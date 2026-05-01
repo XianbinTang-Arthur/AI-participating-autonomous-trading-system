@@ -3289,6 +3289,156 @@ def test_recent_directional_no_order_bridge_decision_context_reports_missing_bri
     assert truth["raw_payload_exposed"] is False
 
 
+def test_latest_directional_no_order_candidate_drilldown_verifies_context() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_latest_directional_no_order_candidate_drilldown_truth(
+        db={
+            "ok": True,
+            "latest_decision": {
+                "decision_id": "decision-current",
+                "created_at": "2026-05-01T01:35:45Z",
+                "symbol": "BTC-USDT-SWAP",
+                "primary_family": "directional",
+                "route_action": "advisory_only",
+                "execution_truth_chain": {
+                    "order_expected": False,
+                    "fill_expected": False,
+                },
+                "no_trade_attribution": {
+                    "classification": "no_order_fill_expected_for_latest_decision",
+                    "primary_blocker": "candidate_execution_incompatible",
+                    "final_blockers": [
+                        "candidate_execution_incompatible",
+                        "composed_as_advisory_only",
+                    ],
+                    "contributing_factors": ["candidate_signal_below_threshold"],
+                    "candidate_execution_drilldown": [
+                        {
+                            "family": "directional",
+                            "route_action": "hold_current",
+                            "target_notional": "0",
+                            "reason_codes": ["hold_current_zero_delta"],
+                            "execution": {
+                                "approved_for_execution": True,
+                                "execution_compatible": True,
+                                "execution_behavior": "hold_current",
+                                "permission_mode": "approved",
+                                "legs_count": 0,
+                            },
+                            "permission": {
+                                "approved_for_execution": True,
+                                "candidate_execution_compatible": True,
+                                "permission_mode": "approved",
+                            },
+                            "composition": {
+                                "route_action": "hold_current",
+                                "execution_behavior": "hold_current",
+                                "requested_delta_position_qty": "0",
+                                "composed_delta_position_qty": "0",
+                            },
+                            "budget": {"effective_scale": "1.0"},
+                            "permission_root_cause": {
+                                "primary": "primary_candidate_hold_current_zero_delta"
+                            },
+                        }
+                    ],
+                    "primary_family_candidate_truth": {
+                        "status": (
+                            "verified_primary_candidate_hold_current_zero_delta_no_order_expected"
+                        ),
+                        "smallest_missing_field": None,
+                        "primary_family": "directional",
+                        "candidate_route_action": "hold_current",
+                        "candidate_execution_behavior": "hold_current",
+                        "candidate_approved_for_execution": True,
+                        "candidate_execution_compatible": True,
+                        "candidate_permission_mode": "approved",
+                        "order_expected_from_primary_candidate": False,
+                        "no_order_root_cause": "primary_candidate_hold_current_zero_delta",
+                        "global_blocker_scope": "other_candidate_or_portfolio_level",
+                        "global_primary_blocker_applies_to_candidate": False,
+                    },
+                },
+            },
+        },
+        latest_bridge={
+            "status": "verified_latest_directional_no_order_primary_candidate_bridge",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "bridge": {
+                "primary_candidate_route_action": "hold_current",
+            },
+            "primary_candidate": {"family": "directional"},
+        },
+    )
+
+    assert truth["ok"] is True
+    assert (
+        truth["status"]
+        == "verified_latest_directional_no_order_candidate_drilldown_context"
+    )
+    assert truth["smallest_missing_field"] is None
+    assert truth["raw_payload_exposed"] is False
+    assert truth["coverage"]["final_blocker_count"] == 2
+    assert truth["coverage"]["candidate_drilldown_count"] == 1
+    assert truth["coverage"]["primary_candidate_drilldown_present"] is True
+    assert truth["primary_candidate_drilldown"]["approved_for_execution"] is True
+    assert truth["primary_candidate_drilldown"]["execution_compatible"] is True
+    assert truth["primary_candidate_drilldown"]["zero_delta"] is True
+    assert truth["primary_candidate_drilldown"]["legs_count"] == 0
+    assert truth["primary_candidate_truth"]["no_order_root_cause"] == (
+        "primary_candidate_hold_current_zero_delta"
+    )
+    assert (
+        truth["interpretation"][
+            "final_blockers_include_candidate_execution_incompatible"
+        ]
+        is True
+    )
+    assert truth["interpretation"]["primary_drilldown_zero_delta_no_legs"] is True
+    assert truth["interpretation"]["not_alpha_or_profitability_evidence"] is True
+
+
+def test_latest_directional_no_order_candidate_drilldown_reports_missing_drilldown() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_latest_directional_no_order_candidate_drilldown_truth(
+        db={
+            "ok": True,
+            "latest_decision": {
+                "decision_id": "decision-current",
+                "primary_family": "directional",
+                "execution_truth_chain": {"order_expected": False},
+                "no_trade_attribution": {
+                    "classification": "no_order_fill_expected_for_latest_decision",
+                    "final_blockers": ["candidate_execution_incompatible"],
+                    "candidate_execution_drilldown": [],
+                    "primary_family_candidate_truth": {
+                        "primary_family": "directional",
+                        "smallest_missing_field": None,
+                        "order_expected_from_primary_candidate": False,
+                        "no_order_root_cause": "primary_candidate_hold_current_zero_delta",
+                    },
+                },
+            },
+        },
+        latest_bridge={
+            "status": "verified_latest_directional_no_order_primary_candidate_bridge",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+        },
+    )
+
+    assert truth["ok"] is False
+    assert truth["status"] == "missing_latest_no_order_candidate_execution_drilldown"
+    assert truth["smallest_missing_field"] == (
+        "database_truth.latest_decision.no_trade_attribution."
+        "candidate_execution_drilldown"
+    )
+    assert truth["raw_payload_exposed"] is False
+
+
 def test_project_live_runtime_facts_exposes_decision_lifecycle_execution_science_continuity() -> None:
     mod = load_module()
     report = {
@@ -3618,6 +3768,110 @@ def test_project_live_runtime_facts_exposes_latest_directional_no_order_primary_
     ] is True
     assert live_facts[
         "latest_directional_no_order_bridge_not_alpha_or_profitability_evidence"
+    ] is True
+
+
+def test_project_live_runtime_facts_exposes_latest_no_order_candidate_drilldown() -> None:
+    mod = load_module()
+    report = {
+        "database_truth": {
+            "ok": True,
+            "latest_decision": {},
+            "latest_executable_directional_decision": {},
+        },
+        "latest_directional_no_order_candidate_drilldown_truth": {
+            "status": "verified_latest_directional_no_order_candidate_drilldown_context",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "coverage": {
+                "latest_decision_id": "decision-current",
+                "final_blocker_count": 4,
+                "candidate_drilldown_count": 1,
+                "primary_candidate_drilldown_present": True,
+                "latest_order_expected": False,
+                "primary_candidate_order_expected": False,
+            },
+            "latest_decision": {
+                "route_action": "advisory_only",
+                "no_trade_primary_blocker": "candidate_execution_incompatible",
+                "final_blockers": [
+                    "candidate_execution_incompatible",
+                    "composed_as_advisory_only",
+                ],
+            },
+            "primary_candidate_drilldown": {
+                "family": "directional",
+                "route_action": "hold_current",
+                "execution_behavior": "hold_current",
+                "approved_for_execution": True,
+                "execution_compatible": True,
+                "legs_count": 0,
+                "zero_delta": True,
+            },
+            "primary_candidate_truth": {
+                "no_order_root_cause": "primary_candidate_hold_current_zero_delta",
+                "no_order_semantic_status": (
+                    "verified_primary_candidate_no_order_expected_semantics"
+                ),
+                "global_blocker_scope": "other_candidate_or_portfolio_level",
+            },
+            "interpretation": {
+                "primary_drilldown_zero_delta_no_legs": True,
+                "final_blocker_may_be_global_or_portfolio_level": True,
+                "not_alpha_or_profitability_evidence": True,
+            },
+        },
+        "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
+        "scope": {"shadow_benchmark": "none_verified"},
+        "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
+        "deployment_health": {"gateway_health": {"ok": True}, "containers": {}},
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+
+    assert live_facts[
+        "latest_directional_no_order_candidate_drilldown_truth_status"
+    ] == "verified_latest_directional_no_order_candidate_drilldown_context"
+    assert (
+        live_facts["latest_directional_no_order_candidate_drilldown_raw_payload_exposed"]
+        is False
+    )
+    assert (
+        live_facts[
+            "latest_directional_no_order_candidate_drilldown_final_blocker_count"
+        ]
+        == 4
+    )
+    assert live_facts["latest_directional_no_order_candidate_drilldown_candidate_count"] == 1
+    assert live_facts[
+        "latest_directional_no_order_candidate_drilldown_primary_present"
+    ] is True
+    assert live_facts[
+        "latest_directional_no_order_candidate_drilldown_primary_route_action"
+    ] == "hold_current"
+    assert live_facts[
+        "latest_directional_no_order_candidate_drilldown_primary_execution_behavior"
+    ] == "hold_current"
+    assert live_facts[
+        "latest_directional_no_order_candidate_drilldown_primary_approved_for_execution"
+    ] is True
+    assert live_facts[
+        "latest_directional_no_order_candidate_drilldown_primary_execution_compatible"
+    ] is True
+    assert (
+        live_facts[
+            "latest_directional_no_order_candidate_drilldown_primary_no_order_root_cause"
+        ]
+        == "primary_candidate_hold_current_zero_delta"
+    )
+    assert live_facts[
+        "latest_directional_no_order_candidate_drilldown_zero_delta_no_legs"
+    ] is True
+    assert live_facts[
+        "latest_directional_no_order_candidate_drilldown_final_blocker_global_or_portfolio"
+    ] is True
+    assert live_facts[
+        "latest_directional_no_order_candidate_drilldown_not_alpha_or_profitability_evidence"
     ] is True
 
 

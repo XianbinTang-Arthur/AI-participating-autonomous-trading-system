@@ -8410,6 +8410,333 @@ def summarize_latest_directional_no_order_primary_candidate_bridge_truth(
     }
 
 
+def summarize_latest_directional_no_order_candidate_drilldown_truth(
+    *,
+    db: dict[str, Any],
+    latest_bridge: dict[str, Any],
+) -> dict[str, Any]:
+    source = (
+        "database_truth.latest_decision.no_trade_attribution."
+        "candidate_execution_drilldown"
+    )
+    latest_bridge_truth = as_dict(latest_bridge)
+    latest_bridge_context = as_dict(latest_bridge_truth.get("bridge"))
+    latest_bridge_primary = as_dict(latest_bridge_truth.get("primary_candidate"))
+    latest_bridge_verified = (
+        latest_bridge_truth.get("status")
+        == "verified_latest_directional_no_order_primary_candidate_bridge"
+    )
+
+    if not db.get("ok"):
+        return {
+            "source": source,
+            "ok": False,
+            "status": "live_db_unavailable",
+            "smallest_missing_field": "database_truth",
+            "raw_payload_exposed": False,
+        }
+
+    latest = as_dict(db.get("latest_decision"))
+    latest_decision_id = latest.get("decision_id")
+    if not latest_decision_id:
+        return {
+            "source": source,
+            "ok": False,
+            "status": "missing_latest_decision_truth",
+            "smallest_missing_field": "database_truth.latest_decision.decision_id",
+            "raw_payload_exposed": False,
+        }
+
+    if latest_bridge_truth.get("raw_payload_exposed") is True:
+        return {
+            "source": source,
+            "ok": False,
+            "status": "latest_no_order_candidate_drilldown_raw_payload_exposed",
+            "smallest_missing_field": "raw_payload_redaction",
+            "raw_payload_exposed": True,
+        }
+
+    truth_chain = as_dict(latest.get("execution_truth_chain"))
+    no_trade = as_dict(latest.get("no_trade_attribution"))
+    primary_candidate = as_dict(no_trade.get("primary_family_candidate_truth"))
+    final_blockers = compact_unique(as_list(no_trade.get("final_blockers")), limit=12)
+    contributing_factors = compact_unique(
+        as_list(no_trade.get("contributing_factors")),
+        limit=12,
+    )
+    drilldown_rows = [
+        as_dict(row)
+        for row in as_list(no_trade.get("candidate_execution_drilldown"))
+        if as_dict(row)
+    ]
+    primary_family = (
+        latest.get("primary_family")
+        or primary_candidate.get("primary_family")
+        or latest_bridge_primary.get("family")
+    )
+    primary_drilldown = next(
+        (
+            row
+            for row in drilldown_rows
+            if row.get("family") == primary_family
+        ),
+        {},
+    )
+
+    primary_execution = as_dict(primary_drilldown.get("execution"))
+    primary_permission = as_dict(primary_drilldown.get("permission"))
+    primary_composition = as_dict(primary_drilldown.get("composition"))
+    primary_budget = as_dict(primary_drilldown.get("budget"))
+    primary_permission_root = as_dict(primary_drilldown.get("permission_root_cause"))
+    primary_reason_codes = compact_unique(
+        as_list(primary_drilldown.get("reason_codes"))
+        + as_list(primary_permission.get("reason_codes"))
+        + as_list(primary_composition.get("reason_codes"))
+        + as_list(primary_budget.get("reason_codes")),
+        limit=16,
+    )
+
+    primary_route_action = first_present(
+        primary_composition.get("route_action"),
+        primary_drilldown.get("route_action"),
+        primary_candidate.get("candidate_route_action"),
+        latest_bridge_context.get("primary_candidate_route_action"),
+    )
+    primary_execution_behavior = first_present(
+        primary_composition.get("execution_behavior"),
+        primary_execution.get("execution_behavior"),
+        primary_candidate.get("candidate_execution_behavior"),
+    )
+    primary_approved = first_present(
+        primary_execution.get("approved_for_execution"),
+        primary_permission.get("approved_for_execution"),
+        primary_candidate.get("candidate_approved_for_execution"),
+    )
+    primary_execution_compatible = first_present(
+        primary_execution.get("execution_compatible"),
+        primary_permission.get("candidate_execution_compatible"),
+        primary_candidate.get("candidate_execution_compatible"),
+    )
+    primary_permission_mode = first_present(
+        primary_execution.get("permission_mode"),
+        primary_permission.get("permission_mode"),
+        primary_candidate.get("candidate_permission_mode"),
+    )
+    primary_legs_count = int_or_zero(primary_execution.get("legs_count"))
+    requested_delta_position_qty = first_present(
+        primary_composition.get("requested_delta_position_qty"),
+        primary_budget.get("requested_delta_position_qty"),
+        primary_candidate.get("requested_delta_position_qty"),
+    )
+    composed_delta_position_qty = first_present(
+        primary_composition.get("composed_delta_position_qty"),
+        primary_budget.get("scaled_delta_position_qty"),
+        primary_candidate.get("composed_delta_position_qty"),
+        requested_delta_position_qty,
+    )
+    primary_zero_delta = (
+        decimal_is_zero(requested_delta_position_qty)
+        and decimal_is_zero(composed_delta_position_qty)
+    )
+    latest_order_expected = truth_chain.get("order_expected")
+    if (
+        latest_order_expected is None
+        and no_trade.get("classification") == "no_order_fill_expected_for_latest_decision"
+    ):
+        latest_order_expected = False
+    latest_fill_expected = truth_chain.get("fill_expected")
+    if (
+        latest_fill_expected is None
+        and no_trade.get("classification") == "no_order_fill_expected_for_latest_decision"
+    ):
+        latest_fill_expected = False
+    primary_order_expected = primary_candidate.get("order_expected_from_primary_candidate")
+    primary_semantics = classify_primary_candidate_no_order_semantics(primary_candidate)
+
+    compact_drilldown = []
+    for row in drilldown_rows[:4]:
+        execution = as_dict(row.get("execution"))
+        permission = as_dict(row.get("permission"))
+        composition = as_dict(row.get("composition"))
+        budget = as_dict(row.get("budget"))
+        compact_drilldown.append(
+            {
+                "family": row.get("family"),
+                "route_action": first_present(
+                    composition.get("route_action"),
+                    row.get("route_action"),
+                ),
+                "execution_behavior": first_present(
+                    composition.get("execution_behavior"),
+                    execution.get("execution_behavior"),
+                ),
+                "approved_for_execution": first_present(
+                    execution.get("approved_for_execution"),
+                    permission.get("approved_for_execution"),
+                ),
+                "execution_compatible": first_present(
+                    execution.get("execution_compatible"),
+                    permission.get("candidate_execution_compatible"),
+                ),
+                "permission_mode": first_present(
+                    execution.get("permission_mode"),
+                    permission.get("permission_mode"),
+                ),
+                "legs_count": int_or_zero(execution.get("legs_count")),
+                "target_notional": row.get("target_notional"),
+                "reason_codes": compact_unique(
+                    as_list(row.get("reason_codes"))
+                    + as_list(permission.get("reason_codes"))
+                    + as_list(composition.get("reason_codes"))
+                    + as_list(budget.get("reason_codes")),
+                    limit=10,
+                ),
+            },
+        )
+
+    if not latest_bridge_verified:
+        status = "missing_latest_directional_no_order_primary_candidate_bridge"
+        smallest_missing = (
+            latest_bridge_truth.get("smallest_missing_field")
+            or "latest_directional_no_order_primary_candidate_bridge_truth"
+        )
+        ok = False
+    elif no_trade.get("classification") != "no_order_fill_expected_for_latest_decision":
+        status = "missing_latest_no_order_attribution_classification"
+        smallest_missing = (
+            "database_truth.latest_decision.no_trade_attribution.classification"
+        )
+        ok = False
+    elif not final_blockers:
+        status = "missing_latest_no_order_final_blockers"
+        smallest_missing = "database_truth.latest_decision.no_trade_attribution.final_blockers"
+        ok = False
+    elif not drilldown_rows:
+        status = "missing_latest_no_order_candidate_execution_drilldown"
+        smallest_missing = (
+            "database_truth.latest_decision.no_trade_attribution."
+            "candidate_execution_drilldown"
+        )
+        ok = False
+    elif not primary_drilldown:
+        status = "missing_latest_no_order_primary_candidate_drilldown"
+        smallest_missing = (
+            "database_truth.latest_decision.no_trade_attribution."
+            "candidate_execution_drilldown.primary_family"
+        )
+        ok = False
+    elif primary_semantics.get("status") != (
+        "verified_primary_candidate_no_order_expected_semantics"
+    ):
+        status = "missing_latest_no_order_primary_candidate_semantics"
+        smallest_missing = (
+            primary_candidate.get("smallest_missing_field")
+            or "database_truth.latest_decision.no_trade_attribution."
+            "primary_family_candidate_truth.no_order_root_cause"
+        )
+        ok = False
+    elif latest_order_expected is not False or primary_order_expected is not False:
+        status = "latest_no_order_candidate_drilldown_order_expectation_mismatch"
+        smallest_missing = (
+            "database_truth.latest_decision.execution_truth_chain.order_expected/"
+            "primary_family_candidate_truth.order_expected_from_primary_candidate"
+        )
+        ok = False
+    else:
+        status = "verified_latest_directional_no_order_candidate_drilldown_context"
+        smallest_missing = None
+        ok = True
+
+    return {
+        "source": source,
+        "ok": ok,
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "raw_payload_exposed": False,
+        "coverage": {
+            "latest_decision_id": latest_decision_id,
+            "latest_bridge_status": latest_bridge_truth.get("status"),
+            "latest_bridge_verified": latest_bridge_verified,
+            "final_blocker_count": len(final_blockers),
+            "contributing_factor_count": len(contributing_factors),
+            "candidate_drilldown_count": len(drilldown_rows),
+            "primary_candidate_family": primary_family,
+            "primary_candidate_drilldown_present": bool(primary_drilldown),
+            "latest_order_expected": latest_order_expected,
+            "latest_fill_expected": latest_fill_expected,
+            "primary_candidate_order_expected": primary_order_expected,
+        },
+        "latest_decision": {
+            "decision_id": latest_decision_id,
+            "created_at": latest.get("created_at"),
+            "symbol": latest.get("symbol"),
+            "primary_family": latest.get("primary_family"),
+            "route_action": latest.get("route_action"),
+            "no_trade_classification": no_trade.get("classification"),
+            "no_trade_primary_blocker": no_trade.get("primary_blocker"),
+            "final_blockers": final_blockers,
+            "contributing_factors": contributing_factors,
+        },
+        "primary_candidate_drilldown": {
+            "family": primary_drilldown.get("family"),
+            "route_action": primary_route_action,
+            "execution_behavior": primary_execution_behavior,
+            "approved_for_execution": primary_approved,
+            "execution_compatible": primary_execution_compatible,
+            "permission_mode": primary_permission_mode,
+            "legs_count": primary_legs_count,
+            "target_notional": primary_drilldown.get("target_notional"),
+            "requested_delta_position_qty": requested_delta_position_qty,
+            "composed_delta_position_qty": composed_delta_position_qty,
+            "zero_delta": primary_zero_delta,
+            "effective_scale": primary_budget.get("effective_scale"),
+            "permission_root_cause_primary": primary_permission_root.get("primary"),
+            "reason_codes": primary_reason_codes,
+        },
+        "primary_candidate_truth": {
+            "status": primary_candidate.get("status"),
+            "no_order_semantic_status": primary_semantics.get("status"),
+            "no_order_equivalence_class": primary_semantics.get("equivalence_class"),
+            "no_order_root_cause": primary_semantics.get("root_cause"),
+            "root_cause_is_material_without_order_or_fill_change": (
+                primary_semantics.get(
+                    "root_cause_is_material_without_order_or_fill_change"
+                )
+            ),
+            "requires_order_or_fill_change_for_materiality": primary_semantics.get(
+                "requires_order_or_fill_change_for_materiality",
+            ),
+            "global_blocker_scope": primary_candidate.get("global_blocker_scope"),
+            "global_blocker_applies_to_candidate": primary_candidate.get(
+                "global_primary_blocker_applies_to_candidate"
+            ),
+        },
+        "candidate_drilldown": compact_drilldown,
+        "interpretation": {
+            "latest_no_order_has_final_blockers": bool(final_blockers),
+            "latest_no_order_has_candidate_drilldown": bool(drilldown_rows),
+            "primary_drilldown_approved_and_compatible": (
+                primary_approved is True and primary_execution_compatible is True
+            ),
+            "primary_drilldown_zero_delta_no_legs": (
+                primary_zero_delta and primary_legs_count == 0
+            ),
+            "primary_candidate_no_order_semantics_verified": (
+                primary_semantics.get("status")
+                == "verified_primary_candidate_no_order_expected_semantics"
+            ),
+            "final_blockers_include_candidate_execution_incompatible": (
+                "candidate_execution_incompatible" in final_blockers
+            ),
+            "final_blocker_may_be_global_or_portfolio_level": (
+                primary_candidate.get("global_blocker_scope")
+                == "other_candidate_or_portfolio_level"
+            ),
+            "not_alpha_or_profitability_evidence": True,
+        },
+    }
+
+
 def summarize_recent_directional_no_order_primary_candidate_bridge_density_truth(
     *,
     directional_attribution: dict[str, Any],
@@ -9735,6 +10062,24 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     latest_no_order_primary_candidate_bridge_interpretation = as_dict(
         latest_no_order_primary_candidate_bridge.get("interpretation")
     )
+    latest_no_order_candidate_drilldown = as_dict(
+        report.get("latest_directional_no_order_candidate_drilldown_truth")
+    )
+    latest_no_order_candidate_drilldown_coverage = as_dict(
+        latest_no_order_candidate_drilldown.get("coverage")
+    )
+    latest_no_order_candidate_drilldown_latest = as_dict(
+        latest_no_order_candidate_drilldown.get("latest_decision")
+    )
+    latest_no_order_candidate_drilldown_primary = as_dict(
+        latest_no_order_candidate_drilldown.get("primary_candidate_drilldown")
+    )
+    latest_no_order_candidate_drilldown_truth = as_dict(
+        latest_no_order_candidate_drilldown.get("primary_candidate_truth")
+    )
+    latest_no_order_candidate_drilldown_interpretation = as_dict(
+        latest_no_order_candidate_drilldown.get("interpretation")
+    )
     recent_no_order_primary_candidate_bridge_density = as_dict(
         report.get("recent_directional_no_order_primary_candidate_bridge_density_truth")
     )
@@ -10574,6 +10919,91 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "latest_directional_no_order_bridge_not_alpha_or_profitability_evidence": (
             latest_no_order_primary_candidate_bridge_interpretation.get(
+                "not_alpha_or_profitability_evidence"
+            )
+        ),
+        "latest_directional_no_order_candidate_drilldown_truth_status": (
+            latest_no_order_candidate_drilldown.get("status")
+        ),
+        "latest_directional_no_order_candidate_drilldown_smallest_missing_field": (
+            latest_no_order_candidate_drilldown.get("smallest_missing_field")
+        ),
+        "latest_directional_no_order_candidate_drilldown_raw_payload_exposed": (
+            latest_no_order_candidate_drilldown.get("raw_payload_exposed")
+        ),
+        "latest_directional_no_order_candidate_drilldown_final_blocker_count": (
+            latest_no_order_candidate_drilldown_coverage.get("final_blocker_count")
+        ),
+        "latest_directional_no_order_candidate_drilldown_candidate_count": (
+            latest_no_order_candidate_drilldown_coverage.get("candidate_drilldown_count")
+        ),
+        "latest_directional_no_order_candidate_drilldown_primary_present": (
+            latest_no_order_candidate_drilldown_coverage.get(
+                "primary_candidate_drilldown_present"
+            )
+        ),
+        "latest_directional_no_order_candidate_drilldown_latest_order_expected": (
+            latest_no_order_candidate_drilldown_coverage.get("latest_order_expected")
+        ),
+        "latest_directional_no_order_candidate_drilldown_primary_order_expected": (
+            latest_no_order_candidate_drilldown_coverage.get(
+                "primary_candidate_order_expected"
+            )
+        ),
+        "latest_directional_no_order_candidate_drilldown_decision_id": (
+            latest_no_order_candidate_drilldown_coverage.get("latest_decision_id")
+        ),
+        "latest_directional_no_order_candidate_drilldown_route_action": (
+            latest_no_order_candidate_drilldown_latest.get("route_action")
+        ),
+        "latest_directional_no_order_candidate_drilldown_primary_blocker": (
+            latest_no_order_candidate_drilldown_latest.get("no_trade_primary_blocker")
+        ),
+        "latest_directional_no_order_candidate_drilldown_final_blockers": as_list(
+            latest_no_order_candidate_drilldown_latest.get("final_blockers")
+        ),
+        "latest_directional_no_order_candidate_drilldown_primary_family": (
+            latest_no_order_candidate_drilldown_primary.get("family")
+        ),
+        "latest_directional_no_order_candidate_drilldown_primary_route_action": (
+            latest_no_order_candidate_drilldown_primary.get("route_action")
+        ),
+        "latest_directional_no_order_candidate_drilldown_primary_execution_behavior": (
+            latest_no_order_candidate_drilldown_primary.get("execution_behavior")
+        ),
+        "latest_directional_no_order_candidate_drilldown_primary_approved_for_execution": (
+            latest_no_order_candidate_drilldown_primary.get("approved_for_execution")
+        ),
+        "latest_directional_no_order_candidate_drilldown_primary_execution_compatible": (
+            latest_no_order_candidate_drilldown_primary.get("execution_compatible")
+        ),
+        "latest_directional_no_order_candidate_drilldown_primary_legs_count": (
+            latest_no_order_candidate_drilldown_primary.get("legs_count")
+        ),
+        "latest_directional_no_order_candidate_drilldown_primary_zero_delta": (
+            latest_no_order_candidate_drilldown_primary.get("zero_delta")
+        ),
+        "latest_directional_no_order_candidate_drilldown_primary_no_order_root_cause": (
+            latest_no_order_candidate_drilldown_truth.get("no_order_root_cause")
+        ),
+        "latest_directional_no_order_candidate_drilldown_primary_semantic_status": (
+            latest_no_order_candidate_drilldown_truth.get("no_order_semantic_status")
+        ),
+        "latest_directional_no_order_candidate_drilldown_primary_global_blocker_scope": (
+            latest_no_order_candidate_drilldown_truth.get("global_blocker_scope")
+        ),
+        "latest_directional_no_order_candidate_drilldown_zero_delta_no_legs": (
+            latest_no_order_candidate_drilldown_interpretation.get(
+                "primary_drilldown_zero_delta_no_legs"
+            )
+        ),
+        "latest_directional_no_order_candidate_drilldown_final_blocker_global_or_portfolio": (
+            latest_no_order_candidate_drilldown_interpretation.get(
+                "final_blocker_may_be_global_or_portfolio_level"
+            )
+        ),
+        "latest_directional_no_order_candidate_drilldown_not_alpha_or_profitability_evidence": (
+            latest_no_order_candidate_drilldown_interpretation.get(
                 "not_alpha_or_profitability_evidence"
             )
         ),
@@ -11662,6 +12092,14 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     report["latest_directional_no_order_primary_candidate_bridge_truth"] = (
         summarize_latest_directional_no_order_primary_candidate_bridge_truth(
             db=report["database_truth"],
+        )
+    )
+    report["latest_directional_no_order_candidate_drilldown_truth"] = (
+        summarize_latest_directional_no_order_candidate_drilldown_truth(
+            db=report["database_truth"],
+            latest_bridge=report[
+                "latest_directional_no_order_primary_candidate_bridge_truth"
+            ],
         )
     )
     report["recent_directional_no_order_primary_candidate_bridge_density_truth"] = (
