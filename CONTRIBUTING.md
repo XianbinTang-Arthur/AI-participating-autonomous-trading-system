@@ -1,7 +1,7 @@
 # CONTRIBUTING — AATS 项目工作纪律
 
 > 本文件约束**所有贡献者**（含 AI agent）在本仓库的工作行为。
-> 用户（Arthur31415926）已授权 AI agent 自主迭代；以下纪律是 AI agent 的**自律底线**，不得违反。
+> 用户（XianbinTang-Arthur）已授权 AI agent 自主迭代；以下纪律是 AI agent 的**自律底线**，不得违反。
 
 ---
 

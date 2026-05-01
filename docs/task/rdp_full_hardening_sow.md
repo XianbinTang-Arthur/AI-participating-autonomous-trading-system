@@ -6,7 +6,7 @@
 > **文档状态**：待审批（2026-04-17 起草）
 > **备份基线**：git tag `pre-rdp-hardening-v1`（5cbf836）
 > **目标环境**：模拟盘（paper-trading）衍生品直接上线，不经独立 staging 演练
-> **主责人**：Arthur31415926 + Claude Code
+> **主责人**：XianbinTang-Arthur + Claude Code
 > **相关诊断**：本 SOW 建立在两份独立审查之上（用户审查 + Claude 审查），合并暴露问题共 8 组 / 23 条
 > **接替关系**：本 SOW 是 `docs/task/rdp_production_hardening_plan.md` 的继任版本，含后者全部 10 项止血任务并扩展为三批次工程
 
@@ -279,7 +279,7 @@ AATS 项目的 RDP（Research Data Platform）设计目标是：**自动化研�
 
 ## 11. 审批签字
 
-- [ ] 用户（Arthur31415926）审阅本 SOW
+- [ ] 用户（XianbinTang-Arthur）审阅本 SOW
 - [ ] 用户审阅批次 A 详细设计
 - [ ] 用户明确确认开工
 
