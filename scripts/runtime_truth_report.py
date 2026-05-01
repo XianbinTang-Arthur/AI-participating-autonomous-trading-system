@@ -9242,6 +9242,215 @@ def summarize_recent_directional_no_order_bridge_decision_context_truth(
     }
 
 
+def summarize_recent_directional_no_order_candidate_drilldown_context_truth(
+    *,
+    recent_bridge_context: dict[str, Any],
+    latest_candidate_drilldown: dict[str, Any],
+) -> dict[str, Any]:
+    source = (
+        "recent_directional_no_order_bridge_decision_context_truth_plus_"
+        "latest_directional_no_order_candidate_drilldown_truth"
+    )
+    context = as_dict(recent_bridge_context)
+    drilldown = as_dict(latest_candidate_drilldown)
+
+    context_coverage = as_dict(context.get("coverage"))
+    context_current = as_dict(context.get("current_decision_context"))
+    context_chain = as_dict(context.get("chain_context"))
+    context_interpretation = as_dict(context.get("interpretation"))
+    drilldown_coverage = as_dict(drilldown.get("coverage"))
+    drilldown_latest = as_dict(drilldown.get("latest_decision"))
+    drilldown_primary = as_dict(drilldown.get("primary_candidate_drilldown"))
+    drilldown_primary_truth = as_dict(drilldown.get("primary_candidate_truth"))
+    drilldown_interpretation = as_dict(drilldown.get("interpretation"))
+
+    context_latest_decision_id = (
+        context_coverage.get("latest_decision_id")
+        or context_current.get("decision_id")
+    )
+    drilldown_latest_decision_id = (
+        drilldown_coverage.get("latest_decision_id")
+        or drilldown_latest.get("decision_id")
+    )
+    latest_decision_matches_drilldown = (
+        context_latest_decision_id == drilldown_latest_decision_id
+        if context_latest_decision_id and drilldown_latest_decision_id
+        else None
+    )
+    decisions_with_fills = int_or_zero(context_coverage.get("decisions_with_fills"))
+    recent_decision_count = int_or_zero(context_coverage.get("recent_decision_count"))
+    no_order_expected_decision_count = int_or_zero(
+        context_coverage.get("no_order_expected_decision_count")
+    )
+    final_blocker_count = int_or_zero(
+        drilldown_coverage.get("final_blocker_count")
+    )
+    candidate_drilldown_count = int_or_zero(
+        drilldown_coverage.get("candidate_drilldown_count")
+    )
+    context_verified = (
+        context.get("status")
+        == "verified_recent_directional_no_order_bridge_decision_context"
+    )
+    drilldown_verified = (
+        drilldown.get("status")
+        == "verified_latest_directional_no_order_candidate_drilldown_context"
+    )
+    upstream_raw_payload_exposed = (
+        context.get("raw_payload_exposed") is True
+        or drilldown.get("raw_payload_exposed") is True
+    )
+
+    if upstream_raw_payload_exposed:
+        status = "recent_no_order_candidate_drilldown_context_raw_payload_exposed"
+        smallest_missing = "raw_payload_redaction"
+        ok = False
+    elif not context_verified:
+        status = "missing_recent_directional_no_order_bridge_decision_context"
+        smallest_missing = (
+            context.get("smallest_missing_field")
+            or "recent_directional_no_order_bridge_decision_context_truth"
+        )
+        ok = False
+    elif not drilldown_verified:
+        status = "missing_latest_directional_no_order_candidate_drilldown_context"
+        smallest_missing = (
+            drilldown.get("smallest_missing_field")
+            or "latest_directional_no_order_candidate_drilldown_truth"
+        )
+        ok = False
+    elif latest_decision_matches_drilldown is False:
+        status = "latest_candidate_drilldown_decision_context_mismatch"
+        smallest_missing = (
+            "recent_directional_no_order_bridge_decision_context_truth."
+            "coverage.latest_decision_id/latest_directional_no_order_"
+            "candidate_drilldown_truth.coverage.latest_decision_id"
+        )
+        ok = False
+    elif decisions_with_fills > 0:
+        status = "recent_no_order_candidate_drilldown_context_has_fills"
+        smallest_missing = (
+            "recent_directional_no_order_bridge_decision_context_truth."
+            "coverage.decisions_with_fills"
+        )
+        ok = False
+    else:
+        status = "verified_recent_directional_no_order_candidate_drilldown_context"
+        smallest_missing = None
+        ok = True
+
+    return {
+        "source": source,
+        "ok": ok,
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "raw_payload_exposed": False,
+        "coverage": {
+            "recent_decision_count": recent_decision_count,
+            "no_order_expected_decision_count": no_order_expected_decision_count,
+            "decisions_with_fills": decisions_with_fills,
+            "recent_bridge_context_status": context.get("status"),
+            "latest_candidate_drilldown_status": drilldown.get("status"),
+            "latest_decision_id": context_latest_decision_id,
+            "latest_candidate_drilldown_decision_id": drilldown_latest_decision_id,
+            "latest_decision_matches_candidate_drilldown": (
+                latest_decision_matches_drilldown
+            ),
+            "latest_candidate_drilldown_present": candidate_drilldown_count > 0,
+            "candidate_drilldown_count": candidate_drilldown_count,
+            "primary_candidate_drilldown_present": drilldown_coverage.get(
+                "primary_candidate_drilldown_present"
+            ),
+            "final_blocker_count": final_blocker_count,
+            "historical_candidate_drilldown_scope": "latest_decision_only",
+            "historical_candidate_drilldown_not_claimed": True,
+            "historical_primary_candidate_bridge_scope": context_coverage.get(
+                "historical_primary_candidate_bridge_scope"
+            ),
+            "historical_primary_candidate_bridge_not_claimed": context_coverage.get(
+                "historical_primary_candidate_bridge_not_claimed"
+            ),
+        },
+        "current_decision_context": {
+            "decision_id": context_latest_decision_id,
+            "latest_route_action": first_present(
+                context_current.get("latest_bridge_route_action"),
+                context_current.get("route_action"),
+                drilldown_latest.get("route_action"),
+            ),
+            "no_trade_primary_blocker": first_present(
+                context_current.get("no_trade_primary_blocker"),
+                drilldown_latest.get("no_trade_primary_blocker"),
+            ),
+            "final_blockers": as_list(drilldown_latest.get("final_blockers")),
+            "primary_candidate_family": first_present(
+                drilldown_primary.get("family"),
+                context_current.get("primary_family"),
+            ),
+            "primary_candidate_route_action": first_present(
+                context_current.get("primary_candidate_route_action"),
+                drilldown_primary.get("route_action"),
+            ),
+            "primary_candidate_execution_behavior": drilldown_primary.get(
+                "execution_behavior"
+            ),
+            "primary_candidate_no_order_root_cause": first_present(
+                context_current.get("primary_candidate_no_order_root_cause"),
+                drilldown_primary_truth.get("no_order_root_cause"),
+            ),
+            "primary_candidate_semantic_status": drilldown_primary_truth.get(
+                "no_order_semantic_status"
+            ),
+            "primary_candidate_zero_delta": drilldown_primary.get("zero_delta"),
+            "primary_candidate_legs_count": drilldown_primary.get("legs_count"),
+            "primary_drilldown_zero_delta_no_legs": drilldown_interpretation.get(
+                "primary_drilldown_zero_delta_no_legs"
+            ),
+            "route_root_and_primary_candidate_root_distinct": context_current.get(
+                "route_root_and_primary_candidate_root_distinct"
+            ),
+        },
+        "chain_context": {
+            "latest_executable_decision_id": context_chain.get(
+                "latest_executable_decision_id"
+            ),
+            "terminal_pretrade_status": context_chain.get(
+                "terminal_pretrade_status"
+            ),
+            "payload_sequence_status": context_chain.get("payload_sequence_status"),
+        },
+        "interpretation": {
+            "recent_window_no_order_regime": context_interpretation.get(
+                "recent_window_no_order_regime"
+            ),
+            "no_recent_fills_in_context_window": decisions_with_fills == 0,
+            "latest_drilldown_context_is_current_decision": (
+                latest_decision_matches_drilldown
+            ),
+            "latest_drilldown_scope_only": True,
+            "historical_candidate_drilldown_not_claimed": True,
+            "primary_drilldown_zero_delta_no_legs": drilldown_interpretation.get(
+                "primary_drilldown_zero_delta_no_legs"
+            ),
+            "primary_drilldown_approved_and_compatible": drilldown_interpretation.get(
+                "primary_drilldown_approved_and_compatible"
+            ),
+            "final_blocker_may_be_global_or_portfolio_level": (
+                drilldown_interpretation.get(
+                    "final_blocker_may_be_global_or_portfolio_level"
+                )
+            ),
+            "recent_bridge_context_not_alpha_or_profitability_evidence": (
+                context_interpretation.get("not_alpha_or_profitability_evidence")
+            ),
+            "latest_drilldown_not_alpha_or_profitability_evidence": (
+                drilldown_interpretation.get("not_alpha_or_profitability_evidence")
+            ),
+            "not_alpha_or_profitability_evidence": True,
+        },
+    }
+
+
 def summarize_latest_decision_fill_feasibility_truth(
     db: dict[str, Any],
     directional_attribution: dict[str, Any],
@@ -10109,6 +10318,21 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     )
     recent_no_order_bridge_decision_context_interpretation = as_dict(
         recent_no_order_bridge_decision_context.get("interpretation")
+    )
+    recent_no_order_candidate_drilldown_context = as_dict(
+        report.get("recent_directional_no_order_candidate_drilldown_context_truth")
+    )
+    recent_no_order_candidate_drilldown_context_coverage = as_dict(
+        recent_no_order_candidate_drilldown_context.get("coverage")
+    )
+    recent_no_order_candidate_drilldown_context_current = as_dict(
+        recent_no_order_candidate_drilldown_context.get("current_decision_context")
+    )
+    recent_no_order_candidate_drilldown_context_chain = as_dict(
+        recent_no_order_candidate_drilldown_context.get("chain_context")
+    )
+    recent_no_order_candidate_drilldown_context_interpretation = as_dict(
+        recent_no_order_candidate_drilldown_context.get("interpretation")
     )
     directional_spike_reversion = as_dict(report.get("directional_spike_reversion_truth"))
     directional_spike_reversion_coverage = as_dict(directional_spike_reversion.get("coverage"))
@@ -11229,6 +11453,140 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
                 "not_alpha_or_profitability_evidence"
             )
         ),
+        "recent_directional_no_order_candidate_drilldown_context_truth_status": (
+            recent_no_order_candidate_drilldown_context.get("status")
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_smallest_missing_field": (
+            recent_no_order_candidate_drilldown_context.get("smallest_missing_field")
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_raw_payload_exposed": (
+            recent_no_order_candidate_drilldown_context.get("raw_payload_exposed")
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_recent_decision_count": (
+            recent_no_order_candidate_drilldown_context_coverage.get(
+                "recent_decision_count"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_no_order_expected_decision_count": (
+            recent_no_order_candidate_drilldown_context_coverage.get(
+                "no_order_expected_decision_count"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_decisions_with_fills": (
+            recent_no_order_candidate_drilldown_context_coverage.get(
+                "decisions_with_fills"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_recent_bridge_status": (
+            recent_no_order_candidate_drilldown_context_coverage.get(
+                "recent_bridge_context_status"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_latest_drilldown_status": (
+            recent_no_order_candidate_drilldown_context_coverage.get(
+                "latest_candidate_drilldown_status"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_latest_decision_id": (
+            recent_no_order_candidate_drilldown_context_coverage.get(
+                "latest_decision_id"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_latest_drilldown_decision_id": (
+            recent_no_order_candidate_drilldown_context_coverage.get(
+                "latest_candidate_drilldown_decision_id"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_latest_decision_matches_drilldown": (
+            recent_no_order_candidate_drilldown_context_coverage.get(
+                "latest_decision_matches_candidate_drilldown"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_candidate_count": (
+            recent_no_order_candidate_drilldown_context_coverage.get(
+                "candidate_drilldown_count"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_primary_present": (
+            recent_no_order_candidate_drilldown_context_coverage.get(
+                "primary_candidate_drilldown_present"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_final_blocker_count": (
+            recent_no_order_candidate_drilldown_context_coverage.get(
+                "final_blocker_count"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_historical_drilldown_scope": (
+            recent_no_order_candidate_drilldown_context_coverage.get(
+                "historical_candidate_drilldown_scope"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_historical_drilldown_not_claimed": (
+            recent_no_order_candidate_drilldown_context_coverage.get(
+                "historical_candidate_drilldown_not_claimed"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_latest_route_action": (
+            recent_no_order_candidate_drilldown_context_current.get(
+                "latest_route_action"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_primary_candidate_route_action": (
+            recent_no_order_candidate_drilldown_context_current.get(
+                "primary_candidate_route_action"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_primary_candidate_root_cause": (
+            recent_no_order_candidate_drilldown_context_current.get(
+                "primary_candidate_no_order_root_cause"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_primary_semantic_status": (
+            recent_no_order_candidate_drilldown_context_current.get(
+                "primary_candidate_semantic_status"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_primary_zero_delta": (
+            recent_no_order_candidate_drilldown_context_current.get(
+                "primary_candidate_zero_delta"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_primary_legs_count": (
+            recent_no_order_candidate_drilldown_context_current.get(
+                "primary_candidate_legs_count"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_primary_zero_delta_no_legs": (
+            recent_no_order_candidate_drilldown_context_current.get(
+                "primary_drilldown_zero_delta_no_legs"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_terminal_pretrade_status": (
+            recent_no_order_candidate_drilldown_context_chain.get(
+                "terminal_pretrade_status"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_payload_sequence_status": (
+            recent_no_order_candidate_drilldown_context_chain.get(
+                "payload_sequence_status"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_latest_scope_only": (
+            recent_no_order_candidate_drilldown_context_interpretation.get(
+                "latest_drilldown_scope_only"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_no_recent_fills": (
+            recent_no_order_candidate_drilldown_context_interpretation.get(
+                "no_recent_fills_in_context_window"
+            )
+        ),
+        "recent_directional_no_order_candidate_drilldown_context_not_alpha_or_profitability_evidence": (
+            recent_no_order_candidate_drilldown_context_interpretation.get(
+                "not_alpha_or_profitability_evidence"
+            )
+        ),
         "silver_orderbook_truth_status": (
             as_dict(execution_science.get("silver_orderbook")).get("status")
         ),
@@ -12130,6 +12488,16 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             ],
             decision_lifecycle_execution_science_continuity=report[
                 "decision_lifecycle_execution_science_continuity_truth"
+            ],
+        )
+    )
+    report["recent_directional_no_order_candidate_drilldown_context_truth"] = (
+        summarize_recent_directional_no_order_candidate_drilldown_context_truth(
+            recent_bridge_context=report[
+                "recent_directional_no_order_bridge_decision_context_truth"
+            ],
+            latest_candidate_drilldown=report[
+                "latest_directional_no_order_candidate_drilldown_truth"
             ],
         )
     )
