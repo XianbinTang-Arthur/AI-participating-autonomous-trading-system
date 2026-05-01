@@ -3681,6 +3681,111 @@ def test_recent_no_order_provenance_density_gate_verifies_current_context() -> N
     assert truth["interpretation"]["not_alpha_or_profitability_evidence"] is True
 
 
+def test_recent_no_order_freshness_truth_verifies_fresh_current_decision() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_recent_directional_no_order_freshness_truth(
+        db={
+            "latest_decision": {
+                "decision_id": "decision-current",
+                "created_at": "2026-05-01T14:00:00+00:00",
+                "route_action": "advisory_only",
+                "execution_truth_chain": {
+                    "status": "verified_no_order_expected",
+                    "order_expected": False,
+                    "fill_expected": False,
+                },
+            },
+        },
+        recent_no_order_provenance_density_gate={
+            "status": "verified_recent_directional_no_order_provenance_density_gate",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "coverage": {
+                "latest_decision_id": "decision-current",
+                "recent_decision_count": 24,
+                "no_order_expected_decision_count": 24,
+                "decisions_with_fills": 0,
+                "no_recent_fills": True,
+            },
+            "current_decision": {
+                "execution_truth_status": "verified_no_order_expected",
+            },
+            "executable_episode": {
+                "payload_sequence_status": "sequence_continuous",
+            },
+            "interpretation": {"gate_verified": True},
+        },
+        microstructure_runtime_growth={
+            "status": "verified_microstructure_runtime_growth",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "collector": {
+                "running": True,
+                "healthy": True,
+                "heartbeat_fresh": True,
+                "heartbeat_age_seconds": 4,
+            },
+            "payload_sequence": {
+                "status": "sequence_continuous",
+                "sequence_gap_count": 0,
+            },
+            "silver_workflow": {
+                "status": "latest_done_recent",
+                "latest_age_seconds": 300,
+            },
+        },
+        report_generated_at="2026-05-01T14:05:00Z",
+    )
+
+    assert truth["ok"] is True
+    assert truth["status"] == "verified_recent_directional_no_order_freshness_truth"
+    assert truth["smallest_missing_field"] is None
+    assert truth["raw_payload_exposed"] is False
+    assert truth["freshness"]["latest_decision_age_seconds"] == 300
+    assert truth["freshness"]["latest_decision_recent"] is True
+    assert truth["provenance_gate"]["latest_decision_ids_consistent"] is True
+    assert truth["microstructure"]["verified"] is True
+    assert truth["interpretation"]["not_alpha_or_profitability_evidence"] is True
+
+
+def test_recent_no_order_freshness_truth_reports_stale_latest_decision() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_recent_directional_no_order_freshness_truth(
+        db={
+            "latest_decision": {
+                "decision_id": "decision-current",
+                "created_at": "2026-05-01T13:00:00+00:00",
+                "route_action": "advisory_only",
+                "execution_truth_chain": {"status": "verified_no_order_expected"},
+            },
+        },
+        recent_no_order_provenance_density_gate={
+            "status": "verified_recent_directional_no_order_provenance_density_gate",
+            "smallest_missing_field": None,
+            "coverage": {
+                "latest_decision_id": "decision-current",
+                "decisions_with_fills": 0,
+                "no_recent_fills": True,
+            },
+            "interpretation": {"gate_verified": True},
+        },
+        microstructure_runtime_growth={
+            "status": "verified_microstructure_runtime_growth",
+            "smallest_missing_field": None,
+            "collector": {"heartbeat_fresh": True},
+        },
+        report_generated_at="2026-05-01T14:05:00Z",
+    )
+
+    assert truth["ok"] is False
+    assert truth["status"] == "latest_decision_stale_for_recent_no_order_freshness"
+    assert truth["smallest_missing_field"] == "database_truth.latest_decision.created_at"
+    assert truth["freshness"]["latest_decision_age_seconds"] == 3900
+    assert truth["freshness"]["latest_decision_recent"] is False
+
+
 def test_recent_no_order_provenance_density_gate_reports_decision_mismatch() -> None:
     mod = load_module()
 
@@ -4540,7 +4645,10 @@ def test_project_live_runtime_facts_exposes_recent_no_order_provenance_density_g
     report = {
         "database_truth": {
             "ok": True,
-            "latest_decision": {},
+            "latest_decision": {
+                "decision_id": "decision-current",
+                "created_at": "2026-05-01T14:00:00+00:00",
+            },
             "latest_executable_directional_decision": {},
         },
         "recent_directional_no_order_provenance_density_gate_truth": {
@@ -4593,6 +4701,40 @@ def test_project_live_runtime_facts_exposes_recent_no_order_provenance_density_g
                 "not_alpha_or_profitability_evidence": True,
             },
         },
+        "recent_directional_no_order_freshness_truth": {
+            "status": "verified_recent_directional_no_order_freshness_truth",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "freshness": {
+                "latest_decision_id": "decision-current",
+                "latest_decision_created_at": "2026-05-01T14:00:00+00:00",
+                "latest_decision_age_seconds": 300,
+                "latest_decision_stale_after_seconds": 1800,
+                "latest_decision_recent": True,
+                "latest_route_action": "advisory_only",
+                "latest_execution_truth_status": "verified_no_order_expected",
+            },
+            "provenance_gate": {
+                "status": "verified_recent_directional_no_order_provenance_density_gate",
+                "verified": True,
+                "recent_decision_count": 24,
+                "decisions_with_fills": 0,
+                "latest_decision_ids_consistent": True,
+            },
+            "microstructure": {
+                "status": "verified_microstructure_runtime_growth",
+                "verified": True,
+                "heartbeat_fresh": True,
+                "payload_sequence_status": "sequence_continuous",
+                "silver_workflow_status": "latest_done_recent",
+            },
+            "interpretation": {
+                "latest_decision_fresh": True,
+                "provenance_density_gate_verified": True,
+                "microstructure_runtime_fresh": True,
+                "not_alpha_or_profitability_evidence": True,
+            },
+        },
         "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
         "scope": {"shadow_benchmark": "none_verified"},
         "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
@@ -4601,6 +4743,7 @@ def test_project_live_runtime_facts_exposes_recent_no_order_provenance_density_g
 
     live_facts = mod.project_live_runtime_facts(report)
 
+    assert live_facts["latest_decision_created_at"] == "2026-05-01T14:00:00+00:00"
     assert live_facts[
         "recent_directional_no_order_provenance_density_gate_truth_status"
     ] == "verified_recent_directional_no_order_provenance_density_gate"
@@ -4647,6 +4790,23 @@ def test_project_live_runtime_facts_exposes_recent_no_order_provenance_density_g
     assert live_facts[
         "recent_directional_no_order_provenance_density_gate_not_alpha_or_profitability_evidence"
     ] is True
+    assert (
+        live_facts["recent_directional_no_order_freshness_truth_status"]
+        == "verified_recent_directional_no_order_freshness_truth"
+    )
+    assert live_facts[
+        "recent_directional_no_order_freshness_latest_decision_created_at"
+    ] == "2026-05-01T14:00:00+00:00"
+    assert live_facts[
+        "recent_directional_no_order_freshness_latest_decision_age_seconds"
+    ] == 300
+    assert live_facts[
+        "recent_directional_no_order_freshness_latest_decision_ids_consistent"
+    ] is True
+    assert live_facts["recent_directional_no_order_freshness_verified"] is True
+    assert live_facts[
+        "recent_directional_no_order_freshness_microstructure_payload_sequence_status"
+    ] == "sequence_continuous"
 
 
 def test_directional_episode_pnl_lifecycle_classifies_open_unrealized_position() -> None:

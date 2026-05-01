@@ -72,6 +72,7 @@ MICROSTRUCTURE_HEARTBEAT_STALE_AFTER_SECONDS = 60
 MICROSTRUCTURE_BRONZE_GROWTH_WINDOW_MINUTES = 5
 MICROSTRUCTURE_WORKFLOW_STALE_AFTER_SECONDS = 1800
 MICROSTRUCTURE_BAR_MATCH_MAX_AGE_SECONDS = ORDERBOOK_SILVER_STALE_AFTER_SECONDS
+LATEST_DECISION_FRESHNESS_STALE_AFTER_SECONDS = 1800
 ARTIFACT_COMPARE_FACTS = (
     "latest_decision_id",
     "latest_decision_route_action",
@@ -10356,6 +10357,180 @@ def summarize_claimed_submit_operator_handoff_truth(
     }
 
 
+def summarize_recent_directional_no_order_freshness_truth(
+    *,
+    db: dict[str, Any],
+    recent_no_order_provenance_density_gate: dict[str, Any],
+    microstructure_runtime_growth: dict[str, Any],
+    report_generated_at: str,
+) -> dict[str, Any]:
+    source = (
+        "database_latest_decision_plus_recent_no_order_provenance_density_gate_plus_"
+        "microstructure_runtime_growth"
+    )
+    latest = as_dict(as_dict(db).get("latest_decision"))
+    latest_truth_chain = as_dict(latest.get("execution_truth_chain"))
+    gate = as_dict(recent_no_order_provenance_density_gate)
+    gate_coverage = as_dict(gate.get("coverage"))
+    gate_current = as_dict(gate.get("current_decision"))
+    gate_interpretation = as_dict(gate.get("interpretation"))
+    microstructure = as_dict(microstructure_runtime_growth)
+    microstructure_collector = as_dict(microstructure.get("collector"))
+    microstructure_payload_sequence = as_dict(microstructure.get("payload_sequence"))
+    microstructure_silver_workflow = as_dict(microstructure.get("silver_workflow"))
+
+    latest_decision_id = latest.get("decision_id")
+    gate_latest_decision_id = gate_coverage.get("latest_decision_id")
+    latest_decision_ids_consistent = (
+        latest_decision_id == gate_latest_decision_id
+        if latest_decision_id and gate_latest_decision_id
+        else None
+    )
+
+    report_time = parse_utc_timestamp(report_generated_at)
+    latest_created_at = latest.get("created_at")
+    latest_created_time = (
+        parse_utc_timestamp(str(latest_created_at))
+        if latest_created_at is not None
+        else None
+    )
+    latest_decision_age_seconds = seconds_between(latest_created_time, report_time)
+    latest_decision_recent = (
+        latest_decision_age_seconds is not None
+        and latest_decision_age_seconds <= LATEST_DECISION_FRESHNESS_STALE_AFTER_SECONDS
+    )
+    gate_verified = (
+        gate.get("status") == "verified_recent_directional_no_order_provenance_density_gate"
+        and gate.get("smallest_missing_field") is None
+        and gate_interpretation.get("gate_verified") is True
+    )
+    microstructure_verified = (
+        microstructure.get("status") == "verified_microstructure_runtime_growth"
+        and microstructure.get("smallest_missing_field") is None
+        and microstructure_collector.get("heartbeat_fresh") is True
+    )
+    no_recent_fills = gate_coverage.get("no_recent_fills") is True
+    upstream_raw_payload_exposed = (
+        gate.get("raw_payload_exposed") is True
+        or microstructure.get("raw_payload_exposed") is True
+    )
+
+    if upstream_raw_payload_exposed:
+        status = "recent_no_order_freshness_raw_payload_exposed"
+        smallest_missing = "raw_payload_redaction"
+        ok = False
+    elif not latest_decision_id:
+        status = "missing_latest_decision_for_recent_no_order_freshness"
+        smallest_missing = "database_truth.latest_decision.decision_id"
+        ok = False
+    elif latest_decision_age_seconds is None:
+        status = "missing_latest_decision_created_at_for_recent_no_order_freshness"
+        smallest_missing = "database_truth.latest_decision.created_at"
+        ok = False
+    elif not latest_decision_recent:
+        status = "latest_decision_stale_for_recent_no_order_freshness"
+        smallest_missing = "database_truth.latest_decision.created_at"
+        ok = False
+    elif not gate_verified:
+        status = "missing_recent_no_order_provenance_density_gate_for_freshness"
+        smallest_missing = (
+            gate.get("smallest_missing_field")
+            or "recent_directional_no_order_provenance_density_gate_truth"
+        )
+        ok = False
+    elif latest_decision_ids_consistent is False:
+        status = "recent_no_order_freshness_latest_decision_identity_mismatch"
+        smallest_missing = (
+            "database_truth.latest_decision.decision_id/"
+            "recent_directional_no_order_provenance_density_gate_truth.coverage.latest_decision_id"
+        )
+        ok = False
+    elif not no_recent_fills:
+        status = "recent_no_order_freshness_window_has_fills"
+        smallest_missing = (
+            "recent_directional_no_order_provenance_density_gate_truth."
+            "coverage.decisions_with_fills"
+        )
+        ok = False
+    elif not microstructure_verified:
+        status = "missing_microstructure_runtime_growth_for_recent_no_order_freshness"
+        smallest_missing = (
+            microstructure.get("smallest_missing_field")
+            or "microstructure_runtime_growth_truth"
+        )
+        ok = False
+    else:
+        status = "verified_recent_directional_no_order_freshness_truth"
+        smallest_missing = None
+        ok = True
+
+    return {
+        "source": source,
+        "ok": ok,
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "raw_payload_exposed": False,
+        "freshness": {
+            "report_generated_at": report_generated_at,
+            "latest_decision_id": latest_decision_id,
+            "latest_decision_created_at": latest_created_at,
+            "latest_decision_age_seconds": latest_decision_age_seconds,
+            "latest_decision_stale_after_seconds": (
+                LATEST_DECISION_FRESHNESS_STALE_AFTER_SECONDS
+            ),
+            "latest_decision_recent": latest_decision_recent,
+            "latest_route_action": latest.get("route_action"),
+            "latest_execution_truth_status": latest_truth_chain.get("status"),
+            "latest_order_expected": latest_truth_chain.get("order_expected"),
+            "latest_fill_expected": latest_truth_chain.get("fill_expected"),
+        },
+        "provenance_gate": {
+            "status": gate.get("status"),
+            "verified": gate_verified,
+            "latest_decision_id": gate_latest_decision_id,
+            "latest_decision_ids_consistent": latest_decision_ids_consistent,
+            "recent_decision_count": gate_coverage.get("recent_decision_count"),
+            "no_order_expected_decision_count": gate_coverage.get(
+                "no_order_expected_decision_count"
+            ),
+            "decisions_with_fills": gate_coverage.get("decisions_with_fills"),
+            "no_recent_fills": no_recent_fills,
+            "current_execution_truth_status": gate_current.get(
+                "execution_truth_status"
+            ),
+            "payload_sequence_status": as_dict(gate.get("executable_episode")).get(
+                "payload_sequence_status"
+            ),
+        },
+        "microstructure": {
+            "status": microstructure.get("status"),
+            "verified": microstructure_verified,
+            "collector_running": microstructure_collector.get("running"),
+            "collector_healthy": microstructure_collector.get("healthy"),
+            "heartbeat_fresh": microstructure_collector.get("heartbeat_fresh"),
+            "heartbeat_age_seconds": microstructure_collector.get(
+                "heartbeat_age_seconds"
+            ),
+            "payload_sequence_status": microstructure_payload_sequence.get("status"),
+            "payload_sequence_gap_count": microstructure_payload_sequence.get(
+                "sequence_gap_count"
+            ),
+            "silver_workflow_status": microstructure_silver_workflow.get("status"),
+            "silver_workflow_latest_age_seconds": microstructure_silver_workflow.get(
+                "latest_age_seconds"
+            ),
+        },
+        "interpretation": {
+            "latest_decision_fresh": latest_decision_recent,
+            "provenance_density_gate_verified": gate_verified,
+            "latest_decision_identity_consistent": latest_decision_ids_consistent,
+            "no_recent_fills_in_context_window": no_recent_fills,
+            "microstructure_runtime_fresh": microstructure_verified,
+            "not_alpha_or_profitability_evidence": True,
+        },
+    }
+
+
 def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     db = report.get("database_truth") or {}
     execution_science = as_dict(report.get("execution_science_truth"))
@@ -10607,6 +10782,21 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     recent_no_order_provenance_density_gate_interpretation = as_dict(
         recent_no_order_provenance_density_gate.get("interpretation")
     )
+    recent_no_order_freshness = as_dict(
+        report.get("recent_directional_no_order_freshness_truth")
+    )
+    recent_no_order_freshness_values = as_dict(
+        recent_no_order_freshness.get("freshness")
+    )
+    recent_no_order_freshness_gate = as_dict(
+        recent_no_order_freshness.get("provenance_gate")
+    )
+    recent_no_order_freshness_microstructure = as_dict(
+        recent_no_order_freshness.get("microstructure")
+    )
+    recent_no_order_freshness_interpretation = as_dict(
+        recent_no_order_freshness.get("interpretation")
+    )
     directional_spike_reversion = as_dict(report.get("directional_spike_reversion_truth"))
     directional_spike_reversion_coverage = as_dict(directional_spike_reversion.get("coverage"))
     latest_directional_spike_reversion = as_dict(directional_spike_reversion.get("latest_filled_decision"))
@@ -10728,6 +10918,7 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "may_be_overridden_by_artifact": False,
         "active_live_carrier": infer_live_carrier_from_database_truth(db),
         "latest_decision_id": latest.get("decision_id"),
+        "latest_decision_created_at": latest.get("created_at"),
         "latest_decision_route_action": latest.get("route_action"),
         "latest_decision_symbol": latest.get("symbol"),
         "latest_decision_primary_family": latest.get("primary_family"),
@@ -11994,6 +12185,85 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
                 "not_alpha_or_profitability_evidence"
             )
         ),
+        "recent_directional_no_order_freshness_truth_status": (
+            recent_no_order_freshness.get("status")
+        ),
+        "recent_directional_no_order_freshness_smallest_missing_field": (
+            recent_no_order_freshness.get("smallest_missing_field")
+        ),
+        "recent_directional_no_order_freshness_raw_payload_exposed": (
+            recent_no_order_freshness.get("raw_payload_exposed")
+        ),
+        "recent_directional_no_order_freshness_latest_decision_id": (
+            recent_no_order_freshness_values.get("latest_decision_id")
+        ),
+        "recent_directional_no_order_freshness_latest_decision_created_at": (
+            recent_no_order_freshness_values.get("latest_decision_created_at")
+        ),
+        "recent_directional_no_order_freshness_latest_decision_age_seconds": (
+            recent_no_order_freshness_values.get("latest_decision_age_seconds")
+        ),
+        "recent_directional_no_order_freshness_latest_decision_stale_after_seconds": (
+            recent_no_order_freshness_values.get("latest_decision_stale_after_seconds")
+        ),
+        "recent_directional_no_order_freshness_latest_decision_recent": (
+            recent_no_order_freshness_values.get("latest_decision_recent")
+        ),
+        "recent_directional_no_order_freshness_latest_route_action": (
+            recent_no_order_freshness_values.get("latest_route_action")
+        ),
+        "recent_directional_no_order_freshness_latest_execution_truth_status": (
+            recent_no_order_freshness_values.get("latest_execution_truth_status")
+        ),
+        "recent_directional_no_order_freshness_gate_status": (
+            recent_no_order_freshness_gate.get("status")
+        ),
+        "recent_directional_no_order_freshness_gate_verified": (
+            recent_no_order_freshness_gate.get("verified")
+        ),
+        "recent_directional_no_order_freshness_gate_recent_decision_count": (
+            recent_no_order_freshness_gate.get("recent_decision_count")
+        ),
+        "recent_directional_no_order_freshness_gate_decisions_with_fills": (
+            recent_no_order_freshness_gate.get("decisions_with_fills")
+        ),
+        "recent_directional_no_order_freshness_latest_decision_ids_consistent": (
+            recent_no_order_freshness_gate.get("latest_decision_ids_consistent")
+        ),
+        "recent_directional_no_order_freshness_microstructure_status": (
+            recent_no_order_freshness_microstructure.get("status")
+        ),
+        "recent_directional_no_order_freshness_microstructure_verified": (
+            recent_no_order_freshness_microstructure.get("verified")
+        ),
+        "recent_directional_no_order_freshness_microstructure_heartbeat_fresh": (
+            recent_no_order_freshness_microstructure.get("heartbeat_fresh")
+        ),
+        "recent_directional_no_order_freshness_microstructure_payload_sequence_status": (
+            recent_no_order_freshness_microstructure.get("payload_sequence_status")
+        ),
+        "recent_directional_no_order_freshness_silver_workflow_status": (
+            recent_no_order_freshness_microstructure.get("silver_workflow_status")
+        ),
+        "recent_directional_no_order_freshness_verified": (
+            recent_no_order_freshness_interpretation.get(
+                "latest_decision_fresh"
+            )
+            is True
+            and recent_no_order_freshness_interpretation.get(
+                "provenance_density_gate_verified"
+            )
+            is True
+            and recent_no_order_freshness_interpretation.get(
+                "microstructure_runtime_fresh"
+            )
+            is True
+        ),
+        "recent_directional_no_order_freshness_not_alpha_or_profitability_evidence": (
+            recent_no_order_freshness_interpretation.get(
+                "not_alpha_or_profitability_evidence"
+            )
+        ),
         "silver_orderbook_truth_status": (
             as_dict(execution_science.get("silver_orderbook")).get("status")
         ),
@@ -12919,6 +13189,16 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             decision_lifecycle_execution_science_continuity=report[
                 "decision_lifecycle_execution_science_continuity_truth"
             ],
+        )
+    )
+    report["recent_directional_no_order_freshness_truth"] = (
+        summarize_recent_directional_no_order_freshness_truth(
+            db=report["database_truth"],
+            recent_no_order_provenance_density_gate=report[
+                "recent_directional_no_order_provenance_density_gate_truth"
+            ],
+            microstructure_runtime_growth=report["microstructure_runtime_growth_truth"],
+            report_generated_at=generated_at,
         )
     )
     report["directional_spike_reversion_truth"] = summarize_directional_spike_reversion_truth(
