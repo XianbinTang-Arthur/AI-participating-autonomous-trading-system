@@ -437,6 +437,9 @@ def test_gateway_health_probe_falls_back_to_wsl_localhost(monkeypatch) -> None:
 def test_db_probe_executable_directional_query_excludes_hold_current_notional() -> None:
     mod = load_module()
 
+    assert "set transaction isolation level repeatable read, read only" in mod.DB_PROBE
+    assert '"isolation_level": "repeatable_read_read_only"' in mod.DB_PROBE
+    assert '"snapshot_ts": db_probe_snapshot_ts' in mod.DB_PROBE
     assert "route_action not in ('advisory_only', 'hold_current')" in mod.DB_PROBE
     assert "coalesce(portfolio_requested_notional, 0) <> 0" not in mod.DB_PROBE
     assert "coalesce(portfolio_approved_notional, 0) <> 0" not in mod.DB_PROBE
@@ -2689,6 +2692,105 @@ def test_recent_directional_decision_chain_density_reports_missing_order_surface
         "directional_episode_attribution.order_surface_or_no_order_expectation"
     )
     assert truth["coverage"]["decisions_missing_order_surface"] == 1
+
+
+def test_decision_snapshot_coherence_verifies_directional_latest_identity() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_decision_snapshot_coherence_truth(
+        db={
+            "ok": True,
+            "probe_snapshot": {
+                "isolation_level": "repeatable_read_read_only",
+                "snapshot_ts": "2026-05-02 10:18:31+00:00",
+            },
+            "latest_decision": {
+                "decision_id": "decision_latest",
+                "created_at": "2026-05-02T10:18:00Z",
+                "primary_family": "directional",
+                "route_action": "advisory_only",
+            },
+        },
+        directional_attribution={
+            "ok": True,
+            "raw_payload_exposed": False,
+            "recent_decisions": [
+                {
+                    "decision_id": "decision_latest",
+                    "created_at": "2026-05-02T10:18:00Z",
+                    "route_action": "advisory_only",
+                },
+            ],
+        },
+    )
+
+    assert truth["ok"] is True
+    assert truth["status"] == "verified_decision_snapshot_coherence"
+    assert truth["smallest_missing_field"] is None
+    assert truth["raw_payload_exposed"] is False
+    assert truth["snapshot"]["repeatable_read_read_only"] is True
+    assert truth["alignment"]["latest_decision_ids_consistent"] is True
+    assert truth["interpretation"]["db_probe_uses_single_repeatable_read_snapshot"] is True
+    assert truth["interpretation"]["not_alpha_or_profitability_evidence"] is True
+
+
+def test_decision_snapshot_coherence_reports_directional_latest_mismatch() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_decision_snapshot_coherence_truth(
+        db={
+            "ok": True,
+            "probe_snapshot": {
+                "isolation_level": "repeatable_read_read_only",
+                "snapshot_ts": "2026-05-02 10:18:31+00:00",
+            },
+            "latest_decision": {
+                "decision_id": "decision_latest",
+                "primary_family": "directional",
+                "route_action": "advisory_only",
+            },
+        },
+        directional_attribution={
+            "ok": True,
+            "recent_decisions": [
+                {
+                    "decision_id": "decision_other",
+                    "route_action": "advisory_only",
+                },
+            ],
+        },
+    )
+
+    assert truth["ok"] is False
+    assert truth["status"] == "directional_latest_decision_snapshot_mismatch"
+    assert truth["smallest_missing_field"] == (
+        "database_truth.latest_decision.decision_id/"
+        "directional_episode_attribution_truth.recent_decisions[0].decision_id"
+    )
+    assert truth["alignment"]["latest_decision_ids_consistent"] is False
+
+
+def test_decision_snapshot_coherence_requires_repeatable_read_snapshot() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_decision_snapshot_coherence_truth(
+        db={
+            "ok": True,
+            "probe_snapshot": {
+                "isolation_level": "read_committed",
+                "snapshot_ts": "2026-05-02 10:18:31+00:00",
+            },
+            "latest_decision": {
+                "decision_id": "decision_latest",
+                "primary_family": "directional",
+            },
+        },
+        directional_attribution={"ok": True, "recent_decisions": []},
+    )
+
+    assert truth["ok"] is False
+    assert truth["status"] == "decision_snapshot_not_repeatable_read"
+    assert truth["smallest_missing_field"] == "database_truth.probe_snapshot.isolation_level"
     assert truth["raw_payload_exposed"] is False
 
 
@@ -4061,6 +4163,53 @@ def test_project_live_runtime_facts_exposes_recent_directional_decision_chain_de
     assert live_facts["recent_directional_chain_decisions_with_fills"] == 0
     assert live_facts["recent_directional_chain_waiting_for_executable_directional_episode"] is True
     assert live_facts["recent_directional_chain_not_alpha_or_profitability_evidence"] is True
+
+
+def test_project_live_runtime_facts_exposes_decision_snapshot_coherence() -> None:
+    mod = load_module()
+    report = {
+        "database_truth": {
+            "ok": True,
+            "latest_decision": {},
+            "latest_executable_directional_decision": {},
+        },
+        "decision_snapshot_coherence_truth": {
+            "status": "verified_decision_snapshot_coherence",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "snapshot": {
+                "snapshot_ts": "2026-05-02 10:18:31+00:00",
+                "isolation_level": "repeatable_read_read_only",
+                "repeatable_read_read_only": True,
+            },
+            "latest_decision": {"decision_id": "decision_latest"},
+            "directional_recent_chain_latest": {"decision_id": "decision_latest"},
+            "alignment": {
+                "latest_decision_ids_consistent": True,
+                "recent_chain_count": 24,
+            },
+        },
+        "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
+        "scope": {"shadow_benchmark": "none_verified"},
+        "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
+        "deployment_health": {"gateway_health": {"ok": True}, "containers": {}},
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+
+    assert live_facts["decision_snapshot_coherence_truth_status"] == (
+        "verified_decision_snapshot_coherence"
+    )
+    assert live_facts["decision_snapshot_coherence_smallest_missing_field"] is None
+    assert live_facts["decision_snapshot_coherence_raw_payload_exposed"] is False
+    assert live_facts["decision_snapshot_coherence_repeatable_read"] is True
+    assert live_facts["decision_snapshot_coherence_latest_decision_id"] == "decision_latest"
+    assert (
+        live_facts["decision_snapshot_coherence_directional_latest_decision_id"]
+        == "decision_latest"
+    )
+    assert live_facts["decision_snapshot_coherence_latest_ids_consistent"] is True
+    assert live_facts["decision_snapshot_coherence_recent_chain_count"] == 24
 
 
 def test_project_live_runtime_facts_exposes_recent_no_order_root_density() -> None:
@@ -6167,6 +6316,31 @@ def test_blocking_findings_attribute_stale_decision_to_kill_switch() -> None:
 
     assert mod.collect_blocking_findings(report) == [
         "decision_cycle_halted_by_kill_switch"
+    ]
+
+
+def test_blocking_findings_include_decision_snapshot_mismatch() -> None:
+    mod = load_module()
+    report = {
+        "git": {
+            "windows": {
+                "dirty": False,
+                "origin_divergence": {"ahead": 0, "behind": 0},
+            },
+            "deployed_matches_windows": True,
+        },
+        "deployment_health": {
+            "gateway_health": {"ok": True},
+            "containers": {"all_required_app_containers_healthy": True},
+        },
+        "database_truth": {"ok": True},
+        "decision_snapshot_coherence_truth": {
+            "status": "directional_latest_decision_snapshot_mismatch",
+        },
+    }
+
+    assert mod.collect_blocking_findings(report) == [
+        "directional_latest_decision_snapshot_mismatch"
     ]
 
 

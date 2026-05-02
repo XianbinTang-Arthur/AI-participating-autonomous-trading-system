@@ -174,6 +174,8 @@ runtime_config = {
 
 engine = create_engine(url)
 with engine.connect() as conn:
+    conn.execute(text("set transaction isolation level repeatable read, read only"))
+    db_probe_snapshot_ts = conn.execute(text("select transaction_timestamp()")).scalar()
     decisions = conn.execute(text("select count(*) from portfolio_allocation_decisions")).scalar()
     fills = conn.execute(text("select count(*) from execution_fills")).scalar()
     decision_select = (
@@ -1504,6 +1506,10 @@ with engine.connect() as conn:
 
 print(json.dumps({
     "ok": True,
+    "probe_snapshot": {
+        "isolation_level": "repeatable_read_read_only",
+        "snapshot_ts": db_probe_snapshot_ts,
+    },
     "portfolio_allocation_decisions": int(decisions),
     "execution_fills": int(fills),
     "latest_decision": dict(latest) if latest else None,
@@ -7930,6 +7936,117 @@ def summarize_recent_directional_decision_chain_density_truth(
     }
 
 
+def summarize_decision_snapshot_coherence_truth(
+    *,
+    db: dict[str, Any],
+    directional_attribution: dict[str, Any],
+) -> dict[str, Any]:
+    source = (
+        "database_truth.latest_decision_plus_directional_episode_attribution_"
+        "under_repeatable_read_snapshot"
+    )
+    db_payload = as_dict(db)
+    snapshot = as_dict(db_payload.get("probe_snapshot"))
+    latest = as_dict(db_payload.get("latest_decision"))
+    attribution = as_dict(directional_attribution)
+    recent = [as_dict(item) for item in as_list(attribution.get("recent_decisions"))]
+    attribution_latest = recent[0] if recent else {}
+
+    snapshot_isolation_level = snapshot.get("isolation_level")
+    snapshot_ts = snapshot.get("snapshot_ts")
+    latest_decision_id = latest.get("decision_id")
+    latest_primary_family = latest.get("primary_family")
+    attribution_latest_decision_id = attribution_latest.get("decision_id")
+    directional_latest_required = latest_primary_family == "directional"
+    directional_latest_consistent = (
+        latest_decision_id == attribution_latest_decision_id
+        if latest_decision_id and attribution_latest_decision_id
+        else None
+    )
+    attribution_ok = attribution.get("ok") is not False
+    snapshot_is_repeatable_read = snapshot_isolation_level == "repeatable_read_read_only"
+    upstream_raw_payload_exposed = attribution.get("raw_payload_exposed") is True
+
+    if db_payload.get("ok") is False:
+        status = "database_truth_unavailable_for_decision_snapshot_coherence"
+        smallest_missing = "database_truth"
+        ok = False
+    elif upstream_raw_payload_exposed:
+        status = "decision_snapshot_coherence_raw_payload_exposed"
+        smallest_missing = "raw_payload_redaction"
+        ok = False
+    elif not snapshot_is_repeatable_read:
+        status = "decision_snapshot_not_repeatable_read"
+        smallest_missing = "database_truth.probe_snapshot.isolation_level"
+        ok = False
+    elif not snapshot_ts:
+        status = "decision_snapshot_timestamp_missing"
+        smallest_missing = "database_truth.probe_snapshot.snapshot_ts"
+        ok = False
+    elif not latest_decision_id:
+        status = "latest_decision_missing_for_snapshot_coherence"
+        smallest_missing = "database_truth.latest_decision.decision_id"
+        ok = False
+    elif not attribution_ok:
+        status = "directional_attribution_unavailable_for_snapshot_coherence"
+        smallest_missing = (
+            attribution.get("smallest_missing_field")
+            or "directional_episode_attribution_truth"
+        )
+        ok = False
+    elif directional_latest_required and not attribution_latest_decision_id:
+        status = "directional_latest_decision_missing_from_recent_chain"
+        smallest_missing = "directional_episode_attribution_truth.recent_decisions[0]"
+        ok = False
+    elif directional_latest_required and directional_latest_consistent is not True:
+        status = "directional_latest_decision_snapshot_mismatch"
+        smallest_missing = (
+            "database_truth.latest_decision.decision_id/"
+            "directional_episode_attribution_truth.recent_decisions[0].decision_id"
+        )
+        ok = False
+    else:
+        status = "verified_decision_snapshot_coherence"
+        smallest_missing = None
+        ok = True
+
+    return {
+        "source": source,
+        "ok": ok,
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "raw_payload_exposed": False,
+        "snapshot": {
+            "isolation_level": snapshot_isolation_level,
+            "snapshot_ts": snapshot_ts,
+            "repeatable_read_read_only": snapshot_is_repeatable_read,
+        },
+        "latest_decision": {
+            "decision_id": latest_decision_id,
+            "created_at": latest.get("created_at"),
+            "primary_family": latest_primary_family,
+            "route_action": latest.get("route_action"),
+        },
+        "directional_recent_chain_latest": {
+            "decision_id": attribution_latest_decision_id,
+            "created_at": attribution_latest.get("created_at"),
+            "route_action": attribution_latest.get("route_action"),
+        },
+        "alignment": {
+            "directional_latest_required": directional_latest_required,
+            "latest_decision_ids_consistent": directional_latest_consistent,
+            "recent_chain_count": len(recent),
+        },
+        "interpretation": {
+            "db_probe_uses_single_repeatable_read_snapshot": snapshot_is_repeatable_read,
+            "directional_latest_chain_aligned": (
+                (not directional_latest_required) or directional_latest_consistent is True
+            ),
+            "not_alpha_or_profitability_evidence": True,
+        },
+    }
+
+
 def summarize_recent_directional_no_order_root_cause_density_truth(
     *,
     directional_attribution: dict[str, Any],
@@ -10819,6 +10936,21 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     recent_directional_chain_density_latest_filled = as_dict(
         recent_directional_chain_density.get("latest_filled_decision")
     )
+    decision_snapshot_coherence = as_dict(
+        report.get("decision_snapshot_coherence_truth")
+    )
+    decision_snapshot_coherence_snapshot = as_dict(
+        decision_snapshot_coherence.get("snapshot")
+    )
+    decision_snapshot_coherence_alignment = as_dict(
+        decision_snapshot_coherence.get("alignment")
+    )
+    decision_snapshot_coherence_latest = as_dict(
+        decision_snapshot_coherence.get("latest_decision")
+    )
+    decision_snapshot_coherence_directional_latest = as_dict(
+        decision_snapshot_coherence.get("directional_recent_chain_latest")
+    )
     recent_directional_no_order_root_density = as_dict(
         report.get("recent_directional_no_order_root_cause_density_truth")
     )
@@ -11660,6 +11792,36 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "recent_directional_chain_latest_filled_pnl_lifecycle_status": (
             recent_directional_chain_density_latest_filled.get("pnl_lifecycle_status")
+        ),
+        "decision_snapshot_coherence_truth_status": (
+            decision_snapshot_coherence.get("status")
+        ),
+        "decision_snapshot_coherence_smallest_missing_field": (
+            decision_snapshot_coherence.get("smallest_missing_field")
+        ),
+        "decision_snapshot_coherence_raw_payload_exposed": (
+            decision_snapshot_coherence.get("raw_payload_exposed")
+        ),
+        "decision_snapshot_coherence_snapshot_ts": (
+            decision_snapshot_coherence_snapshot.get("snapshot_ts")
+        ),
+        "decision_snapshot_coherence_isolation_level": (
+            decision_snapshot_coherence_snapshot.get("isolation_level")
+        ),
+        "decision_snapshot_coherence_repeatable_read": (
+            decision_snapshot_coherence_snapshot.get("repeatable_read_read_only")
+        ),
+        "decision_snapshot_coherence_latest_decision_id": (
+            decision_snapshot_coherence_latest.get("decision_id")
+        ),
+        "decision_snapshot_coherence_directional_latest_decision_id": (
+            decision_snapshot_coherence_directional_latest.get("decision_id")
+        ),
+        "decision_snapshot_coherence_latest_ids_consistent": (
+            decision_snapshot_coherence_alignment.get("latest_decision_ids_consistent")
+        ),
+        "decision_snapshot_coherence_recent_chain_count": (
+            decision_snapshot_coherence_alignment.get("recent_chain_count")
         ),
         "recent_directional_no_order_root_cause_density_truth_status": (
             recent_directional_no_order_root_density.get("status")
@@ -13236,6 +13398,12 @@ def collect_blocking_findings(report: dict[str, Any]) -> list[str]:
         == "latest_decision_stale_for_recent_no_order_freshness"
     ):
         blockers.append("latest_decision_stale_for_recent_no_order_freshness")
+    decision_snapshot_coherence = report.get("decision_snapshot_coherence_truth") or {}
+    if decision_snapshot_coherence.get("status") in {
+        "decision_snapshot_not_repeatable_read",
+        "directional_latest_decision_snapshot_mismatch",
+    }:
+        blockers.append(decision_snapshot_coherence["status"])
     return blockers
 
 
@@ -13361,6 +13529,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
                 "decision_lifecycle_execution_science_continuity_truth"
             ],
             directional_command_flow=report["directional_command_flow_provenance_truth"],
+        )
+    )
+    report["decision_snapshot_coherence_truth"] = (
+        summarize_decision_snapshot_coherence_truth(
+            db=report["database_truth"],
+            directional_attribution=report["directional_episode_attribution_truth"],
         )
     )
     report["recent_directional_no_order_root_cause_density_truth"] = (
