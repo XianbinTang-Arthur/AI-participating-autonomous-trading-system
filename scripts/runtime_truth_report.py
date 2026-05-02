@@ -10989,6 +10989,29 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         latest_primary_candidate_truth
     )
     latest_truth_chain = latest.get("execution_truth_chain") or {}
+    latest_primary_candidate_order_expected = latest_primary_candidate_truth.get(
+        "order_expected_from_primary_candidate"
+    )
+    latest_primary_candidate_root_cause = latest_primary_candidate_truth.get("no_order_root_cause")
+    latest_no_trade_primary_blocker = no_trade.get("primary_blocker")
+    latest_decision_order_expected = latest_truth_chain.get("order_expected")
+    latest_effective_no_order_root_cause = None
+    latest_effective_no_order_root_scope = None
+    latest_effective_no_order_root_source = None
+    latest_no_order_context = (
+        latest_decision_order_expected is False
+        or latest_primary_candidate_order_expected is False
+        or no_trade.get("classification") == "no_order_fill_expected_for_latest_decision"
+    )
+    if latest_no_order_context:
+        if latest_primary_candidate_root_cause and latest_primary_candidate_order_expected is False:
+            latest_effective_no_order_root_cause = latest_primary_candidate_root_cause
+            latest_effective_no_order_root_scope = "primary_directional_candidate"
+            latest_effective_no_order_root_source = "primary_family_candidate_truth"
+        elif latest_no_trade_primary_blocker:
+            latest_effective_no_order_root_cause = latest_no_trade_primary_blocker
+            latest_effective_no_order_root_scope = "latest_decision_no_trade_attribution"
+            latest_effective_no_order_root_source = "no_trade_attribution.primary_blocker"
     latest_terminal_no_fill = as_dict(latest_truth_chain.get("terminal_no_fill_explanation"))
     executable_truth_chain = latest_executable_directional.get("execution_truth_chain") or {}
     executable_no_trade = (
@@ -11016,7 +11039,10 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "latest_decision_route_action": latest.get("route_action"),
         "latest_decision_symbol": latest.get("symbol"),
         "latest_decision_primary_family": latest.get("primary_family"),
-        "latest_decision_no_trade_primary_blocker": no_trade.get("primary_blocker"),
+        "latest_decision_no_trade_primary_blocker": latest_no_trade_primary_blocker,
+        "latest_decision_effective_no_order_root_cause": latest_effective_no_order_root_cause,
+        "latest_decision_effective_no_order_root_scope": latest_effective_no_order_root_scope,
+        "latest_decision_effective_no_order_root_source": latest_effective_no_order_root_source,
         "latest_decision_no_trade_final_blockers": no_trade.get("final_blockers"),
         "latest_decision_no_trade_contributing_factors": no_trade.get("contributing_factors"),
         "latest_decision_no_trade_candidate_drilldown_count": len(
@@ -11035,12 +11061,8 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "latest_decision_primary_candidate_execution_behavior": latest_primary_candidate_truth.get(
             "candidate_execution_behavior"
         ),
-        "latest_decision_primary_candidate_order_expected": latest_primary_candidate_truth.get(
-            "order_expected_from_primary_candidate"
-        ),
-        "latest_decision_primary_candidate_no_order_root_cause": latest_primary_candidate_truth.get(
-            "no_order_root_cause"
-        ),
+        "latest_decision_primary_candidate_order_expected": latest_primary_candidate_order_expected,
+        "latest_decision_primary_candidate_no_order_root_cause": latest_primary_candidate_root_cause,
         "latest_decision_primary_candidate_no_order_semantic_status": (
             latest_primary_candidate_no_order_semantics.get("status")
         ),

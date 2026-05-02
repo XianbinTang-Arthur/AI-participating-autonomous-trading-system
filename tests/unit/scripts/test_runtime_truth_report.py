@@ -6634,6 +6634,15 @@ def test_project_live_runtime_facts_exposes_primary_candidate_truth() -> None:
     assert live_facts["latest_decision_primary_candidate_no_order_root_cause"] == (
         "primary_candidate_hold_current_zero_delta"
     )
+    assert live_facts["latest_decision_effective_no_order_root_cause"] == (
+        "primary_candidate_hold_current_zero_delta"
+    )
+    assert live_facts["latest_decision_effective_no_order_root_scope"] == (
+        "primary_directional_candidate"
+    )
+    assert live_facts["latest_decision_effective_no_order_root_source"] == (
+        "primary_family_candidate_truth"
+    )
     assert live_facts["latest_decision_primary_candidate_no_order_semantic_status"] == (
         "verified_primary_candidate_no_order_expected_semantics"
     )
