@@ -2522,6 +2522,10 @@ const manualOnlyConfigHtml = renderAIConfigView({
     configured_operating_mode: 'baseline_only',
     effective_operating_mode: 'baseline_only',
     manual_override_active: false,
+    ui_operating_mode_override: {
+      enabled: false,
+      disabled_reason: 'ui_operating_mode_override_disabled_by_governance_policy',
+    },
     strategy_profile_auto_control_configured: false,
     strategy_profile_auto_control_effective: false,
     strategy_profile_auto_control_reason: 'explicit_setting_disabled',
@@ -3122,6 +3126,11 @@ console.log(JSON.stringify({
   manualOnlyProfileAutoEnabled: /<button class="secondary-button" data-action="set-profile-control-mode" data-value="auto"/.test(manualOnlyConfigHtml),
   manualOnlyProfileButtonsUnlocked: /data-action="manual-activate-strategy-profile" data-value="trend_strict"/.test(manualOnlyConfigHtml) && !/data-action="manual-activate-strategy-profile" data-value="trend_strict"[^>]*disabled/.test(manualOnlyConfigHtml),
   manualOnlyRuntimeCurrentModeLocked: /<button class="primary-button" data-action="select-ai-operating-mode" data-value="baseline_only"[^>]*disabled/.test(manualOnlyConfigHtml),
+  manualOnlyRuntimePolicyLocksAlternativeModes:
+    /data-action="select-ai-operating-mode" data-value="ai_assisted"[^>]*disabled/.test(manualOnlyConfigHtml)
+    && /data-action="select-ai-operating-mode" data-value="ai_decision_maker"[^>]*disabled/.test(manualOnlyConfigHtml),
+  manualOnlyRuntimePolicyExplained: manualOnlyConfigHtml.includes('后端治理策略当前禁止从页面临时切换 AI 运行模式') && manualOnlyConfigHtml.includes('页面切换') && manualOnlyConfigHtml.includes('已禁用'),
+  manualOnlyRuntimePolicyDoesNotExposeEnvVar: !manualOnlyConfigHtml.includes('AATS_ALLOW_UI_OPERATING_MODE_OVERRIDE'),
   manualOnlyRuntimeAvoidsLegacyButtons: !manualOnlyConfigHtml.includes('跟随配置') && !manualOnlyConfigHtml.includes('手动接管'),
 }));
 """
@@ -3171,6 +3180,9 @@ console.log(JSON.stringify({
         self.assertIn('"manualOnlyProfileAutoEnabled":true', result.stdout)
         self.assertIn('"manualOnlyProfileButtonsUnlocked":true', result.stdout)
         self.assertIn('"manualOnlyRuntimeCurrentModeLocked":true', result.stdout)
+        self.assertIn('"manualOnlyRuntimePolicyLocksAlternativeModes":true', result.stdout)
+        self.assertIn('"manualOnlyRuntimePolicyExplained":true', result.stdout)
+        self.assertIn('"manualOnlyRuntimePolicyDoesNotExposeEnvVar":true', result.stdout)
         self.assertIn('"manualOnlyRuntimeAvoidsLegacyButtons":true', result.stdout)
 
     def test_ai_analysis_view_uses_truthful_ai_enabled_semantics(self) -> None:

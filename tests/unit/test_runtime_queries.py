@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from aats.services.operator.runtime_queries import RuntimeQueryFacade
+from aats.services.operator.ui_capabilities import UI_OPERATING_MODE_OVERRIDE_DISABLED_REASON
 
 
 class _FakeOwner:
@@ -98,7 +100,8 @@ class TestAiRuntimeStubWhenServiceMissing(unittest.TestCase):
             _AIRuntimeFakeOwner(ai_service=None, process_role="gateway")
         )
 
-        result = facade.ai_runtime()
+        with patch.dict(os.environ, {}, clear=True):
+            result = facade.ai_runtime()
 
         # 关键标识：UI 一眼能看出本进程没装 AI 切片
         self.assertEqual(result["provider"], "not_loaded")
@@ -145,6 +148,14 @@ class TestAiRuntimeStubWhenServiceMissing(unittest.TestCase):
             result["strategy_profile_control_effective_mode"], "manual"
         )
         self.assertEqual(result["operating_mode_source"], "ai_service_not_loaded")
+        self.assertEqual(
+            result["ui_operating_mode_override"],
+            {
+                "enabled": False,
+                "source": "environment",
+                "disabled_reason": UI_OPERATING_MODE_OVERRIDE_DISABLED_REASON,
+            },
+        )
 
     def test_ai_runtime_stub_carries_process_role_label(self) -> None:
         """Stage 7：每个非 monolith role 下 stub 都应该带上自己的 process_role 标签
@@ -187,7 +198,8 @@ class TestAiRuntimeAuthoritativeRead(unittest.IsolatedAsyncioTestCase):
         )
         facade = RuntimeQueryFacade(owner)
 
-        result = await facade.ai_runtime_authoritative()
+        with patch.dict(os.environ, {}, clear=True):
+            result = await facade.ai_runtime_authoritative()
 
         self.assertEqual(result["provider"], "deepseek")
         self.assertTrue(result["configured"])
@@ -195,9 +207,44 @@ class TestAiRuntimeAuthoritativeRead(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["process_role"], "decision")
         self.assertEqual(result["ai_runtime_source"], "remote_decision")
         self.assertEqual(result["queried_from_process_role"], "gateway")
+        self.assertEqual(
+            result["ui_operating_mode_override"]["disabled_reason"],
+            UI_OPERATING_MODE_OVERRIDE_DISABLED_REASON,
+        )
         owner.runtime.ai_command_client.invoke.assert_awaited_once_with(
             command="ai_runtime_status",
             payload={},
+        )
+
+    async def test_authoritative_runtime_reports_ui_override_capability_when_enabled(self) -> None:
+        owner = _AIRuntimeFakeOwner(ai_service=None, process_role="gateway")
+        owner.runtime.ai_command_client = SimpleNamespace(
+            invoke=AsyncMock(
+                return_value={
+                    "provider": "deepseek",
+                    "configured": True,
+                    "provider_ready": True,
+                    "ai_service_loaded": True,
+                    "process_role": "decision",
+                }
+            )
+        )
+        facade = RuntimeQueryFacade(owner)
+
+        with patch.dict(
+            os.environ,
+            {"AATS_ALLOW_UI_OPERATING_MODE_OVERRIDE": "true"},
+            clear=False,
+        ):
+            result = await facade.ai_runtime_authoritative()
+
+        self.assertEqual(
+            result["ui_operating_mode_override"],
+            {
+                "enabled": True,
+                "source": "environment",
+                "disabled_reason": None,
+            },
         )
 
     async def test_gateway_without_client_preserves_stable_stub(self) -> None:

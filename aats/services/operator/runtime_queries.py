@@ -7,6 +7,7 @@ from aats.events import topics
 from aats.schemas.common import utc_now
 from aats.services.execution_engine.okx_account import derivatives_position_mode_contract
 from aats.services.operator._parallel import parallel_fetch
+from aats.services.operator.ui_capabilities import ui_operating_mode_override_policy
 from aats.services.runtime_scope import latest_topic_event_for_scope
 
 if TYPE_CHECKING:
@@ -116,6 +117,7 @@ class RuntimeQueryFacade:
                 "strategy_profile_control_effective_mode": "manual",
                 "strategy_profile_auto_control_reason": "ai_service_not_loaded",
                 "operating_mode_source": "ai_service_not_loaded",
+                "ui_operating_mode_override": ui_operating_mode_override_policy(),
                 "ai_service_loaded": False,
                 "process_role": getattr(settings, "process_role", None),
             }
@@ -155,6 +157,7 @@ class RuntimeQueryFacade:
             else "configured"
         )
         status["legacy_modes"] = legacy_modes
+        status["ui_operating_mode_override"] = ui_operating_mode_override_policy()
         # Stage 7：与 stub 路径对称的 loaded 标记，UI/审计可统一判断 ai 子系统是否在本进程
         status["ai_service_loaded"] = True
         status["process_role"] = getattr(settings, "process_role", None)
@@ -186,6 +189,7 @@ class RuntimeQueryFacade:
                 payload={},
             )
         )
+        status["ui_operating_mode_override"] = ui_operating_mode_override_policy()
         status.setdefault("ai_runtime_source", "remote_decision")
         status.setdefault(
             "queried_from_process_role",

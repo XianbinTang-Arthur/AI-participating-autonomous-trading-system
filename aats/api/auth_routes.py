@@ -28,6 +28,7 @@ from aats.services.operator.command_bridge import (
     OperatorCommandTimeoutError,
 )
 from aats.services.operator.query_service import OperatorQueryService
+from aats.services.operator.ui_capabilities import ui_operating_mode_override_enabled
 
 
 auth_router = APIRouter(include_in_schema=False)
@@ -917,8 +918,7 @@ async def select_ai_operating_mode(
     #     决策之前, UI override 路径直接禁止, 只能走 §3.5 持久化流程
     #   - 运维场景需用 UI override 时, 显式在 .env.*.live 设 AATS_ALLOW_UI_
     #     OPERATING_MODE_OVERRIDE=true + deploy (同样留 audit trail)
-    import os
-    if os.environ.get("AATS_ALLOW_UI_OPERATING_MODE_OVERRIDE", "false").lower() not in ("true", "1", "yes"):
+    if not ui_operating_mode_override_enabled():
         raise HTTPException(
             status_code=403,
             detail=(

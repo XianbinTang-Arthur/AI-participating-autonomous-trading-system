@@ -558,6 +558,7 @@ const ERROR_MAP = {
   operator_write_auth_required: "当前账号只有查看权限，不能执行人工操作。",
   operator_write_access_required: "当前角色不允许执行这项操作。",
   operator_admin_access_required: "只有管理员才能执行这项操作。",
+  ui_operating_mode_override_disabled_by_governance_policy: "后端治理策略当前禁止从页面临时切换 AI 运行模式。",
   operator_login_failed: "用户名或密码错误。",
   operator_login_locked: "登录失败次数过多，账号已被临时锁定，请稍后再试。",
   operator_session_auth_not_configured: "系统没有启用浏览器会话登录。",

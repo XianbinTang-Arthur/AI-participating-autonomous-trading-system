@@ -77,7 +77,10 @@ export function renderAIConfigView(data) {
 
 function renderManualOperatingModePanel({ runtime = {}, canAdmin = false }) {
   const mode = currentOperatingMode(runtime);
-  const summary = runtimeModeSummary(runtime);
+  const overridePolicy = uiOperatingModeOverridePolicy(runtime);
+  const overrideBlocked = !overridePolicy.enabled;
+  const overrideBlockedText = localizeError(overridePolicy.disabledReason);
+  const summary = runtimeModeSummary(runtime, overridePolicy);
   const buttons = MANUAL_MODE_OPTIONS.map(([value, label, tone]) =>
     actionButton(
       value === mode ? `${label}（当前）` : label,
@@ -85,12 +88,14 @@ function renderManualOperatingModePanel({ runtime = {}, canAdmin = false }) {
       value,
       value === mode ? "primary" : tone,
       {
-        disabled: !canAdmin || value === mode,
+        disabled: !canAdmin || overrideBlocked || value === mode,
         title: !canAdmin
           ? "当前账号只有查看权限"
-          : value === mode
-            ? "当前运行模式"
-            : `切换到${label}`,
+          : overrideBlocked
+            ? overrideBlockedText
+            : value === mode
+              ? "当前运行模式"
+              : `切换到${label}`,
       },
     ),
   ).join("");
@@ -98,7 +103,9 @@ function renderManualOperatingModePanel({ runtime = {}, canAdmin = false }) {
   return surfaceCard({
     title: "运行模式切换",
     kicker: "交易决策入口",
-    copy: "这里决定最终下单前由谁拍板：完全按基础策略、让 AI 辅助判断，还是直接由 AI 参与决策。配置文件只负责设默认值，你仍可在这里临时切换。",
+    copy: overrideBlocked
+      ? "这里展示最终下单前由谁拍板。后端治理策略当前禁止从页面临时切换 AI 运行模式；如需调整，请走持久化配置与发布流程。"
+      : "这里决定最终下单前由谁拍板：完全按基础策略、让 AI 辅助判断，还是直接由 AI 参与决策。配置文件只负责设默认值，你仍可在这里临时切换。",
     content: `
       ${callout({
         title: summary.title,
@@ -129,6 +136,13 @@ function renderManualOperatingModePanel({ runtime = {}, canAdmin = false }) {
           meta: runtime.degradation_reason ? localizeError(runtime.degradation_reason) : "当前没有新的 AI 降级原因",
           tone: runtime.degraded ? "warning" : "positive",
           badge: actorTags("ai", "system"),
+        },
+        {
+          label: "页面切换",
+          value: overridePolicy.enabled ? "允许" : "已禁用",
+          meta: overridePolicy.enabled ? "后端允许管理员从页面临时切换运行模式" : overrideBlockedText,
+          tone: overridePolicy.enabled ? "positive" : "warning",
+          badge: actorTags(overridePolicy.enabled ? "admin" : "risk_control"),
         },
       ])}
       <div class="table-actions table-actions--compact manual-profile-switch-actions manual-profile-switch-actions--centered">
@@ -326,20 +340,39 @@ function renderCurrentConfigurationCard({ runtimeProfiles = {}, runtime = {}, ai
   });
 }
 
-function runtimeModeSummary(runtime = {}) {
+function runtimeModeSummary(runtime = {}, overridePolicy = uiOperatingModeOverridePolicy(runtime)) {
   const configured = readableMode(runtime.configured_operating_mode || "baseline_only");
   const effective = readableMode(runtime.effective_operating_mode || "baseline_only");
+  const overrideBlocked = !overridePolicy.enabled;
+  const overrideBlockedText = localizeError(overridePolicy.disabledReason);
   if ((runtime.effective_operating_mode || "baseline_only") === (runtime.configured_operating_mode || "baseline_only")) {
     return {
       title: `当前按配置运行：${configured}`,
-      copy: "当前运行模式与配置文件默认值一致。下面另外两个按钮代表可临时切换的模式，点选后会立刻改成那个模式运行。",
-      actors: ["config", "system"],
+      copy: overrideBlocked
+        ? `当前运行模式与配置文件默认值一致。${overrideBlockedText}下面的模式按钮只用于展示后端真实能力。`
+        : "当前运行模式与配置文件默认值一致。下面另外两个按钮代表可临时切换的模式，点选后会立刻改成那个模式运行。",
+      tone: overrideBlocked ? "warning" : undefined,
+      actors: overrideBlocked ? ["config", "risk_control"] : ["config", "system"],
     };
   }
   return {
     title: `当前手动切到：${effective}`,
-    copy: `配置默认仍是 ${configured}。如果你想回到配置默认，只要点回对应的模式按钮即可，不需要额外再点“跟随配置”。`,
-    actors: ["admin", "config"],
+    copy: overrideBlocked
+      ? `配置默认仍是 ${configured}，但页面临时切换已被后端治理策略锁定。${overrideBlockedText}`
+      : `配置默认仍是 ${configured}。如果你想回到配置默认，只要点回对应的模式按钮即可，不需要额外再点“跟随配置”。`,
+    tone: overrideBlocked ? "warning" : undefined,
+    actors: overrideBlocked ? ["risk_control", "config"] : ["admin", "config"],
+  };
+}
+
+function uiOperatingModeOverridePolicy(runtime = {}) {
+  const policy = runtime.ui_operating_mode_override || {};
+  const enabled = policy.enabled === true;
+  return {
+    enabled,
+    disabledReason: policy.disabled_reason
+      || (enabled ? "" : "ui_operating_mode_override_disabled_by_governance_policy"),
+    source: policy.source || "unknown",
   };
 }
 

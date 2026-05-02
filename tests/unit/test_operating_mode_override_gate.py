@@ -17,6 +17,12 @@ import inspect
 
 import pytest
 
+from aats.services.operator.ui_capabilities import (
+    UI_OPERATING_MODE_OVERRIDE_DISABLED_REASON,
+    UI_OPERATING_MODE_OVERRIDE_ENV,
+    ui_operating_mode_override_policy,
+)
+
 
 def test_select_ai_operating_mode_endpoint_source_contains_env_gate() -> None:
     """契约: select_ai_operating_mode 函数源码必须含 AATS_ALLOW_UI_OPERATING_MODE_OVERRIDE 判断.
@@ -122,3 +128,33 @@ def test_operating_mode_override_truthy_values_accepted(monkeypatch, env_value) 
                 f"AATS_ALLOW_UI_OPERATING_MODE_OVERRIDE={env_value!r} 应放行, "
                 f"但路由仍返回 403: {exc.detail}"
             )
+
+
+def test_ai_runtime_ui_override_policy_defaults_to_disabled(monkeypatch) -> None:
+    """前端不能猜测按钮可用性；/ai/runtime 必须有后端能力字段可读。"""
+    monkeypatch.delenv(UI_OPERATING_MODE_OVERRIDE_ENV, raising=False)
+
+    policy = ui_operating_mode_override_policy()
+
+    assert policy == {
+        "enabled": False,
+        "source": "environment",
+        "disabled_reason": UI_OPERATING_MODE_OVERRIDE_DISABLED_REASON,
+    }
+    assert UI_OPERATING_MODE_OVERRIDE_ENV not in policy
+
+
+@pytest.mark.parametrize("env_value", ["true", "TRUE", "1", "yes", "Yes"])
+def test_ai_runtime_ui_override_policy_truthy_values_enable_capability(
+    monkeypatch,
+    env_value,
+) -> None:
+    monkeypatch.setenv(UI_OPERATING_MODE_OVERRIDE_ENV, env_value)
+
+    policy = ui_operating_mode_override_policy()
+
+    assert policy == {
+        "enabled": True,
+        "source": "environment",
+        "disabled_reason": None,
+    }
