@@ -3997,6 +3997,101 @@ def test_recent_no_order_provenance_density_gate_reports_decision_mismatch() -> 
     assert truth["raw_payload_exposed"] is False
 
 
+def test_execution_science_evidence_readiness_truth_verifies_no_order_wait_state() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_execution_science_evidence_readiness_truth(
+        latest_decision_fill_feasibility={
+            "decision_id": "decision_latest",
+            "status": "verified_no_order_fill_feasibility_not_applicable_with_pretrade_context",
+            "order_expected": False,
+            "fill_expected": False,
+            "fill_feasibility_applicable": False,
+            "pretrade_microstructure": {
+                "status": "verified_pretrade_microstructure_context_present",
+                "smallest_missing_field": None,
+                "orderbook": {"bar_age_seconds": 47},
+                "trade_flow": {"bar_age_seconds": 47},
+            },
+        },
+        decision_lifecycle_execution_science_continuity={
+            "status": "verified_no_order_terminal_no_fill_execution_science_continuity",
+            "smallest_missing_field": None,
+            "terminal_no_fill_execution_science": {
+                "status": "verified_executable_terminal_no_fill_pretrade_microstructure_drilldown",
+            },
+            "orderbook_payload_depth": {
+                "status": "verified_books5_payload_depth_evidence_present",
+                "books5_sequence_gap_count": 0,
+                "diff_payload_persisted_row_count": 4376,
+            },
+            "execution_science": {
+                "payload_sequence_status": "sequence_continuous",
+                "payload_sequence_gap_count": 0,
+            },
+            "slippage_cost_calibration": {
+                "status": "verified_slippage_cost_calibration_evidence_present",
+                "slippage_proxy_sample_count": 17,
+            },
+        },
+        depth_slippage_lifecycle={"interpretation": {"forward_depth_ready": True}},
+        slippage_cost={"status": "verified_slippage_cost_calibration_evidence_present"},
+    )
+
+    assert truth["ok"] is True
+    assert truth["status"] == "ready_no_order_regime_waiting_for_executable_or_fill_episode"
+    assert truth["smallest_missing_field"] is None
+    assert truth["raw_payload_exposed"] is False
+    assert truth["waiting_for"] == "executable_or_filled_directional_episode"
+    assert truth["current_decision"]["decision_id"] == "decision_latest"
+    assert truth["readiness_checks"]["evidence_ready"] is True
+    assert truth["readiness_checks"]["pretrade_context_ready"] is True
+    assert truth["readiness_checks"]["depth_ready"] is True
+    assert truth["readiness_checks"]["sequence_ready"] is True
+    assert truth["readiness_checks"]["slippage_baseline_ready"] is True
+    assert truth["readiness_checks"]["terminal_no_fill_context_ready"] is True
+    assert truth["interpretation"]["fill_feasibility_not_applicable_without_order"] is True
+    assert truth["interpretation"]["not_alpha_or_profitability_evidence"] is True
+
+
+def test_execution_science_evidence_readiness_truth_reports_missing_sequence() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_execution_science_evidence_readiness_truth(
+        latest_decision_fill_feasibility={
+            "status": "verified_order_expected_pretrade_fill_feasibility_context_present",
+            "order_expected": True,
+            "fill_expected": True,
+            "pretrade_microstructure": {
+                "status": "verified_pretrade_microstructure_context_present",
+                "smallest_missing_field": None,
+            },
+        },
+        decision_lifecycle_execution_science_continuity={
+            "status": "verified_decision_lifecycle_execution_science_continuity",
+            "smallest_missing_field": None,
+            "orderbook_payload_depth": {
+                "status": "verified_books5_payload_depth_evidence_present",
+                "books5_sequence_gap_count": 3,
+            },
+            "execution_science": {
+                "payload_sequence_status": "sequence_gap_detected",
+            },
+            "slippage_cost_calibration": {
+                "status": "verified_slippage_cost_calibration_evidence_present",
+            },
+        },
+        depth_slippage_lifecycle={"interpretation": {"forward_depth_ready": True}},
+        slippage_cost={"status": "verified_slippage_cost_calibration_evidence_present"},
+    )
+
+    assert truth["ok"] is False
+    assert truth["status"] == "blocked_missing_execution_science_context"
+    assert truth["smallest_missing_field"] == "sequence_gap_detected"
+    assert truth["readiness_checks"]["sequence_ready"] is False
+    assert truth["waiting_for"] is None
+
+
 def test_project_live_runtime_facts_exposes_decision_lifecycle_execution_science_continuity() -> None:
     mod = load_module()
     report = {

@@ -7685,6 +7685,175 @@ def summarize_decision_lifecycle_execution_science_continuity_truth(
     }
 
 
+def summarize_execution_science_evidence_readiness_truth(
+    *,
+    latest_decision_fill_feasibility: dict[str, Any],
+    decision_lifecycle_execution_science_continuity: dict[str, Any],
+    depth_slippage_lifecycle: dict[str, Any],
+    slippage_cost: dict[str, Any],
+) -> dict[str, Any]:
+    latest_fill_feasibility = as_dict(latest_decision_fill_feasibility)
+    latest_pretrade = as_dict(latest_fill_feasibility.get("pretrade_microstructure"))
+    execution_continuity = as_dict(decision_lifecycle_execution_science_continuity)
+    execution_terminal = as_dict(execution_continuity.get("terminal_no_fill_execution_science"))
+    execution_depth = as_dict(execution_continuity.get("orderbook_payload_depth"))
+    execution_sequence = as_dict(execution_continuity.get("execution_science"))
+    execution_slippage = as_dict(execution_continuity.get("slippage_cost_calibration"))
+    depth_lifecycle_interpretation = as_dict(as_dict(depth_slippage_lifecycle).get("interpretation"))
+    slippage = as_dict(slippage_cost)
+
+    current_no_order_expected = (
+        latest_fill_feasibility.get("order_expected") is False
+        and latest_fill_feasibility.get("fill_expected") is False
+    )
+    pretrade_context_ready = (
+        latest_pretrade.get("status") == "verified_pretrade_microstructure_context_present"
+        and latest_pretrade.get("smallest_missing_field") is None
+    )
+    depth_ready = (
+        depth_lifecycle_interpretation.get("forward_depth_ready") is True
+        or execution_depth.get("status") == "verified_books5_payload_depth_evidence_present"
+    )
+    sequence_ready = (
+        execution_sequence.get("payload_sequence_status") == "sequence_continuous"
+        and execution_depth.get("books5_sequence_gap_count") in (0, None)
+    )
+    slippage_baseline_ready = (
+        execution_slippage.get("status") == "verified_slippage_cost_calibration_evidence_present"
+        or slippage.get("status") == "verified_slippage_cost_calibration_evidence_present"
+    )
+    terminal_no_fill_context_ready = (
+        execution_terminal.get("status")
+        == "verified_executable_terminal_no_fill_pretrade_microstructure_drilldown"
+    )
+
+    readiness_checks = {
+        "continuity_ready": execution_continuity.get("smallest_missing_field") is None,
+        "pretrade_context_ready": pretrade_context_ready,
+        "depth_ready": depth_ready,
+        "sequence_ready": sequence_ready,
+        "slippage_baseline_ready": slippage_baseline_ready,
+        "terminal_no_fill_context_ready": terminal_no_fill_context_ready,
+    }
+    evidence_ready = all(
+        readiness_checks[key]
+        for key in (
+            "continuity_ready",
+            "pretrade_context_ready",
+            "depth_ready",
+            "sequence_ready",
+            "slippage_baseline_ready",
+        )
+    )
+    readiness_checks["evidence_ready"] = evidence_ready
+
+    missing_candidates = [
+        (
+            "decision_lifecycle_execution_science_continuity_truth",
+            execution_continuity.get("smallest_missing_field"),
+            readiness_checks["continuity_ready"],
+        ),
+        (
+            "latest_decision_fill_feasibility_truth.pretrade_microstructure",
+            latest_pretrade.get("smallest_missing_field"),
+            readiness_checks["pretrade_context_ready"],
+        ),
+        (
+            "depth_slippage_lifecycle_truth.forward_depth",
+            as_dict(depth_slippage_lifecycle).get("smallest_missing_field"),
+            readiness_checks["depth_ready"],
+        ),
+        (
+            "execution_science_truth.payload_sequence",
+            execution_sequence.get("payload_sequence_status"),
+            readiness_checks["sequence_ready"],
+        ),
+        (
+            "slippage_cost_calibration_truth",
+            slippage.get("smallest_missing_field"),
+            readiness_checks["slippage_baseline_ready"],
+        ),
+    ]
+    smallest_missing = next(
+        (
+            explicit_missing or field
+            for field, explicit_missing, passed in missing_candidates
+            if not passed
+        ),
+        None,
+    )
+
+    status = "blocked_missing_execution_science_context"
+    waiting_for = None
+    if evidence_ready and current_no_order_expected:
+        status = "ready_no_order_regime_waiting_for_executable_or_fill_episode"
+        waiting_for = "executable_or_filled_directional_episode"
+        smallest_missing = None
+    elif evidence_ready:
+        status = "ready_for_next_execution_episode"
+        waiting_for = "next_directional_execution_episode"
+        smallest_missing = None
+
+    return {
+        "source": "live_runtime_truth_surfaces",
+        "ok": evidence_ready,
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "raw_payload_exposed": False,
+        "current_decision": {
+            "decision_id": latest_fill_feasibility.get("decision_id"),
+            "order_expected": latest_fill_feasibility.get("order_expected"),
+            "fill_expected": latest_fill_feasibility.get("fill_expected"),
+            "fill_feasibility_applicable": latest_fill_feasibility.get(
+                "fill_feasibility_applicable"
+            ),
+            "fill_feasibility_status": latest_fill_feasibility.get("status"),
+        },
+        "readiness_checks": readiness_checks,
+        "waiting_for": waiting_for,
+        "pretrade_microstructure": {
+            "status": latest_pretrade.get("status"),
+            "smallest_missing_field": latest_pretrade.get("smallest_missing_field"),
+            "orderbook_bar_age_seconds": as_dict(latest_pretrade.get("orderbook")).get(
+                "bar_age_seconds"
+            ),
+            "trade_flow_bar_age_seconds": as_dict(latest_pretrade.get("trade_flow")).get(
+                "bar_age_seconds"
+            ),
+        },
+        "depth": {
+            "forward_depth_ready": depth_lifecycle_interpretation.get("forward_depth_ready"),
+            "orderbook_payload_depth_status": execution_depth.get("status"),
+            "books5_sequence_gap_count": execution_depth.get("books5_sequence_gap_count"),
+            "diff_payload_persisted_row_count": execution_depth.get(
+                "diff_payload_persisted_row_count"
+            ),
+        },
+        "sequence": {
+            "payload_sequence_status": execution_sequence.get("payload_sequence_status"),
+            "payload_sequence_gap_count": execution_sequence.get(
+                "payload_sequence_gap_count"
+            ),
+        },
+        "slippage_baseline": {
+            "status": execution_slippage.get("status") or slippage.get("status"),
+            "slippage_proxy_sample_count": (
+                execution_slippage.get("slippage_proxy_sample_count")
+                or as_dict(slippage.get("slippage_proxy")).get("sample_count")
+            ),
+        },
+        "interpretation": {
+            "current_no_order_expected": current_no_order_expected,
+            "fill_feasibility_not_applicable_without_order": (
+                current_no_order_expected
+                and latest_fill_feasibility.get("fill_feasibility_applicable") is False
+            ),
+            "pretrade_observability_ready": evidence_ready,
+            "not_alpha_or_profitability_evidence": True,
+        },
+    }
+
+
 def summarize_recent_directional_decision_chain_density_truth(
     *,
     directional_attribution: dict[str, Any],
@@ -10873,57 +11042,47 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     decision_lifecycle_execution_science_slippage = as_dict(
         decision_lifecycle_execution_science.get("slippage_cost_calibration")
     )
+    execution_science_evidence_readiness = as_dict(
+        report.get("execution_science_evidence_readiness_truth")
+    )
+    if not execution_science_evidence_readiness:
+        execution_science_evidence_readiness = (
+            summarize_execution_science_evidence_readiness_truth(
+                latest_decision_fill_feasibility=latest_decision_fill_feasibility,
+                decision_lifecycle_execution_science_continuity=(
+                    decision_lifecycle_execution_science
+                ),
+                depth_slippage_lifecycle=depth_slippage_lifecycle,
+                slippage_cost=slippage_cost,
+            )
+        )
+    execution_science_readiness_checks = as_dict(
+        execution_science_evidence_readiness.get("readiness_checks")
+    )
+    execution_science_readiness_interpretation = as_dict(
+        execution_science_evidence_readiness.get("interpretation")
+    )
+    execution_science_evidence_readiness_status = execution_science_evidence_readiness.get(
+        "status"
+    )
+    execution_science_waiting_for = execution_science_evidence_readiness.get("waiting_for")
+    execution_science_evidence_readiness_smallest_missing_field = (
+        execution_science_evidence_readiness.get("smallest_missing_field")
+    )
     execution_science_current_no_order_expected = (
-        latest_decision_fill_feasibility.get("order_expected") is False
-        and latest_decision_fill_feasibility.get("fill_expected") is False
+        execution_science_readiness_interpretation.get("current_no_order_expected")
     )
-    execution_science_pretrade_context_ready = (
-        latest_decision_fill_feasibility_pretrade.get("status")
-        == "verified_pretrade_microstructure_context_present"
-        and latest_decision_fill_feasibility_pretrade.get("smallest_missing_field") is None
+    execution_science_pretrade_context_ready = execution_science_readiness_checks.get(
+        "pretrade_context_ready"
     )
-    execution_science_depth_ready = (
-        depth_slippage_lifecycle_interpretation.get("forward_depth_ready") is True
-        or decision_lifecycle_execution_science_depth.get("status")
-        == "verified_books5_payload_depth_evidence_present"
-    )
-    execution_science_sequence_ready = (
-        decision_lifecycle_execution_science_sequence.get("payload_sequence_status")
-        == "sequence_continuous"
-        and decision_lifecycle_execution_science_depth.get("books5_sequence_gap_count") in (0, None)
-    )
-    execution_science_slippage_baseline_ready = (
-        decision_lifecycle_execution_science_slippage.get("status")
-        == "verified_slippage_cost_calibration_evidence_present"
-        or slippage_cost.get("status") == "verified_slippage_cost_calibration_evidence_present"
+    execution_science_depth_ready = execution_science_readiness_checks.get("depth_ready")
+    execution_science_sequence_ready = execution_science_readiness_checks.get("sequence_ready")
+    execution_science_slippage_baseline_ready = execution_science_readiness_checks.get(
+        "slippage_baseline_ready"
     )
     execution_science_terminal_no_fill_context_ready = (
-        decision_lifecycle_execution_science_terminal.get("status")
-        == "verified_executable_terminal_no_fill_pretrade_microstructure_drilldown"
+        execution_science_readiness_checks.get("terminal_no_fill_context_ready")
     )
-    execution_science_evidence_ready = (
-        decision_lifecycle_execution_science.get("smallest_missing_field") is None
-        and execution_science_pretrade_context_ready
-        and execution_science_depth_ready
-        and execution_science_sequence_ready
-        and execution_science_slippage_baseline_ready
-    )
-    execution_science_evidence_readiness_status = "blocked_missing_execution_science_context"
-    execution_science_waiting_for = None
-    execution_science_evidence_readiness_smallest_missing_field = (
-        decision_lifecycle_execution_science.get("smallest_missing_field")
-        or latest_decision_fill_feasibility_pretrade.get("smallest_missing_field")
-    )
-    if execution_science_evidence_ready and execution_science_current_no_order_expected:
-        execution_science_evidence_readiness_status = (
-            "ready_no_order_regime_waiting_for_executable_or_fill_episode"
-        )
-        execution_science_waiting_for = "executable_or_filled_directional_episode"
-        execution_science_evidence_readiness_smallest_missing_field = None
-    elif execution_science_evidence_ready:
-        execution_science_evidence_readiness_status = "ready_for_next_execution_episode"
-        execution_science_waiting_for = "next_directional_execution_episode"
-        execution_science_evidence_readiness_smallest_missing_field = None
     recent_directional_chain_density = as_dict(
         report.get("recent_directional_decision_chain_density_truth")
     )
@@ -11723,6 +11882,9 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "execution_science_evidence_readiness_status": execution_science_evidence_readiness_status,
         "execution_science_evidence_readiness_smallest_missing_field": (
             execution_science_evidence_readiness_smallest_missing_field
+        ),
+        "execution_science_evidence_readiness_raw_payload_exposed": (
+            execution_science_evidence_readiness.get("raw_payload_exposed")
         ),
         "execution_science_evidence_waiting_for": execution_science_waiting_for,
         "execution_science_current_no_order_expected": execution_science_current_no_order_expected,
@@ -13516,6 +13678,16 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             latest_decision_fill_feasibility=report["latest_decision_fill_feasibility_truth"],
             depth_slippage_lifecycle=report["depth_slippage_lifecycle_truth"],
             execution_science=report["execution_science_truth"],
+            slippage_cost=report["slippage_cost_calibration_truth"],
+        )
+    )
+    report["execution_science_evidence_readiness_truth"] = (
+        summarize_execution_science_evidence_readiness_truth(
+            latest_decision_fill_feasibility=report["latest_decision_fill_feasibility_truth"],
+            decision_lifecycle_execution_science_continuity=report[
+                "decision_lifecycle_execution_science_continuity_truth"
+            ],
+            depth_slippage_lifecycle=report["depth_slippage_lifecycle_truth"],
             slippage_cost=report["slippage_cost_calibration_truth"],
         )
     )
