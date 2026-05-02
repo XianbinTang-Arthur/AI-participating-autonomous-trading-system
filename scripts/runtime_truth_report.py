@@ -10248,7 +10248,7 @@ def load_artifact_runtime_projection(repo_root: Path, report_generated_at: str) 
         if not path.exists():
             continue
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError):
             continue
         payload_generated_at = payload.get("generated_at")
@@ -10297,7 +10297,7 @@ def load_latest_claimed_submit_operator_handoff(repo_root: Path) -> dict[str, An
     candidates: list[tuple[str, str, Path, dict[str, Any]]] = []
     for path in artifact_dir.glob(CLAIMED_SUBMIT_OPERATOR_HANDOFF_PATTERN):
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError):
             continue
         if not isinstance(payload, dict):

@@ -7478,6 +7478,31 @@ def test_artifact_last_known_is_non_authoritative_when_live_fact_differs(tmp_pat
     }
 
 
+def test_artifact_last_known_reads_utf8_bom_state_json(tmp_path: Path) -> None:
+    mod = load_module()
+    artifact_dir = tmp_path / "artifacts" / "automation"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "current_state.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-26T06:45:00Z",
+                "latest_runtime_facts": {
+                    "latest_decision_id": "decision_old",
+                    "ai_timeout_active_blocker": False,
+                    "runtime_truth_generated_at": "2026-04-26T06:45:00Z",
+                },
+            },
+        ),
+        encoding="utf-8-sig",
+    )
+
+    projection = mod.load_artifact_runtime_projection(tmp_path, "2026-04-26T07:01:00Z")
+
+    assert projection["facts"]["latest_decision_id"] == "decision_old"
+    assert projection["facts"]["ai_timeout_active_blocker"] is False
+    assert projection["sources"][0]["path"] == "artifacts/automation/current_state.json"
+
+
 def test_artifact_last_known_stable_fact_mismatch_remains_stale(tmp_path: Path) -> None:
     mod = load_module()
     artifact_dir = tmp_path / "artifacts" / "automation"
