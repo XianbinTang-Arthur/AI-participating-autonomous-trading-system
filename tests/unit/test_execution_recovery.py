@@ -102,6 +102,132 @@ class _RecordingSleevePnlProjectionService:
 
 
 class TestExecutionRecovery(unittest.TestCase):
+    @staticmethod
+    def _scoped_reconciliation_report(
+        *,
+        reconciliation_id: str,
+        as_of_delta: timedelta = timedelta(),
+        severity: str = "CLEAN",
+        halt_required: bool = False,
+        review_required: bool = False,
+        resume_blocking: bool = False,
+        only_reduce_required: bool = False,
+    ) -> ReconciliationReport:
+        return ReconciliationReport(
+            reconciliation_id=reconciliation_id,
+            as_of_ts=utc_now() - as_of_delta,
+            product_type="derivatives",
+            margin_mode="cross",
+            allowed_symbols=["BTC-USDT-SWAP"],
+            exchange_comparison_enabled=True,
+            order_diff={"reconstructed": {}, "exchange": {}},
+            fill_diff={"replayed": {}, "exchange": {}},
+            balance_diff={"reconstructed": {}, "exchange": {}},
+            position_diff={
+                "stored": {},
+                "reconstructed": {},
+                "reconstructed_mismatches": {},
+                "exchange": {},
+                "exchange_mismatches": {},
+            },
+            mismatch_categories=[],
+            mismatch_reasons=[],
+            safety_impacts=[],
+            severity=severity,
+            halt_required=halt_required,
+            review_required=review_required,
+            resume_blocking=resume_blocking,
+            only_reduce_required=only_reduce_required,
+        )
+
+    def test_recovery_clears_stale_reconciliation_halt_after_fresh_nonblocking_report(self) -> None:
+        reconciliation_repo = InMemoryReconciliationRepository()
+        reconciliation_repo.save_report(
+            self._scoped_reconciliation_report(
+                reconciliation_id="recon_fresh_nonblocking",
+                severity="SOFT_MISMATCH",
+            )
+        )
+        kill_switch = KillSwitch()
+        kill_switch.halt(reason="recovery_reconciliation_stale")
+        recovery = self._service(
+            kill_switch=kill_switch,
+            reconciliation_repo=reconciliation_repo,
+            settings_override={
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ["BTC-USDT-SWAP"],
+            },
+        )
+
+        artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=10_000.0))
+
+        self.assertFalse(kill_switch.halted)
+        self.assertFalse(artifacts.status.halted)
+        self.assertTrue(artifacts.status.safe_startup)
+        self.assertIn(
+            "recovery_reconciliation_stale_halt_cleared_after_fresh_nonblocking_reconciliation",
+            artifacts.status.notes,
+        )
+
+    def test_recovery_does_not_clear_non_reconciliation_stale_halt_reason(self) -> None:
+        reconciliation_repo = InMemoryReconciliationRepository()
+        reconciliation_repo.save_report(
+            self._scoped_reconciliation_report(reconciliation_id="recon_fresh_manual_halt")
+        )
+        kill_switch = KillSwitch()
+        kill_switch.halt(reason="manual_halt")
+        recovery = self._service(
+            kill_switch=kill_switch,
+            reconciliation_repo=reconciliation_repo,
+            settings_override={
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ["BTC-USDT-SWAP"],
+            },
+        )
+
+        artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=10_000.0))
+
+        self.assertTrue(kill_switch.halted)
+        self.assertEqual(kill_switch.status()["reason"], "manual_halt")
+        self.assertTrue(artifacts.status.halted)
+        self.assertNotIn(
+            "recovery_reconciliation_stale_halt_cleared_after_fresh_nonblocking_reconciliation",
+            artifacts.status.notes,
+        )
+
+    def test_recovery_does_not_clear_stale_halt_when_reconciliation_requires_halt(self) -> None:
+        reconciliation_repo = InMemoryReconciliationRepository()
+        reconciliation_repo.save_report(
+            self._scoped_reconciliation_report(
+                reconciliation_id="recon_fresh_halt_required",
+                severity="HARD_MISMATCH",
+                halt_required=True,
+            )
+        )
+        kill_switch = KillSwitch()
+        kill_switch.halt(reason="recovery_reconciliation_stale")
+        recovery = self._service(
+            kill_switch=kill_switch,
+            reconciliation_repo=reconciliation_repo,
+            settings_override={
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ["BTC-USDT-SWAP"],
+            },
+        )
+
+        artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=10_000.0))
+
+        self.assertTrue(kill_switch.halted)
+        self.assertEqual(kill_switch.status()["reason"], "recovery_reconciliation_halt_required")
+        self.assertTrue(artifacts.status.halted)
+        self.assertIn("latest_reconciliation_requires_operator_review", artifacts.status.notes)
+
     def test_recovery_tracks_structured_bundle_open_orders_without_halting(self) -> None:
         execution_repo = InMemoryExecutionRepository()
         now = utc_now()

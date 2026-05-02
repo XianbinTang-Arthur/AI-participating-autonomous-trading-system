@@ -59,6 +59,7 @@ class RecoveryArtifacts:
 
 class ExecutionRecoveryService:
     _RECOVERY_COMPARISON_EPSILON = Decimal("1e-8")
+    _STALE_RECONCILIATION_HALT_REASON = "recovery_reconciliation_stale"
 
     def __init__(
         self,
@@ -294,6 +295,15 @@ class ExecutionRecoveryService:
                 recovery_action = recovery_action or "halted_open_orders_require_review"
                 safe_startup = False
                 notes.append("open_orders_restored_require_operator_review")
+
+        self._clear_stale_reconciliation_halt_if_resolved(
+            latest_reconciliation=latest_reconciliation,
+            safe_startup=safe_startup,
+            open_order_count=len(open_orders),
+            bundle_recovery_required=bundle_recovery.bundle_recovery_required,
+            bundle_recovery_blocking=bundle_recovery.recovery_blocking,
+            notes=notes,
+        )
 
         only_reduce_reasons = (
             list(latest_reconciliation.only_reduce_reasons)
@@ -729,6 +739,37 @@ class ExecutionRecoveryService:
         # Stage 6 Slice 6.4：合并的 KillSwitch 自动跨进程广播
         self.kill_switch.halt(reason=reason)
         notes.append(action)
+
+    def _clear_stale_reconciliation_halt_if_resolved(
+        self,
+        *,
+        latest_reconciliation: ReconciliationReport | None,
+        safe_startup: bool,
+        open_order_count: int,
+        bundle_recovery_required: bool,
+        bundle_recovery_blocking: bool,
+        notes: list[str],
+    ) -> bool:
+        status = self.kill_switch.status()
+        if not status.get("halted") or status.get("reason") != self._STALE_RECONCILIATION_HALT_REASON:
+            return False
+        if latest_reconciliation is None:
+            return False
+        age_seconds = (utc_now() - latest_reconciliation.as_of_ts).total_seconds()
+        if age_seconds > self.reconciliation_stale_after_seconds:
+            return False
+        if (
+            latest_reconciliation.halt_required
+            or latest_reconciliation.review_required
+            or latest_reconciliation.only_reduce_required
+            or bool(getattr(latest_reconciliation, "resume_blocking", False))
+        ):
+            return False
+        if not safe_startup or open_order_count or bundle_recovery_required or bundle_recovery_blocking:
+            return False
+        self.kill_switch.resume()
+        notes.append("recovery_reconciliation_stale_halt_cleared_after_fresh_nonblocking_reconciliation")
+        return True
 
     @staticmethod
     def _dedupe_notes(notes: list[str]) -> list[str]:
