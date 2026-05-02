@@ -8,9 +8,11 @@ from aats.bootstrap.settings import AATSSettings
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.storage.event_store import InMemoryEventStore
 from aats.events import topics
+from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent, OrderState
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeFill
 from aats.schemas.portfolio import PortfolioSnapshot
+from aats.schemas.reconciliation import ReconciliationReport
 from aats.services.execution_engine.exit_intent_aggregator import (
     child_exit_order_ref_from_order_state,
     create_exit_execution_intent_from_order_state,
@@ -49,6 +51,55 @@ def build_fill() -> FillEvent:
 
 
 class TestReconciliationRepair(unittest.IsolatedAsyncioTestCase):
+    def test_persist_report_invokes_stale_reconciliation_halt_clearer(self) -> None:
+        event_store = InMemoryEventStore()
+        calls: list[str] = []
+        service = ReconciliationService(
+            settings=AATSSettings.model_validate({}),
+            bus=InMemoryEventBus(event_store=event_store, persistence_mode="strict"),
+            fetcher=ExchangeStateFetcher(account_service=None),
+            comparator=StateComparator(),
+            repair_service=ReconciliationRepairService(),
+            reconciliation_repo=InMemoryReconciliationRepository(),
+            execution_repo=InMemoryExecutionRepository(),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            event_store=event_store,
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            price_provider=lambda _symbol: Decimal("0"),
+            bootstrap_portfolio_from_exchange=False,
+            metrics=None,
+            stale_reconciliation_halt_clearer=lambda report: calls.append(report.reconciliation_id) is None,
+        )
+        report = ReconciliationReport(
+            reconciliation_id="recon_persist_clearer",
+            as_of_ts=utc_now(),
+            product_type="spot",
+            margin_mode="cash",
+            allowed_symbols=["BTC-USDT"],
+            exchange_comparison_enabled=False,
+            order_diff={"reconstructed": {}, "exchange": {}},
+            fill_diff={"replayed": {}, "exchange": {}},
+            balance_diff={"reconstructed": {}, "exchange": {}},
+            position_diff={
+                "stored": {},
+                "reconstructed": {},
+                "reconstructed_mismatches": {},
+                "exchange": {},
+                "exchange_mismatches": {},
+            },
+            mismatch_categories=[],
+            mismatch_reasons=[],
+            safety_impacts=[],
+            severity="CLEAN",
+        )
+
+        service._persist_report_sync(report)
+
+        self.assertEqual(calls, ["recon_persist_clearer"])
+
     async def test_local_only_snapshot_divergence_is_rebuilt_safely(self) -> None:
         event_store = InMemoryEventStore()
         bus = InMemoryEventBus(event_store=event_store, persistence_mode="strict")

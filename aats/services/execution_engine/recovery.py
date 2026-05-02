@@ -438,6 +438,49 @@ class ExecutionRecoveryService:
             rebuilt_snapshot=rebuilt_snapshot_for_event,
         )
 
+    def clear_stale_reconciliation_halt_if_resolved(
+        self,
+        latest_reconciliation: ReconciliationReport | None = None,
+    ) -> bool:
+        report = latest_reconciliation_for_scope(self.reconciliation_repo, self.runtime_scope)
+        if latest_reconciliation is not None and (
+            report is None
+            or report.reconciliation_id != latest_reconciliation.reconciliation_id
+            or report.as_of_ts != latest_reconciliation.as_of_ts
+        ):
+            return False
+
+        scoped_order_states = order_states_for_scope(self.execution_repo, self.runtime_scope)
+        open_orders = [
+            order for order in scoped_order_states if str(order.status).upper() not in _TERMINAL_ORDER_STATES
+        ]
+        bundle_recovery = scoped_bundle_recovery_assessment(
+            scope=self.runtime_scope,
+            order_states=scoped_order_states,
+            obligations=self._scoped_active_obligations(),
+            strategy_bundles=self._scoped_recent_strategy_bundles(),
+        )
+        fills = fills_for_scope(self.execution_repo, self.runtime_scope)
+        latest_snapshot = latest_snapshot_for_scope(self.portfolio_repo, self.runtime_scope)
+        safe_startup = not bool(fills and latest_snapshot is None and self.bootstrap_portfolio_from_exchange)
+        notes: list[str] = []
+        cleared = self._clear_stale_reconciliation_halt_if_resolved(
+            latest_reconciliation=report,
+            safe_startup=safe_startup,
+            open_order_count=len(open_orders),
+            bundle_recovery_required=bundle_recovery.bundle_recovery_required,
+            bundle_recovery_blocking=bundle_recovery.recovery_blocking,
+            notes=notes,
+        )
+        if cleared:
+            log_event(
+                self.logger,
+                "recovery_reconciliation_stale_halt_cleared_after_report",
+                reason=self._STALE_RECONCILIATION_HALT_REASON,
+                reconciliation_id=report.reconciliation_id if report is not None else None,
+            )
+        return cleared
+
     def _persist_recovery_snapshot(
         self,
         snapshot: PortfolioSnapshot,

@@ -171,6 +171,31 @@ class TestExecutionRecovery(unittest.TestCase):
             artifacts.status.notes,
         )
 
+    def test_reconciliation_report_callback_clears_stale_halt_with_recovery_guards(self) -> None:
+        reconciliation_repo = InMemoryReconciliationRepository()
+        report = self._scoped_reconciliation_report(
+            reconciliation_id="recon_callback_fresh_nonblocking",
+            severity="SOFT_MISMATCH",
+        )
+        reconciliation_repo.save_report(report)
+        kill_switch = KillSwitch()
+        kill_switch.halt(reason="recovery_reconciliation_stale")
+        recovery = self._service(
+            kill_switch=kill_switch,
+            reconciliation_repo=reconciliation_repo,
+            settings_override={
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ["BTC-USDT-SWAP"],
+            },
+        )
+
+        cleared = recovery.clear_stale_reconciliation_halt_if_resolved(report)
+
+        self.assertTrue(cleared)
+        self.assertFalse(kill_switch.halted)
+
     def test_recovery_does_not_clear_non_reconciliation_stale_halt_reason(self) -> None:
         reconciliation_repo = InMemoryReconciliationRepository()
         reconciliation_repo.save_report(

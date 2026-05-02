@@ -261,6 +261,7 @@ class ReconciliationService:
         reconciliation_classifier: RecoveryReconciliationClassifier | None = None,
         portfolio_outbox_publisher: "PostgresPortfolioOutboxPublisher | None" = None,
         exit_execution_writer: ExitExecutionWriter | None = None,
+        stale_reconciliation_halt_clearer: Callable[[ReconciliationReport], bool] | None = None,
     ) -> None:
         self.settings = settings
         self.bus = bus
@@ -281,6 +282,8 @@ class ReconciliationService:
         self.exit_execution_writer = exit_execution_writer or (
             ExitExecutionWriter(exit_execution_repo) if exit_execution_repo is not None else None
         )
+        self.stale_reconciliation_halt_clearer = stale_reconciliation_halt_clearer
+        self.logger = get_logger("aats.reconciliation")
         self.runtime_scope = runtime_state_scope(settings)
         configure_comparator = getattr(self.comparator, "configure", None)
         if callable(configure_comparator):
@@ -757,6 +760,18 @@ class ReconciliationService:
                 report_to_save,
                 schedule_post_commit=False,
             )
+        if self.stale_reconciliation_halt_clearer is not None:
+            try:
+                if self.stale_reconciliation_halt_clearer(report_to_save) and self.metrics is not None:
+                    self.metrics.increment("reconciliation_stale_halt_cleared")
+            except Exception as exc:
+                self.logger.warning(
+                    "stale_reconciliation_halt_clearer_failed",
+                    extra={
+                        "error_type": type(exc).__name__,
+                        "reconciliation_id": report_to_save.reconciliation_id,
+                    },
+                )
         return report_to_save, repaired_snapshot
 
     async def _emit_processing_failure(

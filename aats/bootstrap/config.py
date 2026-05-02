@@ -4630,6 +4630,9 @@ def _build_reconciliation_slice(
         portfolio_outbox_publisher=slices.portfolio_outbox_publisher,
         sleeve_pnl_projection_service=slices.sleeve_pnl_projection_service,
     )
+    slices.reconciliation_service.stale_reconciliation_halt_clearer = (
+        slices.base_recovery_service.clear_stale_reconciliation_halt_if_resolved
+    )
     # OKXExecutionAdapter.client satisfies ExchangeOrderQuerier protocol.
     _exchange_order_client = (
         getattr(slices.execution_adapter, "client", None)
