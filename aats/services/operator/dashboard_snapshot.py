@@ -1,0 +1,662 @@
+from __future__ import annotations
+
+import asyncio
+import inspect
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
+from datetime import timedelta
+from time import perf_counter
+from typing import Any
+
+from aats.bootstrap.logging import get_logger, log_event
+from aats.schemas.common import utc_now
+
+
+DashboardSnapshotLoader = Callable[[str], Any | Awaitable[Any]]
+DashboardSnapshotDefaultFactory = Callable[[str], Any]
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardSnapshotPolicy:
+    panel_key: str
+    ttl_seconds: float
+    stale_after_seconds: float
+    hard_expire_seconds: float
+    timeout_seconds: float
+    priority: str = "p0"
+
+
+@dataclass(slots=True)
+class DashboardPanelSnapshot:
+    panel_key: str
+    data: Any
+    generated_at: Any
+    last_success_at: Any
+    duration_ms: float
+    last_error: str | None = None
+    last_error_at: Any | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardSnapshotRead:
+    data: Any
+    error: str | None
+    meta: dict[str, Any]
+    duration_ms: float
+
+
+_LOGGER = get_logger("aats.operator.dashboard_snapshot")
+
+
+P0_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
+    "runtime": DashboardSnapshotPolicy(
+        panel_key="runtime",
+        ttl_seconds=3.0,
+        stale_after_seconds=5.0,
+        hard_expire_seconds=120.0,
+        timeout_seconds=2.0,
+    ),
+    "health": DashboardSnapshotPolicy(
+        panel_key="health",
+        ttl_seconds=3.0,
+        stale_after_seconds=5.0,
+        hard_expire_seconds=120.0,
+        timeout_seconds=2.0,
+    ),
+    "mode": DashboardSnapshotPolicy(
+        panel_key="mode",
+        ttl_seconds=5.0,
+        stale_after_seconds=10.0,
+        hard_expire_seconds=120.0,
+        timeout_seconds=1.0,
+    ),
+    "systemRecovery": DashboardSnapshotPolicy(
+        panel_key="systemRecovery",
+        ttl_seconds=5.0,
+        stale_after_seconds=10.0,
+        hard_expire_seconds=120.0,
+        timeout_seconds=2.0,
+    ),
+    "blockerControl": DashboardSnapshotPolicy(
+        panel_key="blockerControl",
+        ttl_seconds=3.0,
+        stale_after_seconds=5.0,
+        hard_expire_seconds=120.0,
+        timeout_seconds=3.0,
+    ),
+    "blockers": DashboardSnapshotPolicy(
+        panel_key="blockers",
+        ttl_seconds=3.0,
+        stale_after_seconds=5.0,
+        hard_expire_seconds=120.0,
+        timeout_seconds=3.0,
+    ),
+    "aiRuntime": DashboardSnapshotPolicy(
+        panel_key="aiRuntime",
+        ttl_seconds=10.0,
+        stale_after_seconds=20.0,
+        hard_expire_seconds=180.0,
+        timeout_seconds=3.0,
+    ),
+    "metrics": DashboardSnapshotPolicy(
+        panel_key="metrics",
+        ttl_seconds=5.0,
+        stale_after_seconds=10.0,
+        hard_expire_seconds=120.0,
+        timeout_seconds=3.0,
+    ),
+    "accountState": DashboardSnapshotPolicy(
+        panel_key="accountState",
+        ttl_seconds=5.0,
+        stale_after_seconds=10.0,
+        hard_expire_seconds=120.0,
+        timeout_seconds=2.0,
+    ),
+}
+
+P0_DASHBOARD_SNAPSHOT_PANEL_KEYS = frozenset(P0_DASHBOARD_SNAPSHOT_POLICIES)
+
+P1_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
+    "latestDecision": DashboardSnapshotPolicy(
+        panel_key="latestDecision",
+        ttl_seconds=5.0,
+        stale_after_seconds=15.0,
+        hard_expire_seconds=180.0,
+        timeout_seconds=5.0,
+        priority="p1",
+    ),
+    "strategyRuntime": DashboardSnapshotPolicy(
+        panel_key="strategyRuntime",
+        ttl_seconds=10.0,
+        stale_after_seconds=30.0,
+        hard_expire_seconds=240.0,
+        timeout_seconds=5.0,
+        priority="p1",
+    ),
+    "executionLatest": DashboardSnapshotPolicy(
+        panel_key="executionLatest",
+        ttl_seconds=5.0,
+        stale_after_seconds=15.0,
+        hard_expire_seconds=180.0,
+        timeout_seconds=3.0,
+        priority="p1",
+    ),
+    "portfolio": DashboardSnapshotPolicy(
+        panel_key="portfolio",
+        ttl_seconds=5.0,
+        stale_after_seconds=10.0,
+        hard_expire_seconds=180.0,
+        timeout_seconds=2.0,
+        priority="p1",
+    ),
+    "positions": DashboardSnapshotPolicy(
+        panel_key="positions",
+        ttl_seconds=5.0,
+        stale_after_seconds=10.0,
+        hard_expire_seconds=180.0,
+        timeout_seconds=2.0,
+        priority="p1",
+    ),
+    "reconciliationLatest": DashboardSnapshotPolicy(
+        panel_key="reconciliationLatest",
+        ttl_seconds=10.0,
+        stale_after_seconds=30.0,
+        hard_expire_seconds=240.0,
+        timeout_seconds=3.0,
+        priority="p1",
+    ),
+}
+
+P1_DASHBOARD_SNAPSHOT_PANEL_KEYS = frozenset(P1_DASHBOARD_SNAPSHOT_POLICIES)
+
+P2_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
+    "trialGuard": DashboardSnapshotPolicy(
+        panel_key="trialGuard",
+        ttl_seconds=10.0,
+        stale_after_seconds=30.0,
+        hard_expire_seconds=240.0,
+        timeout_seconds=5.0,
+        priority="p2",
+    ),
+    "guardedLivePreflight": DashboardSnapshotPolicy(
+        panel_key="guardedLivePreflight",
+        ttl_seconds=10.0,
+        stale_after_seconds=30.0,
+        hard_expire_seconds=240.0,
+        timeout_seconds=8.0,
+        priority="p2",
+    ),
+    "guardedLiveRunPacket": DashboardSnapshotPolicy(
+        panel_key="guardedLiveRunPacket",
+        ttl_seconds=30.0,
+        stale_after_seconds=60.0,
+        hard_expire_seconds=300.0,
+        timeout_seconds=20.0,
+        priority="p2",
+    ),
+    "replayStatus": DashboardSnapshotPolicy(
+        panel_key="replayStatus",
+        ttl_seconds=15.0,
+        stale_after_seconds=60.0,
+        hard_expire_seconds=300.0,
+        timeout_seconds=8.0,
+        priority="p2",
+    ),
+    "aiOverview": DashboardSnapshotPolicy(
+        panel_key="aiOverview",
+        ttl_seconds=30.0,
+        stale_after_seconds=60.0,
+        hard_expire_seconds=300.0,
+        timeout_seconds=10.0,
+        priority="p2",
+    ),
+    "aiLatest": DashboardSnapshotPolicy(
+        panel_key="aiLatest",
+        ttl_seconds=30.0,
+        stale_after_seconds=60.0,
+        hard_expire_seconds=300.0,
+        timeout_seconds=10.0,
+        priority="p2",
+    ),
+    "aiShadowLatest": DashboardSnapshotPolicy(
+        panel_key="aiShadowLatest",
+        ttl_seconds=30.0,
+        stale_after_seconds=60.0,
+        hard_expire_seconds=300.0,
+        timeout_seconds=10.0,
+        priority="p2",
+    ),
+    "profileControlSummary": DashboardSnapshotPolicy(
+        panel_key="profileControlSummary",
+        ttl_seconds=60.0,
+        stale_after_seconds=120.0,
+        hard_expire_seconds=360.0,
+        timeout_seconds=20.0,
+        priority="p2",
+    ),
+    "aiConfigModel": DashboardSnapshotPolicy(
+        panel_key="aiConfigModel",
+        ttl_seconds=60.0,
+        stale_after_seconds=120.0,
+        hard_expire_seconds=360.0,
+        timeout_seconds=15.0,
+        priority="p2",
+    ),
+    "rdpControl": DashboardSnapshotPolicy(
+        panel_key="rdpControl",
+        ttl_seconds=30.0,
+        stale_after_seconds=120.0,
+        hard_expire_seconds=360.0,
+        timeout_seconds=15.0,
+        priority="p2",
+    ),
+    "rdpWorkbenchOverview": DashboardSnapshotPolicy(
+        panel_key="rdpWorkbenchOverview",
+        ttl_seconds=30.0,
+        stale_after_seconds=120.0,
+        hard_expire_seconds=360.0,
+        timeout_seconds=15.0,
+        priority="p2",
+    ),
+    "rdpWorkbenchItems": DashboardSnapshotPolicy(
+        panel_key="rdpWorkbenchItems",
+        ttl_seconds=60.0,
+        stale_after_seconds=180.0,
+        hard_expire_seconds=420.0,
+        timeout_seconds=20.0,
+        priority="p2",
+    ),
+    "rdpWorkbenchAlerts": DashboardSnapshotPolicy(
+        panel_key="rdpWorkbenchAlerts",
+        ttl_seconds=60.0,
+        stale_after_seconds=180.0,
+        hard_expire_seconds=420.0,
+        timeout_seconds=20.0,
+        priority="p2",
+    ),
+    "rdpTuningOverview": DashboardSnapshotPolicy(
+        panel_key="rdpTuningOverview",
+        ttl_seconds=60.0,
+        stale_after_seconds=180.0,
+        hard_expire_seconds=420.0,
+        timeout_seconds=20.0,
+        priority="p2",
+    ),
+    "rdpTuningProposals": DashboardSnapshotPolicy(
+        panel_key="rdpTuningProposals",
+        ttl_seconds=60.0,
+        stale_after_seconds=180.0,
+        hard_expire_seconds=420.0,
+        timeout_seconds=20.0,
+        priority="p2",
+    ),
+}
+
+P2_DASHBOARD_SNAPSHOT_PANEL_KEYS = frozenset(P2_DASHBOARD_SNAPSHOT_POLICIES)
+
+DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
+    **P0_DASHBOARD_SNAPSHOT_POLICIES,
+    **P1_DASHBOARD_SNAPSHOT_POLICIES,
+    **P2_DASHBOARD_SNAPSHOT_POLICIES,
+}
+
+DASHBOARD_SNAPSHOT_PANEL_KEYS = frozenset(DASHBOARD_SNAPSHOT_POLICIES)
+
+
+class DashboardSnapshotPlane:
+    """Background-produced dashboard panel snapshots for the API gateway.
+
+    The critical contract is that request-time bundle assembly only reads
+    snapshots and enqueues refresh work. It must not call the configured
+    loader from ``read_panel``.
+    """
+
+    def __init__(
+        self,
+        *,
+        loader: DashboardSnapshotLoader,
+        default_factory: DashboardSnapshotDefaultFactory,
+        policies: Mapping[str, DashboardSnapshotPolicy] | None = None,
+        scheduler_interval_seconds: float = 1.0,
+        priority_concurrency: Mapping[str, int] | None = None,
+    ) -> None:
+        self._loader = loader
+        self._default_factory = default_factory
+        self._policies = dict(policies or DASHBOARD_SNAPSHOT_POLICIES)
+        self._scheduler_interval_seconds = max(float(scheduler_interval_seconds), 0.2)
+        concurrency = {
+            "p0": 4,
+            "p1": 2,
+            "p2": 1,
+            **(dict(priority_concurrency or {})),
+        }
+        self._priority_semaphores = {
+            priority: asyncio.Semaphore(max(int(limit), 1))
+            for priority, limit in concurrency.items()
+        }
+        self._snapshots: dict[str, DashboardPanelSnapshot] = {}
+        self._last_errors: dict[str, tuple[str, Any]] = {}
+        self._inflight: dict[str, asyncio.Task[None]] = {}
+        self._lock = asyncio.Lock()
+        self._scheduler_task: asyncio.Task[None] | None = None
+        self._stopped = False
+
+    @property
+    def panel_keys(self) -> frozenset[str]:
+        return frozenset(self._policies)
+
+    async def start(self) -> None:
+        if self._scheduler_task is not None and not self._scheduler_task.done():
+            return
+        self._stopped = False
+        await self.enqueue_all(reason="startup")
+        self._scheduler_task = asyncio.create_task(self._scheduler_loop(), name="dashboard-snapshot-scheduler")
+
+    async def stop(self) -> None:
+        self._stopped = True
+        if self._scheduler_task is not None:
+            self._scheduler_task.cancel()
+            await asyncio.gather(self._scheduler_task, return_exceptions=True)
+            self._scheduler_task = None
+        async with self._lock:
+            tasks = list(self._inflight.values())
+            self._inflight.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def invalidate_all_and_refresh(self, *, reason: str = "mutation") -> None:
+        now = utc_now()
+        async with self._lock:
+            for panel_key, snapshot in self._snapshots.items():
+                policy = self._policies.get(panel_key)
+                if policy is None:
+                    continue
+                snapshot.generated_at = now - timedelta(seconds=policy.stale_after_seconds + 0.001)
+        await self.enqueue_all(reason=reason)
+
+    async def seed_panel(
+        self,
+        panel_key: str,
+        data: Any,
+        *,
+        generated_at: Any | None = None,
+        duration_ms: float = 0.0,
+    ) -> None:
+        if panel_key not in self._policies:
+            raise KeyError(f"dashboard_snapshot_panel_not_registered:{panel_key}")
+        timestamp = generated_at or utc_now()
+        async with self._lock:
+            self._snapshots[panel_key] = DashboardPanelSnapshot(
+                panel_key=panel_key,
+                data=data,
+                generated_at=timestamp,
+                last_success_at=timestamp,
+                duration_ms=round(float(duration_ms), 3),
+            )
+            self._last_errors.pop(panel_key, None)
+
+    async def enqueue_all(self, *, reason: str) -> None:
+        for panel_key in self._policies:
+            await self.enqueue(panel_key, reason=reason)
+
+    async def enqueue(self, panel_key: str, *, reason: str) -> bool:
+        if self._stopped or panel_key not in self._policies:
+            return False
+        async with self._lock:
+            task = self._inflight.get(panel_key)
+            if task is not None and not task.done():
+                return False
+            task = asyncio.create_task(self._refresh_panel(panel_key, reason=reason), name=f"dashboard-snapshot-{panel_key}")
+            self._inflight[panel_key] = task
+            task.add_done_callback(lambda _task, key=panel_key: self._forget_inflight(key, _task))
+            return True
+
+    async def read_panel(self, panel_key: str) -> DashboardSnapshotRead:
+        started_at = perf_counter()
+        policy = self._policies.get(panel_key)
+        if policy is None:
+            raise KeyError(f"dashboard_snapshot_panel_not_registered:{panel_key}")
+        snapshot = await self._snapshot(panel_key)
+        age_seconds = self._snapshot_age_seconds(snapshot)
+        hard_expired = snapshot is None or age_seconds is None or age_seconds > policy.hard_expire_seconds
+        stale = snapshot is None or age_seconds is None or age_seconds > policy.stale_after_seconds
+        refreshing = await self._is_refreshing(panel_key)
+
+        if stale or hard_expired:
+            enqueued = await self.enqueue(panel_key, reason="read_stale" if snapshot is not None else "read_missing")
+            refreshing = refreshing or enqueued
+
+        if snapshot is None or hard_expired:
+            data = self._default_factory(panel_key)
+            last_error, last_error_at = await self._last_error(panel_key)
+            return DashboardSnapshotRead(
+                data=data,
+                error=None if last_error is None else "dashboard_snapshot_refresh_failed",
+                meta=self._meta(
+                    policy=policy,
+                    snapshot=None,
+                    stale=True,
+                    loading=True,
+                    refreshing=refreshing,
+                    age_seconds=None,
+                    last_error=last_error,
+                    last_error_at=last_error_at,
+                    status="missing" if last_error is None else "error",
+                ),
+                duration_ms=round((perf_counter() - started_at) * 1000.0, 3),
+            )
+
+        return DashboardSnapshotRead(
+            data=snapshot.data,
+            error=None,
+            meta=self._meta(
+                policy=policy,
+                snapshot=snapshot,
+                stale=stale,
+                loading=False,
+                refreshing=refreshing,
+                age_seconds=age_seconds,
+                last_error=snapshot.last_error,
+                last_error_at=snapshot.last_error_at,
+                status="stale" if stale else "fresh",
+            ),
+            duration_ms=round((perf_counter() - started_at) * 1000.0, 3),
+        )
+
+    async def _scheduler_loop(self) -> None:
+        while not self._stopped:
+            try:
+                await self._enqueue_due_panels()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log_event(
+                    _LOGGER,
+                    "dashboard_snapshot_scheduler_failed",
+                    level="warning",
+                    error=type(exc).__name__,
+                    message=str(exc),
+                )
+            await asyncio.sleep(self._scheduler_interval_seconds)
+
+    async def _enqueue_due_panels(self) -> None:
+        now = utc_now()
+        for panel_key, policy in self._policies.items():
+            snapshot = await self._snapshot(panel_key)
+            if snapshot is None:
+                await self.enqueue(panel_key, reason="scheduler_missing")
+                continue
+            age_seconds = max((now - snapshot.generated_at).total_seconds(), 0.0)
+            if age_seconds >= policy.ttl_seconds:
+                await self.enqueue(panel_key, reason="scheduler_ttl")
+
+    async def _refresh_panel(self, panel_key: str, *, reason: str) -> None:
+        policy = self._policies[panel_key]
+        semaphore = self._priority_semaphores.setdefault(policy.priority, asyncio.Semaphore(1))
+        async with semaphore:
+            await self._refresh_panel_locked(panel_key, policy=policy, reason=reason)
+
+    async def _refresh_panel_locked(
+        self,
+        panel_key: str,
+        *,
+        policy: DashboardSnapshotPolicy,
+        reason: str,
+    ) -> None:
+        started_at = perf_counter()
+        log_event(
+            _LOGGER,
+            "dashboard_snapshot_refresh_start",
+            panel_key=panel_key,
+            priority=policy.priority,
+            reason=reason,
+        )
+        loader_task = asyncio.create_task(self._call_loader(panel_key), name=f"dashboard-snapshot-loader-{panel_key}")
+        done, _pending = await asyncio.wait({loader_task}, timeout=policy.timeout_seconds)
+        if not done:
+            await self._record_error(
+                panel_key,
+                error_code="dashboard_snapshot_refresh_timeout",
+                message=f"snapshot refresh exceeded {policy.timeout_seconds:.3f}s",
+            )
+            log_event(
+                _LOGGER,
+                "dashboard_snapshot_refresh_timeout",
+                level="warning",
+                panel_key=panel_key,
+                timeout_seconds=policy.timeout_seconds,
+            )
+        try:
+            payload = await loader_task
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._record_error(
+                panel_key,
+                error_code=type(exc).__name__,
+                message=str(exc),
+            )
+            log_event(
+                _LOGGER,
+                "dashboard_snapshot_refresh_failed",
+                level="warning",
+                panel_key=panel_key,
+                error=type(exc).__name__,
+                message=str(exc),
+            )
+            return
+
+        duration_ms = round((perf_counter() - started_at) * 1000.0, 3)
+        generated_at = utc_now()
+        async with self._lock:
+            self._snapshots[panel_key] = DashboardPanelSnapshot(
+                panel_key=panel_key,
+                data=payload,
+                generated_at=generated_at,
+                last_success_at=generated_at,
+                duration_ms=duration_ms,
+            )
+            self._last_errors.pop(panel_key, None)
+        log_event(
+            _LOGGER,
+            "dashboard_snapshot_refresh_success",
+            panel_key=panel_key,
+            priority=policy.priority,
+            duration_ms=duration_ms,
+        )
+
+    async def _call_loader(self, panel_key: str) -> Any:
+        payload = self._loader(panel_key)
+        if inspect.isawaitable(payload):
+            return await payload
+        return payload
+
+    async def _snapshot(self, panel_key: str) -> DashboardPanelSnapshot | None:
+        async with self._lock:
+            return self._snapshots.get(panel_key)
+
+    async def _last_error(self, panel_key: str) -> tuple[str | None, Any | None]:
+        async with self._lock:
+            return self._last_errors.get(panel_key, (None, None))
+
+    async def _record_error(self, panel_key: str, *, error_code: str, message: str) -> None:
+        text = f"{error_code}:{message}" if message else error_code
+        now = utc_now()
+        async with self._lock:
+            self._last_errors[panel_key] = (text, now)
+            snapshot = self._snapshots.get(panel_key)
+            if snapshot is not None:
+                snapshot.last_error = text
+                snapshot.last_error_at = now
+
+    async def _is_refreshing(self, panel_key: str) -> bool:
+        async with self._lock:
+            task = self._inflight.get(panel_key)
+            return task is not None and not task.done()
+
+    def _forget_inflight(self, panel_key: str, task: asyncio.Task[None]) -> None:
+        try:
+            current = self._inflight.get(panel_key)
+            if current is task:
+                self._inflight.pop(panel_key, None)
+        except Exception:
+            pass
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            log_event(
+                _LOGGER,
+                "dashboard_snapshot_task_failed",
+                level="warning",
+                panel_key=panel_key,
+                error=type(exc).__name__,
+                message=str(exc),
+            )
+
+    @staticmethod
+    def _snapshot_age_seconds(snapshot: DashboardPanelSnapshot | None) -> float | None:
+        if snapshot is None:
+            return None
+        return max((utc_now() - snapshot.generated_at).total_seconds(), 0.0)
+
+    @staticmethod
+    def _iso(value: Any | None) -> str | None:
+        if value is None:
+            return None
+        iso = getattr(value, "isoformat", None)
+        return iso() if callable(iso) else str(value)
+
+    def _meta(
+        self,
+        *,
+        policy: DashboardSnapshotPolicy,
+        snapshot: DashboardPanelSnapshot | None,
+        stale: bool,
+        loading: bool,
+        refreshing: bool,
+        age_seconds: float | None,
+        last_error: str | None,
+        last_error_at: Any | None,
+        status: str,
+    ) -> dict[str, Any]:
+        return {
+            "source": "dashboard_snapshot",
+            "status": status,
+            "priority": policy.priority,
+            "snapshot_generated_at": self._iso(snapshot.generated_at if snapshot is not None else None),
+            "snapshot_age_ms": None if age_seconds is None else round(age_seconds * 1000.0, 3),
+            "stale": stale,
+            "loading": loading,
+            "refreshing": refreshing,
+            "last_success_at": self._iso(snapshot.last_success_at if snapshot is not None else None),
+            "last_error": last_error,
+            "last_error_at": self._iso(last_error_at),
+            "ttl_seconds": policy.ttl_seconds,
+            "stale_after_seconds": policy.stale_after_seconds,
+            "hard_expire_seconds": policy.hard_expire_seconds,
+            "refresh_duration_ms": snapshot.duration_ms if snapshot is not None else None,
+        }

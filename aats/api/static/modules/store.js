@@ -65,8 +65,10 @@ export function createState() {
     flash: null,
     data: {},
     errors: {},
+    panelMeta: {},
     bundleAuth: null,
     pendingPanels: {},
+    snapshotPendingPanels: {},
     pageLimits: { ...DEFAULT_PAGE_LIMITS },
     ui: {
       aiConfig: {
@@ -89,6 +91,27 @@ export function createState() {
         parentFilter: "all",
       },
     },
+  };
+}
+
+export function syncSnapshotPendingPanelState(state, panelKey, meta = null) {
+  if (!state || !panelKey) return;
+  state.snapshotPendingPanels = state.snapshotPendingPanels || {};
+  const snapshotMeta = meta && typeof meta === "object" ? meta : null;
+  const isSnapshotPanel = snapshotMeta?.source === "dashboard_snapshot";
+  const isPending = Boolean(snapshotMeta?.loading || snapshotMeta?.refreshing);
+  if (isSnapshotPanel && isPending) {
+    state.snapshotPendingPanels[panelKey] = true;
+    return;
+  }
+  delete state.snapshotPendingPanels[panelKey];
+}
+
+export function mergedPendingPanels(state) {
+  if (!state) return {};
+  return {
+    ...(state.snapshotPendingPanels || {}),
+    ...(state.pendingPanels || {}),
   };
 }
 

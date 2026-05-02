@@ -563,6 +563,48 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("syncRefreshDisabledButtons", refresh_interactivity_text)
         self.assertIn("当前区域正在刷新，请等待刷新完成后再操作。", refresh_interactivity_text)
 
+    def test_snapshot_loading_meta_keeps_panel_pending_until_fresh_snapshot_arrives(self) -> None:
+        script = """
+import {
+  createState,
+  mergedPendingPanels,
+  syncSnapshotPendingPanelState,
+} from './aats/api/static/modules/store.js';
+
+const state = createState();
+state.pendingPanels.primaryPanel = 7;
+
+syncSnapshotPendingPanelState(state, 'rdpWorkbenchItems', {
+  source: 'dashboard_snapshot',
+  loading: true,
+  refreshing: true,
+});
+
+const withLoading = mergedPendingPanels(state);
+
+syncSnapshotPendingPanelState(state, 'rdpWorkbenchItems', {
+  source: 'dashboard_snapshot',
+  loading: false,
+  refreshing: false,
+});
+
+const afterFresh = mergedPendingPanels(state);
+
+console.log(JSON.stringify({
+  snapshotPendingWhileLoading: Boolean(withLoading.rdpWorkbenchItems),
+  primaryPendingPreserved: withLoading.primaryPanel === 7,
+  snapshotPendingCleared: !Object.prototype.hasOwnProperty.call(afterFresh, 'rdpWorkbenchItems'),
+  primaryPendingStillPreserved: afterFresh.primaryPanel === 7,
+}));
+"""
+        result = _run_node_module(script, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["snapshotPendingWhileLoading"])
+        self.assertTrue(payload["primaryPendingPreserved"])
+        self.assertTrue(payload["snapshotPendingCleared"])
+        self.assertTrue(payload["primaryPendingStillPreserved"])
+
     def test_dashboard_app_bundle_wires_exit_execution_review_actions(self) -> None:
         app = FastAPI()
         app.include_router(auth_router)

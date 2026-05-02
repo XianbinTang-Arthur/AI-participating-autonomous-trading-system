@@ -45,6 +45,8 @@ import {
   createState,
   viewSpecs,
   invalidateCachedViews,
+  mergedPendingPanels,
+  syncSnapshotPendingPanelState,
 } from "./modules/store.js";
 import {
   VIEW_LABELS,
@@ -342,6 +344,12 @@ function applyPanelResults(results) {
   for (const [key, result] of Object.entries(normalizedResults.panels || {})) {
     state.data[key] = result.data;
     state.errors[key] = result.error;
+    if (result && typeof result === "object" && Object.prototype.hasOwnProperty.call(result, "meta")) {
+      state.panelMeta[key] = result.meta || null;
+    } else {
+      delete state.panelMeta[key];
+    }
+    syncSnapshotPendingPanelState(state, key, result?.meta || null);
   }
   if (Object.prototype.hasOwnProperty.call(normalizedResults, "auth")) {
     state.bundleAuth = normalizedResults.auth || null;
@@ -388,7 +396,8 @@ function renderActiveView() {
     uiHints: {
       recoveryReasonsText: localizedRecoveryReasons(),
       controlPermissionMessage: controlPermissionMessage(),
-      pendingPanels: state.pendingPanels,
+      pendingPanels: mergedPendingPanels(state),
+      snapshotMeta: state.panelMeta,
     },
   };
   if (state.activeView === "overview" && nodes.overviewContent) {

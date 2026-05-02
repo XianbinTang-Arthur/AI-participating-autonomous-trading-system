@@ -6,7 +6,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from aats.api.auth_routes import auth_router, invalidate_bundle_cache
+from aats.api.auth_routes import (
+    auth_router,
+    invalidate_bundle_cache,
+    start_dashboard_snapshot_plane,
+    stop_dashboard_snapshot_plane,
+)
 from aats.api.rdp_profile_routes import profile_router as rdp_profile_router
 from aats.api.rdp_routes import rdp_router
 from aats.api.routes import router
@@ -95,6 +100,7 @@ async def lifespan(app: FastAPI):
     )
     await runtime.start_background_tasks()
     app.state.runtime = runtime
+    await start_dashboard_snapshot_plane(app, runtime)
     try:
         # RDP schema 初始化：确保 governance.rdp_task_queue 等 47 张 RDP 表存在。
         # 放在 try 内部：即使建表失败也不阻断启动、不泄漏后台任务。
@@ -110,6 +116,7 @@ async def lifespan(app: FastAPI):
             )
         yield
     finally:
+        await stop_dashboard_snapshot_plane(app)
         await runtime.stop_background_tasks()
 
 
@@ -121,6 +128,9 @@ async def _invalidate_bundle_cache_on_mutation(request: Request, call_next):
     response = await call_next(request)
     if request.method in _MUTATING_METHODS and 200 <= response.status_code < 400:
         invalidate_bundle_cache()
+        plane = getattr(request.app.state, "dashboard_snapshot_plane", None)
+        if plane is not None:
+            await plane.invalidate_all_and_refresh(reason=f"{request.method.lower()}_mutation")
     return response
 
 

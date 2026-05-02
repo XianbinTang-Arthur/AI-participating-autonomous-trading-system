@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from time import perf_counter
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -27,6 +28,11 @@ from aats.services.operator.command_bridge import (
     OperatorCommandError,
     OperatorCommandRemoteError,
     OperatorCommandTimeoutError,
+)
+from aats.services.operator.dashboard_snapshot import (
+    DASHBOARD_SNAPSHOT_PANEL_KEYS,
+    DASHBOARD_SNAPSHOT_POLICIES,
+    DashboardSnapshotPlane,
 )
 from aats.services.operator.query_service import OperatorQueryService
 from aats.services.operator.ui_capabilities import ui_operating_mode_override_enabled
@@ -193,10 +199,9 @@ def _dashboard_bundle_auth_summary(
     }
 
 
-def _system_health_payload(request: Request, query: OperatorQueryService) -> dict[str, Any]:
+def _system_health_payload_for_runtime(runtime: ApplicationRuntime, query: OperatorQueryService) -> dict[str, Any]:
     health = query.system_health()
     operator_metrics = query.metrics()
-    runtime = _runtime(request)
     health["execution_summary"] = {
         "order_count": len(query._scoped_order_states()),
         "fill_count": len(query._scoped_fills()),
@@ -218,9 +223,26 @@ def _system_health_payload(request: Request, query: OperatorQueryService) -> dic
     return health
 
 
+def _system_health_payload(request: Request, query: OperatorQueryService) -> dict[str, Any]:
+    return _system_health_payload_for_runtime(_runtime(request), query)
+
+
 def _blockers_panel_payload_from_blocker_control(
     *,
     request: Request,
+    query: OperatorQueryService,
+    blocker_control: dict[str, Any],
+) -> dict[str, Any]:
+    return _blockers_panel_payload_from_blocker_control_for_runtime(
+        runtime=_runtime(request),
+        query=query,
+        blocker_control=blocker_control,
+    )
+
+
+def _blockers_panel_payload_from_blocker_control_for_runtime(
+    *,
+    runtime: ApplicationRuntime,
     query: OperatorQueryService,
     blocker_control: dict[str, Any],
 ) -> dict[str, Any]:
@@ -234,7 +256,7 @@ def _blockers_panel_payload_from_blocker_control(
         ]
     return {
         "blocked": bool(blockers),
-        "halted": _runtime(request).kill_switch.halted,
+        "halted": runtime.kill_switch.halted,
         "blockers": blockers,
         "recent_history": query.blocker_history(limit=20, offset=0)["history"],
     }
@@ -274,6 +296,206 @@ def _normalize_dashboard_panel_keys(panel_keys: list[str]) -> tuple[str, ...]:
     normalized = [str(panel_key or "").strip() for panel_key in panel_keys]
     filtered = [panel_key for panel_key in normalized if panel_key]
     return tuple(dict.fromkeys(filtered))
+
+
+def _dashboard_snapshot_default_payload(panel_key: str) -> dict[str, Any]:
+    if panel_key == "health":
+        return {
+            "runtime_state": "unknown",
+            "execution_summary": {},
+        }
+    if panel_key == "mode":
+        return {}
+    if panel_key == "runtime":
+        return {}
+    if panel_key == "systemRecovery":
+        return {"recovery": {}}
+    if panel_key == "blockerControl":
+        return {
+            "blocked": False,
+            "blockers": [],
+            "actions": [],
+        }
+    if panel_key == "blockers":
+        return {
+            "blocked": False,
+            "halted": False,
+            "blockers": [],
+            "recent_history": [],
+        }
+    if panel_key == "aiRuntime":
+        return {}
+    if panel_key == "metrics":
+        return {}
+    if panel_key == "accountState":
+        return {}
+    if panel_key == "latestDecision":
+        return {}
+    if panel_key == "strategyRuntime":
+        return {}
+    if panel_key == "executionLatest":
+        return {}
+    if panel_key == "portfolio":
+        return {"portfolio": None}
+    if panel_key == "positions":
+        return {}
+    if panel_key == "reconciliationLatest":
+        return {"reconciliation": None}
+    if panel_key == "trialGuard":
+        return {}
+    if panel_key == "guardedLivePreflight":
+        return {}
+    if panel_key == "guardedLiveRunPacket":
+        return {}
+    if panel_key == "replayStatus":
+        return {}
+    if panel_key == "aiOverview":
+        return {}
+    if panel_key == "aiLatest":
+        return {}
+    if panel_key == "aiShadowLatest":
+        return {}
+    if panel_key == "profileControlSummary":
+        return {}
+    if panel_key == "aiConfigModel":
+        return {"ai": {}}
+    if panel_key == "rdpControl":
+        return {}
+    if panel_key == "rdpWorkbenchOverview":
+        return {}
+    if panel_key == "rdpWorkbenchItems":
+        return {}
+    if panel_key == "rdpWorkbenchAlerts":
+        return {}
+    if panel_key == "rdpTuningOverview":
+        return {}
+    if panel_key == "rdpTuningProposals":
+        return {}
+    return {}
+
+
+def _dashboard_snapshot_rdp_request(runtime: ApplicationRuntime) -> Any:
+    return SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(runtime=runtime)),
+        state=SimpleNamespace(),
+    )
+
+
+async def _load_dashboard_snapshot_panel(runtime: ApplicationRuntime, panel_key: str) -> dict[str, Any]:
+    query = OperatorQueryService(runtime)
+    if panel_key == "aiRuntime":
+        return dict(await query.ai_runtime_authoritative())
+    if panel_key == "aiOverview":
+        runtime_payload = dict(await query.ai_runtime_authoritative())
+        return query.ai_overview_with_runtime(runtime_payload)
+    if panel_key == "aiConfigModel":
+        runtime_payload = dict(await query.ai_runtime_authoritative())
+        return query.ai_config_summary_with_runtime(runtime_payload)
+
+    def _load_sync_panel() -> dict[str, Any]:
+        if panel_key == "health":
+            return _system_health_payload_for_runtime(runtime, query)
+        if panel_key == "mode":
+            return RuntimeModeState(**query.system_mode()).model_dump(mode="json")
+        if panel_key == "runtime":
+            return query.system_runtime()
+        if panel_key == "systemRecovery":
+            return query.system_recovery()
+        if panel_key == "blockerControl":
+            return query.blocker_control()
+        if panel_key == "blockers":
+            return _blockers_panel_payload_from_blocker_control_for_runtime(
+                runtime=runtime,
+                query=query,
+                blocker_control=query.blocker_control(),
+            )
+        if panel_key == "metrics":
+            return query.metrics()
+        if panel_key == "accountState":
+            return query.account_state()
+        if panel_key == "latestDecision":
+            return query.latest_decision()
+        if panel_key == "strategyRuntime":
+            return query.strategy_runtime()
+        if panel_key == "executionLatest":
+            return query.execution_latest()
+        if panel_key == "portfolio":
+            return query.portfolio_latest()
+        if panel_key == "positions":
+            return query.positions()
+        if panel_key == "reconciliationLatest":
+            return query.reconciliation_latest()
+        if panel_key == "trialGuard":
+            return query.trial_guard()
+        if panel_key == "guardedLivePreflight":
+            return query.guarded_live_preflight()
+        if panel_key == "guardedLiveRunPacket":
+            return query.guarded_live_run_packet()
+        if panel_key == "replayStatus":
+            return query.replay_status()
+        if panel_key == "aiLatest":
+            return query.ai_latest()
+        if panel_key == "aiShadowLatest":
+            return query.ai_shadow_latest()
+        if panel_key == "profileControlSummary":
+            return query.profile_control_summary_report()
+        if panel_key.startswith("rdp"):
+            request = _dashboard_snapshot_rdp_request(runtime)
+            if panel_key == "rdpControl":
+                from aats.api.rdp_control_summary import build_rdp_control_summary
+
+                return build_rdp_control_summary(request)
+            if panel_key == "rdpWorkbenchOverview":
+                from aats.api.rdp_control_summary import build_rdp_workbench_overview
+
+                return build_rdp_workbench_overview(request)
+            if panel_key == "rdpWorkbenchItems":
+                from aats.api.rdp_control_summary import build_rdp_workbench_items
+
+                return build_rdp_workbench_items(request)
+            if panel_key == "rdpWorkbenchAlerts":
+                from aats.api.rdp_control_summary import build_rdp_workbench_alerts
+
+                return build_rdp_workbench_alerts(request)
+            if panel_key == "rdpTuningOverview":
+                from aats.api.rdp_control_summary import build_rdp_tuning_overview
+
+                return build_rdp_tuning_overview(request)
+            if panel_key == "rdpTuningProposals":
+                from aats.api.rdp_control_summary import build_rdp_tuning_proposals
+
+                return build_rdp_tuning_proposals(request)
+        raise KeyError(f"dashboard_snapshot_panel_not_found:{panel_key}")
+
+    return await asyncio.to_thread(_load_sync_panel)
+
+
+def install_dashboard_snapshot_plane(runtime: ApplicationRuntime) -> DashboardSnapshotPlane:
+    return DashboardSnapshotPlane(
+        loader=lambda panel_key: _load_dashboard_snapshot_panel(runtime, panel_key),
+        default_factory=_dashboard_snapshot_default_payload,
+        policies=DASHBOARD_SNAPSHOT_POLICIES,
+    )
+
+
+async def start_dashboard_snapshot_plane(app: Any, runtime: ApplicationRuntime) -> DashboardSnapshotPlane:
+    plane = install_dashboard_snapshot_plane(runtime)
+    app.state.dashboard_snapshot_plane = plane
+    await plane.start()
+    return plane
+
+
+async def stop_dashboard_snapshot_plane(app: Any) -> None:
+    plane = getattr(app.state, "dashboard_snapshot_plane", None)
+    if isinstance(plane, DashboardSnapshotPlane):
+        await plane.stop()
+    if hasattr(app.state, "dashboard_snapshot_plane"):
+        delattr(app.state, "dashboard_snapshot_plane")
+
+
+def _dashboard_snapshot_plane(request: Request) -> DashboardSnapshotPlane | None:
+    plane = getattr(request.app.state, "dashboard_snapshot_plane", None)
+    return plane if isinstance(plane, DashboardSnapshotPlane) else None
 
 
 # -----------------------------------------------------------------------------
@@ -731,6 +953,19 @@ async def dashboard_bundle(
                         authoritative_ai_runtime = dict(await query.ai_runtime_authoritative())
             return dict(authoritative_ai_runtime)
 
+        snapshot_plane = _dashboard_snapshot_plane(request)
+
+        async def _load_snapshot_panel(panel_key: str) -> tuple[str, dict[str, Any], float] | None:
+            if snapshot_plane is None or panel_key not in DASHBOARD_SNAPSHOT_PANEL_KEYS:
+                return None
+            if read_error is not None:
+                return None
+            read = await snapshot_plane.read_panel(panel_key)
+            payload = read.data
+            if panel_key == "strategyRuntime" and view == "strategy" and isinstance(payload, dict):
+                payload = _strategy_view_strategy_runtime_payload(payload)
+            return panel_key, {"data": payload, "error": read.error, "meta": read.meta}, read.duration_ms
+
         def _load_panel_sync(panel_key: str) -> tuple[str, dict[str, Any], float]:
             panel_started_at = perf_counter()
             try:
@@ -764,6 +999,9 @@ async def dashboard_bundle(
                 return panel_key, {"data": None, "error": _dashboard_panel_error(exc)}, round((perf_counter() - panel_started_at) * 1000.0, 3)
 
         async def _load_panel(panel_key: str) -> tuple[str, dict[str, Any], float]:
+            snapshot_result = await _load_snapshot_panel(panel_key)
+            if snapshot_result is not None:
+                return snapshot_result
             if panel_key not in {"aiRuntime", "aiOverview", "aiConfigModel"}:
                 return await asyncio.to_thread(_load_panel_sync, panel_key)
             panel_started_at = perf_counter()

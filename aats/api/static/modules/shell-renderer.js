@@ -8,7 +8,7 @@ import {
   middleEllipsis,
 } from "./formatters.js";
 import { syncRefreshDisabledButtons } from "./refresh-interactivity.js";
-import { REFRESH_PHASE_PRIMARY } from "./store.js";
+import { REFRESH_PHASE_PRIMARY, mergedPendingPanels } from "./store.js";
 import {
   readableFamilyExecutionSummary,
   localizeError,
@@ -521,7 +521,7 @@ export function createDashboardShellRenderer({
     syncRefreshDisabledButtons({
       roots: currentRefreshInteractivityRoots(),
       refreshing: viewIsLoading || isPrimaryRefreshing,
-      pendingPanels: state.pendingPanels,
+      pendingPanels: mergedPendingPanels(state),
       reason: "当前区域正在刷新，请等待刷新完成后再操作。",
       panelReason: "该卡片数据还在刷新，请稍候再操作。",
     });

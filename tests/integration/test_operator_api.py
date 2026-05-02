@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from datetime import timedelta
 from decimal import Decimal
@@ -66,6 +67,11 @@ from aats.services.operator.strategy_profiles import StrategyProfileControlServi
 from aats.services.operator.strategy_profile_seed import _seed_revisions, seed_strategy_profiles
 from aats.services.operator.passwords import hash_password
 from aats.schemas.strategy_profiles import strategy_profile_payload_from_settings
+from aats.services.operator.dashboard_snapshot import (
+    DASHBOARD_SNAPSHOT_POLICIES,
+    DashboardSnapshotPlane,
+    P0_DASHBOARD_SNAPSHOT_POLICIES,
+)
 from tests.support.postgres import temporary_postgres_url
 
 
@@ -637,6 +643,279 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(payload["timing"]["total_ms"], 0.0)
         self.assertEqual(set(payload["timing"]["panels"].keys()), panel_keys)
         self.assertGreaterEqual(payload["timing"]["panels"]["health"]["duration_ms"], 0.0)
+
+    async def test_dashboard_bundle_reads_p0_panels_from_snapshot_plane(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+        policies = {
+            key: P0_DASHBOARD_SNAPSHOT_POLICIES[key]
+            for key in ("health", "runtime")
+        }
+        plane = DashboardSnapshotPlane(
+            loader=lambda panel_key: (_ for _ in ()).throw(
+                AssertionError(f"request path computed snapshot panel {panel_key}")
+            ),
+            default_factory=lambda _panel_key: {},
+            policies=policies,
+        )
+        await plane.seed_panel(
+            "health",
+            {
+                "runtime_state": "snapshot_healthy",
+                "execution_summary": {"source": "snapshot"},
+            },
+        )
+        await plane.seed_panel("runtime", {"snapshot_runtime": True})
+        app.state.dashboard_snapshot_plane = plane
+
+        with (
+            patch.object(
+                OperatorQueryService,
+                "system_health",
+                side_effect=AssertionError("health panel should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
+                "system_runtime",
+                side_effect=AssertionError("runtime panel should read dashboard snapshot"),
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="snapshotPlaneTest",
+                    panels=["health", "runtime"],
+                )
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["panels"]["health"]["data"]["runtime_state"], "snapshot_healthy")
+        self.assertEqual(payload["panels"]["runtime"]["data"], {"snapshot_runtime": True})
+        self.assertIsNone(payload["panels"]["health"]["error"])
+        self.assertEqual(payload["panels"]["health"]["meta"]["source"], "dashboard_snapshot")
+        self.assertEqual(payload["panels"]["health"]["meta"]["status"], "fresh")
+        self.assertEqual(payload["panels"]["runtime"]["meta"]["source"], "dashboard_snapshot")
+
+    async def test_dashboard_bundle_reads_p1_panels_from_snapshot_plane(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+        p1_keys = (
+            "latestDecision",
+            "strategyRuntime",
+            "executionLatest",
+            "portfolio",
+            "positions",
+            "reconciliationLatest",
+        )
+        plane = DashboardSnapshotPlane(
+            loader=lambda panel_key: (_ for _ in ()).throw(
+                AssertionError(f"request path computed snapshot panel {panel_key}")
+            ),
+            default_factory=lambda _panel_key: {},
+            policies={key: DASHBOARD_SNAPSHOT_POLICIES[key] for key in p1_keys},
+        )
+        await plane.seed_panel("latestDecision", {"decision_id": "snapshot_decision"})
+        await plane.seed_panel(
+            "strategyRuntime",
+            {
+                "generated_at": "2026-05-02T00:00:00Z",
+                "summary": {"latest_bundle_status": "submitted"},
+                "configured_parameters": {
+                    "strategy_family_active": "directional",
+                    "trade_costs": {"spot_taker_fee_bps": 10},
+                },
+                "latest_snapshot": {
+                    "automation_decisions": [{"strategy_sleeve_id": "independent"}],
+                    "candidates": [{"family": "independent"}],
+                },
+                "latest_bundle": {"bundle_id": "bundle_from_snapshot"},
+                "latest_applied_target": {"target_position_qty": "0.01"},
+                "truth_source": "snapshot_plane_test",
+                "recent_budget_snapshots": [{"strategy_sleeve_id": "independent"}],
+            },
+        )
+        await plane.seed_panel("executionLatest", {"latest_order": {"client_order_id": "snapshot_order"}})
+        await plane.seed_panel("portfolio", {"portfolio": {"total_equity": 1000}})
+        await plane.seed_panel("positions", {"local_instrument_positions": [{"symbol": "BTC-USDT-SWAP"}]})
+        await plane.seed_panel("reconciliationLatest", {"reconciliation": {"status": "snapshot_ok"}})
+        app.state.dashboard_snapshot_plane = plane
+
+        patched_methods = [
+            patch.object(
+                OperatorQueryService,
+                "latest_decision",
+                side_effect=AssertionError("latestDecision should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
+                "strategy_runtime",
+                side_effect=AssertionError("strategyRuntime should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
+                "execution_latest",
+                side_effect=AssertionError("executionLatest should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
+                "portfolio_latest",
+                side_effect=AssertionError("portfolio should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
+                "positions",
+                side_effect=AssertionError("positions should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
+                "reconciliation_latest",
+                side_effect=AssertionError("reconciliationLatest should read dashboard snapshot"),
+            ),
+        ]
+
+        with ExitStack() as stack:
+            for patch_context in patched_methods:
+                stack.enter_context(patch_context)
+            with TestClient(app) as client:
+                response = client.get(
+                    self._dashboard_bundle_url(
+                        view="strategy",
+                        panels=list(p1_keys),
+                    )
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["panels"]["latestDecision"]["data"]["decision_id"], "snapshot_decision")
+        strategy_runtime = payload["panels"]["strategyRuntime"]["data"]
+        self.assertEqual(strategy_runtime["latest_bundle"]["bundle_id"], "bundle_from_snapshot")
+        self.assertEqual(strategy_runtime["truth_source"], "snapshot_plane_test")
+        self.assertNotIn("recent_budget_snapshots", strategy_runtime)
+        self.assertNotIn("trade_costs", strategy_runtime["configured_parameters"])
+        self.assertNotIn("candidates", strategy_runtime["latest_snapshot"])
+        self.assertEqual(payload["panels"]["portfolio"]["data"]["portfolio"]["total_equity"], 1000)
+        self.assertEqual(payload["panels"]["positions"]["data"]["local_instrument_positions"][0]["symbol"], "BTC-USDT-SWAP")
+        self.assertEqual(payload["panels"]["reconciliationLatest"]["data"]["reconciliation"]["status"], "snapshot_ok")
+        self.assertEqual(payload["panels"]["executionLatest"]["meta"]["source"], "dashboard_snapshot")
+        self.assertEqual(payload["panels"]["strategyRuntime"]["meta"]["status"], "fresh")
+
+    async def test_dashboard_bundle_reads_p2_panels_from_snapshot_plane(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+        p2_keys = (
+            "trialGuard",
+            "guardedLivePreflight",
+            "guardedLiveRunPacket",
+            "replayStatus",
+            "aiOverview",
+            "aiLatest",
+            "aiShadowLatest",
+            "profileControlSummary",
+            "aiConfigModel",
+            "rdpControl",
+            "rdpWorkbenchOverview",
+            "rdpWorkbenchItems",
+            "rdpWorkbenchAlerts",
+            "rdpTuningOverview",
+            "rdpTuningProposals",
+        )
+        plane = DashboardSnapshotPlane(
+            loader=lambda panel_key: (_ for _ in ()).throw(
+                AssertionError(f"request path computed snapshot panel {panel_key}")
+            ),
+            default_factory=lambda _panel_key: {},
+            policies={key: DASHBOARD_SNAPSHOT_POLICIES[key] for key in p2_keys},
+        )
+        for key in p2_keys:
+            await plane.seed_panel(key, {"snapshot_panel": key})
+        app.state.dashboard_snapshot_plane = plane
+
+        patched_methods = [
+            patch.object(
+                OperatorQueryService,
+                "trial_guard",
+                side_effect=AssertionError("trialGuard should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
+                "guarded_live_preflight",
+                side_effect=AssertionError("guardedLivePreflight should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
+                "guarded_live_run_packet",
+                side_effect=AssertionError("guardedLiveRunPacket should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
+                "replay_status",
+                side_effect=AssertionError("replayStatus should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
+                "ai_runtime_authoritative",
+                side_effect=AssertionError("AI summary panels should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
+                "ai_latest",
+                side_effect=AssertionError("aiLatest should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
+                "ai_shadow_latest",
+                side_effect=AssertionError("aiShadowLatest should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
+                "profile_control_summary_report",
+                side_effect=AssertionError("profileControlSummary should read dashboard snapshot"),
+            ),
+            patch(
+                "aats.api.rdp_control_summary.build_rdp_control_summary",
+                side_effect=AssertionError("rdpControl should read dashboard snapshot"),
+            ),
+            patch(
+                "aats.api.rdp_control_summary.build_rdp_workbench_overview",
+                side_effect=AssertionError("rdpWorkbenchOverview should read dashboard snapshot"),
+            ),
+            patch(
+                "aats.api.rdp_control_summary.build_rdp_workbench_items",
+                side_effect=AssertionError("rdpWorkbenchItems should read dashboard snapshot"),
+            ),
+            patch(
+                "aats.api.rdp_control_summary.build_rdp_workbench_alerts",
+                side_effect=AssertionError("rdpWorkbenchAlerts should read dashboard snapshot"),
+            ),
+            patch(
+                "aats.api.rdp_control_summary.build_rdp_tuning_overview",
+                side_effect=AssertionError("rdpTuningOverview should read dashboard snapshot"),
+            ),
+            patch(
+                "aats.api.rdp_control_summary.build_rdp_tuning_proposals",
+                side_effect=AssertionError("rdpTuningProposals should read dashboard snapshot"),
+            ),
+        ]
+
+        with ExitStack() as stack:
+            for patch_context in patched_methods:
+                stack.enter_context(patch_context)
+            with TestClient(app) as client:
+                response = client.get(
+                    self._dashboard_bundle_url(
+                        view="p2SnapshotTest",
+                        panels=list(p2_keys),
+                    )
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        for key in p2_keys:
+            self.assertEqual(payload["panels"][key]["data"], {"snapshot_panel": key})
+            self.assertIsNone(payload["panels"][key]["error"])
+            self.assertEqual(payload["panels"][key]["meta"]["source"], "dashboard_snapshot")
+        self.assertEqual(payload["panels"]["guardedLiveRunPacket"]["meta"]["priority"], "p2")
 
     async def test_ai_config_read_paths_use_authoritative_runtime_when_gateway_has_no_ai_service(self) -> None:
         runtime = await self._runtime()
