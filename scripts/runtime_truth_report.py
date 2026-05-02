@@ -81,6 +81,16 @@ ARTIFACT_COMPARE_FACTS = (
     "shadow_benchmark",
     "ai_timeout_active_blocker",
 )
+ARTIFACT_LIVE_ADVANCE_FACTS = {
+    "latest_decision_id",
+    "latest_decision_route_action",
+    "portfolio_allocation_decisions",
+    "execution_fills",
+}
+ARTIFACT_LIVE_ADVANCE_COUNTER_FACTS = {
+    "portfolio_allocation_decisions",
+    "execution_fills",
+}
 SOFT_CONTRIBUTING_REASON_CODES = {
     "approved_for_non_protective_execution",
     "allocator_budget_assignment_active",
@@ -13085,6 +13095,28 @@ def apply_live_runtime_scope(report: dict[str, Any], live_facts: dict[str, Any])
     report["scope"] = scope
 
 
+def _numeric_artifact_value(value: Any) -> Decimal | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float, Decimal, str)):
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return None
+    return None
+
+
+def _is_live_advanced_artifact_mismatch(mismatch: dict[str, Any]) -> bool:
+    fact = mismatch.get("fact")
+    if fact not in ARTIFACT_LIVE_ADVANCE_FACTS:
+        return False
+    if fact in ARTIFACT_LIVE_ADVANCE_COUNTER_FACTS:
+        artifact_value = _numeric_artifact_value(mismatch.get("artifact_value"))
+        live_value = _numeric_artifact_value(mismatch.get("live_value"))
+        return artifact_value is not None and live_value is not None and live_value >= artifact_value
+    return True
+
+
 def summarize_artifact_runtime_status(
     *,
     artifact_projection: dict[str, Any],
@@ -13120,8 +13152,16 @@ def summarize_artifact_runtime_status(
 
     age_seconds = seconds_between(newest_source_time, report_time)
     age_stale = age_seconds is not None and age_seconds > ARTIFACT_STALE_AFTER_SECONDS
+    live_advanced_mismatches = [
+        mismatch for mismatch in mismatches if _is_live_advanced_artifact_mismatch(mismatch)
+    ]
+    live_advanced_artifact_lag = bool(mismatches) and len(live_advanced_mismatches) == len(mismatches)
     if not artifact_facts:
         status = "missing_artifact"
+    elif live_advanced_artifact_lag and age_stale:
+        status = "age_stale_live_advanced_artifact_lag"
+    elif live_advanced_artifact_lag:
+        status = "live_advanced_artifact_lag"
     elif mismatches:
         status = "stale_mismatch"
     elif age_stale:
@@ -13142,6 +13182,8 @@ def summarize_artifact_runtime_status(
         "age_stale": age_stale,
         "compared_facts": compared,
         "mismatched_facts": mismatches,
+        "live_advanced_artifact_lag": live_advanced_artifact_lag,
+        "live_advanced_mismatch_facts": [mismatch["fact"] for mismatch in live_advanced_mismatches],
         "source_count": len(sources),
     }
 

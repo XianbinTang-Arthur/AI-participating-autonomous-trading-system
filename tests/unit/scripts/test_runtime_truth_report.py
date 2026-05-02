@@ -7437,14 +7437,14 @@ def test_artifact_last_known_is_non_authoritative_when_live_fact_differs(tmp_pat
     (artifact_dir / "task_registry.json").write_text(
         json.dumps(
             {
-                "generated_at": "2026-04-26T06:30:00Z",
+                "generated_at": "2026-04-26T06:45:00Z",
                 "latest_runtime_facts": {
                     "latest_decision_id": "decision_old",
                     "portfolio_allocation_decisions": 10,
                     "execution_fills": 2,
                     "shadow_benchmark": "none_verified",
                     "ai_timeout_active_blocker": False,
-                    "runtime_truth_generated_at": "2026-04-26T06:30:00Z",
+                    "runtime_truth_generated_at": "2026-04-26T06:45:00Z",
                 },
             },
         ),
@@ -7465,10 +7465,123 @@ def test_artifact_last_known_is_non_authoritative_when_live_fact_differs(tmp_pat
         report_generated_at="2026-04-26T07:01:00Z",
     )
 
-    assert status["status"] == "stale_mismatch"
+    assert status["status"] == "live_advanced_artifact_lag"
     assert status["may_override_live"] is False
+    assert status["live_advanced_artifact_lag"] is True
     assert {item["fact"] for item in status["mismatched_facts"]} == {
         "latest_decision_id",
+        "portfolio_allocation_decisions",
+    }
+    assert set(status["live_advanced_mismatch_facts"]) == {
+        "latest_decision_id",
+        "portfolio_allocation_decisions",
+    }
+
+
+def test_artifact_last_known_stable_fact_mismatch_remains_stale(tmp_path: Path) -> None:
+    mod = load_module()
+    artifact_dir = tmp_path / "artifacts" / "automation"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "current_state.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-26T06:59:00Z",
+                "latest_runtime_facts": {
+                    "latest_decision_id": "decision_old",
+                    "ai_timeout_active_blocker": False,
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    projection = mod.load_artifact_runtime_projection(tmp_path, "2026-04-26T07:01:00Z")
+    live_facts = {
+        "latest_decision_id": "decision_new",
+        "ai_timeout_active_blocker": True,
+    }
+
+    status = mod.summarize_artifact_runtime_status(
+        artifact_projection=projection,
+        live_facts=live_facts,
+        report_generated_at="2026-04-26T07:01:00Z",
+    )
+
+    assert status["status"] == "stale_mismatch"
+    assert status["live_advanced_artifact_lag"] is False
+    assert {item["fact"] for item in status["mismatched_facts"]} == {
+        "latest_decision_id",
+        "ai_timeout_active_blocker",
+    }
+
+
+def test_artifact_last_known_age_stale_live_advance_is_not_conflict(tmp_path: Path) -> None:
+    mod = load_module()
+    artifact_dir = tmp_path / "artifacts" / "automation"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "task_registry.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-26T06:30:00Z",
+                "latest_runtime_facts": {
+                    "latest_decision_id": "decision_old",
+                    "portfolio_allocation_decisions": 10,
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    projection = mod.load_artifact_runtime_projection(tmp_path, "2026-04-26T07:01:00Z")
+    live_facts = {
+        "latest_decision_id": "decision_new",
+        "portfolio_allocation_decisions": 11,
+    }
+
+    status = mod.summarize_artifact_runtime_status(
+        artifact_projection=projection,
+        live_facts=live_facts,
+        report_generated_at="2026-04-26T07:01:00Z",
+    )
+
+    assert status["status"] == "age_stale_live_advanced_artifact_lag"
+    assert status["age_stale"] is True
+    assert status["live_advanced_artifact_lag"] is True
+    assert set(status["live_advanced_mismatch_facts"]) == {
+        "latest_decision_id",
+        "portfolio_allocation_decisions",
+    }
+
+
+def test_artifact_last_known_counter_regression_remains_stale(tmp_path: Path) -> None:
+    mod = load_module()
+    artifact_dir = tmp_path / "artifacts" / "automation"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "task_registry.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-26T06:59:00Z",
+                "latest_runtime_facts": {
+                    "portfolio_allocation_decisions": 12,
+                    "execution_fills": 3,
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    projection = mod.load_artifact_runtime_projection(tmp_path, "2026-04-26T07:01:00Z")
+    live_facts = {
+        "portfolio_allocation_decisions": 11,
+        "execution_fills": 3,
+    }
+
+    status = mod.summarize_artifact_runtime_status(
+        artifact_projection=projection,
+        live_facts=live_facts,
+        report_generated_at="2026-04-26T07:01:00Z",
+    )
+
+    assert status["status"] == "stale_mismatch"
+    assert status["live_advanced_artifact_lag"] is False
+    assert {item["fact"] for item in status["mismatched_facts"]} == {
         "portfolio_allocation_decisions",
     }
 
