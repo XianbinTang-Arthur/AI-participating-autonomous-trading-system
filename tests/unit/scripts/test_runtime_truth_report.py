@@ -4205,6 +4205,101 @@ def test_project_live_runtime_facts_exposes_decision_lifecycle_execution_science
     assert live_facts["execution_science_terminal_no_fill_context_ready"] is True
 
 
+def test_truth_chain_evidence_readiness_verifies_no_order_wait_state() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_truth_chain_evidence_readiness_truth(
+        decision_lifecycle_provenance_continuity={
+            "ok": True,
+            "status": "verified_decision_lifecycle_provenance_continuity",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "current_decision": {
+                "decision_id": "decision_latest",
+                "order_expected": False,
+                "fill_expected": False,
+                "execution_truth_status": "verified_no_order_expected",
+                "fill_feasibility_status": (
+                    "verified_no_order_fill_feasibility_not_applicable_with_pretrade_context"
+                ),
+            },
+            "recent_directional_batch": {
+                "recent_decision_count": 24,
+                "decisions_with_fills": 0,
+            },
+        },
+        recent_directional_decision_chain_density={
+            "ok": True,
+            "status": "verified_recent_directional_decision_chain_density_no_order_regime",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "coverage": {
+                "recent_decision_count": 24,
+                "decisions_with_no_order_expected": 24,
+                "decisions_with_fills": 0,
+                "all_recent_decisions_no_order_expected": True,
+            },
+            "interpretation": {
+                "waiting_for_executable_directional_episode": True,
+            },
+        },
+        recent_directional_no_order_provenance_density_gate={
+            "ok": True,
+            "status": "verified_recent_directional_no_order_provenance_density_gate",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "coverage": {"no_recent_fills": True},
+            "interpretation": {
+                "no_recent_fills_in_context_window": True,
+                "gate_verified": True,
+            },
+        },
+        decision_snapshot_coherence={
+            "status": "verified_decision_snapshot_coherence",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "alignment": {"latest_decision_ids_consistent": True},
+        },
+        directional_command_flow={
+            "status": "verified_current_directional_command_flow_fill_provenance_present",
+            "smallest_missing_field": None,
+            "current_command_path_reference_gap": False,
+            "coverage": {
+                "current_submit_command_fill_count": 17,
+                "current_submit_command_reference_missing_fill_count": 0,
+            },
+        },
+        directional_attribution={
+            "ok": True,
+            "status": "verified_directional_episode_no_order_expected",
+            "smallest_missing_field": None,
+            "coverage": {
+                "recent_decision_count": 24,
+                "decisions_with_no_order_expected": 24,
+                "decisions_with_fills": 0,
+                "all_recent_decisions_no_order_expected": True,
+            },
+        },
+    )
+
+    assert truth["status"] == (
+        "ready_no_order_regime_truth_chain_waiting_for_executable_or_fill_episode"
+    )
+    assert truth["smallest_missing_field"] is None
+    assert truth["waiting_for"] == "executable_or_filled_directional_episode"
+    assert truth["raw_payload_exposed"] is False
+    assert truth["readiness_checks"] == {
+        "snapshot_coherence_ready": True,
+        "lifecycle_provenance_ready": True,
+        "recent_chain_density_ready": True,
+        "no_order_provenance_density_gate_ready": True,
+        "command_flow_ready": True,
+        "directional_attribution_ready": True,
+    }
+    assert truth["recent_directional_window"]["no_order_regime"] is True
+    assert truth["interpretation"]["not_alpha_or_profitability_evidence"] is True
+
+
 def test_project_live_runtime_facts_exposes_recent_directional_decision_chain_density() -> None:
     mod = load_module()
     report = {
@@ -4258,6 +4353,74 @@ def test_project_live_runtime_facts_exposes_recent_directional_decision_chain_de
     assert live_facts["recent_directional_chain_decisions_with_fills"] == 0
     assert live_facts["recent_directional_chain_waiting_for_executable_directional_episode"] is True
     assert live_facts["recent_directional_chain_not_alpha_or_profitability_evidence"] is True
+
+
+def test_project_live_runtime_facts_exposes_truth_chain_evidence_readiness() -> None:
+    mod = load_module()
+    report = {
+        "database_truth": {
+            "ok": True,
+            "latest_decision": {},
+            "latest_executable_directional_decision": {},
+        },
+        "truth_chain_evidence_readiness_truth": {
+            "status": "ready_no_order_regime_truth_chain_waiting_for_executable_or_fill_episode",
+            "smallest_missing_field": None,
+            "waiting_for": "executable_or_filled_directional_episode",
+            "raw_payload_exposed": False,
+            "readiness_checks": {
+                "snapshot_coherence_ready": True,
+                "lifecycle_provenance_ready": True,
+                "recent_chain_density_ready": True,
+                "no_order_provenance_density_gate_ready": True,
+                "command_flow_ready": True,
+                "directional_attribution_ready": True,
+            },
+            "current_decision": {
+                "decision_id": "decision_latest",
+                "order_expected": False,
+                "fill_expected": False,
+            },
+            "recent_directional_window": {
+                "recent_decision_count": 24,
+                "decisions_with_no_order_expected": 24,
+                "decisions_with_fills": 0,
+                "no_order_regime": True,
+            },
+            "interpretation": {
+                "not_alpha_or_profitability_evidence": True,
+            },
+        },
+        "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
+        "scope": {"shadow_benchmark": "none_verified"},
+        "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
+        "deployment_health": {"gateway_health": {"ok": True}, "containers": {}},
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+
+    assert live_facts["truth_chain_evidence_readiness_status"] == (
+        "ready_no_order_regime_truth_chain_waiting_for_executable_or_fill_episode"
+    )
+    assert live_facts["truth_chain_evidence_readiness_smallest_missing_field"] is None
+    assert live_facts["truth_chain_evidence_readiness_waiting_for"] == (
+        "executable_or_filled_directional_episode"
+    )
+    assert live_facts["truth_chain_evidence_readiness_raw_payload_exposed"] is False
+    assert live_facts["truth_chain_readiness_snapshot_coherence_ready"] is True
+    assert live_facts["truth_chain_readiness_lifecycle_provenance_ready"] is True
+    assert live_facts["truth_chain_readiness_recent_chain_density_ready"] is True
+    assert live_facts["truth_chain_readiness_no_order_provenance_density_gate_ready"] is True
+    assert live_facts["truth_chain_readiness_command_flow_ready"] is True
+    assert live_facts["truth_chain_readiness_directional_attribution_ready"] is True
+    assert live_facts["truth_chain_readiness_current_decision_id"] == "decision_latest"
+    assert live_facts["truth_chain_readiness_current_order_expected"] is False
+    assert live_facts["truth_chain_readiness_current_fill_expected"] is False
+    assert live_facts["truth_chain_readiness_recent_decision_count"] == 24
+    assert live_facts["truth_chain_readiness_decisions_with_no_order_expected"] == 24
+    assert live_facts["truth_chain_readiness_decisions_with_fills"] == 0
+    assert live_facts["truth_chain_readiness_no_order_regime"] is True
+    assert live_facts["truth_chain_readiness_not_alpha_or_profitability_evidence"] is True
 
 
 def test_project_live_runtime_facts_exposes_decision_snapshot_coherence() -> None:

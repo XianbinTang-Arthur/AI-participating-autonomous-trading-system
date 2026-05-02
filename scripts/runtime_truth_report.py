@@ -10067,6 +10067,225 @@ def summarize_recent_directional_no_order_provenance_density_gate_truth(
     }
 
 
+def summarize_truth_chain_evidence_readiness_truth(
+    *,
+    decision_lifecycle_provenance_continuity: dict[str, Any],
+    recent_directional_decision_chain_density: dict[str, Any],
+    recent_directional_no_order_provenance_density_gate: dict[str, Any],
+    decision_snapshot_coherence: dict[str, Any],
+    directional_command_flow: dict[str, Any],
+    directional_attribution: dict[str, Any],
+) -> dict[str, Any]:
+    lifecycle = as_dict(decision_lifecycle_provenance_continuity)
+    chain_density = as_dict(recent_directional_decision_chain_density)
+    no_order_gate = as_dict(recent_directional_no_order_provenance_density_gate)
+    snapshot = as_dict(decision_snapshot_coherence)
+    command_flow = as_dict(directional_command_flow)
+    attribution = as_dict(directional_attribution)
+
+    lifecycle_current = as_dict(lifecycle.get("current_decision"))
+    lifecycle_recent = as_dict(lifecycle.get("recent_directional_batch"))
+    chain_coverage = as_dict(chain_density.get("coverage"))
+    gate_interpretation = as_dict(no_order_gate.get("interpretation"))
+    snapshot_alignment = as_dict(snapshot.get("alignment"))
+    command_coverage = as_dict(command_flow.get("coverage"))
+    attribution_coverage = as_dict(attribution.get("coverage"))
+
+    recent_decision_count = int_or_zero(
+        chain_coverage.get("recent_decision_count")
+        or attribution_coverage.get("recent_decision_count")
+        or lifecycle_recent.get("recent_decision_count")
+    )
+    decisions_with_fills = int_or_zero(
+        chain_coverage.get("decisions_with_fills")
+        or attribution_coverage.get("decisions_with_fills")
+        or lifecycle_recent.get("decisions_with_fills")
+    )
+    decisions_with_no_order_expected = int_or_zero(
+        chain_coverage.get("decisions_with_no_order_expected")
+        or attribution_coverage.get("decisions_with_no_order_expected")
+    )
+    all_recent_no_order_expected = (
+        chain_coverage.get("all_recent_decisions_no_order_expected") is True
+        or attribution_coverage.get("all_recent_decisions_no_order_expected") is True
+    )
+    current_no_order_expected = (
+        lifecycle_current.get("order_expected") is False
+        and lifecycle_current.get("fill_expected") is False
+    )
+    no_order_regime = (
+        recent_decision_count > 0
+        and decisions_with_fills == 0
+        and all_recent_no_order_expected
+        and current_no_order_expected
+    )
+
+    snapshot_ready = (
+        snapshot.get("status") == "verified_decision_snapshot_coherence"
+        and snapshot.get("smallest_missing_field") is None
+        and snapshot_alignment.get("latest_decision_ids_consistent") is True
+    )
+    lifecycle_ready = (
+        lifecycle.get("ok") is True
+        and lifecycle.get("smallest_missing_field") is None
+        and lifecycle.get("status")
+        in {
+            "verified_current_no_order_plus_executable_terminal_no_fill_continuity",
+            "verified_decision_lifecycle_provenance_continuity",
+        }
+    )
+    chain_density_ready = (
+        chain_density.get("ok") is True
+        and chain_density.get("smallest_missing_field") is None
+        and chain_density.get("status")
+        in {
+            "verified_recent_directional_decision_chain_density_no_order_regime",
+            "verified_recent_directional_decision_chain_density_with_fills",
+        }
+    )
+    no_order_gate_ready = (
+        not no_order_regime
+        or (
+            no_order_gate.get("ok") is True
+            and no_order_gate.get("smallest_missing_field") is None
+            and no_order_gate.get("status")
+            == "verified_recent_directional_no_order_provenance_density_gate"
+        )
+    )
+    command_flow_ready = (
+        command_flow.get("smallest_missing_field") is None
+        and command_flow.get("current_command_path_reference_gap") is not True
+    )
+    attribution_ready = (
+        attribution.get("ok") is True
+        and attribution.get("smallest_missing_field") is None
+        and attribution.get("status")
+        in {
+            "verified_directional_episode_no_order_expected",
+            "verified_directional_episode_edge_cost_pnl_attribution_present",
+        }
+    )
+    raw_payload_exposed = any(
+        item.get("raw_payload_exposed") is True
+        for item in (lifecycle, chain_density, no_order_gate, snapshot)
+    )
+
+    checks = [
+        ("raw_payload_redaction", not raw_payload_exposed),
+        ("decision_snapshot_coherence_truth", snapshot_ready),
+        ("decision_lifecycle_provenance_continuity_truth", lifecycle_ready),
+        ("recent_directional_decision_chain_density_truth", chain_density_ready),
+        (
+            "recent_directional_no_order_provenance_density_gate_truth",
+            no_order_gate_ready,
+        ),
+        ("directional_command_flow_provenance_truth", command_flow_ready),
+        ("directional_episode_attribution_truth", attribution_ready),
+    ]
+    smallest_missing = next((field for field, passed in checks if not passed), None)
+
+    if raw_payload_exposed:
+        status = "truth_chain_readiness_raw_payload_exposed"
+        ok = False
+        waiting_for = "raw_payload_redaction"
+    elif not snapshot_ready:
+        status = "missing_decision_snapshot_coherence"
+        ok = False
+        waiting_for = "coherent_repeatable_read_decision_snapshot"
+    elif not lifecycle_ready:
+        status = "missing_decision_lifecycle_provenance_continuity"
+        ok = False
+        waiting_for = "decision_order_fill_lifecycle_provenance_continuity"
+    elif not chain_density_ready:
+        status = "missing_recent_directional_decision_chain_density"
+        ok = False
+        waiting_for = "recent_decision_chain_density"
+    elif not no_order_gate_ready:
+        status = "missing_recent_no_order_provenance_density_gate"
+        ok = False
+        waiting_for = "recent_no_order_provenance_density_gate"
+    elif not command_flow_ready:
+        status = "missing_directional_command_flow_provenance"
+        ok = False
+        waiting_for = "current_directional_command_flow_reference_coverage"
+    elif not attribution_ready:
+        status = "missing_directional_episode_attribution"
+        ok = False
+        waiting_for = "directional_episode_attribution"
+    elif no_order_regime:
+        status = "ready_no_order_regime_truth_chain_waiting_for_executable_or_fill_episode"
+        ok = True
+        waiting_for = "executable_or_filled_directional_episode"
+    elif decisions_with_fills > 0:
+        status = "ready_filled_regime_truth_chain_present"
+        ok = True
+        waiting_for = None
+    else:
+        status = "partial_truth_chain_waiting_for_directional_episode_materiality"
+        ok = False
+        smallest_missing = "directional_episode.order_or_fill_materiality"
+        waiting_for = "directional_order_or_fill_materiality"
+
+    return {
+        "source": "live_runtime_truth_surfaces",
+        "ok": ok,
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "waiting_for": waiting_for,
+        "raw_payload_exposed": False,
+        "readiness_checks": {
+            "snapshot_coherence_ready": snapshot_ready,
+            "lifecycle_provenance_ready": lifecycle_ready,
+            "recent_chain_density_ready": chain_density_ready,
+            "no_order_provenance_density_gate_ready": no_order_gate_ready,
+            "command_flow_ready": command_flow_ready,
+            "directional_attribution_ready": attribution_ready,
+        },
+        "current_decision": {
+            "decision_id": lifecycle_current.get("decision_id"),
+            "order_expected": lifecycle_current.get("order_expected"),
+            "fill_expected": lifecycle_current.get("fill_expected"),
+            "execution_truth_status": lifecycle_current.get("execution_truth_status"),
+            "fill_feasibility_status": lifecycle_current.get("fill_feasibility_status"),
+        },
+        "recent_directional_window": {
+            "recent_decision_count": recent_decision_count,
+            "decisions_with_no_order_expected": decisions_with_no_order_expected,
+            "decisions_with_fills": decisions_with_fills,
+            "all_recent_decisions_no_order_expected": all_recent_no_order_expected,
+            "no_order_regime": no_order_regime,
+            "no_recent_fills": gate_interpretation.get("no_recent_fills_in_context_window")
+            if no_order_regime
+            else decisions_with_fills == 0,
+        },
+        "source_statuses": {
+            "decision_snapshot_coherence": snapshot.get("status"),
+            "decision_lifecycle_provenance_continuity": lifecycle.get("status"),
+            "recent_directional_decision_chain_density": chain_density.get("status"),
+            "recent_directional_no_order_provenance_density_gate": no_order_gate.get("status"),
+            "directional_command_flow_provenance": command_flow.get("status"),
+            "directional_episode_attribution": attribution.get("status"),
+        },
+        "command_flow": {
+            "current_command_path_reference_gap": command_flow.get(
+                "current_command_path_reference_gap"
+            ),
+            "current_submit_command_fill_count": int_or_zero(
+                command_coverage.get("current_submit_command_fill_count")
+            ),
+            "current_submit_command_reference_missing_fill_count": int_or_zero(
+                command_coverage.get("current_submit_command_reference_missing_fill_count")
+            ),
+        },
+        "interpretation": {
+            "current_decision_no_order_expected": current_no_order_expected,
+            "no_order_regime": no_order_regime,
+            "ready_for_no_order_operator_readout": ok and no_order_regime,
+            "not_alpha_or_profitability_evidence": True,
+        },
+    }
+
+
 def summarize_latest_decision_fill_feasibility_truth(
     db: dict[str, Any],
     directional_attribution: dict[str, Any],
@@ -11214,6 +11433,32 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     )
     recent_no_order_provenance_density_gate_interpretation = as_dict(
         recent_no_order_provenance_density_gate.get("interpretation")
+    )
+    truth_chain_evidence_readiness = as_dict(
+        report.get("truth_chain_evidence_readiness_truth")
+    )
+    if not truth_chain_evidence_readiness:
+        truth_chain_evidence_readiness = summarize_truth_chain_evidence_readiness_truth(
+            decision_lifecycle_provenance_continuity=decision_lifecycle_continuity,
+            recent_directional_decision_chain_density=recent_directional_chain_density,
+            recent_directional_no_order_provenance_density_gate=(
+                recent_no_order_provenance_density_gate
+            ),
+            decision_snapshot_coherence=decision_snapshot_coherence,
+            directional_command_flow=directional_command_flow,
+            directional_attribution=directional_attribution,
+        )
+    truth_chain_readiness_checks = as_dict(
+        truth_chain_evidence_readiness.get("readiness_checks")
+    )
+    truth_chain_readiness_current = as_dict(
+        truth_chain_evidence_readiness.get("current_decision")
+    )
+    truth_chain_readiness_recent = as_dict(
+        truth_chain_evidence_readiness.get("recent_directional_window")
+    )
+    truth_chain_readiness_interpretation = as_dict(
+        truth_chain_evidence_readiness.get("interpretation")
     )
     recent_no_order_freshness = as_dict(
         report.get("recent_directional_no_order_freshness_truth")
@@ -12699,6 +12944,62 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
                 "not_alpha_or_profitability_evidence"
             )
         ),
+        "truth_chain_evidence_readiness_status": (
+            truth_chain_evidence_readiness.get("status")
+        ),
+        "truth_chain_evidence_readiness_smallest_missing_field": (
+            truth_chain_evidence_readiness.get("smallest_missing_field")
+        ),
+        "truth_chain_evidence_readiness_waiting_for": (
+            truth_chain_evidence_readiness.get("waiting_for")
+        ),
+        "truth_chain_evidence_readiness_raw_payload_exposed": (
+            truth_chain_evidence_readiness.get("raw_payload_exposed")
+        ),
+        "truth_chain_readiness_snapshot_coherence_ready": (
+            truth_chain_readiness_checks.get("snapshot_coherence_ready")
+        ),
+        "truth_chain_readiness_lifecycle_provenance_ready": (
+            truth_chain_readiness_checks.get("lifecycle_provenance_ready")
+        ),
+        "truth_chain_readiness_recent_chain_density_ready": (
+            truth_chain_readiness_checks.get("recent_chain_density_ready")
+        ),
+        "truth_chain_readiness_no_order_provenance_density_gate_ready": (
+            truth_chain_readiness_checks.get("no_order_provenance_density_gate_ready")
+        ),
+        "truth_chain_readiness_command_flow_ready": (
+            truth_chain_readiness_checks.get("command_flow_ready")
+        ),
+        "truth_chain_readiness_directional_attribution_ready": (
+            truth_chain_readiness_checks.get("directional_attribution_ready")
+        ),
+        "truth_chain_readiness_current_decision_id": (
+            truth_chain_readiness_current.get("decision_id")
+        ),
+        "truth_chain_readiness_current_order_expected": (
+            truth_chain_readiness_current.get("order_expected")
+        ),
+        "truth_chain_readiness_current_fill_expected": (
+            truth_chain_readiness_current.get("fill_expected")
+        ),
+        "truth_chain_readiness_recent_decision_count": (
+            truth_chain_readiness_recent.get("recent_decision_count")
+        ),
+        "truth_chain_readiness_decisions_with_no_order_expected": (
+            truth_chain_readiness_recent.get("decisions_with_no_order_expected")
+        ),
+        "truth_chain_readiness_decisions_with_fills": (
+            truth_chain_readiness_recent.get("decisions_with_fills")
+        ),
+        "truth_chain_readiness_no_order_regime": (
+            truth_chain_readiness_recent.get("no_order_regime")
+        ),
+        "truth_chain_readiness_not_alpha_or_profitability_evidence": (
+            truth_chain_readiness_interpretation.get(
+                "not_alpha_or_profitability_evidence"
+            )
+        ),
         "recent_directional_no_order_freshness_truth_status": (
             recent_no_order_freshness.get("status")
         ),
@@ -13779,6 +14080,22 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             decision_lifecycle_execution_science_continuity=report[
                 "decision_lifecycle_execution_science_continuity_truth"
             ],
+        )
+    )
+    report["truth_chain_evidence_readiness_truth"] = (
+        summarize_truth_chain_evidence_readiness_truth(
+            decision_lifecycle_provenance_continuity=report[
+                "decision_lifecycle_provenance_continuity_truth"
+            ],
+            recent_directional_decision_chain_density=report[
+                "recent_directional_decision_chain_density_truth"
+            ],
+            recent_directional_no_order_provenance_density_gate=report[
+                "recent_directional_no_order_provenance_density_gate_truth"
+            ],
+            decision_snapshot_coherence=report["decision_snapshot_coherence_truth"],
+            directional_command_flow=report["directional_command_flow_provenance_truth"],
+            directional_attribution=report["directional_episode_attribution_truth"],
         )
     )
     report["recent_directional_no_order_freshness_truth"] = (
