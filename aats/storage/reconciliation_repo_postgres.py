@@ -303,11 +303,13 @@ class PostgresReconciliationRepository:
         DISTINCT。NULL ref 被过滤（业务上 snapshot_ref=NULL 的对账不参与
         "snapshot_without_reconciliation" 聚合）。
         """
+        portfolio_snapshot_ref = ReconciliationReportModel.payload["portfolio_snapshot_ref"].as_string()
         query = (
-            select(ReconciliationReportModel.portfolio_snapshot_ref)
+            select(portfolio_snapshot_ref)
             .where(ReconciliationReportModel.product_type == scope.product_type)
             .where(ReconciliationReportModel.margin_mode == scope.margin_mode)
-            .where(ReconciliationReportModel.portfolio_snapshot_ref.isnot(None))
+            .where(portfolio_snapshot_ref.isnot(None))
+            .where(portfolio_snapshot_ref != "")
             .distinct()
         )
         with self.session_factory() as session:

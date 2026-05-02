@@ -61,6 +61,7 @@ export function renderRdpView(data) {
   const rdpTuningOverview = data.rdpTuningOverview || {};
   const rdpTuningProposals = data.rdpTuningProposals || {};
   const uiState = data.uiState?.rdp || {};
+  const pendingPanels = data.uiHints?.pendingPanels || {};
   const canAdmin = session.role === "admin" || session.identity === "api_key_write";
   const rdpAuthError = resolveRdpAuthError(data);
 
@@ -105,5 +106,6 @@ export function renderRdpView(data) {
     rdpTuningProposals,
     canAdmin,
     uiState,
+    pendingPanels,
   });
 }

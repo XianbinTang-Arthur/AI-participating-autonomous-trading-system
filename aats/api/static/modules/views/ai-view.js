@@ -271,6 +271,7 @@ export function renderAIAnalysisSectionCards(data) {
   const aiRecent = data.aiRecent || {};
   const aiShadowRecent = data.aiShadowRecent || {};
   const aiShadowEvaluations = data.aiShadowEvaluations || {};
+  const pendingPanels = data.uiHints?.pendingPanels || {};
   const executionSuggestion = aiOverview.latest_execution_suggestion || aiLatest.execution_suggestion || {};
   const recentPayload = aiRecent || {};
   const recentAssessments = recentPayload.assessments || [];
@@ -284,6 +285,11 @@ export function renderAIAnalysisSectionCards(data) {
   const recentReports = performanceView.recent_reports || [];
   const replayContext = performanceView.replay_context || {};
   const hasHistoryRecords = recentAssessments.length > 0 || shadowRecent.length > 0 || evaluations.length > 0;
+  const historyPending = !hasHistoryRecords && (
+    Boolean(pendingPanels.aiRecent)
+    || Boolean(pendingPanels.aiShadowRecent)
+    || Boolean(pendingPanels.aiShadowEvaluations)
+  );
   const hasPerformanceRecords =
     recentReports.length > 0
     || Number(performanceView.report_count ?? 0) > 0
@@ -306,7 +312,14 @@ export function renderAIAnalysisSectionCards(data) {
       kicker: "历史记录",
       panelKey: "aiShadowEvaluations",
       copy: "这里集中看策略层 shadow 的动作记录和收益评估。",
-      content: hasHistoryRecords
+      content: historyPending
+        ? callout({
+            title: "AI 历史正在加载",
+            copy: "AI 判断、影子动作和收益评估已放到后台加载，加载完成后会自动替换这里的等待态。",
+            tone: "info",
+            pills: [actorTags("ai")],
+          })
+        : hasHistoryRecords
         ? `
             <div class="panel-grid">
               <div class="span-12">

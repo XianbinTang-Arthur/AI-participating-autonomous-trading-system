@@ -20,6 +20,7 @@ from aats.api.auth import (
 )
 from aats.api.session_auth import issue_session_token
 from aats.bootstrap.config import ApplicationRuntime
+from aats.bootstrap.logging import get_logger, log_event
 from aats.schemas.common import utc_now
 from aats.schemas.system import RuntimeModeState
 from aats.services.operator.command_bridge import (
@@ -32,6 +33,7 @@ from aats.services.operator.ui_capabilities import ui_operating_mode_override_en
 
 
 auth_router = APIRouter(include_in_schema=False)
+_logger = get_logger("aats.api.auth")
 
 
 class LoginRequest(BaseModel):
@@ -216,6 +218,49 @@ def _system_health_payload(request: Request, query: OperatorQueryService) -> dic
     return health
 
 
+def _blockers_panel_payload_from_blocker_control(
+    *,
+    request: Request,
+    query: OperatorQueryService,
+    blocker_control: dict[str, Any],
+) -> dict[str, Any]:
+    blocker_items = blocker_control.get("blockers")
+    blockers = []
+    if isinstance(blocker_items, list):
+        blockers = [
+            _legacy_blocker_payload(item)
+            for item in blocker_items
+            if isinstance(item, dict)
+        ]
+    return {
+        "blocked": bool(blockers),
+        "halted": _runtime(request).kill_switch.halted,
+        "blockers": blockers,
+        "recent_history": query.blocker_history(limit=20, offset=0)["history"],
+    }
+
+
+def _legacy_blocker_payload(item: dict[str, Any]) -> dict[str, Any]:
+    subsystem = item.get("subsystem")
+    return {
+        "blocker": item.get("blocker"),
+        "subsystem": subsystem,
+        "affects_execution": item.get("affects_execution", True),
+        "affects_account_synchronization": subsystem == "account_state",
+        "submit_only": item.get("submit_only", False),
+        "recommended_action": item.get("recommended_next_step"),
+        "recommended_next_step": item.get("recommended_next_step"),
+        "title": item.get("title"),
+        "description": item.get("description"),
+        "impact": item.get("impact"),
+        "priority": item.get("priority"),
+        "root_cause": item.get("root_cause", False),
+        "derived_from": list(item.get("derived_from") or []),
+        "resolution_mode": item.get("resolution_mode"),
+        "actions": list(item.get("actions") or []),
+    }
+
+
 def _dashboard_panel_error(exc: Exception) -> str:
     if isinstance(exc, HTTPException):
         detail = exc.detail
@@ -254,6 +299,7 @@ def _normalize_dashboard_panel_keys(panel_keys: list[str]) -> tuple[str, ...]:
 #      （asyncio 协程之间没有抢占，只有 await 点才让出控制权，而 cache
 #      check / inflight set 这段路径里没有 await）。
 _BUNDLE_CACHE_TTL_SECONDS = 2.0
+_DASHBOARD_BUNDLE_SLOW_MS = 2_000.0
 _bundle_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _bundle_cache_inflight: dict[tuple[Any, ...], tuple[int, "asyncio.Future[dict[str, Any]]"]] = {}
 # 代际计数器：每次 invalidate 递增。inflight compute 完成后只有代际一致
@@ -332,13 +378,11 @@ def _protected_dashboard_panel_payload(
     if panel_key == "blockerControl":
         return query.blocker_control()
     if panel_key == "blockers":
-        blockers = query.blockers()
-        return {
-            "blocked": bool(blockers),
-            "halted": _runtime(request).kill_switch.halted,
-            "blockers": blockers,
-            "recent_history": query.blocker_history(limit=20, offset=0)["history"],
-        }
+        return _blockers_panel_payload_from_blocker_control(
+            request=request,
+            query=query,
+            blocker_control=query.blocker_control(),
+        )
     if panel_key == "metrics":
         return query.metrics()
     if panel_key == "portfolio":
@@ -764,6 +808,19 @@ async def dashboard_bundle(
                 "deduped": False,
             },
         }
+        if payload_total_ms >= _DASHBOARD_BUNDLE_SLOW_MS:
+            log_event(
+                _logger,
+                "dashboard_bundle_slow",
+                level="warning",
+                view=view,
+                total_ms=payload_total_ms,
+                panel_keys=list(panel_keys),
+                panel_timings_ms={
+                    key: value["duration_ms"]
+                    for key, value in panel_timings.items()
+                },
+            )
         # 只缓存成功响应（含各 panel 内部的 error 条目——panel-level error 是
         # OperatorQueryService 预期的 best-effort 输出，不是端点失败）。
         # 代际守卫：如果计算期间发生过 invalidate，不写缓存，防止旧数据污染。

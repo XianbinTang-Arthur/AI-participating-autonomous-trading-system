@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import os
 import unittest
 from types import SimpleNamespace
@@ -48,6 +49,19 @@ class _AIRuntimeFakeOwner:
         )
 
 
+class _RunPacketSummaryOwner:
+    def __init__(self, cached_packet: dict | None = None) -> None:
+        self.cached_packet = cached_packet
+        self.full_packet_called = False
+
+    def cached_guarded_live_run_packet(self) -> dict | None:
+        return self.cached_packet
+
+    def guarded_live_run_packet(self) -> dict:
+        self.full_packet_called = True
+        raise AssertionError("system runtime must not build the full guarded-live run packet")
+
+
 class TestRuntimeQueryFacade(unittest.TestCase):
     def test_control_plane_consistency_marks_phase5_without_financial_convergence_as_transitional(self) -> None:
         facade = RuntimeQueryFacade(
@@ -82,6 +96,118 @@ class TestRuntimeQueryFacade(unittest.TestCase):
             "portfolio_ledger_truth_enabled_without_phase5_control_plane",
             snapshot["warning_codes"],
         )
+
+    def test_system_runtime_does_not_register_full_guarded_live_run_packet_query(self) -> None:
+        source = inspect.getsource(RuntimeQueryFacade.build_system_runtime)
+
+        self.assertNotIn(
+            '"guarded_live_run_packet": self.owner.guarded_live_run_packet',
+            source,
+        )
+        self.assertIn("guarded_live_run_packet_summary", source)
+
+    def test_system_runtime_defers_event_archive_and_replay_offset_queries(self) -> None:
+        source = inspect.getsource(RuntimeQueryFacade.build_system_runtime)
+
+        self.assertNotIn(
+            '"event_store_archive": self.owner.runtime.event_store.archive_summary',
+            source,
+        )
+        self.assertNotIn(
+            '"latest_replay_offset": lambda: self.owner.runtime.event_store.latest_replay_offset',
+            source,
+        )
+        self.assertIn('"truth_source": "/replay/status"', source)
+
+    def test_lightweight_run_packet_summary_does_not_call_full_packet_loader(self) -> None:
+        owner = _RunPacketSummaryOwner()
+        facade = RuntimeQueryFacade(owner)
+
+        summary = facade.guarded_live_run_packet_summary(
+            preflight={"status": "ready", "launch_ready": True},
+            live_guard={"auto_halt_required": True, "only_reduce_required": False},
+            trial_guard={"status": "monitoring"},
+            margin_buffer={
+                "status": "healthy",
+                "current": {"initial_margin_usage_fraction": 0.12},
+                "liquidation": {"nearest_liquidation_gap_ratio": 0.35},
+            },
+            recovery={"safe_to_trade": True},
+            blocker_control={"blockers": []},
+        )
+
+        self.assertFalse(owner.full_packet_called)
+        self.assertEqual(summary["status"], "critical")
+        self.assertEqual(summary["summary_source"], "runtime_lightweight")
+        self.assertFalse(summary["full_packet_cached"])
+        self.assertIn("forward_validation", summary["deferred_sections"])
+        self.assertEqual(
+            summary["forward_validation_summary"]["summary"]["verdict"],
+            "deferred",
+        )
+        self.assertIsNone(summary["summary_metrics"]["combined_net_realized_pnl"])
+        self.assertEqual(
+            summary["summary_metrics"]["current_initial_margin_usage_fraction"],
+            0.12,
+        )
+
+    def test_run_packet_summary_reuses_cached_full_packet_when_available(self) -> None:
+        cached_packet = {
+            "status": "warning",
+            "summary": "cached summary",
+            "summary_metrics": {"combined_net_realized_pnl": "-1.25"},
+            "operator_actions": ["cached action"],
+            "forward_validation_summary": {"summary": {"verdict": "warning"}},
+        }
+        owner = _RunPacketSummaryOwner(cached_packet)
+        facade = RuntimeQueryFacade(owner)
+
+        summary = facade.guarded_live_run_packet_summary(
+            preflight={"status": "ready", "launch_ready": True},
+            live_guard={"auto_halt_required": False, "only_reduce_required": False},
+            trial_guard={"status": "monitoring"},
+            margin_buffer={"status": "healthy"},
+            recovery={"safe_to_trade": True},
+            blocker_control={"blockers": []},
+        )
+
+        self.assertFalse(owner.full_packet_called)
+        self.assertEqual(summary["status"], "warning")
+        self.assertEqual(summary["summary"], "cached summary")
+        self.assertEqual(summary["summary_metrics"], cached_packet["summary_metrics"])
+        self.assertEqual(summary["operator_actions"], ["cached action"])
+        self.assertEqual(summary["summary_source"], "cached_full_packet")
+        self.assertTrue(summary["full_packet_cached"])
+
+    def test_lightweight_run_packet_summary_marks_execution_blockers_critical(self) -> None:
+        owner = _RunPacketSummaryOwner()
+        facade = RuntimeQueryFacade(owner)
+
+        summary = facade.guarded_live_run_packet_summary(
+            preflight={"status": "ready", "launch_ready": True},
+            live_guard={"auto_halt_required": False, "only_reduce_required": False},
+            trial_guard={"status": "monitoring"},
+            margin_buffer={"status": "healthy"},
+            recovery={"safe_to_trade": True},
+            blocker_control={
+                "blockers": [
+                    {
+                        "blocker": "phase1_shadow_recovery_required",
+                        "affects_execution": True,
+                    },
+                    {
+                        "blocker": "live_submit_disabled",
+                        "affects_execution": False,
+                    },
+                ],
+            },
+        )
+
+        self.assertFalse(owner.full_packet_called)
+        self.assertEqual(summary["status"], "critical")
+        self.assertEqual(summary["summary_metrics"]["execution_blocker_count"], 1)
+        self.assertEqual(summary["active_blockers"][0]["blocker"], "phase1_shadow_recovery_required")
+        self.assertIn("当前仍有执行阻断，先把阻断项处理干净。", summary["operator_actions"])
 
 
 class TestAiRuntimeStubWhenServiceMissing(unittest.TestCase):

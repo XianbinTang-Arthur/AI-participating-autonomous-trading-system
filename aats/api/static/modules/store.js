@@ -122,7 +122,11 @@ const DEFERRED_VIEW_PANELS = {
     "guardedLiveRunPacket",
   ]),
   strategy: new Set(["trialReviewSummary", "strategyAttribution", "positionLifecycleAttribution"]),
-  aiAnalysis: new Set(["aiShadowEvaluations", "profileControlSummary"]),
+  execution: new Set(["positionLifecycleAttribution"]),
+  exitExecution: new Set(["exitExecutionActionHistoryPage"]),
+  replay: new Set(["replayStatus", "replayRecentValidations"]),
+  aiAnalysis: new Set(["aiRecent", "aiShadowRecent", "aiShadowEvaluations", "profileControlSummary"]),
+  rdp: new Set(["rdpWorkbenchItems", "rdpWorkbenchAlerts", "rdpTuningProposals"]),
 };
 
 export function viewSpecs(view, state = null) {

@@ -471,6 +471,7 @@ function renderActiveView() {
         rdpTuningProposals: state.data.rdpTuningProposals || {},
         errors: state.errors,
         uiState: state.ui,
+        uiHints: viewData.uiHints,
       }),
     );
     return;

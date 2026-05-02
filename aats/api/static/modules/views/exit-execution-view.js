@@ -1,4 +1,4 @@
-import { actionButton, summaryStrip, surfaceCard } from "../components.js";
+import { actionButton, callout, summaryStrip, surfaceCard } from "../components.js";
 import { textOrFallback } from "../copy.js";
 // #36 修复：原本这里从 ./risk-view.js 反向 import 以下三个 helper，导致
 // views/exit-execution-view.js ↔ views/risk-view.js 之间出现水平依赖。
@@ -15,6 +15,8 @@ export function renderExitExecutionView(data, uiState = {}) {
   const recovery = data.systemRecovery?.recovery || {};
   const reviewItems = mergedExitExecutionReviewItems(recovery);
   const page = data.exitExecutionActionHistoryPage || {};
+  const pendingPanels = data.uiHints?.pendingPanels || {};
+  const historyPending = Boolean(pendingPanels.exitExecutionActionHistoryPage) && Object.keys(page).length === 0;
   const filters = normalizedExitExecutionHistoryFilters(uiState.exitExecutionHistory);
   const totalAvailable = Math.max(Number(page.total_available || 0), 0);
   const pendingReviewCount = reviewItems.length;
@@ -44,9 +46,11 @@ export function renderExitExecutionView(data, uiState = {}) {
             },
             {
               label: "历史总量",
-              value: `${formatNumber(totalAvailable, 0)} 条`,
-              meta: "这里展示的是 parent-exit operator action 的长历史分页结果。",
-              tone: totalAvailable > 0 ? "info" : "neutral",
+              value: historyPending ? "加载中" : `${formatNumber(totalAvailable, 0)} 条`,
+              meta: historyPending
+                ? "历史记录正在后台加载，当前先显示工作台框架。"
+                : "这里展示的是 parent-exit operator action 的长历史分页结果。",
+              tone: historyPending ? "info" : totalAvailable > 0 ? "info" : "neutral",
             },
             {
               label: "筛选状态",
@@ -70,10 +74,15 @@ export function renderExitExecutionView(data, uiState = {}) {
           title: "完整处理列表",
           kicker: "历史记录与分页",
           copy: "筛选条件和分页位置会同步进 URL，可直接分享给值班同事，或在刷新后继续查看同一页。",
-          content: renderExitExecutionWorkspace({
-            page,
-            filters,
-          }),
+          content: historyPending
+            ? callout({
+                title: "历史记录正在加载",
+                copy: "退出任务长历史已放到后台加载，加载完成后会自动替换这里的等待态。",
+              })
+            : renderExitExecutionWorkspace({
+                page,
+                filters,
+              }),
         })}
       </section>
 

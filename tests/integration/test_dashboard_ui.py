@@ -133,6 +133,77 @@ console.log(JSON.stringify({{
 
 
 class TestDashboardUI(unittest.TestCase):
+    def test_dashboard_blockers_panel_reuses_blocker_control_payload(self) -> None:
+        class Query:
+            def __init__(self) -> None:
+                self.blocker_control_calls = 0
+                self.blocker_history_calls = 0
+
+            def blocker_control(self) -> dict[str, object]:
+                self.blocker_control_calls += 1
+                return {
+                    "blockers": [
+                        {
+                            "blocker": "phase1_shadow_recovery_required",
+                            "subsystem": "account_state",
+                            "affects_execution": True,
+                            "submit_only": False,
+                            "recommended_next_step": "先完成 Phase1 shadow 恢复。",
+                            "title": "Phase1 shadow 需要恢复",
+                            "description": "shadow 状态未收敛。",
+                            "impact": "自动执行保持阻断。",
+                            "priority": 10,
+                            "root_cause": True,
+                            "derived_from": ["phase1_shadow"],
+                            "resolution_mode": "manual_only",
+                            "actions": [{"action_id": "inspect", "label": "检查"}],
+                        }
+                    ]
+                }
+
+            def blocker_history(self, *, limit: int, offset: int) -> dict[str, object]:
+                self.blocker_history_calls += 1
+                self.assert_limit = limit
+                self.assert_offset = offset
+                return {"history": [{"blocker": "phase1_shadow_recovery_required"}]}
+
+            def blockers(self) -> list[dict[str, object]]:
+                raise AssertionError("blockers panel should derive from blocker_control")
+
+        query = Query()
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(
+                    runtime=SimpleNamespace(kill_switch=SimpleNamespace(halted=True))
+                )
+            )
+        )
+
+        payload = _protected_dashboard_panel_payload(
+            request=request,
+            query=query,
+            panel_key="blockers",
+            recent_decisions_limit=8,
+            recent_orders_limit=8,
+            recent_fills_limit=8,
+            recent_replay_validations_limit=8,
+            recent_ai_assessments_limit=8,
+            recent_ai_shadow_decisions_limit=8,
+            recent_ai_shadow_evaluations_limit=8,
+        )
+
+        self.assertTrue(payload["blocked"])
+        self.assertTrue(payload["halted"])
+        blocker = payload["blockers"][0]
+        self.assertEqual(blocker["blocker"], "phase1_shadow_recovery_required")
+        self.assertEqual(blocker["recommended_action"], "先完成 Phase1 shadow 恢复。")
+        self.assertEqual(blocker["recommended_next_step"], "先完成 Phase1 shadow 恢复。")
+        self.assertTrue(blocker["affects_account_synchronization"])
+        self.assertEqual(blocker["actions"], [{"action_id": "inspect", "label": "检查"}])
+        self.assertEqual(payload["recent_history"], [{"blocker": "phase1_shadow_recovery_required"}])
+        self.assertEqual(query.blocker_control_calls, 1)
+        self.assertEqual(query.blocker_history_calls, 1)
+
     def test_dashboard_bundle_dispatches_position_lifecycle_attribution_panel(self) -> None:
         calls: list[int] = []
 
@@ -1524,6 +1595,130 @@ console.log(JSON.stringify({
                 "exitExecutionActionHistoryPage",
             ],
         )
+
+    def test_second_round_dashboard_request_plan_defers_slow_page_details(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { buildDashboardBundleRequestPlan } from './aats/api/static/modules/store.js';
+
+const views = ['execution', 'exitExecution', 'replay', 'aiAnalysis', 'rdp'];
+const payload = Object.fromEntries(views.map((view) => {
+  const plan = buildDashboardBundleRequestPlan(view, {
+    ui: {
+      exitExecution: {
+        exitExecutionHistory: {
+          action: 'all',
+          parent: '',
+          actor: '',
+          windowHours: 'all',
+          offset: 0,
+          limit: 50,
+        },
+      },
+    },
+  });
+  return [view, {
+    primaryPanels: plan.primaryPanels,
+    deferredPanels: plan.deferredPanels,
+  }];
+}));
+console.log(JSON.stringify(payload));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+
+        self.assertIn("positionLifecycleAttribution", payload["execution"]["deferredPanels"])
+        self.assertNotIn("positionLifecycleAttribution", payload["execution"]["primaryPanels"])
+        self.assertIn("exitExecutionActionHistoryPage", payload["exitExecution"]["deferredPanels"])
+        self.assertNotIn("exitExecutionActionHistoryPage", payload["exitExecution"]["primaryPanels"])
+        self.assertEqual(payload["replay"]["deferredPanels"], ["replayStatus", "replayRecentValidations"])
+        self.assertNotIn("replayStatus", payload["replay"]["primaryPanels"])
+        self.assertNotIn("replayRecentValidations", payload["replay"]["primaryPanels"])
+        for panel_key in ["aiRecent", "aiShadowRecent", "aiShadowEvaluations", "profileControlSummary"]:
+            self.assertIn(panel_key, payload["aiAnalysis"]["deferredPanels"])
+            self.assertNotIn(panel_key, payload["aiAnalysis"]["primaryPanels"])
+        for panel_key in ["rdpWorkbenchItems", "rdpWorkbenchAlerts", "rdpTuningProposals"]:
+            self.assertIn(panel_key, payload["rdp"]["deferredPanels"])
+            self.assertNotIn(panel_key, payload["rdp"]["primaryPanels"])
+        self.assertIn("rdpWorkbenchOverview", payload["rdp"]["primaryPanels"])
+        self.assertIn("rdpTuningOverview", payload["rdp"]["primaryPanels"])
+
+    def test_rdp_view_shows_loading_state_for_deferred_detail_panels(self) -> None:
+        script = """
+import { renderRdpView } from './aats/api/static/modules/views/rdp-view.js';
+
+const html = renderRdpView({
+  session: { role: 'admin', authenticated: true },
+  authProviders: { auth_enabled: true },
+  rdpControl: { environment: { name: 'test' }, observation_queue: [] },
+  rdpWorkbenchOverview: {
+    overall_status: 'ready',
+    headline: 'RDP ready',
+    health: { daemon: 'healthy', latest_gate: 'pass' },
+    current_execution: {},
+    next_queue: {},
+  },
+  rdpTuningOverview: { pending_review_count: 1, active_override_count: 0 },
+  uiHints: {
+    pendingPanels: {
+      rdpWorkbenchItems: true,
+      rdpWorkbenchAlerts: true,
+      rdpTuningProposals: true,
+    },
+  },
+});
+
+console.log(JSON.stringify({
+  hasItemsLoading: html.includes('待处理组合正在加载'),
+  hasAlertsLoading: html.includes('阻断明细正在加载'),
+  hasTuningLoading: html.includes('调优提案正在加载'),
+  avoidsFalseEmptyItems: !html.includes('当前没有新的待处理组合。'),
+  avoidsFalseEmptyAlerts: !html.includes('当前没有新的阻断。'),
+  avoidsFalseEmptyTuning: !html.includes('当前没有待审核的自动调优提案。'),
+}));
+"""
+        result = _run_node_module(script, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["hasItemsLoading"])
+        self.assertTrue(payload["hasAlertsLoading"])
+        self.assertTrue(payload["hasTuningLoading"])
+        self.assertTrue(payload["avoidsFalseEmptyItems"])
+        self.assertTrue(payload["avoidsFalseEmptyAlerts"])
+        self.assertTrue(payload["avoidsFalseEmptyTuning"])
+
+    def test_ai_analysis_view_shows_loading_state_for_deferred_history_panels(self) -> None:
+        script = """
+import { renderAIAnalysisSectionCards } from './aats/api/static/modules/views/ai-view.js';
+
+const sections = renderAIAnalysisSectionCards({
+  aiOverview: { shadow_summary: {}, performance_view: {} },
+  aiLatest: {},
+  uiHints: {
+    pendingPanels: {
+      aiRecent: true,
+      aiShadowRecent: true,
+      aiShadowEvaluations: true,
+    },
+  },
+});
+const html = sections.aiHistory;
+console.log(JSON.stringify({
+  hasLoading: html.includes('AI 历史正在加载'),
+  avoidsFalseEmpty: !html.includes('当前暂无可复盘的 AI 历史记录'),
+}));
+"""
+        result = _run_node_module(script, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["hasLoading"])
+        self.assertTrue(payload["avoidsFalseEmpty"])
 
     def test_risk_view_shows_deferred_loading_notice_before_replay_and_exit_history_arrive(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

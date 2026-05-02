@@ -35,6 +35,8 @@ const REPLAY_PARENT_FILTERS = [
 
 export function renderReplaySections(data, uiState = {}, paging = {}) {
   const replay = data.replayStatus || {};
+  const pendingPanels = data.uiHints?.pendingPanels || {};
+  const replayPending = Boolean(pendingPanels.replayStatus) && Object.keys(replay).length === 0;
   const recentPayload = data.replayRecentValidations || {};
   const recentValidations = Array.isArray(recentPayload.validations)
     ? recentPayload.validations
@@ -58,13 +60,17 @@ export function renderReplaySections(data, uiState = {}, paging = {}) {
   return {
     replayHero: primaryStatusPanel({
       eyebrow: "回放与复盘",
-      headline: replay.healthy ? "回放链路目前健康" : "回放链路仍有差异",
-      summary: latestValidation
+      headline: replayPending
+        ? "回放数据正在加载"
+        : replay.healthy ? "回放链路目前健康" : "回放链路仍有差异",
+      summary: replayPending
+        ? "首屏已先显示工作区框架，回放归档统计和最近校验记录正在后台加载。"
+        : latestValidation
         ? `最近一次回放在 ${formatMaybeTimestamp(latestValidation.validated_at)} 完成，当前可以直接对读父腿阶段、链路分数和腿级对账。`
         : "当前还没有回放校验记录，先手动触发一次回放，才能开始复盘。",
-      tone: replay.healthy ? "positive" : "warning",
+      tone: replayPending ? "neutral" : replay.healthy ? "positive" : "warning",
       pills: [
-        replayHeroPill("回放健康度", booleanWord(replay.healthy), replay.healthy ? "positive" : "warning"),
+        replayHeroPill("回放健康度", replayPending ? "加载中" : booleanWord(replay.healthy), replayPending ? "neutral" : replay.healthy ? "positive" : "warning"),
         replayHeroPill("最新决策", textOrFallback(latestValidation?.decision_id, "当前没有决策编号"), latestValidation?.decision_id ? "info" : "neutral"),
         replayHeroPill("最新对账", readableState(reconciliation?.severity || "unknown"), reconciliation?.halt_required ? "danger" : toneForReconciliationSeverity(reconciliation?.severity)),
       ],

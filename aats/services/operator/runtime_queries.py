@@ -466,6 +466,130 @@ class RuntimeQueryFacade:
     def system_runtime(self) -> dict[str, Any]:
         return self.build_system_runtime()
 
+    def guarded_live_run_packet_summary(
+        self,
+        *,
+        preflight: dict[str, Any],
+        live_guard: dict[str, Any],
+        trial_guard: dict[str, Any],
+        margin_buffer: dict[str, Any],
+        recovery: dict[str, Any],
+        blocker_control: dict[str, Any],
+    ) -> dict[str, Any]:
+        cached_packet_getter = getattr(self.owner, "cached_guarded_live_run_packet", None)
+        cached_packet = cached_packet_getter() if callable(cached_packet_getter) else None
+        if isinstance(cached_packet, dict):
+            return {
+                "status": cached_packet.get("status"),
+                "summary": cached_packet.get("summary"),
+                "summary_metrics": cached_packet.get("summary_metrics"),
+                "operator_actions": cached_packet.get("operator_actions"),
+                "forward_validation_summary": cached_packet.get("forward_validation_summary"),
+                "summary_source": "cached_full_packet",
+                "full_packet_cached": True,
+                "deferred_sections": [],
+            }
+        return self._lightweight_guarded_live_run_packet_summary(
+            preflight=preflight,
+            live_guard=live_guard,
+            trial_guard=trial_guard,
+            margin_buffer=margin_buffer,
+            recovery=recovery,
+            blocker_control=blocker_control,
+        )
+
+    def _lightweight_guarded_live_run_packet_summary(
+        self,
+        *,
+        preflight: dict[str, Any],
+        live_guard: dict[str, Any],
+        trial_guard: dict[str, Any],
+        margin_buffer: dict[str, Any],
+        recovery: dict[str, Any],
+        blocker_control: dict[str, Any],
+    ) -> dict[str, Any]:
+        preflight_status = preflight.get("status")
+        margin_status = margin_buffer.get("status")
+        auto_halt_required = bool(live_guard.get("auto_halt_required"))
+        only_reduce_required = bool(live_guard.get("only_reduce_required"))
+        trial_breached = trial_guard.get("status") == "breached"
+        blocker_items = blocker_control.get("blockers")
+        execution_blockers = []
+        if isinstance(blocker_items, list):
+            execution_blockers = [
+                item
+                for item in blocker_items
+                if isinstance(item, dict) and item.get("affects_execution") is not False
+            ]
+
+        status = "ready"
+        if auto_halt_required or trial_breached or execution_blockers:
+            status = "critical"
+        elif (
+            preflight_status in {"warning", "fail"}
+            or only_reduce_required
+            or margin_status in {"warning", "critical"}
+            or not recovery.get("safe_to_trade")
+        ):
+            status = "warning"
+
+        summary_map = {
+            "ready": "当前运行包状态健康，可以继续保持小资金受控运行。",
+            "warning": "当前运行包存在明显风险或约束，必须保持 only-reduce / 小资金 / 人工盯盘。",
+            "critical": "当前运行包已经触发自动停机或存在硬阻断，不应继续自动运行。",
+        }
+        operator_actions: list[str] = []
+        if preflight_status == "fail":
+            operator_actions.append("先处理启盘前自检里的硬失败项，再讨论继续实盘。")
+        if auto_halt_required:
+            operator_actions.append("当前已经进入自动停机区间，先减仓并核对交易所保证金状态。")
+        elif only_reduce_required:
+            operator_actions.append("当前只允许继续减仓或平仓，先把保证金缓冲拉回健康区间。")
+        if trial_breached:
+            operator_actions.append("试盘守护已经触发暂停，先复盘最近收益、滑点和资金费拖累。")
+        if execution_blockers:
+            operator_actions.append("当前仍有执行阻断，先把阻断项处理干净。")
+        if margin_status in {"warning", "critical"} and not (auto_halt_required or only_reduce_required):
+            operator_actions.append("保证金缓冲已经偏紧，先确认仓位、杠杆和强平距离。")
+        if not recovery.get("safe_to_trade"):
+            operator_actions.append("恢复状态仍不允许自动交易，先处理恢复阻断或人工复核。")
+
+        current_margin = margin_buffer.get("current") if isinstance(margin_buffer.get("current"), dict) else {}
+        liquidation = margin_buffer.get("liquidation") if isinstance(margin_buffer.get("liquidation"), dict) else {}
+        return {
+            "status": status,
+            "summary": summary_map[status],
+            "summary_metrics": {
+                "launch_ready": preflight.get("launch_ready"),
+                "safe_to_trade": recovery.get("safe_to_trade"),
+                "execution_blocker_count": len(execution_blockers),
+                "current_initial_margin_usage_fraction": current_margin.get("initial_margin_usage_fraction"),
+                "nearest_liquidation_gap_ratio": liquidation.get("nearest_liquidation_gap_ratio"),
+                "combined_net_realized_pnl": None,
+                "funding_fee_net_pnl": None,
+                "open_position_count": None,
+                "current_open_order_count": None,
+            },
+            "operator_actions": list(dict.fromkeys(operator_actions)),
+            "forward_validation_summary": {
+                "summary": {
+                    "verdict": "deferred",
+                    "summary": "前向验证未在首屏主请求中同步计算，请打开完整运行包查看。",
+                    "reasons": ["forward_validation_deferred_from_runtime_summary"],
+                },
+                "latest_period": None,
+            },
+            "summary_source": "runtime_lightweight",
+            "full_packet_cached": False,
+            "active_blockers": execution_blockers,
+            "deferred_sections": [
+                "forward_validation",
+                "execution_blockers",
+                "positions",
+                "account",
+            ],
+        }
+
     def build_system_runtime(self) -> dict[str, Any]:
         # ── 阶段 0：预热 strategy_runtime 的 30s TTL 缓存 ──────────
         # strategy_runtime 内部用 ThreadPoolExecutor(5) 并行发 8 个 DB 查询。
@@ -483,12 +607,7 @@ class RuntimeQueryFacade:
             "account_snapshot": self.owner.latest_exchange_snapshot,
             "recovery": self.owner.recovery_view,
             "guarded_live_preflight": self.owner.guarded_live_preflight,
-            "guarded_live_run_packet": self.owner.guarded_live_run_packet,
-            "event_store_archive": self.owner.runtime.event_store.archive_summary,
-            "latest_replay_offset": lambda: self.owner.runtime.event_store.latest_replay_offset(
-                projection_key="portfolio_replay",
-                scope=self.owner.state_scope,
-            ),
+            "blocker_control": self.owner.blocker_control,
             "control_plane_consistency": self._control_plane_consistency,
             "account_status": self.owner.account_service_status,
             "runtime_profile_control": self.owner.runtime_profile_snapshot,
@@ -506,9 +625,16 @@ class RuntimeQueryFacade:
         account_snapshot = r["account_snapshot"]
         recovery = r["recovery"]
         guarded_live_preflight = r["guarded_live_preflight"]
-        guarded_live_run_packet = r["guarded_live_run_packet"]
         control_plane_consistency = r["control_plane_consistency"]
         account_status = r["account_status"]
+        guarded_live_run_packet_summary = self.guarded_live_run_packet_summary(
+            preflight=guarded_live_preflight,
+            live_guard=r["derivatives_live_guard"],
+            trial_guard=r["trial_guard"],
+            margin_buffer=r["margin_buffer_overview"],
+            recovery=recovery,
+            blocker_control=r["blocker_control"],
+        )
         position_mode_contract = account_status.get("position_mode_contract") or derivatives_position_mode_contract(
             settings=self.owner.runtime.settings,
             snapshot=account_snapshot,
@@ -619,15 +745,16 @@ class RuntimeQueryFacade:
             "margin_buffer_overview": r["margin_buffer_overview"],
             "derivatives_live_guard": r["derivatives_live_guard"],
             "guarded_live_preflight": guarded_live_preflight,
-            "guarded_live_run_packet_summary": {
-                "status": guarded_live_run_packet.get("status"),
-                "summary": guarded_live_run_packet.get("summary"),
-                "summary_metrics": guarded_live_run_packet.get("summary_metrics"),
-                "operator_actions": guarded_live_run_packet.get("operator_actions"),
+            "guarded_live_run_packet_summary": guarded_live_run_packet_summary,
+            "event_store_archive": {
+                "status": "deferred",
+                "summary": "事件归档统计已移出运行时首屏摘要，请在回放页查看完整归档状态。",
+                "truth_source": "/replay/status",
             },
-            "event_store_archive": r["event_store_archive"],
             "replay_offsets": {
-                "portfolio_replay": None if r["latest_replay_offset"] is None else r["latest_replay_offset"].model_dump(mode="json"),
+                "portfolio_replay": None,
+                "status": "deferred",
+                "truth_source": "/replay/status",
             },
         }
 

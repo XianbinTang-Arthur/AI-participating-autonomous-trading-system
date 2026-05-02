@@ -451,7 +451,21 @@ function renderWorkbenchHero({
 function renderWorkbenchItemsCard({
   items = [],
   canAdmin = false,
+  loading = false,
 }) {
+  if (loading) {
+    return surfaceCard({
+      title: "当前待处理",
+      kicker: "只看当前轮次",
+      copy: "每个组合只保留一张主卡。",
+      content: callout({
+        title: "待处理组合正在加载",
+        copy: "工作台明细已放到后台加载，加载完成后会自动替换这里的等待态。",
+        tone: "info",
+        pills: [actorTags("system")],
+      }),
+    });
+  }
   const cards = items.map((item) => renderWorkItem({
     tone: item.integrity_status === "blocked" ? "danger" : "warning",
     kicker: `${item.family || "未知策略"} / ${item.timeframe || "未知周期"}`,
@@ -544,6 +558,20 @@ function renderReleaseCandidatesCard({
 }
 
 function renderIntegrityAlertsCard(alerts = []) {
+  const loading = Boolean(alerts?.loading);
+  if (loading) {
+    return surfaceCard({
+      title: "当前阻断",
+      kicker: "审批前先看",
+      copy: "先处理这些问题，再继续审批和发布。",
+      content: callout({
+        title: "阻断明细正在加载",
+        copy: "RDP 阻断与系统问题正在后台加载，加载完成后会自动替换这里的等待态。",
+        tone: "info",
+        pills: [actorTags("system")],
+      }),
+    });
+  }
   const integrity = alerts.integrity_alerts || [];
   const operational = alerts.operational_alerts || [];
   return surfaceCard({
@@ -669,6 +697,7 @@ function renderTuningCard({
   tuningProposals = {},
   canAdmin = false,
 }) {
+  const loading = Boolean(tuningProposals.loading);
   const items = tuningProposals.items || [];
   return surfaceCard({
     title: "自动调优",
@@ -712,7 +741,14 @@ function renderTuningCard({
               .map((action, index) => renderActionDescriptor(action, canAdmin, index === 0 ? "secondary" : "ghost"))
               .join(""),
           })).join("")}</div>`
-        : notice("当前没有待审核的自动调优提案。", "outline")}
+        : loading
+          ? callout({
+              title: "调优提案正在加载",
+              copy: "自动调优提案已放到后台加载，加载完成后会自动替换这里的等待态。",
+              tone: "info",
+              pills: [actorTags("ai")],
+            })
+          : notice("当前没有待审核的自动调优提案。", "outline")}
     `,
   });
 }
@@ -726,8 +762,12 @@ export function renderRdpControlPanelV2({
   rdpTuningProposals = {},
   canAdmin = false,
   uiState = {},
+  pendingPanels = {},
 }) {
   void uiState;
+  const workbenchItemsPending = Boolean(pendingPanels.rdpWorkbenchItems) && Object.keys(rdpWorkbenchItems).length === 0;
+  const workbenchAlertsPending = Boolean(pendingPanels.rdpWorkbenchAlerts) && Object.keys(rdpWorkbenchAlerts).length === 0;
+  const tuningProposalsPending = Boolean(pendingPanels.rdpTuningProposals) && Object.keys(rdpTuningProposals).length === 0;
 
   // 内部三大工作区（当前待处理 / 侧栏告警与观察窗口 / 调优提案）各自标为
   // aria-label 化的 region，方便屏幕阅读器按 landmark 跳转，也让键盘用户
@@ -744,8 +784,9 @@ export function renderRdpControlPanelV2({
           ${renderWorkbenchItemsCard({
             items: rdpWorkbenchItems.items || [],
             canAdmin,
+            loading: workbenchItemsPending,
           })}
-          ${rdpWorkbenchOverview.overall_status === "rollback_required"
+          ${rdpWorkbenchOverview.overall_status === "rollback_required" || workbenchItemsPending
             ? ""
             : renderReleaseCandidatesCard({
               payload: rdpWorkbenchItems.release_candidates || {},
@@ -753,12 +794,12 @@ export function renderRdpControlPanelV2({
             })}
           ${renderTuningCard({
             tuningOverview: rdpTuningOverview,
-            tuningProposals: rdpTuningProposals,
+            tuningProposals: tuningProposalsPending ? { loading: true } : rdpTuningProposals,
             canAdmin,
           })}
         </section>
         <aside class="span-4 workspace-stack" role="region" aria-label="RDP 侧栏：告警、运行态与观察窗口">
-          ${renderIntegrityAlertsCard(rdpWorkbenchAlerts)}
+          ${renderIntegrityAlertsCard(workbenchAlertsPending ? { loading: true } : rdpWorkbenchAlerts)}
           ${renderRuntimeRailCard({
             overview: rdpWorkbenchOverview,
             rdpControl,

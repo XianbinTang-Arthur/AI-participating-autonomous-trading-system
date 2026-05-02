@@ -74,6 +74,10 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
   const marginBuffer = account.margin_buffer_overview || data.runtime?.margin_buffer_overview || {};
   const guardedLivePreflight = data.guardedLivePreflight || data.runtime?.guarded_live_preflight || {};
   const guardedLiveRunPacket = data.guardedLiveRunPacket || data.runtime?.guarded_live_run_packet_summary || {};
+  const guardedLiveRunPacketMetrics = guardedLiveRunPacket.summary_metrics || {};
+  const guardedLiveRunPacketHasPnl = guardedLiveRunPacketMetrics.combined_net_realized_pnl !== null
+    && guardedLiveRunPacketMetrics.combined_net_realized_pnl !== undefined
+    && guardedLiveRunPacketMetrics.combined_net_realized_pnl !== "";
   const positionModeContract = account.position_mode_contract || {};
   const derivativesLiveGuard = account.derivatives_live_guard || {};
   const currentDerivativesExposure = derivativesLiveGuard.current_derivatives_exposure || {};
@@ -432,14 +436,16 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
         },
         {
           label: "综合净收益",
-          value: formatSigned(guardedLiveRunPacket.summary_metrics?.combined_net_realized_pnl),
-          meta: `资金费 ${formatSigned(guardedLiveRunPacket.summary_metrics?.funding_fee_net_pnl)}，活动阻断 ${formatNumber(guardedLiveRunPacket.summary_metrics?.execution_blocker_count || 0, 0)} 个`,
-          tone: Number(guardedLiveRunPacket.summary_metrics?.combined_net_realized_pnl || 0) >= 0 ? "positive" : "warning",
+          value: formatSigned(guardedLiveRunPacketMetrics.combined_net_realized_pnl),
+          meta: `资金费 ${formatSigned(guardedLiveRunPacketMetrics.funding_fee_net_pnl)}，活动阻断 ${formatNumber(guardedLiveRunPacketMetrics.execution_blocker_count, 0)} 个`,
+          tone: guardedLiveRunPacketHasPnl
+            ? (Number(guardedLiveRunPacketMetrics.combined_net_realized_pnl) >= 0 ? "positive" : "warning")
+            : "neutral",
         },
         {
           label: "保证金 / 强平距离",
-          value: trialRatioText(guardedLiveRunPacket.summary_metrics?.current_initial_margin_usage_fraction),
-          meta: `最近强平距离 ${trialRatioText(guardedLiveRunPacket.summary_metrics?.nearest_liquidation_gap_ratio)}，持仓 ${formatNumber(guardedLiveRunPacket.summary_metrics?.open_position_count || 0, 0)} 条`,
+          value: trialRatioText(guardedLiveRunPacketMetrics.current_initial_margin_usage_fraction),
+          meta: `最近强平距离 ${trialRatioText(guardedLiveRunPacketMetrics.nearest_liquidation_gap_ratio)}，持仓 ${formatNumber(guardedLiveRunPacketMetrics.open_position_count, 0)} 条`,
           tone: packetTone(guardedLiveRunPacket.status),
         },
         {

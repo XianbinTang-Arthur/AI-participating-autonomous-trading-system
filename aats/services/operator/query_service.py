@@ -2181,6 +2181,22 @@ class OperatorQueryService:
         cache_key = f"guarded_live_run_packet:{self._scope_cache_fragment()}"
         return self._cached_ttl(cache_key, 35, self._build_guarded_live_run_packet)
 
+    def cached_guarded_live_run_packet(self) -> dict[str, Any] | None:
+        """Return the current full run-packet cache without triggering its loader."""
+        ttl_cache = getattr(self, "_ttl_cache", None)
+        cache_lock = getattr(self, "_cache_lock", None)
+        if ttl_cache is None or cache_lock is None:
+            return None
+        cache_key = f"guarded_live_run_packet:{self._scope_cache_fragment()}"
+        with cache_lock:
+            cached = ttl_cache.get(cache_key)
+            if cached is None:
+                return None
+            expires_at, value = cached
+            if expires_at <= utc_now() or isinstance(value, _CachedError):
+                return None
+            return value if isinstance(value, dict) else None
+
     def _build_guarded_live_run_packet(self) -> dict[str, Any]:
         # S3（task P2-1）：原 9 路纯串行。wall 观察到 38s+（preflight 本身 29s
         # + 下游 8 路每路 1-2s 串行相加）。parallel_fetch fan-out 后每路各走
