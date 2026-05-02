@@ -3936,6 +3936,20 @@ def test_project_live_runtime_facts_exposes_decision_lifecycle_execution_science
                 "slippage_proxy_sample_count": 17,
             },
         },
+        "latest_decision_fill_feasibility_truth": {
+            "status": "verified_no_order_fill_feasibility_not_applicable_with_pretrade_context",
+            "order_expected": False,
+            "fill_expected": False,
+            "pretrade_microstructure": {
+                "status": "verified_pretrade_microstructure_context_present",
+                "smallest_missing_field": None,
+            },
+        },
+        "depth_slippage_lifecycle_truth": {
+            "interpretation": {
+                "forward_depth_ready": True,
+            },
+        },
         "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
         "scope": {"shadow_benchmark": "none_verified"},
         "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
@@ -3979,6 +3993,19 @@ def test_project_live_runtime_facts_exposes_decision_lifecycle_execution_science
         "verified_slippage_cost_calibration_evidence_present"
     )
     assert live_facts["decision_lifecycle_execution_science_continuity_slippage_proxy_sample_count"] == 17
+    assert live_facts["execution_science_evidence_readiness_status"] == (
+        "ready_no_order_regime_waiting_for_executable_or_fill_episode"
+    )
+    assert live_facts["execution_science_evidence_readiness_smallest_missing_field"] is None
+    assert live_facts["execution_science_evidence_waiting_for"] == (
+        "executable_or_filled_directional_episode"
+    )
+    assert live_facts["execution_science_current_no_order_expected"] is True
+    assert live_facts["execution_science_pretrade_context_ready"] is True
+    assert live_facts["execution_science_depth_ready"] is True
+    assert live_facts["execution_science_sequence_ready"] is True
+    assert live_facts["execution_science_slippage_baseline_ready"] is True
+    assert live_facts["execution_science_terminal_no_fill_context_ready"] is True
 
 
 def test_project_live_runtime_facts_exposes_recent_directional_decision_chain_density() -> None:
