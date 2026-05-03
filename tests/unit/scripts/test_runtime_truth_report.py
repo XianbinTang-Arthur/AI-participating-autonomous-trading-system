@@ -461,6 +461,17 @@ def test_db_probe_executable_directional_query_excludes_hold_current_notional() 
     )
 
 
+def test_db_probe_guard_scan_is_bounded_to_directional_sample() -> None:
+    mod = load_module()
+
+    assert "directional_guard_sample_limit" in mod.DB_PROBE
+    assert "with directional_sample as materialized" in mod.DB_PROBE
+    assert "payload::text as payload_text" in mod.DB_PROBE
+    assert "guard_hits_total_scope" in mod.DB_PROBE
+    assert "payload::text like '%' || :guard_flag || '%'" not in mod.DB_PROBE
+    assert "payload::text like :impulse_guard" not in mod.DB_PROBE
+
+
 def test_parse_db_probe_returns_only_json_payload() -> None:
     mod = load_module()
     payload = {

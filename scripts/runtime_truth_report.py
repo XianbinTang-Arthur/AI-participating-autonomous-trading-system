@@ -449,29 +449,135 @@ with engine.connect() as conn:
         "order by created_at desc limit 1"
     )).mappings().first()
     target_convergence_guard_flag = "target_convergence_open_orders_block_exposure_increase"
-    target_convergence_guard_coverage = dict(conn.execute(text(
+    impulse_chase_guard_flags = (
+        "long_impulse_entry_post_spike_pullback_unconfirmed",
+        "short_impulse_entry_post_spike_pullback_unconfirmed",
+        "long_impulse_entry_extreme_chase_unconfirmed",
+        "short_impulse_entry_extreme_chase_unconfirmed",
+    )
+    impulse_chase_guard_params = {
+        f"impulse_guard_{idx}": f"%{flag}%"
+        for idx, flag in enumerate(impulse_chase_guard_flags)
+    }
+    impulse_chase_guard_predicate = " or ".join(
+        f"payload_text like :impulse_guard_{idx}"
+        for idx, _ in enumerate(impulse_chase_guard_flags)
+    )
+    impulse_chase_flag_hit_selects = "".join(
+        f", count(*) filter (where payload_text like :impulse_guard_{idx}) "
+        f"as impulse_guard_{idx}_hits_sample"
+        for idx, _ in enumerate(impulse_chase_guard_flags)
+    )
+    try:
+        directional_guard_sample_limit = int(os.environ.get("AATS_RUNTIME_TRUTH_GUARD_SAMPLE_LIMIT", "5000"))
+    except ValueError:
+        directional_guard_sample_limit = 5000
+    directional_guard_sample_limit = max(100, min(directional_guard_sample_limit, 10000))
+    directional_guard_decision_windows = dict(conn.execute(text(
         "select count(*) as directional_decisions_total, "
         "       count(*) filter (where created_at >= now() - interval '24 hour') as directional_decisions_24h, "
-        "       count(*) filter (where created_at >= now() - interval '1 hour') as directional_decisions_1h, "
-        "       count(*) filter (where payload::text like '%' || :guard_flag || '%') as guard_hits_total, "
-        "       count(*) filter ("
-        "           where created_at >= now() - interval '24 hour' "
-        "           and payload::text like '%' || :guard_flag || '%'"
-        "       ) as guard_hits_24h, "
-        "       count(*) filter ("
-        "           where created_at >= now() - interval '1 hour' "
-        "           and payload::text like '%' || :guard_flag || '%'"
-        "       ) as guard_hits_1h "
+        "       count(*) filter (where created_at >= now() - interval '1 hour') as directional_decisions_1h "
         "from portfolio_allocation_decisions "
         "where symbol = :symbol and primary_family = 'directional'"
-    ), {"symbol": symbol, "guard_flag": target_convergence_guard_flag}).mappings().first() or {})
-    latest_target_convergence_guard_hit = conn.execute(text(
-        "select decision_id, created_at, route_action, expected_edge_bps, expected_cost_bps "
-        "from portfolio_allocation_decisions "
-        "where symbol = :symbol and primary_family = 'directional' "
-        "and payload::text like '%' || :guard_flag || '%' "
-        "order by created_at desc limit 1"
-    ), {"symbol": symbol, "guard_flag": target_convergence_guard_flag}).mappings().first()
+    ), {"symbol": symbol}).mappings().first() or {})
+    guard_scan_summary = dict(conn.execute(text(
+        "with directional_sample as materialized ("
+        "    select decision_id, created_at, route_action, expected_edge_bps, expected_cost_bps, "
+        "           payload, payload::text as payload_text "
+        "    from portfolio_allocation_decisions "
+        "    where symbol = :symbol and primary_family = 'directional' "
+        "    order by created_at desc "
+        "    limit :guard_sample_limit"
+        ") "
+        "select count(*) as directional_decisions_sampled, "
+        "       min(created_at) as oldest_sample_created_at, "
+        "       count(*) filter (where payload_text like '%' || :guard_flag || '%') "
+        "           as target_guard_hits_sample, "
+        "       count(*) filter ("
+        "           where created_at >= now() - interval '24 hour' "
+        "           and payload_text like '%' || :guard_flag || '%'"
+        "       ) as target_guard_hits_24h, "
+        "       count(*) filter ("
+        "           where created_at >= now() - interval '1 hour' "
+        "           and payload_text like '%' || :guard_flag || '%'"
+        "       ) as target_guard_hits_1h, "
+        f"      count(*) filter (where {impulse_chase_guard_predicate}) "
+        "           as impulse_guard_hits_sample, "
+        "       count(*) filter ("
+        "           where created_at >= now() - interval '24 hour' "
+        f"          and ({impulse_chase_guard_predicate})"
+        "       ) as impulse_guard_hits_24h, "
+        "       count(*) filter ("
+        "           where created_at >= now() - interval '1 hour' "
+        f"          and ({impulse_chase_guard_predicate})"
+        "       ) as impulse_guard_hits_1h, "
+        "       count(*) filter ("
+        f"          where ({impulse_chase_guard_predicate}) "
+        "           and route_action in ('hold_current', 'advisory_only')"
+        "       ) as impulse_blocked_live_entry_hits_sample, "
+        "       count(*) filter ("
+        "           where created_at >= now() - interval '24 hour' "
+        f"          and ({impulse_chase_guard_predicate}) "
+        "           and route_action in ('hold_current', 'advisory_only')"
+        "       ) as impulse_blocked_live_entry_hits_24h, "
+        "       count(*) filter ("
+        "           where created_at >= now() - interval '1 hour' "
+        f"          and ({impulse_chase_guard_predicate}) "
+        "           and route_action in ('hold_current', 'advisory_only')"
+        "       ) as impulse_blocked_live_entry_hits_1h "
+        f"      {impulse_chase_flag_hit_selects}, "
+        "       ("
+        "           select to_jsonb(target_hit) from ("
+        "               select decision_id, created_at, route_action, expected_edge_bps, expected_cost_bps "
+        "               from directional_sample "
+        "               where payload_text like '%' || :guard_flag || '%' "
+        "               order by created_at desc limit 1"
+        "           ) target_hit"
+        "       ) as latest_target_convergence_guard_hit, "
+        "       ("
+        "           select to_jsonb(impulse_hit) from ("
+        "               select decision_id, created_at, route_action, expected_edge_bps, expected_cost_bps, payload "
+        "               from directional_sample "
+        f"              where ({impulse_chase_guard_predicate}) "
+        "               order by created_at desc limit 1"
+        "           ) impulse_hit"
+        "       ) as latest_impulse_chase_guard_hit "
+        "from directional_sample"
+    ), {
+        "symbol": symbol,
+        "guard_flag": target_convergence_guard_flag,
+        "guard_sample_limit": directional_guard_sample_limit,
+        **impulse_chase_guard_params,
+    }).mappings().first() or {})
+
+    def json_mapping(value):
+        if not value:
+            return None
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                return None
+        return dict(value)
+
+    guard_sample_decisions = int(guard_scan_summary.get("directional_decisions_sampled") or 0)
+    directional_decisions_24h = int(directional_guard_decision_windows.get("directional_decisions_24h") or 0)
+    directional_decisions_1h = int(directional_guard_decision_windows.get("directional_decisions_1h") or 0)
+    target_convergence_guard_coverage = {
+        **directional_guard_decision_windows,
+        "guard_hits_total": guard_scan_summary.get("target_guard_hits_sample"),
+        "guard_hits_24h": guard_scan_summary.get("target_guard_hits_24h"),
+        "guard_hits_1h": guard_scan_summary.get("target_guard_hits_1h"),
+        "guard_hits_total_scope": "latest_directional_decision_sample",
+        "guard_sample_limit": directional_guard_sample_limit,
+        "guard_sample_decisions": guard_sample_decisions,
+        "oldest_sample_created_at": guard_scan_summary.get("oldest_sample_created_at"),
+        "guard_24h_complete_within_sample": directional_decisions_24h <= guard_sample_decisions,
+        "guard_1h_complete_within_sample": directional_decisions_1h <= guard_sample_decisions,
+    }
+    latest_target_convergence_guard_hit = json_mapping(
+        guard_scan_summary.get("latest_target_convergence_guard_hit")
+    )
     execution_open_orders = dict(conn.execute(text(
         "select count(*) as open_order_count, "
         "       count(*) filter (where strategy_family = 'directional') as directional_open_order_count, "
@@ -652,64 +758,28 @@ with engine.connect() as conn:
             else None
         ),
     }
-    impulse_chase_guard_flags = (
-        "long_impulse_entry_post_spike_pullback_unconfirmed",
-        "short_impulse_entry_post_spike_pullback_unconfirmed",
-        "long_impulse_entry_extreme_chase_unconfirmed",
-        "short_impulse_entry_extreme_chase_unconfirmed",
+    impulse_chase_guard_coverage = {
+        **directional_guard_decision_windows,
+        "guard_hits_total": guard_scan_summary.get("impulse_guard_hits_sample"),
+        "guard_hits_24h": guard_scan_summary.get("impulse_guard_hits_24h"),
+        "guard_hits_1h": guard_scan_summary.get("impulse_guard_hits_1h"),
+        "blocked_live_entry_hits_total": guard_scan_summary.get("impulse_blocked_live_entry_hits_sample"),
+        "blocked_live_entry_hits_24h": guard_scan_summary.get("impulse_blocked_live_entry_hits_24h"),
+        "blocked_live_entry_hits_1h": guard_scan_summary.get("impulse_blocked_live_entry_hits_1h"),
+        "guard_hits_total_scope": "latest_directional_decision_sample",
+        "guard_sample_limit": directional_guard_sample_limit,
+        "guard_sample_decisions": guard_sample_decisions,
+        "oldest_sample_created_at": guard_scan_summary.get("oldest_sample_created_at"),
+        "guard_24h_complete_within_sample": directional_decisions_24h <= guard_sample_decisions,
+        "guard_1h_complete_within_sample": directional_decisions_1h <= guard_sample_decisions,
+    }
+    latest_impulse_chase_guard_hit = json_mapping(
+        guard_scan_summary.get("latest_impulse_chase_guard_hit")
     )
-    impulse_chase_guard_params = {
-        f"impulse_guard_{idx}": f"%{flag}%"
+    impulse_chase_flag_hits_total = {
+        flag: int(guard_scan_summary.get(f"impulse_guard_{idx}_hits_sample") or 0)
         for idx, flag in enumerate(impulse_chase_guard_flags)
     }
-    impulse_chase_guard_predicate = " or ".join(
-        f"payload::text like :impulse_guard_{idx}"
-        for idx, _ in enumerate(impulse_chase_guard_flags)
-    )
-    impulse_chase_guard_coverage = dict(conn.execute(text(
-        "select count(*) as directional_decisions_total, "
-        "       count(*) filter (where created_at >= now() - interval '24 hour') as directional_decisions_24h, "
-        "       count(*) filter (where created_at >= now() - interval '1 hour') as directional_decisions_1h, "
-        f"      count(*) filter (where {impulse_chase_guard_predicate}) as guard_hits_total, "
-        "       count(*) filter ("
-        "           where created_at >= now() - interval '24 hour' "
-        f"          and ({impulse_chase_guard_predicate})"
-        "       ) as guard_hits_24h, "
-        "       count(*) filter ("
-        "           where created_at >= now() - interval '1 hour' "
-        f"          and ({impulse_chase_guard_predicate})"
-        "       ) as guard_hits_1h, "
-        "       count(*) filter ("
-        f"          where ({impulse_chase_guard_predicate}) "
-        "           and route_action in ('hold_current', 'advisory_only')"
-        "       ) as blocked_live_entry_hits_total, "
-        "       count(*) filter ("
-        "           where created_at >= now() - interval '24 hour' "
-        f"          and ({impulse_chase_guard_predicate}) "
-        "           and route_action in ('hold_current', 'advisory_only')"
-        "       ) as blocked_live_entry_hits_24h, "
-        "       count(*) filter ("
-        "           where created_at >= now() - interval '1 hour' "
-        f"          and ({impulse_chase_guard_predicate}) "
-        "           and route_action in ('hold_current', 'advisory_only')"
-        "       ) as blocked_live_entry_hits_1h "
-        "from portfolio_allocation_decisions "
-        "where symbol = :symbol and primary_family = 'directional'"
-    ), {"symbol": symbol, **impulse_chase_guard_params}).mappings().first() or {})
-    latest_impulse_chase_guard_hit = conn.execute(text(
-        "select decision_id, created_at, route_action, expected_edge_bps, expected_cost_bps, payload "
-        "from portfolio_allocation_decisions "
-        "where symbol = :symbol and primary_family = 'directional' "
-        f"and ({impulse_chase_guard_predicate}) "
-        "order by created_at desc limit 1"
-    ), {"symbol": symbol, **impulse_chase_guard_params}).mappings().first()
-    impulse_chase_flag_hits_total = {}
-    for idx, flag in enumerate(impulse_chase_guard_flags):
-        impulse_chase_flag_hits_total[flag] = int(conn.execute(text(
-            "select count(*) from portfolio_allocation_decisions "
-            "where symbol = :symbol and primary_family = 'directional' "
-            f"and payload::text like :impulse_guard_{idx}"
-        ), {"symbol": symbol, **impulse_chase_guard_params}).scalar() or 0)
 
     def impulse_chase_guard_hit_summary(row):
         if not row:
@@ -5301,6 +5371,12 @@ def summarize_target_convergence_guard_truth(
             "guard_hits_total": guard_hits_total,
             "guard_hits_24h": guard_hits_24h,
             "guard_hits_1h": guard_hits_1h,
+            "guard_hits_total_scope": coverage.get("guard_hits_total_scope"),
+            "guard_sample_limit": int_or_zero(coverage.get("guard_sample_limit")),
+            "guard_sample_decisions": int_or_zero(coverage.get("guard_sample_decisions")),
+            "oldest_sample_created_at": coverage.get("oldest_sample_created_at"),
+            "guard_24h_complete_within_sample": coverage.get("guard_24h_complete_within_sample"),
+            "guard_1h_complete_within_sample": coverage.get("guard_1h_complete_within_sample"),
         },
         "current_open_orders": {
             "total_open_order_count": current_open_order_count,
@@ -5431,6 +5507,12 @@ def summarize_directional_impulse_chase_guard_truth(
             "blocked_live_entry_hits_total": blocked_hits_total,
             "blocked_live_entry_hits_24h": blocked_hits_24h,
             "blocked_live_entry_hits_1h": blocked_hits_1h,
+            "guard_hits_total_scope": coverage.get("guard_hits_total_scope"),
+            "guard_sample_limit": int_or_zero(coverage.get("guard_sample_limit")),
+            "guard_sample_decisions": int_or_zero(coverage.get("guard_sample_decisions")),
+            "oldest_sample_created_at": coverage.get("oldest_sample_created_at"),
+            "guard_24h_complete_within_sample": coverage.get("guard_24h_complete_within_sample"),
+            "guard_1h_complete_within_sample": coverage.get("guard_1h_complete_within_sample"),
         },
         "flag_hits_total": {
             str(flag): int_or_zero(count)
