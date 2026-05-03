@@ -190,6 +190,12 @@ class TestDashboardUI(unittest.TestCase):
             recent_ai_assessments_limit=8,
             recent_ai_shadow_decisions_limit=8,
             recent_ai_shadow_evaluations_limit=8,
+            exit_execution_history_limit=20,
+            exit_execution_history_offset=0,
+            exit_execution_history_action=None,
+            exit_execution_history_parent=None,
+            exit_execution_history_actor=None,
+            exit_execution_history_window_hours=None,
         )
 
         self.assertTrue(payload["blocked"])
@@ -223,6 +229,12 @@ class TestDashboardUI(unittest.TestCase):
             "recent_ai_assessments_limit": 8,
             "recent_ai_shadow_decisions_limit": 8,
             "recent_ai_shadow_evaluations_limit": 8,
+            "exit_execution_history_limit": 20,
+            "exit_execution_history_offset": 0,
+            "exit_execution_history_action": None,
+            "exit_execution_history_parent": None,
+            "exit_execution_history_actor": None,
+            "exit_execution_history_window_hours": None,
         }
 
         strategy_payload = _protected_dashboard_panel_payload(view="strategy", **common)
@@ -1637,6 +1649,165 @@ console.log(JSON.stringify({
                 "exitExecutionActionHistoryPage",
             ],
         )
+
+    def test_exit_execution_history_filters_are_embedded_in_bundle_path(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { buildDashboardBundleRequestPlan } from './aats/api/static/modules/store.js';
+
+const plan = buildDashboardBundleRequestPlan('exitExecution', {
+  ui: {
+    exitExecution: {
+      exitExecutionHistory: {
+        action: 'safe_cancel',
+        parent: 'exit_parent:btc_close',
+        actor: 'ops-two',
+        windowHours: '24',
+        offset: 50,
+        limit: 50,
+      },
+    },
+  },
+});
+const primary = new URL(plan.primaryPath, 'http://localhost');
+const deferred = new URL(plan.deferredPath, 'http://localhost');
+console.log(JSON.stringify({
+  primaryPanels: primary.searchParams.getAll('panel'),
+  primaryAction: primary.searchParams.get('exitExecutionHistoryAction'),
+  panels: deferred.searchParams.getAll('panel'),
+  limit: deferred.searchParams.get('exitExecutionHistoryLimit'),
+  offset: deferred.searchParams.get('exitExecutionHistoryOffset'),
+  action: deferred.searchParams.get('exitExecutionHistoryAction'),
+  parent: deferred.searchParams.get('exitExecutionHistoryParent'),
+  actor: deferred.searchParams.get('exitExecutionHistoryActor'),
+  windowHours: deferred.searchParams.get('exitExecutionHistoryWindowHours'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertNotIn("exitExecutionActionHistoryPage", payload["primaryPanels"])
+        self.assertIsNone(payload["primaryAction"])
+        self.assertEqual(payload["panels"], ["exitExecutionActionHistoryPage"])
+        self.assertEqual(payload["limit"], "50")
+        self.assertEqual(payload["offset"], "50")
+        self.assertEqual(payload["action"], "safe_cancel")
+        self.assertEqual(payload["parent"], "exit_parent:btc_close")
+        self.assertEqual(payload["actor"], "ops-two")
+        self.assertEqual(payload["windowHours"], "24")
+
+    def test_explicit_panel_bundle_path_only_embeds_requested_panels(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { buildDashboardBundlePath } from './aats/api/static/modules/store.js';
+
+const path = buildDashboardBundlePath('strategy', {
+  pageLimits: {
+    recentDecisions: 20,
+  },
+}, { panelKeys: ['recentDecisions'] });
+const url = new URL(path, 'http://localhost');
+console.log(JSON.stringify({
+  panels: url.searchParams.getAll('panel'),
+  recentDecisions: url.searchParams.get('recentDecisions'),
+  recentOrders: url.searchParams.get('recentOrders'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["panels"], ["recentDecisions"])
+        self.assertEqual(payload["recentDecisions"], "20")
+        self.assertEqual(payload["recentOrders"], "8")
+
+    def test_report_drawer_actions_are_registered(self) -> None:
+        app_text = (Path(__file__).resolve().parents[2] / "aats/api/static/app.js").read_text(encoding="utf-8")
+        strategy_text = (
+            Path(__file__).resolve().parents[2] / "aats/api/static/modules/views/strategy-view.js"
+        ).read_text(encoding="utf-8")
+        refresh_text = (
+            Path(__file__).resolve().parents[2] / "aats/api/static/modules/dashboard-refresh.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("buildDecisionHistoryDrawer", app_text)
+        self.assertIn('"inspect-decision-history"', app_text)
+        self.assertIn('"inspect-strategy-attribution"', app_text)
+        self.assertIn('"inspect-trial-review-details"', app_text)
+        self.assertIn('"inspect-decision-history"', strategy_text)
+        self.assertIn('"inspect-strategy-attribution"', strategy_text)
+        self.assertIn('"inspect-trial-review-details"', strategy_text)
+        self.assertIn("async function refreshPanels", refresh_text)
+
+    def test_targeted_panel_refresh_does_not_mark_view_fresh(self) -> None:
+        refresh_text = (
+            Path(__file__).resolve().parents[2] / "aats/api/static/modules/dashboard-refresh.js"
+        ).read_text(encoding="utf-8")
+        start = refresh_text.index("async function refreshPanels")
+        end = refresh_text.index("async function refreshDeferredPanels")
+        targeted_refresh_body = refresh_text[start:end]
+
+        self.assertNotIn("state.readyViews[refreshingView]", targeted_refresh_body)
+        self.assertNotIn("state.viewRefreshedAt[refreshingView]", targeted_refresh_body)
+
+    def test_trial_review_details_drawer_reads_details_payload_shape(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { buildTrialReviewDetailsDrawer } from './aats/api/static/modules/report-drawers.js';
+
+const drawer = buildTrialReviewDetailsDrawer({
+  sections: {
+    forward_validation: {
+      summary: { verdict: 'continue', summary: '验证周期表现稳定' },
+      periods: [
+        {
+          window_start: '2026-05-01T00:00:00Z',
+          window_end: '2026-05-02T00:00:00Z',
+          combined_net_realized_pnl: '12.34',
+          closed_fill_count: 7,
+          fee_to_notional_ratio: '0.0012',
+        },
+      ],
+    },
+    scaling_readiness: {
+      readiness: 'approve_scale_up',
+      summary: '最近多个试盘周期表现稳定，可以进入人工放量评审。',
+    },
+    execution_anomalies: [
+      { anomaly_type: 'slow_submit_to_fill', symbol: 'BTC-USDT-SWAP', impact: '延迟偏高', observed_at: '2026-05-02T01:00:00Z' },
+    ],
+  },
+});
+console.log(JSON.stringify({
+  hasSummary: drawer.body.includes('最近多个试盘周期表现稳定，可以进入人工放量评审。'),
+  hasPeriodPnl: drawer.body.includes('12.34'),
+  hasFillCount: drawer.body.includes('7'),
+  hasAnomaly: drawer.body.includes('slow_submit_to_fill'),
+  didNotUseEmptyPeriods: !drawer.body.includes('当前没有验证周期明细。'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["hasSummary"])
+        self.assertTrue(payload["hasPeriodPnl"])
+        self.assertTrue(payload["hasFillCount"])
+        self.assertTrue(payload["hasAnomaly"])
+        self.assertTrue(payload["didNotUseEmptyPeriods"])
 
     def test_second_round_dashboard_request_plan_defers_slow_page_details(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

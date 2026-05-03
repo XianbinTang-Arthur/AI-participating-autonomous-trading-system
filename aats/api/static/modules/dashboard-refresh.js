@@ -6,6 +6,7 @@ import {
   REFRESH_PHASE_IDLE,
   REFRESH_PHASE_PRIMARY,
   VIEW_FRESHNESS_MS,
+  buildDashboardBundlePath,
   buildDashboardBundleRequestPlan,
 } from "./store.js";
 
@@ -453,6 +454,80 @@ export function createDashboardRefreshController({
     }
   }
 
+  async function refreshPanels(panelKeys = [], { manual = false } = {}) {
+    const normalizedPanelKeys = Array.from(new Set(
+      (Array.isArray(panelKeys) ? panelKeys : [])
+        .map((key) => String(key || "").trim())
+        .filter(Boolean)
+    ));
+    if (!normalizedPanelKeys.length) {
+      return refreshDashboard({ manual });
+    }
+    if (state.actionInFlight || isPrimaryInFlight()) {
+      return refreshDashboard({ manual });
+    }
+
+    const refreshingView = state.activeView;
+    const refreshGeneration = state.refreshGeneration + 1;
+    state.refreshGeneration = refreshGeneration;
+
+    if (currentDeferredAbort) {
+      try {
+        currentDeferredAbort.abort();
+      } catch (abortError) {
+        // eslint-disable-next-line no-console
+        console.debug("[dashboard-refresh] targeted refresh abort deferred 抛出异常", abortError);
+      }
+      currentDeferredAbort = null;
+    }
+
+    const path = buildDashboardBundlePath(refreshingView, state, { panelKeys: normalizedPanelKeys });
+    const abortController = new AbortController();
+    currentDeferredAbort = abortController;
+    cancelScheduledRefresh();
+    state.refreshPhase = REFRESH_PHASE_DEFERRED;
+    setPendingPanels(normalizedPanelKeys, refreshGeneration);
+    renderShell();
+
+    try {
+      const results = await fetchDashboardBundle(path, {
+        timeout: DEFERRED_BUNDLE_TIMEOUT_MS,
+        signal: abortController.signal,
+      });
+      if (state.refreshGeneration !== refreshGeneration) return;
+      applyPanelResults(results);
+      state.lastRefreshAt = new Date();
+      if (manual && !isFlashLive(state)) {
+        setFlash(state, "info", "相关数据已刷新。");
+      }
+    } catch (error) {
+      if (state.refreshGeneration !== refreshGeneration) return;
+      const isAbort = error && typeof error === "object" && "name" in error && error.name === "AbortError";
+      // eslint-disable-next-line no-console
+      console.warn("[dashboard-refresh] 定向 panel 刷新失败", { isAbort, error, panelKeys: normalizedPanelKeys });
+      const message = isAbort
+        ? "请求超时，请稍后重试。"
+        : error instanceof Error ? error.message : String(error);
+      normalizedPanelKeys.forEach((key) => {
+        state.errors[key] = message;
+      });
+      if (manual) {
+        setFlash(state, "warning", message);
+      }
+    } finally {
+      if (currentDeferredAbort === abortController) {
+        currentDeferredAbort = null;
+      }
+      setPendingPanels(normalizedPanelKeys, refreshGeneration, { pending: false });
+      if (state.refreshGeneration !== refreshGeneration) return;
+      if (state.refreshPhase === REFRESH_PHASE_DEFERRED) {
+        state.refreshPhase = REFRESH_PHASE_IDLE;
+      }
+      renderShell();
+      scheduleRefresh();
+    }
+  }
+
   async function refreshDeferredPanels({ path, panelKeys = [], refreshGeneration }) {
     // Register our own abort controller so a newer refreshDashboard() can
     // cancel us via currentDeferredAbort.abort() — see the supersede block
@@ -529,6 +604,7 @@ export function createDashboardRefreshController({
     isRefreshInFlight,
     isViewFresh,
     refreshDashboard,
+    refreshPanels,
     scheduleRefresh,
     shouldRenderLoadingState,
   };

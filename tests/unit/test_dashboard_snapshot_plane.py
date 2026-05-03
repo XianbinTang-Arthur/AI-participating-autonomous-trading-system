@@ -13,6 +13,8 @@ from aats.services.operator.dashboard_snapshot import (
     P0_DASHBOARD_SNAPSHOT_PANEL_KEYS,
     P1_DASHBOARD_SNAPSHOT_PANEL_KEYS,
     P2_DASHBOARD_SNAPSHOT_PANEL_KEYS,
+    dashboard_snapshot_storage_key,
+    dashboard_snapshot_storage_parts,
 )
 
 
@@ -41,13 +43,19 @@ async def _wait_for_snapshot(plane: DashboardSnapshotPlane, expected: dict[str, 
     raise AssertionError(f"snapshot never reached {expected!r}")
 
 
-async def _wait_for_panel_snapshot(plane: DashboardSnapshotPlane, panel_key: str, expected: dict[str, Any]) -> None:
+async def _wait_for_panel_snapshot(
+    plane: DashboardSnapshotPlane,
+    panel_key: str,
+    expected: dict[str, Any],
+    *,
+    variant_key: str | None = None,
+) -> None:
     for _ in range(100):
-        read = await plane.read_panel(panel_key)
+        read = await plane.read_panel(panel_key, variant_key=variant_key)
         if read.data == expected:
             return
         await asyncio.sleep(0.01)
-    raise AssertionError(f"{panel_key} snapshot never reached {expected!r}")
+    raise AssertionError(f"{panel_key}:{variant_key} snapshot never reached {expected!r}")
 
 
 class DashboardSnapshotPlaneTest(unittest.IsolatedAsyncioTestCase):
@@ -231,6 +239,71 @@ class DashboardSnapshotPlaneTest(unittest.IsolatedAsyncioTestCase):
 
             await asyncio.wait_for(loader_called.wait(), timeout=1.0)
             await _wait_for_snapshot(plane, {"version": 2})
+        finally:
+            await plane.stop()
+
+    async def test_variant_snapshots_are_isolated_by_storage_key(self) -> None:
+        calls: list[str] = []
+
+        async def loader(snapshot_key: str) -> dict[str, Any]:
+            calls.append(snapshot_key)
+            panel_key, variant_key = dashboard_snapshot_storage_parts(snapshot_key)
+            return {"panel": panel_key, "variant": variant_key}
+
+        plane = DashboardSnapshotPlane(
+            loader=loader,
+            default_factory=lambda snapshot_key: {"snapshot_key": snapshot_key, "ready": False},
+            policies={"runtime": _policy()},
+            scheduler_interval_seconds=60.0,
+        )
+        try:
+            read_a = await plane.read_panel("runtime", variant_key="limit=8")
+            read_b = await plane.read_panel("runtime", variant_key="limit=20")
+
+            self.assertEqual(read_a.data, {"snapshot_key": "runtime::limit=8", "ready": False})
+            self.assertEqual(read_b.data, {"snapshot_key": "runtime::limit=20", "ready": False})
+            await _wait_for_panel_snapshot(
+                plane,
+                "runtime",
+                {"panel": "runtime", "variant": "limit=8"},
+                variant_key="limit=8",
+            )
+            await _wait_for_panel_snapshot(
+                plane,
+                "runtime",
+                {"panel": "runtime", "variant": "limit=20"},
+                variant_key="limit=20",
+            )
+            self.assertIn(dashboard_snapshot_storage_key("runtime", "limit=8"), calls)
+            self.assertIn(dashboard_snapshot_storage_key("runtime", "limit=20"), calls)
+        finally:
+            await plane.stop()
+
+    async def test_default_variants_are_preheated_by_enqueue_all(self) -> None:
+        calls: list[str] = []
+
+        async def loader(snapshot_key: str) -> dict[str, Any]:
+            calls.append(snapshot_key)
+            return {"snapshot_key": snapshot_key}
+
+        plane = DashboardSnapshotPlane(
+            loader=loader,
+            default_factory=lambda _snapshot_key: {},
+            policies={"runtime": _policy()},
+            default_variants={"runtime": ("limit=8", "limit=20")},
+            scheduler_interval_seconds=60.0,
+        )
+        try:
+            await plane.enqueue_all(reason="test")
+            await _wait_for_panel_snapshot(
+                plane,
+                "runtime",
+                {"snapshot_key": "runtime::limit=8"},
+                variant_key="limit=8",
+            )
+            read = await plane.read_panel("runtime", variant_key="limit=20")
+            self.assertEqual(read.data, {"snapshot_key": "runtime::limit=20"})
+            self.assertEqual(set(calls), {"runtime::limit=8", "runtime::limit=20"})
         finally:
             await plane.stop()
 

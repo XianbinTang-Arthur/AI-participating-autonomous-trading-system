@@ -4,6 +4,7 @@ import asyncio
 from time import perf_counter
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import parse_qsl, urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi import Query
@@ -33,6 +34,7 @@ from aats.services.operator.dashboard_snapshot import (
     DASHBOARD_SNAPSHOT_PANEL_KEYS,
     DASHBOARD_SNAPSHOT_POLICIES,
     DashboardSnapshotPlane,
+    dashboard_snapshot_storage_parts,
 )
 from aats.services.operator.query_service import OperatorQueryService
 from aats.services.operator.ui_capabilities import ui_operating_mode_override_enabled
@@ -40,6 +42,26 @@ from aats.services.operator.ui_capabilities import ui_operating_mode_override_en
 
 auth_router = APIRouter(include_in_schema=False)
 _logger = get_logger("aats.api.auth")
+
+
+def _snapshot_variant_key(**params: Any) -> str:
+    normalized: list[tuple[str, str]] = []
+    for key, value in params.items():
+        if value is None:
+            continue
+        normalized.append((str(key), str(value)))
+    return urlencode(sorted(normalized))
+
+
+DASHBOARD_MATERIALIZED_SNAPSHOT_VARIANTS: dict[str, tuple[str, ...]] = {
+    "recentDecisions": (_snapshot_variant_key(limit=8, offset=0),),
+    "strategyAttribution": (_snapshot_variant_key(limit=200),),
+    "positionLifecycleAttribution": (
+        _snapshot_variant_key(limit=6),
+        _snapshot_variant_key(limit=8),
+    ),
+    "trialReviewSummary": (_snapshot_variant_key(segment_limit=100, window_days=7, period_count=4),),
+}
 
 
 class LoginRequest(BaseModel):
@@ -298,7 +320,38 @@ def _normalize_dashboard_panel_keys(panel_keys: list[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(filtered))
 
 
-def _dashboard_snapshot_default_payload(panel_key: str) -> dict[str, Any]:
+def _snapshot_variant_params(variant_key: str | None) -> dict[str, str]:
+    if not variant_key:
+        return {}
+    return {key: value for key, value in parse_qsl(variant_key, keep_blank_values=False)}
+
+
+def _snapshot_int_param(
+    params: dict[str, str],
+    key: str,
+    default: int,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    try:
+        value = int(params.get(key, default))
+    except (TypeError, ValueError):
+        value = default
+    if minimum is not None:
+        value = max(value, minimum)
+    if maximum is not None:
+        value = min(value, maximum)
+    return value
+
+
+def _dashboard_snapshot_panel_and_params(snapshot_key: str) -> tuple[str, dict[str, str]]:
+    panel_key, variant_key = dashboard_snapshot_storage_parts(snapshot_key)
+    return panel_key, _snapshot_variant_params(variant_key)
+
+
+def _dashboard_snapshot_default_payload(snapshot_key: str) -> dict[str, Any]:
+    panel_key, params = _dashboard_snapshot_panel_and_params(snapshot_key)
     if panel_key == "health":
         return {
             "runtime_state": "unknown",
@@ -371,6 +424,22 @@ def _dashboard_snapshot_default_payload(panel_key: str) -> dict[str, Any]:
         return {}
     if panel_key == "rdpTuningProposals":
         return {}
+    if panel_key == "recentDecisions":
+        limit = _snapshot_int_param(params, "limit", 8, minimum=1, maximum=100)
+        offset = _snapshot_int_param(params, "offset", 0, minimum=0, maximum=5000)
+        return {
+            "decisions": [],
+            "limit": limit,
+            "offset": offset,
+            "total_available": 0,
+            "has_more": False,
+        }
+    if panel_key == "strategyAttribution":
+        return {}
+    if panel_key == "positionLifecycleAttribution":
+        return {"lifecycles": []}
+    if panel_key == "trialReviewSummary":
+        return {"summary": {}, "recommendation": {}, "sections": {}}
     return {}
 
 
@@ -381,7 +450,8 @@ def _dashboard_snapshot_rdp_request(runtime: ApplicationRuntime) -> Any:
     )
 
 
-async def _load_dashboard_snapshot_panel(runtime: ApplicationRuntime, panel_key: str) -> dict[str, Any]:
+async def _load_dashboard_snapshot_panel(runtime: ApplicationRuntime, snapshot_key: str) -> dict[str, Any]:
+    panel_key, params = _dashboard_snapshot_panel_and_params(snapshot_key)
     query = OperatorQueryService(runtime)
     if panel_key == "aiRuntime":
         return dict(await query.ai_runtime_authoritative())
@@ -425,6 +495,25 @@ async def _load_dashboard_snapshot_panel(runtime: ApplicationRuntime, panel_key:
             return query.positions()
         if panel_key == "reconciliationLatest":
             return query.reconciliation_latest()
+        if panel_key == "recentDecisions":
+            return query.recent_decisions(
+                limit=_snapshot_int_param(params, "limit", 8, minimum=1, maximum=100),
+                offset=_snapshot_int_param(params, "offset", 0, minimum=0, maximum=5000),
+            )
+        if panel_key == "strategyAttribution":
+            return query.strategy_attribution_report(
+                limit=_snapshot_int_param(params, "limit", 200, minimum=1, maximum=1000)
+            )
+        if panel_key == "positionLifecycleAttribution":
+            return query.position_lifecycle_attribution(
+                limit=_snapshot_int_param(params, "limit", 8, minimum=1, maximum=500)
+            )
+        if panel_key == "trialReviewSummary":
+            return query.trial_review_summary(
+                segment_limit=_snapshot_int_param(params, "segment_limit", 100, minimum=1, maximum=500),
+                window_days=_snapshot_int_param(params, "window_days", 7, minimum=1, maximum=90),
+                period_count=_snapshot_int_param(params, "period_count", 4, minimum=1, maximum=12),
+            )
         if panel_key == "trialGuard":
             return query.trial_guard()
         if panel_key == "guardedLivePreflight":
@@ -475,6 +564,7 @@ def install_dashboard_snapshot_plane(runtime: ApplicationRuntime) -> DashboardSn
         loader=lambda panel_key: _load_dashboard_snapshot_panel(runtime, panel_key),
         default_factory=_dashboard_snapshot_default_payload,
         policies=DASHBOARD_SNAPSHOT_POLICIES,
+        default_variants=DASHBOARD_MATERIALIZED_SNAPSHOT_VARIANTS,
     )
 
 
@@ -522,6 +612,20 @@ def _dashboard_snapshot_plane(request: Request) -> DashboardSnapshotPlane | None
 #      check / inflight set 这段路径里没有 await）。
 _BUNDLE_CACHE_TTL_SECONDS = 2.0
 _DASHBOARD_BUNDLE_SLOW_MS = 2_000.0
+_DASHBOARD_BUNDLE_DEFAULT_PANEL_BUDGET_SECONDS = 2.0
+_DASHBOARD_BUNDLE_PANEL_BUDGET_SECONDS: dict[str, float] = {
+    "operatorUsers": 5.0,
+    "recentOrders": 4.0,
+    "recentFills": 4.0,
+    "trialReviewHistory": 4.0,
+    "exitExecutionActionHistoryPage": 5.0,
+    "aiRuntime": 5.0,
+    "aiOverview": 5.0,
+    "aiConfigModel": 5.0,
+}
+_DASHBOARD_BUNDLE_SYNC_PANEL_CONCURRENCY = 4
+_dashboard_bundle_sync_panel_semaphores: dict[int, tuple[Any, asyncio.Semaphore]] = {}
+_dashboard_bundle_background_panel_tasks: set[asyncio.Task[Any]] = set()
 _bundle_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _bundle_cache_inflight: dict[tuple[Any, ...], tuple[int, "asyncio.Future[dict[str, Any]]"]] = {}
 # 代际计数器：每次 invalidate 递增。inflight compute 完成后只有代际一致
@@ -555,9 +659,16 @@ def _bundle_cache_key(
     recent_ai_assessments: int,
     recent_ai_shadow_decisions: int,
     recent_ai_shadow_evaluations: int,
+    exit_execution_history_limit: int,
+    exit_execution_history_offset: int,
+    exit_execution_history_action: str | None,
+    exit_execution_history_parent: str | None,
+    exit_execution_history_actor: str | None,
+    exit_execution_history_window_hours: int | None,
 ) -> tuple[Any, ...]:
     identity = principal.identity if principal is not None else None
     role = principal.role if principal is not None else "anonymous"
+    includes_exit_history = "exitExecutionActionHistoryPage" in panel_keys
     return (
         identity or "anonymous",
         role,
@@ -572,7 +683,160 @@ def _bundle_cache_key(
         recent_ai_assessments,
         recent_ai_shadow_decisions,
         recent_ai_shadow_evaluations,
+        exit_execution_history_limit if includes_exit_history else 0,
+        exit_execution_history_offset if includes_exit_history else 0,
+        _cache_exit_execution_history_action(exit_execution_history_action) if includes_exit_history else None,
+        _clean_optional_str(exit_execution_history_parent) if includes_exit_history else None,
+        _clean_optional_str(exit_execution_history_actor) if includes_exit_history else None,
+        exit_execution_history_window_hours if includes_exit_history else None,
     )
+
+
+def _clean_optional_str(value: str | None) -> str | None:
+    normalized = str(value or "").strip()
+    return normalized or None
+
+
+def _cache_exit_execution_history_action(value: str | None) -> str | None:
+    normalized = str(value or "").strip()
+    if not normalized or normalized == "all":
+        return None
+    return normalized
+
+
+def _normalized_exit_execution_history_action(value: str | None) -> str | None:
+    normalized = str(value or "").strip()
+    if not normalized or normalized == "all":
+        return None
+    allowed = {"refresh_exchange_state", "retry_limit_lookup", "safe_cancel"}
+    if normalized not in allowed:
+        raise ValueError("exit_execution_history_action_invalid")
+    return normalized
+
+
+def _dashboard_panel_budget_seconds(panel_key: str) -> float:
+    return _DASHBOARD_BUNDLE_PANEL_BUDGET_SECONDS.get(panel_key, _DASHBOARD_BUNDLE_DEFAULT_PANEL_BUDGET_SECONDS)
+
+
+def _dashboard_panel_timeout_result(panel_key: str, budget_seconds: float, duration_ms: float) -> tuple[str, dict[str, Any], float]:
+    return (
+        panel_key,
+        {
+            "data": None,
+            "error": f"dashboard_bundle_panel_timeout:{budget_seconds:.3f}s",
+            "meta": {
+                "source": "request_time",
+                "status": "timeout",
+                "budget_seconds": budget_seconds,
+                "timed_out": True,
+            },
+        },
+        duration_ms,
+    )
+
+
+def _dashboard_bundle_sync_panel_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    key = id(loop)
+    entry = _dashboard_bundle_sync_panel_semaphores.get(key)
+    if entry is not None and entry[0] is loop:
+        return entry[1]
+    semaphore = asyncio.Semaphore(max(int(_DASHBOARD_BUNDLE_SYNC_PANEL_CONCURRENCY), 1))
+    _dashboard_bundle_sync_panel_semaphores[key] = (loop, semaphore)
+    return semaphore
+
+
+def _track_dashboard_background_panel_task(
+    task: asyncio.Task[tuple[str, dict[str, Any], float]],
+    *,
+    panel_key: str,
+    semaphore: asyncio.Semaphore,
+) -> None:
+    _dashboard_bundle_background_panel_tasks.add(task)
+
+    def _release(_task: asyncio.Task[tuple[str, dict[str, Any], float]]) -> None:
+        _dashboard_bundle_background_panel_tasks.discard(_task)
+        try:
+            _task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            log_event(
+                _logger,
+                "dashboard_bundle_background_panel_failed",
+                level="warning",
+                panel_key=panel_key,
+                error=type(exc).__name__,
+                message=str(exc),
+            )
+        finally:
+            semaphore.release()
+
+    task.add_done_callback(_release)
+
+
+async def _run_dashboard_sync_panel_with_budget(
+    panel_key: str,
+    *,
+    budget_seconds: float,
+    loader: Any,
+) -> tuple[str, dict[str, Any], float]:
+    panel_started_at = perf_counter()
+    semaphore = _dashboard_bundle_sync_panel_semaphore()
+    try:
+        await asyncio.wait_for(semaphore.acquire(), timeout=budget_seconds)
+    except TimeoutError:
+        return _dashboard_panel_timeout_result(
+            panel_key,
+            budget_seconds,
+            round((perf_counter() - panel_started_at) * 1000.0, 3),
+        )
+
+    remaining_budget = max(budget_seconds - (perf_counter() - panel_started_at), 0.001)
+    task = asyncio.create_task(
+        asyncio.to_thread(loader, panel_key),
+        name=f"dashboard-bundle-sync-panel-{panel_key}",
+    )
+    _track_dashboard_background_panel_task(task, panel_key=panel_key, semaphore=semaphore)
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=remaining_budget)
+    except TimeoutError:
+        log_event(
+            _logger,
+            "dashboard_bundle_panel_timeout_background_continues",
+            level="warning",
+            panel_key=panel_key,
+            budget_seconds=budget_seconds,
+        )
+        return _dashboard_panel_timeout_result(
+            panel_key,
+            budget_seconds,
+            round((perf_counter() - panel_started_at) * 1000.0, 3),
+        )
+
+
+def _dashboard_snapshot_variant_is_preheated(panel_key: str, variant_key: str | None) -> bool:
+    variants = DASHBOARD_MATERIALIZED_SNAPSHOT_VARIANTS.get(panel_key)
+    if not variants:
+        return variant_key is None
+    return variant_key in variants
+
+
+def _dashboard_bundle_snapshot_variant_key(
+    panel_key: str,
+    *,
+    view: str | None,
+    recent_decisions_limit: int,
+) -> str | None:
+    if panel_key == "recentDecisions":
+        return _snapshot_variant_key(limit=recent_decisions_limit, offset=0)
+    if panel_key == "strategyAttribution":
+        return _snapshot_variant_key(limit=200)
+    if panel_key == "positionLifecycleAttribution":
+        return _snapshot_variant_key(limit=6 if view == "strategy" else 8)
+    if panel_key == "trialReviewSummary":
+        return _snapshot_variant_key(segment_limit=100, window_days=7, period_count=4)
+    return None
 
 
 def _protected_dashboard_panel_payload(
@@ -588,6 +852,12 @@ def _protected_dashboard_panel_payload(
     recent_ai_assessments_limit: int,
     recent_ai_shadow_decisions_limit: int,
     recent_ai_shadow_evaluations_limit: int,
+    exit_execution_history_limit: int,
+    exit_execution_history_offset: int,
+    exit_execution_history_action: str | None,
+    exit_execution_history_parent: str | None,
+    exit_execution_history_actor: str | None,
+    exit_execution_history_window_hours: int | None,
 ) -> dict[str, Any]:
     if panel_key == "health":
         return _system_health_payload(request, query)
@@ -650,6 +920,15 @@ def _protected_dashboard_panel_payload(
         return query.replay_status()
     if panel_key == "replayRecentValidations":
         return query.replay_recent_validations(limit=recent_replay_validations_limit, offset=0)
+    if panel_key == "exitExecutionActionHistoryPage":
+        return query.exit_execution_action_history(
+            limit=exit_execution_history_limit,
+            offset=exit_execution_history_offset,
+            parent_intent_id=_clean_optional_str(exit_execution_history_parent),
+            action=_normalized_exit_execution_history_action(exit_execution_history_action),
+            actor=_clean_optional_str(exit_execution_history_actor),
+            window_hours=exit_execution_history_window_hours,
+        )
     if panel_key == "aiOverview":
         return query.ai_overview()
     if panel_key == "aiRuntime":
@@ -866,6 +1145,12 @@ async def dashboard_bundle(
     recent_ai_assessments: int = Query(default=8, alias="recentAIAssessments", ge=1, le=100),
     recent_ai_shadow_decisions: int = Query(default=8, alias="recentAIShadowDecisions", ge=1, le=100),
     recent_ai_shadow_evaluations: int = Query(default=8, alias="recentAIShadowEvaluations", ge=1, le=100),
+    exit_execution_history_limit: int = Query(default=20, alias="exitExecutionHistoryLimit", ge=1, le=100),
+    exit_execution_history_offset: int = Query(default=0, alias="exitExecutionHistoryOffset", ge=0, le=5000),
+    exit_execution_history_action: str | None = Query(default=None, alias="exitExecutionHistoryAction"),
+    exit_execution_history_parent: str | None = Query(default=None, alias="exitExecutionHistoryParent"),
+    exit_execution_history_actor: str | None = Query(default=None, alias="exitExecutionHistoryActor"),
+    exit_execution_history_window_hours: int | None = Query(default=None, alias="exitExecutionHistoryWindowHours", ge=1, le=24 * 30),
 ) -> dict[str, Any]:
     request_started_at = perf_counter()
     query = _query(request)
@@ -889,6 +1174,12 @@ async def dashboard_bundle(
         recent_ai_assessments=recent_ai_assessments,
         recent_ai_shadow_decisions=recent_ai_shadow_decisions,
         recent_ai_shadow_evaluations=recent_ai_shadow_evaluations,
+        exit_execution_history_limit=exit_execution_history_limit,
+        exit_execution_history_offset=exit_execution_history_offset,
+        exit_execution_history_action=exit_execution_history_action,
+        exit_execution_history_parent=exit_execution_history_parent,
+        exit_execution_history_actor=exit_execution_history_actor,
+        exit_execution_history_window_hours=exit_execution_history_window_hours,
     )
     loop = asyncio.get_running_loop()
     monotonic_now = loop.time()
@@ -960,7 +1251,20 @@ async def dashboard_bundle(
                 return None
             if read_error is not None:
                 return None
-            read = await snapshot_plane.read_panel(panel_key)
+            variant_key = _dashboard_bundle_snapshot_variant_key(
+                panel_key,
+                view=view,
+                recent_decisions_limit=recent_decisions,
+            )
+            read = await snapshot_plane.read_panel(panel_key, variant_key=variant_key)
+            if (
+                variant_key is not None
+                and not _dashboard_snapshot_variant_is_preheated(panel_key, variant_key)
+                and isinstance(read.meta, dict)
+                and read.meta.get("status") in {"missing", "error"}
+                and read.meta.get("loading")
+            ):
+                return None
             payload = read.data
             if panel_key == "strategyRuntime" and view == "strategy" and isinstance(payload, dict):
                 payload = _strategy_view_strategy_runtime_payload(payload)
@@ -991,6 +1295,12 @@ async def dashboard_bundle(
                         recent_ai_assessments_limit=recent_ai_assessments,
                         recent_ai_shadow_decisions_limit=recent_ai_shadow_decisions,
                         recent_ai_shadow_evaluations_limit=recent_ai_shadow_evaluations,
+                        exit_execution_history_limit=exit_execution_history_limit,
+                        exit_execution_history_offset=exit_execution_history_offset,
+                        exit_execution_history_action=exit_execution_history_action,
+                        exit_execution_history_parent=exit_execution_history_parent,
+                        exit_execution_history_actor=exit_execution_history_actor,
+                        exit_execution_history_window_hours=exit_execution_history_window_hours,
                     )
                     if panel_key == "strategyRuntime" and view == "strategy" and isinstance(payload, dict):
                         payload = _strategy_view_strategy_runtime_payload(payload)
@@ -1002,20 +1312,33 @@ async def dashboard_bundle(
             snapshot_result = await _load_snapshot_panel(panel_key)
             if snapshot_result is not None:
                 return snapshot_result
+            budget_seconds = _dashboard_panel_budget_seconds(panel_key)
             if panel_key not in {"aiRuntime", "aiOverview", "aiConfigModel"}:
-                return await asyncio.to_thread(_load_panel_sync, panel_key)
+                return await _run_dashboard_sync_panel_with_budget(
+                    panel_key,
+                    budget_seconds=budget_seconds,
+                    loader=_load_panel_sync,
+                )
             panel_started_at = perf_counter()
             try:
-                if read_error is not None:
-                    raise read_error
-                runtime_payload = await _load_authoritative_ai_runtime()
-                if panel_key == "aiRuntime":
-                    payload = runtime_payload
-                elif panel_key == "aiOverview":
-                    payload = query.ai_overview_with_runtime(runtime_payload)
-                else:
-                    payload = query.ai_config_summary_with_runtime(runtime_payload)
+                async def _load_ai_panel_payload() -> dict[str, Any]:
+                    if read_error is not None:
+                        raise read_error
+                    runtime_payload = await _load_authoritative_ai_runtime()
+                    if panel_key == "aiRuntime":
+                        return runtime_payload
+                    if panel_key == "aiOverview":
+                        return query.ai_overview_with_runtime(runtime_payload)
+                    return query.ai_config_summary_with_runtime(runtime_payload)
+
+                payload = await asyncio.wait_for(_load_ai_panel_payload(), timeout=budget_seconds)
                 return panel_key, {"data": payload, "error": None}, round((perf_counter() - panel_started_at) * 1000.0, 3)
+            except TimeoutError:
+                return _dashboard_panel_timeout_result(
+                    panel_key,
+                    budget_seconds,
+                    round((perf_counter() - panel_started_at) * 1000.0, 3),
+                )
             except Exception as exc:
                 return panel_key, {"data": None, "error": _dashboard_panel_error(exc)}, round((perf_counter() - panel_started_at) * 1000.0, 3)
 

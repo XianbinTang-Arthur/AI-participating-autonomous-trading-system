@@ -28,6 +28,11 @@ import { buildDecisionDrawer } from "./modules/detail-drawers.js";
 import { runDevSelfChecks } from "./modules/dev-self-check.js";
 import { ensureNotBusy, setFlash } from "./modules/flash.js";
 import {
+  buildDecisionHistoryDrawer,
+  buildStrategyAttributionDrawer,
+  buildTrialReviewDetailsDrawer,
+} from "./modules/report-drawers.js";
+import {
   EXIT_EXECUTION_HISTORY_ACTION_FILTERS,
   EXIT_EXECUTION_HISTORY_WINDOW_FILTERS,
   coerceReplayParentFilter,
@@ -41,6 +46,7 @@ import {
   DEFAULT_PAGE_LIMITS,
   EXIT_EXECUTION_FILTER_AFFECTED_VIEWS,
   PAGE_LIMIT_AFFECTED_VIEWS,
+  PAGE_LIMIT_PANEL_KEYS,
   PAGE_LOAD_STEP,
   createState,
   viewSpecs,
@@ -181,6 +187,7 @@ const {
   isRefreshInFlight,
   isViewFresh,
   refreshDashboard,
+  refreshPanels,
   scheduleRefresh,
   shouldRenderLoadingState,
 } = refreshController;
@@ -195,6 +202,7 @@ const riskActionHandlers = createRiskActionHandlers({
   localizedRecoveryReasons,
   openDrawer,
   refreshDashboard,
+  refreshPanels,
   renderBanners,
   requestJson,
   runAction,
@@ -727,6 +735,9 @@ const LOCAL_DISPATCH_ACTIONS = {
   "refresh-dashboard": () => refreshDashboard({ manual: true }),
   "navigate-view": (value) => navigateToView(value),
   "inspect-decision": (value) => inspectDecision(value),
+  "inspect-decision-history": () => inspectDecisionHistory(),
+  "inspect-strategy-attribution": () => inspectStrategyAttribution(),
+  "inspect-trial-review-details": () => inspectTrialReviewDetails(),
   "select-ai-operating-mode": (value, target) => selectAIOperatingMode(value, target),
   "manual-activate-strategy-profile": (value, target) => activateStrategyProfile(value, target),
   "restore-strategy-profile-auto": (_value, target) => restoreStrategyProfileAutomaticControl(target),
@@ -835,6 +846,36 @@ async function inspectDecision(decisionId) {
   }
 }
 
+async function inspectDecisionHistory() {
+  try {
+    const detail = await requestJson("/decision/recent?limit=50&offset=0");
+    openDrawer(buildDecisionHistoryDrawer(detail));
+  } catch (error) {
+    setFlash(state, "danger", error instanceof Error ? error.message : String(error));
+    renderBanners();
+  }
+}
+
+async function inspectStrategyAttribution() {
+  try {
+    const detail = await requestJson("/reports/strategy-attribution?limit=200");
+    openDrawer(buildStrategyAttributionDrawer(detail));
+  } catch (error) {
+    setFlash(state, "danger", error instanceof Error ? error.message : String(error));
+    renderBanners();
+  }
+}
+
+async function inspectTrialReviewDetails() {
+  try {
+    const detail = await requestJson("/reports/trial-review-details?profitability_limit=100&anomaly_limit=100&segment_limit=100&window_days=7&period_count=4");
+    openDrawer(buildTrialReviewDetailsDrawer(detail));
+  } catch (error) {
+    setFlash(state, "danger", error instanceof Error ? error.message : String(error));
+    renderBanners();
+  }
+}
+
 async function adjustPageLimit(key, delta) {
   const current = Number(state.pageLimits?.[key] || DEFAULT_PAGE_LIMITS[key] || 0);
   const nextValue = current + delta;
@@ -848,12 +889,22 @@ async function adjustPageLimit(key, delta) {
   // to that subset so unrelated views retain their stale-while-revalidate
   // cache entries.
   invalidateCachedViews(state, state.activeView, PAGE_LIMIT_AFFECTED_VIEWS[key] || null);
+  const panelKey = PAGE_LIMIT_PANEL_KEYS[key];
+  if (panelKey && (PAGE_LIMIT_AFFECTED_VIEWS[key] || []).includes(state.activeView)) {
+    await refreshPanels([panelKey]);
+    return;
+  }
   await refreshDashboard();
 }
 
 async function resetPageLimit(key) {
   state.pageLimits[key] = DEFAULT_PAGE_LIMITS[key] || state.pageLimits[key];
   invalidateCachedViews(state, state.activeView, PAGE_LIMIT_AFFECTED_VIEWS[key] || null);
+  const panelKey = PAGE_LIMIT_PANEL_KEYS[key];
+  if (panelKey && (PAGE_LIMIT_AFFECTED_VIEWS[key] || []).includes(state.activeView)) {
+    await refreshPanels([panelKey]);
+    return;
+  }
   await refreshDashboard();
 }
 

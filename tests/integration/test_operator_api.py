@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import threading
 import unittest
+import time
 from contextlib import ExitStack
 from pathlib import Path
 from datetime import timedelta
@@ -819,6 +821,10 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             "rdpWorkbenchAlerts",
             "rdpTuningOverview",
             "rdpTuningProposals",
+            "recentDecisions",
+            "strategyAttribution",
+            "positionLifecycleAttribution",
+            "trialReviewSummary",
         )
         plane = DashboardSnapshotPlane(
             loader=lambda panel_key: (_ for _ in ()).throw(
@@ -828,7 +834,20 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             policies={key: DASHBOARD_SNAPSHOT_POLICIES[key] for key in p2_keys},
         )
         for key in p2_keys:
-            await plane.seed_panel(key, {"snapshot_panel": key})
+            if key == "recentDecisions":
+                await plane.seed_panel(key, {"snapshot_panel": key}, variant_key="limit=8&offset=0")
+            elif key == "strategyAttribution":
+                await plane.seed_panel(key, {"snapshot_panel": key}, variant_key="limit=200")
+            elif key == "positionLifecycleAttribution":
+                await plane.seed_panel(key, {"snapshot_panel": key}, variant_key="limit=8")
+            elif key == "trialReviewSummary":
+                await plane.seed_panel(
+                    key,
+                    {"snapshot_panel": key},
+                    variant_key="period_count=4&segment_limit=100&window_days=7",
+                )
+            else:
+                await plane.seed_panel(key, {"snapshot_panel": key})
         app.state.dashboard_snapshot_plane = plane
 
         patched_methods = [
@@ -896,6 +915,26 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 "aats.api.rdp_control_summary.build_rdp_tuning_proposals",
                 side_effect=AssertionError("rdpTuningProposals should read dashboard snapshot"),
             ),
+            patch.object(
+                OperatorQueryService,
+                "recent_decisions",
+                side_effect=AssertionError("recentDecisions should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
+                "strategy_attribution_report",
+                side_effect=AssertionError("strategyAttribution should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
+                "position_lifecycle_attribution",
+                side_effect=AssertionError("positionLifecycleAttribution should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
+                "trial_review_summary",
+                side_effect=AssertionError("trialReviewSummary should read dashboard snapshot"),
+            ),
         ]
 
         with ExitStack() as stack:
@@ -916,6 +955,273 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(payload["panels"][key]["error"])
             self.assertEqual(payload["panels"][key]["meta"]["source"], "dashboard_snapshot")
         self.assertEqual(payload["panels"]["guardedLiveRunPacket"]["meta"]["priority"], "p2")
+
+    async def test_dashboard_bundle_supports_exit_execution_action_history_page_panel(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+        calls: list[dict[str, object]] = []
+
+        def fake_history(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "actions": [{"action": "safe_cancel", "parent_intent_id": "exit_parent:btc"}],
+                "limit": kwargs["limit"],
+                "offset": kwargs["offset"],
+                "total_available": 1,
+                "has_more": False,
+                "filters": {
+                    "parent_intent_id": kwargs["parent_intent_id"],
+                    "action": kwargs["action"],
+                    "actor": kwargs["actor"],
+                    "window_hours": kwargs["window_hours"],
+                },
+            }
+
+        with (
+            patch.object(OperatorQueryService, "exit_execution_action_history", fake_history),
+            TestClient(app) as client,
+        ):
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="exitExecution",
+                    panels=["exitExecutionActionHistoryPage"],
+                )
+                + "&exitExecutionHistoryLimit=50"
+                + "&exitExecutionHistoryOffset=25"
+                + "&exitExecutionHistoryAction=safe_cancel"
+                + "&exitExecutionHistoryParent=exit_parent%3Abtc"
+                + "&exitExecutionHistoryActor=ops"
+                + "&exitExecutionHistoryWindowHours=24"
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        panel = payload["panels"]["exitExecutionActionHistoryPage"]
+        self.assertIsNone(panel["error"])
+        self.assertEqual(panel["data"]["actions"][0]["action"], "safe_cancel")
+        self.assertEqual(panel["data"]["limit"], 50)
+        self.assertEqual(panel["data"]["offset"], 25)
+        self.assertEqual(calls[0]["parent_intent_id"], "exit_parent:btc")
+        self.assertEqual(calls[0]["action"], "safe_cancel")
+        self.assertEqual(calls[0]["actor"], "ops")
+        self.assertEqual(calls[0]["window_hours"], 24)
+
+    async def test_dashboard_bundle_reads_parameterized_snapshot_variants(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+        policies = {
+            key: DASHBOARD_SNAPSHOT_POLICIES[key]
+            for key in ("recentDecisions", "positionLifecycleAttribution")
+        }
+        plane = DashboardSnapshotPlane(
+            loader=lambda snapshot_key: (_ for _ in ()).throw(
+                AssertionError(f"request path computed snapshot panel {snapshot_key}")
+            ),
+            default_factory=lambda _snapshot_key: {},
+            policies=policies,
+        )
+        await plane.seed_panel(
+            "recentDecisions",
+            {"decisions": [{"decision_id": "snapshot-limit-20"}], "limit": 20},
+            variant_key="limit=20&offset=0",
+        )
+        await plane.seed_panel(
+            "positionLifecycleAttribution",
+            {"lifecycles": [{"lifecycle_id": "strategy-limit-6"}]},
+            variant_key="limit=6",
+        )
+        await plane.seed_panel(
+            "positionLifecycleAttribution",
+            {"lifecycles": [{"lifecycle_id": "execution-limit-8"}]},
+            variant_key="limit=8",
+        )
+        app.state.dashboard_snapshot_plane = plane
+
+        with (
+            patch.object(
+                OperatorQueryService,
+                "recent_decisions",
+                side_effect=AssertionError("recentDecisions should read parameterized dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
+                "position_lifecycle_attribution",
+                side_effect=AssertionError("positionLifecycleAttribution should read parameterized dashboard snapshot"),
+            ),
+            TestClient(app) as client,
+        ):
+            strategy_response = client.get(
+                self._dashboard_bundle_url(
+                    view="strategy",
+                    panels=["recentDecisions", "positionLifecycleAttribution"],
+                    recent_decisions=20,
+                )
+            )
+            execution_response = client.get(
+                self._dashboard_bundle_url(
+                    view="execution",
+                    panels=["positionLifecycleAttribution"],
+                )
+            )
+
+        self.assertEqual(strategy_response.status_code, 200, strategy_response.text)
+        strategy_payload = strategy_response.json()
+        self.assertEqual(
+            strategy_payload["panels"]["recentDecisions"]["data"]["decisions"][0]["decision_id"],
+            "snapshot-limit-20",
+        )
+        self.assertEqual(
+            strategy_payload["panels"]["positionLifecycleAttribution"]["data"]["lifecycles"][0]["lifecycle_id"],
+            "strategy-limit-6",
+        )
+        self.assertEqual(
+            strategy_payload["panels"]["positionLifecycleAttribution"]["meta"]["variant_key"],
+            "limit=6",
+        )
+        self.assertEqual(execution_response.status_code, 200, execution_response.text)
+        execution_payload = execution_response.json()
+        self.assertEqual(
+            execution_payload["panels"]["positionLifecycleAttribution"]["data"]["lifecycles"][0]["lifecycle_id"],
+            "execution-limit-8",
+        )
+
+    async def test_dashboard_bundle_falls_back_to_live_for_missing_recent_decisions_variant(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+        calls: list[dict[str, int]] = []
+
+        async def snapshot_loader(snapshot_key: str) -> dict[str, object]:
+            return {
+                "decisions": [{"decision_id": f"snapshot:{snapshot_key}"}],
+                "limit": 8,
+                "offset": 0,
+                "total_available": 1,
+                "has_more": False,
+            }
+
+        plane = DashboardSnapshotPlane(
+            loader=snapshot_loader,
+            default_factory=lambda _snapshot_key: {
+                "decisions": [],
+                "limit": 20,
+                "offset": 0,
+                "total_available": 0,
+                "has_more": False,
+            },
+            policies={"recentDecisions": DASHBOARD_SNAPSHOT_POLICIES["recentDecisions"]},
+        )
+        app.state.dashboard_snapshot_plane = plane
+
+        def fake_recent_decisions(self, *, limit: int, offset: int) -> dict[str, object]:
+            calls.append({"limit": limit, "offset": offset})
+            return {
+                "decisions": [{"decision_id": "live-limit-20"}],
+                "limit": limit,
+                "offset": offset,
+                "total_available": 20,
+                "has_more": False,
+            }
+
+        with (
+            patch.object(OperatorQueryService, "recent_decisions", fake_recent_decisions),
+            TestClient(app) as client,
+        ):
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="strategy",
+                    panels=["recentDecisions"],
+                    recent_decisions=20,
+                )
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        panel = payload["panels"]["recentDecisions"]
+        self.assertIsNone(panel["error"])
+        self.assertEqual(panel["data"]["decisions"][0]["decision_id"], "live-limit-20")
+        self.assertEqual(panel["data"]["limit"], 20)
+        self.assertEqual(calls, [{"limit": 20, "offset": 0}])
+
+    async def test_dashboard_bundle_live_panel_timeout_isolated_to_panel(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+
+        def slow_orders_recent(self, *, limit: int, offset: int) -> dict[str, object]:
+            time.sleep(0.05)
+            return {"orders": [], "limit": limit, "offset": offset}
+
+        with (
+            patch.object(OperatorQueryService, "orders_recent", slow_orders_recent),
+            patch.dict("aats.api.auth_routes._DASHBOARD_BUNDLE_PANEL_BUDGET_SECONDS", {"recentOrders": 0.01}),
+            TestClient(app) as client,
+        ):
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="execution",
+                    panels=["recentOrders", "recentFills"],
+                )
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["panels"]["recentOrders"]["error"], "dashboard_bundle_panel_timeout:0.010s")
+        self.assertEqual(payload["panels"]["recentOrders"]["meta"]["status"], "timeout")
+        self.assertIn("recentFills", payload["panels"])
+
+    async def test_dashboard_bundle_sync_panel_timeout_holds_concurrency_slot(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+        started = threading.Event()
+        release = threading.Event()
+        call_lock = threading.Lock()
+        calls = 0
+
+        def slow_orders_recent(self, *, limit: int, offset: int) -> dict[str, object]:
+            nonlocal calls
+            with call_lock:
+                calls += 1
+            started.set()
+            release.wait(timeout=1.0)
+            return {"orders": [], "limit": limit, "offset": offset}
+
+        with (
+            patch.object(OperatorQueryService, "orders_recent", slow_orders_recent),
+            patch.dict("aats.api.auth_routes._DASHBOARD_BUNDLE_PANEL_BUDGET_SECONDS", {"recentOrders": 0.02}),
+            patch("aats.api.auth_routes._DASHBOARD_BUNDLE_SYNC_PANEL_CONCURRENCY", 1),
+            patch.dict("aats.api.auth_routes._bundle_cache", {}, clear=True),
+            patch.dict("aats.api.auth_routes._bundle_cache_inflight", {}, clear=True),
+            patch.dict("aats.api.auth_routes._dashboard_bundle_sync_panel_semaphores", {}, clear=True),
+            TestClient(app) as client,
+        ):
+            first_response = client.get(
+                self._dashboard_bundle_url(
+                    view="execution",
+                    panels=["recentOrders"],
+                )
+            )
+            self.assertTrue(started.wait(timeout=0.3))
+            second_response = client.get(
+                self._dashboard_bundle_url(
+                    view="execution",
+                    panels=["recentOrders"],
+                    recent_orders=9,
+                )
+            )
+            release.set()
+            time.sleep(0.05)
+
+        self.assertEqual(first_response.status_code, 200, first_response.text)
+        self.assertEqual(second_response.status_code, 200, second_response.text)
+        self.assertEqual(
+            first_response.json()["panels"]["recentOrders"]["error"],
+            "dashboard_bundle_panel_timeout:0.020s",
+        )
+        self.assertEqual(
+            second_response.json()["panels"]["recentOrders"]["error"],
+            "dashboard_bundle_panel_timeout:0.020s",
+        )
+        with call_lock:
+            self.assertEqual(calls, 1)
 
     async def test_ai_config_read_paths_use_authoritative_runtime_when_gateway_has_no_ai_service(self) -> None:
         runtime = await self._runtime()

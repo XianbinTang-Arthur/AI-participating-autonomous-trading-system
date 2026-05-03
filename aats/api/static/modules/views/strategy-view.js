@@ -387,6 +387,7 @@ export function renderStrategySections(data) {
       panelKey: ["strategyAttribution", "positionLifecycleAttribution"],
       copy: "这里只保留最能解释“谁在赚钱、谁还占库存”的摘要，避免归因卡片本身反过来挤占工作区。",
       classes: "strategy-compact-card",
+      actions: `<div class="stack-actions table-actions--compact">${actionButton("查看完整归因", "inspect-strategy-attribution", "", "ghost")}</div>`,
       content: `
         ${summaryStrip([
           {
@@ -594,8 +595,10 @@ export function renderStrategySections(data) {
     strategyHistory: surfaceCard({
       title: "决策记录",
       kicker: "历史记录",
+      panelKey: "recentDecisions",
       copy: "这里只保留最近决策和快速详情；更老的记录继续按需展开，不再把历史本身放成主工作区。",
       classes: "strategy-compact-card",
+      actions: `<div class="stack-actions table-actions--compact">${actionButton("查看完整历史", "inspect-decision-history", "", "ghost")}</div>`,
       content: `${responsiveTable(
         decisionTableHeaders(decisionScene),
         recentDecisions.map((item) => [
@@ -3001,8 +3004,9 @@ function smartArbitrageBlockingSummary(candidate) {
 // 实际上是 dead code）。直接删掉，保留这个注释作为占位说明，避免有人凭旧
 // 文档/旧 grep 结果重新加回来。
 function renderTrialVerdictActions(workbenchActions, fallback) {
+  const detailsAction = actionButton("查看复盘明细", "inspect-trial-review-details", "", "ghost");
   if (Array.isArray(workbenchActions) && workbenchActions.length) {
-    return `<div class="stack-actions table-actions--compact">${workbenchActions.map(renderWorkbenchActionButton).join("")}</div>`;
+    return `<div class="stack-actions table-actions--compact">${workbenchActions.map(renderWorkbenchActionButton).join("")}${detailsAction}</div>`;
   }
   const { trialGuardStatus, trialGuardHardStopActive, trialVerdict } = fallback;
   const actions = [
@@ -3013,6 +3017,7 @@ function renderTrialVerdictActions(workbenchActions, fallback) {
       actionButton("查看委托与成交", "navigate-view", "execution", "ghost"),
       actionButton("记录本次复盘", "record-trial-review", "", "secondary"),
       actionButton("刷新当前状态", "refresh-dashboard", "", "warning"),
+      detailsAction,
     );
     return `<div class="stack-actions table-actions--compact">${actions.join("")}</div>`;
   }
@@ -3025,7 +3030,7 @@ function renderTrialVerdictActions(workbenchActions, fallback) {
   } else if (trialVerdict === "pause_trial") {
     actions.push(actionButton("记为暂停试盘并复盘", "record-scaling-review", "pause_trial", "warning"));
   }
-  actions.push(actionButton("记录本次复盘", "record-trial-review", "", "ghost"));
+  actions.push(actionButton("记录本次复盘", "record-trial-review", "", "ghost"), detailsAction);
   return `<div class="stack-actions table-actions--compact">${actions.join("")}</div>`;
 }
 

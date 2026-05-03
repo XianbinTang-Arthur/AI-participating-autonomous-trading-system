@@ -294,6 +294,9 @@ export function buildExitExecutionActionHistoryPath(state = {}) {
 }
 
 export function dashboardBundlePanelKeys(view, state = null, options = {}) {
+  if (Array.isArray(options.panelKeys) && options.panelKeys.length) {
+    return Array.from(new Set(options.panelKeys.map((key) => String(key || "").trim()).filter(Boolean)));
+  }
   const includeDeferred = options.includeDeferred !== false;
   const deferredOnly = options.deferredOnly === true;
   const deferredPanels = deferredPanelSetForView(view);
@@ -317,6 +320,7 @@ export function dashboardBundlePanelKeys(view, state = null, options = {}) {
 
 export function buildDashboardBundlePath(view, state = null, options = {}) {
   const limits = { ...DEFAULT_PAGE_LIMITS, ...(state?.pageLimits || {}) };
+  const panelKeys = dashboardBundlePanelKeys(view, state, options);
   const params = new URLSearchParams({
     view: String(view || "home"),
     recentDecisions: String(limits.recentDecisions),
@@ -327,10 +331,38 @@ export function buildDashboardBundlePath(view, state = null, options = {}) {
     recentAIShadowDecisions: String(limits.recentAIShadowDecisions),
     recentAIShadowEvaluations: String(limits.recentAIShadowEvaluations),
   });
-  dashboardBundlePanelKeys(view, state, options).forEach((key) => {
+  appendExitExecutionHistoryBundleParams(params, view, state, panelKeys);
+  panelKeys.forEach((key) => {
     params.append("panel", key);
   });
   return `/dashboard/bundle?${params.toString()}`;
+}
+
+function appendExitExecutionHistoryBundleParams(params, view, state = null, panelKeys = []) {
+  if (view !== "risk" && view !== "exitExecution") return;
+  if (!panelKeys.includes("exitExecutionActionHistoryPage")) return;
+  const history = view === "risk"
+    ? state?.ui?.risk?.exitExecutionHistory
+    : state?.ui?.exitExecution?.exitExecutionHistory;
+  if (!history) return;
+  params.set("exitExecutionHistoryLimit", String(Math.max(Number(history.limit) || 20, 1)));
+  params.set("exitExecutionHistoryOffset", String(Math.max(Number(history.offset) || 0, 0)));
+  const action = String(history.action || "").trim();
+  const parent = String(history.parent || "").trim();
+  const actor = String(history.actor || "").trim();
+  const windowHours = String(history.windowHours || "").trim();
+  if (action && action !== "all") {
+    params.set("exitExecutionHistoryAction", action);
+  }
+  if (parent) {
+    params.set("exitExecutionHistoryParent", parent);
+  }
+  if (actor) {
+    params.set("exitExecutionHistoryActor", actor);
+  }
+  if (windowHours && windowHours !== "all") {
+    params.set("exitExecutionHistoryWindowHours", windowHours);
+  }
 }
 
 export function buildDashboardBundleRequestPlan(view, state = null) {
@@ -356,6 +388,16 @@ export const PAGE_LIMIT_AFFECTED_VIEWS = Object.freeze({
   recentAIAssessments: Object.freeze(["aiAnalysis"]),
   recentAIShadowDecisions: Object.freeze(["aiAnalysis"]),
   recentAIShadowEvaluations: Object.freeze(["aiAnalysis"]),
+});
+
+export const PAGE_LIMIT_PANEL_KEYS = Object.freeze({
+  recentDecisions: "recentDecisions",
+  recentOrders: "recentOrders",
+  recentFills: "recentFills",
+  recentReplayValidations: "replayRecentValidations",
+  recentAIAssessments: "aiRecent",
+  recentAIShadowDecisions: "aiShadowRecent",
+  recentAIShadowEvaluations: "aiShadowEvaluations",
 });
 
 // The exit-execution action-history filters are embedded in the bundle URL

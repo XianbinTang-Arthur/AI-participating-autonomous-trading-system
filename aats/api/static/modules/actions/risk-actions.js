@@ -20,6 +20,7 @@ export function createRiskActionHandlers({
   localizedRecoveryReasons,
   openDrawer,
   refreshDashboard,
+  refreshPanels = null,
   renderBanners,
   requestJson,
   runAction,
@@ -354,6 +355,14 @@ export function createRiskActionHandlers({
     });
   }
 
+  async function refreshExitExecutionHistoryPanel() {
+    if (typeof refreshPanels === "function") {
+      await refreshPanels(["exitExecutionActionHistoryPage"], { manual: true });
+      return;
+    }
+    await refreshDashboard({ manual: true });
+  }
+
   async function applyExitExecutionHistoryWorkspaceFilters(target = null) {
     const historyState = activeExitExecutionHistoryState();
     historyState.offset = 0;
@@ -361,7 +370,7 @@ export function createRiskActionHandlers({
     if (state.activeView === "exitExecution") {
       syncActiveViewLocationState({ pushHistory: false });
     }
-    await refreshDashboard({ manual: true });
+    await refreshExitExecutionHistoryPanel();
     scrollExitExecutionWorkspaceIntoView(target);
   }
 
@@ -374,7 +383,7 @@ export function createRiskActionHandlers({
       syncActiveViewLocationState({ pushHistory: false });
     }
     syncExitExecutionHistoryFilterRoots();
-    await refreshDashboard({ manual: true });
+    await refreshExitExecutionHistoryPanel();
     scrollExitExecutionWorkspaceIntoView(target);
   }
 
@@ -394,7 +403,7 @@ export function createRiskActionHandlers({
     if (state.activeView === "exitExecution") {
       syncActiveViewLocationState({ pushHistory: false });
     }
-    await refreshDashboard({ manual: true });
+    await refreshExitExecutionHistoryPanel();
     scrollExitExecutionWorkspaceIntoView(target);
   }
 
