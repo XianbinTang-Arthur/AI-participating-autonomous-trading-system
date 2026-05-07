@@ -6,11 +6,24 @@ from aats.services.operator.account_queries import AccountQueryFacade
 
 
 class _FakeOwner:
-    def __init__(self, *, orders: list[dict], fills: list[dict] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        orders: list[dict],
+        fills: list[dict] | None = None,
+        order_count: int | None = None,
+        fill_count: int | None = None,
+        current_runtime_timestamps: set[str] | None = None,
+    ) -> None:
         self.orders = orders
         self.fills = fills or []
+        self.order_row_calls: list[dict] = []
+        self.fill_row_calls: list[dict] = []
+        self.current_runtime_timestamps = current_runtime_timestamps
         self.runtime = SimpleNamespace(
             execution_adapter=SimpleNamespace(readiness=lambda: {"ready": True}),
+            execution_order_repo=SimpleNamespace(count_orders=lambda: len(orders) if order_count is None else order_count),
+            execution_fill_repo_v2=SimpleNamespace(count_fills=lambda: len(self.fills) if fill_count is None else fill_count),
         )
 
     def latest_order(self):
@@ -37,14 +50,21 @@ class _FakeOwner:
     def execution_errors(self):
         return {"errors": []}
 
+    def _is_current_runtime_timestamp(self, value):
+        if self.current_runtime_timestamps is None:
+            return True
+        return str(value) in self.current_runtime_timestamps
+
     def _phase5_control_plane_enabled(self):
         return True
 
     def _phase5_order_rows(self, *, limit=None, offset=0):
+        self.order_row_calls.append({"limit": limit, "offset": offset})
         rows = self.orders[offset:]
         return rows[:limit] if limit is not None else rows
 
     def _phase5_fill_rows(self, *, limit=None, offset=0):
+        self.fill_row_calls.append({"limit": limit, "offset": offset})
         rows = self.fills[offset:]
         return rows[:limit] if limit is not None else rows
 
@@ -122,3 +142,85 @@ def test_execution_latest_does_not_mark_terminal_no_fill_when_decision_has_fill(
     payload = AccountQueryFacade(owner).build_execution_latest()
 
     assert payload["terminal_no_fill_explanation"] is None
+
+
+def test_execution_latest_marks_historical_order_and_fill_outside_current_runtime() -> None:
+    owner = _FakeOwner(
+        orders=[
+            {
+                "order_id": "order-stale",
+                "client_order_id": "client-stale",
+                "decision_id": "decision-stale",
+                "state": "FAILED",
+                "updated_at": "2026-04-27T09:49:54Z",
+                "product_type": "derivatives",
+                "margin_mode": "cross",
+                "symbol": "BTC-USDT-SWAP",
+            }
+        ],
+        fills=[
+            {
+                "fill_id": "fill-stale",
+                "decision_id": "decision-stale",
+                "order_id": "order-stale",
+                "ingestion_timestamp": "2026-04-27T09:50:00Z",
+                "product_type": "derivatives",
+                "margin_mode": "cross",
+                "symbol": "BTC-USDT-SWAP",
+            }
+        ],
+        current_runtime_timestamps=set(),
+    )
+
+    payload = AccountQueryFacade(owner).build_execution_latest()
+
+    assert payload["latest_order_is_current_runtime"] is False
+    assert payload["latest_fill_is_current_runtime"] is False
+
+
+def test_phase5_orders_recent_uses_bounded_page_fetch() -> None:
+    owner = _FakeOwner(
+        orders=[
+            {
+                "order_id": f"order_{index}",
+                "client_order_id": f"client_{index}",
+                "state": "FILLED",
+                "product_type": "derivatives",
+                "margin_mode": "cross",
+                "symbol": "BTC-USDT-SWAP",
+            }
+            for index in range(8)
+        ],
+        order_count=123,
+    )
+
+    payload = AccountQueryFacade(owner).build_orders_recent(limit=2, offset=3)
+
+    assert owner.order_row_calls == [{"limit": 2, "offset": 3}]
+    assert [item["order_id"] for item in payload["orders"]] == ["order_3", "order_4"]
+    assert payload["total_available"] == 123
+    assert payload["has_more"] is True
+
+
+def test_phase5_fills_recent_uses_bounded_page_fetch() -> None:
+    owner = _FakeOwner(
+        orders=[],
+        fills=[
+            {
+                "fill_id": f"fill_{index}",
+                "order_id": f"order_{index}",
+                "product_type": "derivatives",
+                "margin_mode": "cross",
+                "symbol": "BTC-USDT-SWAP",
+            }
+            for index in range(8)
+        ],
+        fill_count=88,
+    )
+
+    payload = AccountQueryFacade(owner).build_fills_recent(limit=3, offset=2)
+
+    assert owner.fill_row_calls == [{"limit": 3, "offset": 2}]
+    assert [item["fill_id"] for item in payload["fills"]] == ["fill_2", "fill_3", "fill_4"]
+    assert payload["total_available"] == 88
+    assert payload["has_more"] is True

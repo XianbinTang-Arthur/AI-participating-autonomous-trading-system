@@ -37,12 +37,14 @@ def activation_policy_history(
     *,
     limit: int | None = None,
 ) -> list[StrategyProfileActivationPolicyConfig]:
+    read_limit = limit or 5_000
     rows = [
         StrategyProfileActivationPolicyConfig.model_validate(item.payload)
         for item in reversed(
             service.event_store.by_topic_scoped(
                 topics.STRATEGY_PROFILE_ACTIVATION_POLICIES,
                 scope=service.runtime_state_scope,
+                limit=read_limit,
             )
         )
         if isinstance(item.payload, dict)

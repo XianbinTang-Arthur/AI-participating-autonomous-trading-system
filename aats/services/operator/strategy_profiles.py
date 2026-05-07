@@ -1729,6 +1729,7 @@ class StrategyProfileControlService:
                 self.event_store.by_topic_scoped(
                     topics.STRATEGY_PROFILE_OPTIMIZATION_REPORTS,
                     scope=self.runtime_state_scope,
+                    limit=5_000,
                 )
             )
             if isinstance(item.payload, dict)

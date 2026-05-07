@@ -324,14 +324,15 @@ class AccountQueryFacade:
 
     def build_orders_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
         if self.owner._phase5_control_plane_enabled():
-            all_orders = self.owner._phase5_order_rows()
-            orders = all_orders[offset : offset + limit]
+            orders = self.owner._phase5_order_rows(limit=limit, offset=offset)
+            count_orders = getattr(self.owner.runtime.execution_order_repo, "count_orders", None)
+            total_available = int(count_orders()) if callable(count_orders) else offset + len(orders)
             return {
                 "orders": [self.owner._execution_record_payload(order) for order in orders],
                 "limit": limit,
                 "offset": offset,
-                "total_available": len(all_orders),
-                "has_more": offset + len(orders) < len(all_orders),
+                "total_available": total_available,
+                "has_more": offset + len(orders) < total_available,
                 "truth_source": "execution_order_repo",
             }
         all_orders = sorted(
@@ -404,14 +405,15 @@ class AccountQueryFacade:
 
     def build_fills_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
         if self.owner._phase5_control_plane_enabled():
-            all_fills = self.owner._phase5_fill_rows()
-            fills = all_fills[offset : offset + limit]
+            fills = self.owner._phase5_fill_rows(limit=limit, offset=offset)
+            count_fills = getattr(self.owner.runtime.execution_fill_repo_v2, "count_fills", None)
+            total_available = int(count_fills()) if callable(count_fills) else offset + len(fills)
             return {
                 "fills": [self.owner._execution_record_payload(fill) for fill in fills],
                 "limit": limit,
                 "offset": offset,
-                "total_available": len(all_fills),
-                "has_more": offset + len(fills) < len(all_fills),
+                "total_available": total_available,
+                "has_more": offset + len(fills) < total_available,
                 "truth_source": "execution_fill_repo_v2",
             }
         all_fills = self.owner.recent_fills(limit=limit + offset)
@@ -456,14 +458,24 @@ class AccountQueryFacade:
     def build_execution_latest(self) -> dict[str, Any]:
         latest_order = self.owner.latest_order()
         latest_fill = self.owner.latest_fill()
+        latest_order_payload = self.owner._execution_record_payload(latest_order) if latest_order is not None else None
+        latest_fill_payload = self.owner._execution_record_payload(latest_fill) if latest_fill is not None else None
         latest_reconciliation = self.owner._latest_scoped_reconciliation()
         recovery = self.owner.recovery_view()
         terminal_no_fill_explanation = self._latest_terminal_no_fill_explanation(latest_order=latest_order)
         return {
             "mode": self.owner.system_mode(),
             "execution": self.owner.runtime.execution_adapter.readiness(),
-            "latest_order": self.owner._execution_record_payload(latest_order) if latest_order is not None else None,
-            "latest_fill": self.owner._execution_record_payload(latest_fill) if latest_fill is not None else None,
+            "latest_order": latest_order_payload,
+            "latest_fill": latest_fill_payload,
+            "latest_order_is_current_runtime": self._payload_is_current_runtime(
+                latest_order_payload,
+                keys=("updated_at", "last_update_ts", "created_at"),
+            ),
+            "latest_fill_is_current_runtime": self._payload_is_current_runtime(
+                latest_fill_payload,
+                keys=("ingestion_timestamp", "ingestion_ts", "created_at", "exchange_ts"),
+            ),
             "latest_reconciliation": latest_reconciliation.model_dump(mode="json") if latest_reconciliation is not None else None,
             "terminal_no_fill_explanation": terminal_no_fill_explanation,
             "recent_failures": self.owner.execution_errors()["errors"],
@@ -474,6 +486,22 @@ class AccountQueryFacade:
                 "balances": "ledger_accounts" if self.owner._phase5_control_plane_enabled() else "portfolio_snapshot",
             },
         }
+
+    def _payload_is_current_runtime(
+        self,
+        payload: dict[str, Any] | None,
+        *,
+        keys: tuple[str, ...],
+    ) -> bool | None:
+        if payload is None:
+            return None
+        timestamp = next((payload.get(key) for key in keys if payload.get(key) is not None), None)
+        if timestamp is None:
+            return None
+        checker = getattr(self.owner, "_is_current_runtime_timestamp", None)
+        if not callable(checker):
+            return True
+        return bool(checker(timestamp))
 
     def _latest_terminal_no_fill_explanation(self, *, latest_order: Any | None) -> dict[str, Any] | None:
         if latest_order is None:

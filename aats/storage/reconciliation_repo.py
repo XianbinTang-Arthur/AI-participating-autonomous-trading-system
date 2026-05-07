@@ -124,15 +124,25 @@ class InMemoryReconciliationRepository:
         self,
         *,
         scope: RuntimeStateScope,
+        limit: int | None = None,
     ) -> set[str]:
         """内存实现：过滤出 scope 内的 reports，取 portfolio_snapshot_ref 去重集合。
 
         返回语义等价于 ``{r.portfolio_snapshot_ref for r in history_for_scope(scope=scope)
         if r.portfolio_snapshot_ref}``，测试契约一致。
         """
-        return {
-            report.portfolio_snapshot_ref
+        reports = [
+            report
             for report in self._reports
             if reconciliation_report_matches_scope(report, scope)
-            and report.portfolio_snapshot_ref
+        ]
+        if limit is not None:
+            normalized_limit = max(int(limit), 0)
+            if normalized_limit <= 0:
+                return set()
+            reports = reports[-normalized_limit:]
+        return {
+            report.portfolio_snapshot_ref
+            for report in reports
+            if report.portfolio_snapshot_ref
         }

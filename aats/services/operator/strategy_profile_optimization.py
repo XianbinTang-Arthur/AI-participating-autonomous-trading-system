@@ -288,6 +288,7 @@ def shadow_summary_for_profiles(service: "StrategyProfileControlService") -> dic
             service.event_store.by_topic_scoped(
                 topics.AI_SHADOW_EVALUATIONS,
                 scope=service.runtime_state_scope,
+                limit=10,
             )
         )
     )[:10]

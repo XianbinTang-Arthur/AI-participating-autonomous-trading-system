@@ -265,10 +265,8 @@ class RuntimeQueryFacade:
     def ai_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
         if not self.owner._ai_history_visible():
             return {"assessments": [], "limit": limit, "offset": offset, "total_available": 0, "has_more": False}
-        rows = self.owner.runtime.event_store.by_topic_scoped(topics.AI_ASSESSMENTS, scope=self.owner.state_scope)
-        rows = list(reversed(rows))
-        return self.owner._paginate_rows(
-            rows,
+        return self.owner._paginate_recent_scoped_topic(
+            topics.AI_ASSESSMENTS,
             limit=limit,
             offset=offset,
             key="assessments",
@@ -284,10 +282,8 @@ class RuntimeQueryFacade:
     def ai_shadow_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
         if not self.owner._ai_history_visible():
             return {"shadow_decisions": [], "limit": limit, "offset": offset, "total_available": 0, "has_more": False}
-        rows = self.owner.runtime.event_store.by_topic_scoped(topics.AI_SHADOW_DECISIONS, scope=self.owner.state_scope)
-        rows = list(reversed(rows))
-        return self.owner._paginate_rows(
-            rows,
+        return self.owner._paginate_recent_scoped_topic(
+            topics.AI_SHADOW_DECISIONS,
             limit=limit,
             offset=offset,
             key="shadow_decisions",
@@ -297,10 +293,8 @@ class RuntimeQueryFacade:
     def ai_shadow_evaluations(self, *, limit: int, offset: int) -> dict[str, Any]:
         if not self.owner._ai_history_visible():
             return {"evaluations": [], "limit": limit, "offset": offset, "total_available": 0, "has_more": False}
-        rows = self.owner.runtime.event_store.by_topic_scoped(topics.AI_SHADOW_EVALUATIONS, scope=self.owner.state_scope)
-        rows = list(reversed(rows))
-        return self.owner._paginate_rows(
-            rows,
+        return self.owner._paginate_recent_scoped_topic(
+            topics.AI_SHADOW_EVALUATIONS,
             limit=limit,
             offset=offset,
             key="evaluations",
@@ -310,9 +304,8 @@ class RuntimeQueryFacade:
     def ai_performance_reports(self, *, limit: int, offset: int) -> dict[str, Any]:
         if not self.owner._ai_history_visible():
             return {"reports": [], "limit": limit, "offset": offset, "total_available": 0, "has_more": False}
-        rows = self.owner._recent_ai_performance_report_events()
-        return self.owner._paginate_rows(
-            rows,
+        return self.owner._paginate_recent_scoped_topic(
+            topics.AI_PERFORMANCE_REPORTS,
             limit=limit,
             offset=offset,
             key="reports",

@@ -179,6 +179,24 @@ class PostgresExecutionFillRepositoryV2:
             rows = session.scalars(query).all()
         return [_fill_row_to_dict(row) for row in rows]
 
+    def recent_fills(self, *, limit: int, offset: int = 0) -> list[dict]:
+        normalized_limit = max(int(limit), 0)
+        if normalized_limit <= 0:
+            return []
+        query = (
+            select(ExecutionFillModelV2)
+            .order_by(
+                ExecutionFillModelV2.ingestion_ts.desc(),
+                ExecutionFillModelV2.exchange_ts.desc(),
+                ExecutionFillModelV2.fill_id.desc(),
+            )
+            .offset(max(int(offset), 0))
+            .limit(normalized_limit)
+        )
+        with self.session_factory() as session:
+            rows = session.scalars(query).all()
+        return [_fill_row_to_dict(row) for row in rows]
+
     def count_fills(self) -> int:
         with self.session_factory() as session:
             return int(session.scalar(select(func.count()).select_from(ExecutionFillModelV2)) or 0)

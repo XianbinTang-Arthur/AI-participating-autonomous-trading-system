@@ -19,6 +19,10 @@ export function renderExecutionSections(data) {
   const executionLatest = data.executionLatest || {};
   const latestOrder = executionLatest.latest_order || null;
   const latestFill = executionLatest.latest_fill || null;
+  const latestOrderIsCurrent = executionLatest.latest_order_is_current_runtime !== false;
+  const latestFillIsCurrent = executionLatest.latest_fill_is_current_runtime !== false;
+  const latestOrderLabel = latestOrder && !latestOrderIsCurrent ? "历史最新委托" : "最新委托";
+  const latestFillLabel = latestFill && !latestFillIsCurrent ? "历史最新成交" : "最新成交";
   const latestReconciliation = executionLatest.latest_reconciliation || null;
   const ordersPayload = data.recentOrders || {};
   const fillsPayload = data.recentFills || {};
@@ -31,19 +35,21 @@ export function renderExecutionSections(data) {
   return {
     executionHero: primaryStatusPanel({
       eyebrow: "委托与成交",
-      headline: executionHeadline({ latestOrder, latestFill, errors }),
-      summary: latestOrder || latestFill ? "先看最近委托和成交有没有真正落地，再看是否仍有异常在收敛。" : "当前暂无新的委托和成交记录。",
-      tone: executionTone({ latestOrder, errors }),
-      actions: latestOrder?.client_order_id ? actionButton("查看最新委托", "inspect-order", latestOrder.client_order_id) : "",
+      headline: executionHeadline({ latestOrder, latestFill, latestOrderIsCurrent, latestFillIsCurrent, errors }),
+      summary: latestOrder || latestFill
+        ? "先看当前运行时是否有新委托和成交，再把历史终局记录与当前异常分开判断。"
+        : "当前暂无新的委托和成交记录。",
+      tone: executionTone({ latestOrder, latestOrderIsCurrent, errors }),
+      actions: latestOrder?.client_order_id ? actionButton(latestOrderIsCurrent ? "查看最新委托" : "查看历史委托", "inspect-order", latestOrder.client_order_id) : "",
       pills: [
-        pill(`最新委托 ${latestOrderStatusLabel(latestOrder)}`, executionTone({ latestOrder, errors })),
+        pill(`${latestOrderLabel} ${latestOrderStatusLabel(latestOrder)}`, executionTone({ latestOrder, latestOrderIsCurrent, errors })),
         pill(`活动委托 ${formatNumber(metrics.current_open_order_count, 0, "0")}`, metrics.current_open_order_count > 0 ? "warning" : "outline"),
         pill(`最近异常 ${formatNumber(errors.length, 0)}`, errors.length > 0 ? "danger" : "positive"),
       ],
       metrics: [
-        { label: "最新委托", value: latestOrderStatusLabel(latestOrder), meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托"), tone: toneForOrderStatus(latestOrder?.status) },
-        { label: "最近委托量", value: latestOrder?.requested_qty !== undefined ? formatSigned(latestOrder.requested_qty) : "暂无委托", meta: latestOrder ? `${readableState(latestOrder.order_type, "当前没有委托类型信息")} | ${latestOrder.symbol || "当前没有标的信息"}` : "当前没有最新委托" , tone: latestOrder ? "info" : "neutral" },
-        { label: "最新成交", value: latestFill ? formatNumber(latestFill.fill_qty) : "暂未成交", meta: latestFill ? `价格 ${formatNumber(latestFill.fill_price)} | ${middleEllipsis(latestFill.fill_id)}` : "当前暂无成交编号", tone: latestFill ? "positive" : "neutral" },
+        { label: latestOrderLabel, value: latestOrderStatusLabel(latestOrder), meta: latestOrder ? `${middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托")} | ${latestOrderIsCurrent ? "当前运行时" : "历史记录"}` : "暂未生成委托", tone: latestOrderTone(latestOrder, latestOrderIsCurrent) },
+        { label: "最近委托量", value: latestOrder?.requested_qty !== undefined ? formatSigned(latestOrder.requested_qty) : "暂无委托", meta: latestOrder ? `${readableState(latestOrder.order_type, "当前没有委托类型信息")} | ${latestOrder.symbol || "当前没有标的信息"}` : "当前没有最新委托" , tone: latestOrder && latestOrderIsCurrent ? "info" : "neutral" },
+        { label: latestFillLabel, value: latestFill ? formatNumber(latestFill.fill_qty) : "暂未成交", meta: latestFill ? `价格 ${formatNumber(latestFill.fill_price)} | ${middleEllipsis(latestFill.fill_id)} | ${latestFillIsCurrent ? "当前运行时" : "历史记录"}` : "当前暂无成交编号", tone: latestFill && latestFillIsCurrent ? "positive" : "neutral" },
         { label: "最新对账", value: latestReconciliation ? readableState(latestReconciliation.severity || "unknown") : "暂无对账", meta: middleEllipsis(latestReconciliation?.reconciliation_id, 10, 6, "暂时没有最新对账"), tone: latestReconciliation?.halt_required ? "danger" : latestReconciliation?.severity ? "warning" : "neutral" },
       ],
     }),
@@ -56,7 +62,7 @@ export function renderExecutionSections(data) {
         ? alertQueue(
             errors.slice(0, 6).map((item) => ({
               title: localizeError(item.message || item.status || "execution_issue"),
-              copy: item.order_id ? `关联委托：${item.order_id}` : "当前没有关联的委托编号。",
+              copy: item.order_id ? `关联委托：${item.order_id}` : "系统级异常，无关联委托。",
               meta: `${readableState(item.subsystem || "execution")} | ${formatMaybeTimestamp(item.observed_at || item.timestamp)}`,
               tone: item.severity === "error" ? "danger" : "warning",
               pill: pill(item.severity === "error" ? "错误" : "告警", item.severity === "error" ? "danger" : "warning"),
@@ -65,8 +71,8 @@ export function renderExecutionSections(data) {
           )
         : summaryStrip([
             { label: "异常数", value: "0", meta: "当前暂无新的执行异常", tone: "positive" },
-            { label: "最新委托状态", value: latestOrderStatusLabel(latestOrder), meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "当前没有委托编号"), tone: toneForOrderStatus(latestOrder?.status) },
-            { label: "最新成交状态", value: latestFill ? "已落库" : "暂无", meta: middleEllipsis(latestFill?.fill_id, 10, 6, "当前没有成交编号"), tone: latestFill ? "positive" : "neutral" },
+            { label: `${latestOrderLabel}状态`, value: latestOrderStatusLabel(latestOrder), meta: latestOrder ? `${middleEllipsis(latestOrder?.client_order_id, 10, 6, "当前没有委托编号")} | ${latestOrderIsCurrent ? "当前运行时" : "历史记录"}` : "当前没有委托编号", tone: latestOrderTone(latestOrder, latestOrderIsCurrent) },
+            { label: `${latestFillLabel}状态`, value: latestFill ? "已落库" : "暂无", meta: latestFill ? `${middleEllipsis(latestFill?.fill_id, 10, 6, "当前没有成交编号")} | ${latestFillIsCurrent ? "当前运行时" : "历史记录"}` : "当前没有成交编号", tone: latestFill && latestFillIsCurrent ? "positive" : "neutral" },
           ]),
     }),
     executionOrders: surfaceCard({
@@ -232,17 +238,24 @@ function renderFillGroups(recentFills) {
 
 // #11 修复：renderPaginationFooter 的本地定义已删除，统一到 components.js。
 
-function executionHeadline({ latestOrder, latestFill, errors }) {
-  if (errors.length > 0) return "执行链路存在异常";
-  if (!latestOrder) return "当前暂无新的委托";
-  if (latestFill) return `最新${fillSceneSummary(latestFill)}已落库`;
+function executionHeadline({ latestOrder, latestFill, latestOrderIsCurrent, latestFillIsCurrent, errors }) {
+  if (errors.length > 0) return errors.some((item) => item.order_id) ? "执行委托存在异常" : "执行子系统存在异常";
+  if (!latestOrder || !latestOrderIsCurrent) return "当前暂无新的委托";
+  if (latestFill && latestFillIsCurrent) return `最新${fillSceneSummary(latestFill)}已落库`;
   return `最近一笔${orderSceneSummary(latestOrder)}处于 ${readableState(latestOrder.status)} 阶段`;
 }
 
-function executionTone({ latestOrder, errors }) {
+function executionTone({ latestOrder, latestOrderIsCurrent, errors }) {
   if (errors.length > 0) return "danger";
+  if (!latestOrder || !latestOrderIsCurrent) return "neutral";
   if (["created", "submitting", "partially_filled", "cancel_pending"].includes(String(latestOrder?.status || "").toLowerCase())) return "warning";
   return "positive";
+}
+
+function latestOrderTone(order = null, isCurrentRuntime = true) {
+  if (!order) return "neutral";
+  if (!isCurrentRuntime) return "neutral";
+  return toneForOrderStatus(order.status);
 }
 
 function latestOrderStatusLabel(order = null) {

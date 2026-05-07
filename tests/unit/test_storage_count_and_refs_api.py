@@ -63,11 +63,12 @@ def _reconciliation_report(
     product_type: str,
     margin_mode: str,
     portfolio_snapshot_ref: str | None,
+    as_of_ts: datetime | None = None,
 ) -> ReconciliationReport:
     return ReconciliationReport(
         reconciliation_id=reconciliation_id,
         portfolio_snapshot_ref=portfolio_snapshot_ref,
-        as_of_ts=datetime.now(timezone.utc),
+        as_of_ts=as_of_ts or datetime.now(timezone.utc),
         product_type=product_type,
         margin_mode=margin_mode,
         allowed_symbols=["BTC-USDT" if product_type == "spot" else "BTC-USDT-SWAP"],
@@ -238,6 +239,20 @@ class TestReconciliationRepoPortfolioSnapshotRefs(unittest.TestCase):
             if r.portfolio_snapshot_ref
         }
         self.assertEqual(new_api, legacy_comprehension)
+
+    def test_limit_returns_refs_from_latest_reports_only(self) -> None:
+        repo = InMemoryReconciliationRepository()
+        for i, ref in enumerate(["old_1", "old_2", "new_1", "new_2"], start=1):
+            repo.save_report(_reconciliation_report(
+                reconciliation_id=f"recon_{i}",
+                product_type="spot",
+                margin_mode="cash",
+                portfolio_snapshot_ref=ref,
+            ))
+
+        refs = repo.portfolio_snapshot_refs_for_scope(scope=_spot_scope(), limit=2)
+
+        self.assertEqual(refs, {"new_1", "new_2"})
 
 
 if __name__ == "__main__":

@@ -383,6 +383,7 @@ class StrategyProfileRecommendationFacade:
                 self.owner.event_store.by_topic_scoped(
                     topics.STRATEGY_PROFILE_SELECTION_DECISIONS,
                     scope=self.owner.runtime_state_scope,
+                    limit=5_000,
                 )
             )
             if isinstance(item.payload, dict)

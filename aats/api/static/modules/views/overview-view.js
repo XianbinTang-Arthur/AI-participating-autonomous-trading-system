@@ -29,6 +29,10 @@ export function renderOverviewView(data) {
   const latestDecision = data.latestDecision || {};
   const latestOrder = data.executionLatest?.latest_order || null;
   const latestFill = data.executionLatest?.latest_fill || null;
+  const latestOrderIsCurrent = data.executionLatest?.latest_order_is_current_runtime !== false;
+  const latestFillIsCurrent = data.executionLatest?.latest_fill_is_current_runtime !== false;
+  const latestOrderLabel = latestOrder && !latestOrderIsCurrent ? "历史委托" : "最新委托";
+  const latestFillLabel = latestFill && !latestFillIsCurrent ? "历史成交" : "最新成交";
   const terminalNoFill = data.executionLatest?.terminal_no_fill_explanation || null;
   const reconciliation = data.reconciliationLatest?.reconciliation || null;
   const claimedSubmitGate = recovery.claimed_submit_recovery_gate || {};
@@ -48,6 +52,8 @@ export function renderOverviewView(data) {
     latestDecision,
     latestOrder,
     latestFill,
+    latestOrderIsCurrent,
+    latestFillIsCurrent,
     terminalNoFill,
     metrics,
     blockers,
@@ -94,7 +100,7 @@ export function renderOverviewView(data) {
           pills: [
             pill(`运行状态 ${runtimeStatusLabel}`, toneForRuntimeState(runtimeStateValue)),
             pill(`自动交易 ${tradingStatusLabel(recovery)}`, recovery.safe_to_trade ? "positive" : recovery.halted && recovery.resume_eligible ? "warning" : "danger"),
-            pill(`最新委托 ${latestOrder ? readableState(latestOrder.status) : "暂无委托"}`, toneForOrderStatus(latestOrder?.status)),
+            pill(`${latestOrderLabel} ${latestOrder ? readableState(latestOrder.status) : "暂无委托"}`, latestOrder && !latestOrderIsCurrent ? "outline" : toneForOrderStatus(latestOrder?.status)),
           ],
           metrics: [
             { label: "最新决策时间", value: formatMaybeTimestamp(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts), meta: formatRelativeAge(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts), tone: latestDecision.decision_id ? "info" : "neutral" },
@@ -126,8 +132,8 @@ export function renderOverviewView(data) {
           panelKey: ["executionLatest", "reconciliationLatest"],
           copy: "用一组摘要判断当前动作是否已经真正进入执行链路。",
           content: summaryStrip([
-            { label: "最新委托", value: latestOrder ? readableState(latestOrder.status) : "暂无委托", meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托"), tone: toneForOrderStatus(latestOrder?.status) },
-            { label: "最新成交", value: latestFill ? `${formatNumber(latestFill.fill_qty)} @ ${formatNumber(latestFill.fill_price)}` : "暂未成交", meta: middleEllipsis(latestFill?.fill_id, 10, 6, "当前暂无成交编号"), tone: latestFill ? "positive" : "neutral" },
+            { label: latestOrderLabel, value: latestOrder ? readableState(latestOrder.status) : "暂无委托", meta: latestOrder ? `${middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托")} | ${latestOrderIsCurrent ? "当前运行时" : "历史记录"}` : "暂未生成委托", tone: latestOrder && latestOrderIsCurrent ? toneForOrderStatus(latestOrder?.status) : "neutral" },
+            { label: latestFillLabel, value: latestFill ? `${formatNumber(latestFill.fill_qty)} @ ${formatNumber(latestFill.fill_price)}` : "暂未成交", meta: latestFill ? `${middleEllipsis(latestFill?.fill_id, 10, 6, "当前暂无成交编号")} | ${latestFillIsCurrent ? "当前运行时" : "历史记录"}` : "当前暂无成交编号", tone: latestFill && latestFillIsCurrent ? "positive" : "neutral" },
             { label: "对账结果", value: readableState(reconciliation?.severity || "unknown"), meta: middleEllipsis(reconciliation?.reconciliation_id, 10, 6, "暂时没有最新对账"), tone: reconciliation?.halt_required ? "danger" : toneForReconciliationSeverity(reconciliation?.severity) },
             { label: "活动委托", value: formatNumber(metrics.current_open_order_count, 0, "0"), meta: activityOrderMeta({ currentOpenOrderCount: metrics.current_open_order_count, positionCount: (portfolio.positions || []).length }), tone: metrics.current_open_order_count > 0 ? "warning" : "positive" },
           ]),
@@ -164,7 +170,7 @@ export function renderOverviewView(data) {
           kicker: "关键链路",
           panelKey: ["latestDecision", "executionLatest", "reconciliationLatest"],
           copy: "按时间把最近一次关键节点串起来，方便快速定位问题卡在哪一段链路。",
-          content: timeline(buildTimeline({ latestDecision, latestOrder, latestFill, terminalNoFill, reconciliation }), "当前暂无新的运行活动。"),
+          content: timeline(buildTimeline({ latestDecision, latestOrder, latestFill, latestOrderIsCurrent, latestFillIsCurrent, terminalNoFill, reconciliation }), "当前暂无新的运行活动。"),
         })}
       </div>
 
@@ -228,6 +234,8 @@ function buildOperatorTruthCockpit({
   latestDecision,
   latestOrder,
   latestFill,
+  latestOrderIsCurrent,
+  latestFillIsCurrent,
   terminalNoFill,
   metrics,
   blockers,
@@ -281,7 +289,7 @@ function buildOperatorTruthCockpit({
       {
         label: "决策到执行",
         value: latestDecision.decision_id ? overviewIntentLabel(latestDecision) : "暂无决策",
-        meta: latestOrder ? `委托 ${readableState(latestOrder.status)}` : "本轮暂未生成委托",
+        meta: latestOrder ? `${latestOrderIsCurrent ? "委托" : "历史委托"} ${readableState(latestOrder.status)}` : "本轮暂未生成委托",
         tone: decisionExecutionTone(latestDecision, latestOrder),
       },
       {
@@ -293,8 +301,8 @@ function buildOperatorTruthCockpit({
       {
         label: "成交证据",
         value: formatNumber(metrics.fill_count, 0),
-        meta: latestFill ? `${formatNumber(latestFill.fill_qty)} @ ${formatNumber(latestFill.fill_price)}` : "当前暂无最新成交",
-        tone: Number(metrics.fill_count || 0) > 0 ? "positive" : "neutral",
+        meta: latestFill ? `${latestFillIsCurrent ? "最新" : "历史"} ${formatNumber(latestFill.fill_qty)} @ ${formatNumber(latestFill.fill_price)}` : "当前暂无最新成交",
+        tone: Number(metrics.fill_count || 0) > 0 && latestFillIsCurrent ? "positive" : "neutral",
       },
       {
         label: "阻断队列",
@@ -568,7 +576,7 @@ function formatLegValue(position = {}, side) {
   return `${qty} / ${notional}`;
 }
 
-function buildTimeline({ latestDecision, latestOrder, latestFill, terminalNoFill, reconciliation }) {
+function buildTimeline({ latestDecision, latestOrder, latestFill, latestOrderIsCurrent, latestFillIsCurrent, terminalNoFill, reconciliation }) {
   return [
     latestDecision?.decision_id
       ? {
@@ -581,20 +589,20 @@ function buildTimeline({ latestDecision, latestOrder, latestFill, terminalNoFill
       : null,
     latestOrder?.client_order_id
       ? {
-          title: "最新委托",
+          title: latestOrderIsCurrent ? "最新委托" : "历史最新委托",
           subtitle: latestOrder.client_order_id,
           detail: `${readableState(latestOrder.status)} | ${formatSigned(latestOrder.requested_qty)}`,
           timestamp: formatMaybeTimestamp(latestOrder.last_update_ts || latestOrder.created_at),
-          pill: pill("执行", toneForOrderStatus(latestOrder.status)),
+          pill: pill("执行", latestOrderIsCurrent ? toneForOrderStatus(latestOrder.status) : "outline"),
         }
       : null,
     latestFill?.fill_id
       ? {
-          title: "最新成交",
+          title: latestFillIsCurrent ? "最新成交" : "历史最新成交",
           subtitle: latestFill.fill_id,
           detail: `${formatNumber(latestFill.fill_qty)} @ ${formatNumber(latestFill.fill_price)}`,
           timestamp: formatMaybeTimestamp(latestFill.ingestion_timestamp),
-          pill: pill("成交", "positive"),
+          pill: pill("成交", latestFillIsCurrent ? "positive" : "outline"),
         }
       : null,
     hasTerminalNoFill(terminalNoFill)

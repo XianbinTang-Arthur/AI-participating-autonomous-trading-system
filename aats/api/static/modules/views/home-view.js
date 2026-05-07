@@ -33,6 +33,8 @@ export function renderHomeView(data) {
   const latestDecision = data.latestDecision || {};
   const latestOrder = data.executionLatest?.latest_order || null;
   const latestFill = data.executionLatest?.latest_fill || null;
+  const latestOrderIsCurrent = data.executionLatest?.latest_order_is_current_runtime !== false;
+  const latestFillIsCurrent = data.executionLatest?.latest_fill_is_current_runtime !== false;
   const reconciliation = data.reconciliationLatest?.reconciliation || null;
   const account = data.accountState || {};
   const metrics = data.metrics || {};
@@ -93,10 +95,10 @@ export function renderHomeView(data) {
                 <h3>${latestDecision.decision_id ? "最新动作已生成" : "当前暂无新的交易动作"}</h3>
                 <div class="inline-pills">
                   ${pill(`决策 ${latestDecision.decision_id ? "已更新" : "暂无"}`, latestDecision.decision_id ? "info" : "outline")}
-                  ${pill(`委托 ${readableState(latestOrder?.status || "unknown")}`, latestOrder ? "info" : "outline")}
+                  ${pill(`${latestOrder && !latestOrderIsCurrent ? "历史委托" : "委托"} ${readableState(latestOrder?.status || "unknown")}`, latestOrder && latestOrderIsCurrent ? "info" : "outline")}
                 </div>
               </div>
-              <p>${latestActionNarrative({ latestDecision, latestOrder, latestFill, reconciliation })}</p>
+              <p>${latestActionNarrative({ latestDecision, latestOrder, latestFill, latestOrderIsCurrent, latestFillIsCurrent, reconciliation })}</p>
             </div>
           `,
         })}
@@ -135,7 +137,7 @@ function displayExecutionRouteMeta(value) {
   return "标准执行路径";
 }
 
-function latestActionNarrative({ latestDecision, latestOrder, latestFill, reconciliation }) {
+function latestActionNarrative({ latestDecision, latestOrder, latestFill, latestOrderIsCurrent, latestFillIsCurrent, reconciliation }) {
   if (!latestDecision.decision_id) {
     return "系统最近没有形成新的策略决策，当前更适合先确认账户同步、对账状态和风控条件。";
   }
@@ -144,8 +146,8 @@ function latestActionNarrative({ latestDecision, latestOrder, latestFill, reconc
   const parentSignalSummary = readableOverlayParentSignalSummary(latestDecision.position_target || {}, "");
   return `${formatRelativeAge(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts)}，系统针对 ${symbol} 形成了 ${decisionText} 的判断。`
     + `${parentSignalSummary ? ` 父腿信号为 ${parentSignalSummary}。` : ""}`
-    + `${latestOrder ? ` 最近一笔委托状态为 ${readableState(latestOrder.status)}。` : " 本轮暂未生成新委托。"}` 
-    + `${latestFill ? ` 最新一笔成交已落库，数量 ${formatNumber(latestFill.fill_qty)}。` : " 当前暂无新的成交落库。"}` 
+    + `${latestOrder ? ` ${latestOrderIsCurrent ? "最近一笔委托" : "历史最新委托"}状态为 ${readableState(latestOrder.status)}。` : " 本轮暂未生成新委托。"}`
+    + `${latestFill ? ` ${latestFillIsCurrent ? "最新一笔成交" : "历史最新成交"}已落库，数量 ${formatNumber(latestFill.fill_qty)}。` : " 当前暂无新的成交落库。"}`
     + `${reconciliation ? ` 最近对账结论为 ${readableState(reconciliation.severity)}。` : " 当前暂无新的对账结论。"}`;
 }
 

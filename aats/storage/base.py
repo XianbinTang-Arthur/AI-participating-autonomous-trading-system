@@ -441,6 +441,7 @@ class ReconciliationRepository(Protocol):
         self,
         *,
         scope: RuntimeStateScope,
+        limit: int | None = None,
     ) -> set[str]:
         """返回指定 scope 下所有对账报告引用的 portfolio_snapshot_ref 去重集合。
 

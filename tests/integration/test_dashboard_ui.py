@@ -7077,6 +7077,71 @@ console.log(JSON.stringify({
         self.assertIn('"showsNegativeFeeCost":true', stdout)
         self.assertIn('"showsPositiveFeeRebate":true', stdout)
 
+    def test_execution_view_marks_historical_order_and_orderless_subsystem_error(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderExecutionSections } from './aats/api/static/modules/views/execution-view.js';
+
+const sections = renderExecutionSections({
+  executionLatest: {
+    latest_order: {
+      client_order_id: 'client_stale',
+      status: 'FAILED',
+      requested_qty: 0.001,
+      order_type: 'market',
+      symbol: 'BTC-USDT-SWAP',
+      created_at: '2026-04-27T09:49:54Z',
+      last_update_ts: '2026-04-27T09:49:54Z',
+    },
+    latest_order_is_current_runtime: false,
+    latest_fill: {
+      fill_id: 'fill_stale',
+      fill_qty: 0.001,
+      fill_price: 78025.4,
+      ingestion_timestamp: '2026-04-27T09:50:00Z',
+    },
+    latest_fill_is_current_runtime: false,
+  },
+  recentOrders: { orders: [] },
+  recentFills: { fills: [] },
+  executionErrors: {
+    errors: [
+      {
+        subsystem: 'db_housekeeping',
+        severity: 'error',
+        message: 'db_housekeeping_failed',
+        observed_at: '2026-05-07T19:16:25+08:00',
+      },
+    ],
+  },
+  metrics: { current_open_order_count: 0 },
+});
+
+const html = `${sections.executionHero}${sections.executionExceptions}`;
+console.log(JSON.stringify({
+  showsHistoricalOrder: html.includes('历史最新委托'),
+  showsHistoricalFill: html.includes('历史最新成交'),
+  showsSubsystemHeadline: html.includes('执行子系统存在异常'),
+  describesOrderlessError: html.includes('系统级异常，无关联委托。'),
+  hidesOldGenericHeadline: !html.includes('执行链路存在异常'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"showsHistoricalOrder":true', stdout)
+        self.assertIn('"showsHistoricalFill":true', stdout)
+        self.assertIn('"showsSubsystemHeadline":true', stdout)
+        self.assertIn('"describesOrderlessError":true', stdout)
+        self.assertIn('"hidesOldGenericHeadline":true', stdout)
+
     def test_execution_view_surfaces_lifecycle_diagnostics_with_detail_action(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """

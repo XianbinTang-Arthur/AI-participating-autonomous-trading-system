@@ -19,5 +19,10 @@ class BlockerQueryFacade:
         return self.owner._build_blocker_control().model_dump(mode="json")
 
     def blocker_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
-        rows = [item.payload for item in reversed(self.owner.runtime.event_store.by_topic(topics.BLOCKER_SNAPSHOTS))]
-        return self.owner._paginate_rows(rows, limit=limit, offset=offset, key="history")
+        return self.owner._paginate_recent_topic(
+            topics.BLOCKER_SNAPSHOTS,
+            limit=limit,
+            offset=offset,
+            key="history",
+            serializer=lambda item: item.payload,
+        )

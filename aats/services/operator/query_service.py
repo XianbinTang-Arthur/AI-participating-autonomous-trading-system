@@ -131,6 +131,8 @@ _ORDERBOOK_DIFF_SEQUENCE_MISSING_EVIDENCE = (
     "local_orderbook_diff_checksum_not_exposed",
 )
 _ORDERBOOK_DIFF_PAYLOAD_PERSISTED_STATUS = "local_snapshot_row_sequence_validated_diff_payload_persisted"
+_LIVE_DASHBOARD_EVENT_LIMIT = 5_000
+_PHASE5_SCOPE_FETCH_MULTIPLIER = 4
 
 
 def _orderbook_payload_missing_evidence_by_side(
@@ -659,8 +661,11 @@ class OperatorQueryService:
         window_hours: int | None = None,
     ) -> list[dict[str, Any]]:
         actions = self._cached(
-            "operator_action_events",
-            lambda: self.runtime.event_store.by_topic(topics.OPERATOR_ACTIONS),
+            "operator_action_recent_events",
+            lambda: self.runtime.event_store.recent_by_topic(
+                topics.OPERATOR_ACTIONS,
+                limit=_LIVE_DASHBOARD_EVENT_LIMIT,
+            ),
         )
         rows: list[tuple[datetime, dict[str, Any]]] = []
         normalized_parent_intent_id = str(parent_intent_id or "").strip().lower()
@@ -1283,20 +1288,38 @@ class OperatorQueryService:
     def _phase5_order_rows(self, *, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
         if not self._phase5_control_plane_enabled():
             return []
-        rows = self.runtime.execution_order_repo.list_orders(limit=limit, offset=offset)
+        normalized_offset = max(int(offset), 0)
+        if limit is None:
+            repo_limit = _LIVE_DASHBOARD_EVENT_LIMIT
+        else:
+            fetch_limit = max(int(limit), 0) + normalized_offset
+            repo_limit = max(fetch_limit * _PHASE5_SCOPE_FETCH_MULTIPLIER, fetch_limit)
+        rows = self.runtime.execution_order_repo.list_orders(limit=repo_limit, offset=0)
         allowed_symbols = set(self.state_scope.allowed_symbols)
-        return [
+        scoped = [
             row
             for row in rows
             if row.get("product_type") == self.state_scope.product_type
             and row.get("margin_mode") == self.state_scope.margin_mode
             and (not allowed_symbols or row.get("symbol") in allowed_symbols)
         ]
+        if normalized_offset:
+            scoped = scoped[normalized_offset:]
+        if limit is not None:
+            scoped = scoped[:limit]
+        return scoped
 
     def _phase5_fill_rows(self, *, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
         if not self._phase5_control_plane_enabled():
             return []
-        rows = list(reversed(self.runtime.execution_fill_repo_v2.fills_since(limit=None)))
+        normalized_offset = max(int(offset), 0)
+        if limit is None:
+            rows = self._phase5_recent_fill_repo_rows(limit=_LIVE_DASHBOARD_EVENT_LIMIT)
+        else:
+            fetch_limit = max(int(limit), 0) + normalized_offset
+            rows = self._phase5_recent_fill_repo_rows(
+                limit=max(fetch_limit * _PHASE5_SCOPE_FETCH_MULTIPLIER, fetch_limit),
+            )
         allowed_symbols = set(self.state_scope.allowed_symbols)
         scoped = [
             row
@@ -1305,11 +1328,18 @@ class OperatorQueryService:
             and row.get("raw_payload", {}).get("margin_mode", self.state_scope.margin_mode) == self.state_scope.margin_mode
             and (not allowed_symbols or row.get("symbol") in allowed_symbols)
         ]
-        if offset:
-            scoped = scoped[offset:]
+        if normalized_offset:
+            scoped = scoped[normalized_offset:]
         if limit is not None:
             scoped = scoped[:limit]
         return scoped
+
+    def _phase5_recent_fill_repo_rows(self, *, limit: int) -> list[dict[str, Any]]:
+        repo = self.runtime.execution_fill_repo_v2
+        recent_fills = getattr(repo, "recent_fills", None)
+        if callable(recent_fills):
+            return recent_fills(limit=limit, offset=0)
+        return list(reversed(repo.fills_since(limit=limit)))
 
     def _phase5_balance_view(self) -> dict[str, Decimal]:
         if not self._phase5_control_plane_enabled():
@@ -4682,6 +4712,62 @@ class OperatorQueryService:
             "has_more": offset + len(paged_rows) < total_available,
         }
 
+    def _paginate_recent_topic(
+        self,
+        topic: str,
+        *,
+        limit: int,
+        offset: int,
+        key: str,
+        serializer=None,
+    ) -> dict[str, Any]:
+        normalized_limit = max(int(limit), 1)
+        normalized_offset = max(int(offset), 0)
+        fetch_limit = normalized_limit + normalized_offset
+        rows = list(reversed(self.runtime.event_store.recent_by_topic(topic, limit=fetch_limit)))
+        paged_rows = rows[normalized_offset: normalized_offset + normalized_limit]
+        payloads = [serializer(item) for item in paged_rows] if serializer is not None else list(paged_rows)
+        total_available = self.runtime.event_store.count(topic=topic)
+        return {
+            key: payloads,
+            "limit": normalized_limit,
+            "offset": normalized_offset,
+            "total_available": total_available,
+            "has_more": normalized_offset + len(paged_rows) < total_available,
+        }
+
+    def _paginate_recent_scoped_topic(
+        self,
+        topic: str,
+        *,
+        limit: int,
+        offset: int,
+        key: str,
+        serializer=None,
+    ) -> dict[str, Any]:
+        normalized_limit = max(int(limit), 1)
+        normalized_offset = max(int(offset), 0)
+        fetch_limit = normalized_limit + normalized_offset
+        rows = list(
+            reversed(
+                self.runtime.event_store.by_topic_scoped(
+                    topic,
+                    scope=self.state_scope,
+                    limit=fetch_limit,
+                )
+            )
+        )
+        paged_rows = rows[normalized_offset: normalized_offset + normalized_limit]
+        payloads = [serializer(item) for item in paged_rows] if serializer is not None else list(paged_rows)
+        total_available = self.runtime.event_store.count_by_topic_scoped(topic, scope=self.state_scope)
+        return {
+            key: payloads,
+            "limit": normalized_limit,
+            "offset": normalized_offset,
+            "total_available": total_available,
+            "has_more": normalized_offset + len(paged_rows) < total_available,
+        }
+
     def latest_order(self):
         if self._phase5_control_plane_enabled():
             rows = self._phase5_order_rows(limit=1)
@@ -6023,6 +6109,7 @@ class OperatorQueryService:
                 self.runtime.event_store.by_topic_scoped(
                     topics.AI_SHADOW_EVALUATIONS,
                     scope=self.state_scope,
+                    limit=limit or _LIVE_DASHBOARD_EVENT_LIMIT,
                 )
             )
         )
@@ -6038,6 +6125,7 @@ class OperatorQueryService:
                 self.runtime.event_store.by_topic_scoped(
                     topics.AI_PERFORMANCE_REPORTS,
                     scope=self.state_scope,
+                    limit=limit or _LIVE_DASHBOARD_EVENT_LIMIT,
                 )
             )
         )
@@ -6051,6 +6139,7 @@ class OperatorQueryService:
                 self.runtime.event_store.by_topic_scoped(
                     topics.STRATEGY_PROFILE_OPTIMIZATION_REPORTS,
                     scope=self.state_scope,
+                    limit=limit or _LIVE_DASHBOARD_EVENT_LIMIT,
                 )
             )
         )
@@ -6064,6 +6153,7 @@ class OperatorQueryService:
                 self.runtime.event_store.by_topic_scoped(
                     topics.STRATEGY_PROFILE_SELECTION_DECISIONS,
                     scope=self.state_scope,
+                    limit=limit or _LIVE_DASHBOARD_EVENT_LIMIT,
                 )
             )
         )
@@ -6384,8 +6474,11 @@ class OperatorQueryService:
 
     def latest_operator_action(self, action: str) -> dict[str, Any] | None:
         actions = self._cached(
-            "operator_action_events",
-            lambda: self.runtime.event_store.by_topic(topics.OPERATOR_ACTIONS),
+            "operator_action_recent_events",
+            lambda: self.runtime.event_store.recent_by_topic(
+                topics.OPERATOR_ACTIONS,
+                limit=_LIVE_DASHBOARD_EVENT_LIMIT,
+            ),
         )
         for item in reversed(actions):
             if item.payload.get("action") == action:
@@ -6401,8 +6494,11 @@ class OperatorQueryService:
         offset: int = 0,
     ) -> dict[str, Any]:
         actions = self._cached(
-            "operator_action_events",
-            lambda: self.runtime.event_store.by_topic(topics.OPERATOR_ACTIONS),
+            "operator_action_recent_events",
+            lambda: self.runtime.event_store.recent_by_topic(
+                topics.OPERATOR_ACTIONS,
+                limit=_LIVE_DASHBOARD_EVENT_LIMIT,
+            ),
         )
         rows: list[dict[str, Any]] = []
         for item in reversed(actions):
@@ -10142,9 +10238,8 @@ class OperatorQueryService:
         }
 
     def recent_risks(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
-        rows = list(reversed(self.runtime.event_store.by_topic(topics.RISK_DECISIONS)))
-        return self._paginate_rows(
-            rows,
+        return self._paginate_recent_topic(
+            topics.RISK_DECISIONS,
             limit=limit,
             offset=offset,
             key="risks",
@@ -10253,8 +10348,13 @@ class OperatorQueryService:
         return self._latest_topic_summary(topics.POLICY_DECISIONS)
 
     def recent_policies(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
-        rows = list(reversed(self.runtime.event_store.by_topic(topics.POLICY_DECISIONS)))
-        return self._paginate_rows(rows, limit=limit, offset=offset, key="policies", serializer=lambda item: item.payload)
+        return self._paginate_recent_topic(
+            topics.POLICY_DECISIONS,
+            limit=limit,
+            offset=offset,
+            key="policies",
+            serializer=lambda item: item.payload,
+        )
 
     def _build_blockers(self) -> list[dict[str, Any]]:
         snapshot = self._build_blocker_control()
@@ -10290,8 +10390,8 @@ class OperatorQueryService:
         # 对 event_store 热表（~545K 行 / 6.2GB）而言单路可达 45s，叠加 12 路
         # 并发让 wall time 飙到 79s。改为用 SQL 层的 count(*) / DISTINCT 直接
         # 得到 int / set[str]，避免 jsonb 反序列化与 Python 行对象构造。
-        # snapshot_events 因为下游 snapshot_fill_ids 需要 payload，继续保留
-        # 全量拉取，实测 1.75s，非主要瓶颈（follow-up 独立处理）。
+        # snapshot_events 因为下游 snapshot_fill_ids 需要 payload，仅取在线窗口
+        # 内最新 N 条；完整审计历史仍由 replay/audit 路径显式读取。
         phase1_queries = {
             "snapshot": self._latest_scoped_snapshot,
             "metrics": self.runtime.metrics.snapshot,
@@ -10305,14 +10405,20 @@ class OperatorQueryService:
                 topics.DECISION_CONTEXTS,
                 scope=self.state_scope,
             ),
+            "portfolio_snapshot_event_count": lambda: self.runtime.event_store.count_by_topic_scoped(
+                topics.PORTFOLIO_SNAPSHOTS,
+                scope=self.state_scope,
+            ),
             "snapshot_events": lambda: list(
                 self.runtime.event_store.by_topic_scoped(
                     topics.PORTFOLIO_SNAPSHOTS,
                     scope=self.state_scope,
+                    limit=_LIVE_DASHBOARD_EVENT_LIMIT,
                 )
             ),
             "reconciliation_refs": lambda: self.runtime.reconciliation_repo.portfolio_snapshot_refs_for_scope(
                 scope=self.state_scope,
+                limit=_LIVE_DASHBOARD_EVENT_LIMIT,
             ),
             "rejections": lambda: order_states_for_scope(
                 self.runtime.execution_repo,
@@ -10332,6 +10438,7 @@ class OperatorQueryService:
         phase1_shadow = r["phase1_shadow"]
         order_intent_event_count = r["order_intent_event_count"]
         decision_context_event_count = r["decision_context_event_count"]
+        portfolio_snapshot_event_count = r["portfolio_snapshot_event_count"]
         snapshot_events = r["snapshot_events"]
         reconciliation_refs = r["reconciliation_refs"]
 
@@ -10349,7 +10456,9 @@ class OperatorQueryService:
             "processing_failure_count": metrics.get("processing_failures", 0),
             "portfolio_snapshot_repair_count": metrics.get("portfolio_snapshot_repairs", 0),
             "current_open_order_count": len(r["open_orders"]),
-            "portfolio_snapshot_count": len(snapshot_events),
+            "portfolio_snapshot_count": portfolio_snapshot_event_count,
+            "portfolio_snapshot_recent_window_count": len(snapshot_events),
+            "snapshot_reconciliation_window_limit": _LIVE_DASHBOARD_EVENT_LIMIT,
             "fill_without_snapshot_count": sum(1 for fill in fills if fill.fill_id not in snapshot_fill_ids),
             "snapshot_without_reconciliation_count": sum(
                 1 for event in snapshot_events if event.event_id not in reconciliation_refs
@@ -10494,7 +10603,7 @@ class OperatorQueryService:
     def _build_phase1_shadow_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
         rows: list[dict[str, Any]] = []
 
-        for item in reversed(self.runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)):
+        for item in reversed(self.runtime.event_store.recent_by_topic(topics.OPERATOR_ACTIONS, limit=_LIVE_DASHBOARD_EVENT_LIMIT)):
             if item.payload.get("action") != "phase1_shadow_review":
                 continue
             rows.append(
@@ -10511,7 +10620,9 @@ class OperatorQueryService:
                 }
             )
 
-        for item in reversed(self.runtime.event_store.by_topic(topics.EXECUTION_ERROR_SUMMARIES)):
+        for item in reversed(
+            self.runtime.event_store.recent_by_topic(topics.EXECUTION_ERROR_SUMMARIES, limit=_LIVE_DASHBOARD_EVENT_LIMIT)
+        ):
             if item.key != "phase1_shadow" and item.payload.get("subsystem") != "phase1_shadow":
                 continue
             rows.append(
@@ -10528,7 +10639,9 @@ class OperatorQueryService:
                 }
             )
 
-        for item in reversed(self.runtime.event_store.by_topic(topics.PROCESSING_FAILURES)):
+        for item in reversed(
+            self.runtime.event_store.recent_by_topic(topics.PROCESSING_FAILURES, limit=_LIVE_DASHBOARD_EVENT_LIMIT)
+        ):
             if item.key != "phase1_shadow" and item.payload.get("subsystem") != "phase1_shadow":
                 continue
             rows.append(
@@ -11799,8 +11912,11 @@ class OperatorQueryService:
 
     def _latest_trial_review_action(self) -> dict[str, Any] | None:
         actions = self._cached(
-            "operator_action_events",
-            lambda: self.runtime.event_store.by_topic(topics.OPERATOR_ACTIONS),
+            "operator_action_recent_events",
+            lambda: self.runtime.event_store.recent_by_topic(
+                topics.OPERATOR_ACTIONS,
+                limit=_LIVE_DASHBOARD_EVENT_LIMIT,
+            ),
         )
         for item in reversed(actions):
             action = str(item.payload.get("action") or "")
@@ -11814,8 +11930,11 @@ class OperatorQueryService:
 
     def _trial_review_history_payload(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
         actions = self._cached(
-            "operator_action_events",
-            lambda: self.runtime.event_store.by_topic(topics.OPERATOR_ACTIONS),
+            "operator_action_recent_events",
+            lambda: self.runtime.event_store.recent_by_topic(
+                topics.OPERATOR_ACTIONS,
+                limit=_LIVE_DASHBOARD_EVENT_LIMIT,
+            ),
         )
         rows: list[dict[str, Any]] = []
         for item in reversed(actions):

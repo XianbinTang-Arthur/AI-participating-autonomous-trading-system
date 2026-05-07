@@ -290,6 +290,7 @@ class PostgresReconciliationRepository:
         self,
         *,
         scope: RuntimeStateScope,
+        limit: int | None = None,
     ) -> set[str]:
         """SQL 层面 ``SELECT DISTINCT portfolio_snapshot_ref``，不拉 payload。
 
@@ -304,14 +305,28 @@ class PostgresReconciliationRepository:
         "snapshot_without_reconciliation" 聚合）。
         """
         portfolio_snapshot_ref = ReconciliationReportModel.payload["portfolio_snapshot_ref"].as_string()
-        query = (
-            select(portfolio_snapshot_ref)
+        base_query = (
+            select(portfolio_snapshot_ref.label("portfolio_snapshot_ref"))
             .where(ReconciliationReportModel.product_type == scope.product_type)
             .where(ReconciliationReportModel.margin_mode == scope.margin_mode)
             .where(portfolio_snapshot_ref.isnot(None))
             .where(portfolio_snapshot_ref != "")
-            .distinct()
         )
+        if limit is not None:
+            normalized_limit = max(int(limit), 0)
+            if normalized_limit <= 0:
+                return set()
+            recent_refs = (
+                base_query.order_by(
+                    desc(ReconciliationReportModel.as_of_ts),
+                    desc(ReconciliationReportModel.reconciliation_id),
+                )
+                .limit(normalized_limit)
+                .subquery()
+            )
+            query = select(recent_refs.c.portfolio_snapshot_ref).distinct()
+        else:
+            query = base_query.distinct()
         with self.session_factory() as session:
             return set(session.scalars(query).all())
 
