@@ -170,6 +170,70 @@ class DashboardSnapshotPlaneTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await plane.stop()
 
+    async def test_refresh_timeout_releases_priority_slot_for_queued_panel(self) -> None:
+        slow_started = asyncio.Event()
+        cancel_seen = asyncio.Event()
+        release_slow = asyncio.Event()
+        slow_finished = asyncio.Event()
+
+        async def loader(panel_key: str) -> dict[str, Any]:
+            if panel_key == "runtime":
+                slow_started.set()
+                try:
+                    await asyncio.sleep(10.0)
+                except asyncio.CancelledError:
+                    cancel_seen.set()
+                    await release_slow.wait()
+                    slow_finished.set()
+                return {"panel": panel_key, "unexpected": True}
+            return {"panel": panel_key, "ready": True}
+
+        plane = DashboardSnapshotPlane(
+            loader=loader,
+            default_factory=lambda panel_key: {"panel": panel_key, "ready": False},
+            policies={
+                "runtime": DashboardSnapshotPolicy(
+                    panel_key="runtime",
+                    ttl_seconds=60.0,
+                    stale_after_seconds=60.0,
+                    hard_expire_seconds=120.0,
+                    timeout_seconds=0.02,
+                    priority="p1",
+                ),
+                "health": DashboardSnapshotPolicy(
+                    panel_key="health",
+                    ttl_seconds=60.0,
+                    stale_after_seconds=60.0,
+                    hard_expire_seconds=120.0,
+                    timeout_seconds=1.0,
+                    priority="p1",
+                ),
+            },
+            scheduler_interval_seconds=60.0,
+            priority_concurrency={"p1": 1},
+        )
+        try:
+            self.assertTrue(await plane.enqueue("runtime", reason="test_slow"))
+            self.assertTrue(await plane.enqueue("health", reason="test_fast"))
+            await asyncio.wait_for(slow_started.wait(), timeout=1.0)
+            await asyncio.wait_for(cancel_seen.wait(), timeout=1.0)
+
+            await asyncio.wait_for(
+                _wait_for_panel_snapshot(plane, "health", {"panel": "health", "ready": True}),
+                timeout=1.0,
+            )
+            read = await plane.read_panel("runtime")
+
+            self.assertEqual(read.data, {"panel": "runtime", "ready": False})
+            self.assertEqual(read.error, "dashboard_snapshot_refresh_failed")
+            self.assertEqual(read.meta["status"], "error")
+            self.assertIn("dashboard_snapshot_refresh_timeout", read.meta["last_error"])
+        finally:
+            release_slow.set()
+            if cancel_seen.is_set() and not slow_finished.is_set():
+                await asyncio.wait_for(slow_finished.wait(), timeout=1.0)
+            await plane.stop()
+
     async def test_stale_snapshot_is_served_while_refresh_runs(self) -> None:
         loader_called = asyncio.Event()
 
