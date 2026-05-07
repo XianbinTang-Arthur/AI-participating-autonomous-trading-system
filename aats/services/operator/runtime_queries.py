@@ -427,7 +427,11 @@ class RuntimeQueryFacade:
                 "audit_replay": {
                     "ready": True,
                     "fresh": bool(self.owner.runtime.replay_validation_history),
-                    "audit_record_count": self.owner.runtime.audit_repo.count(),
+                    "audit_record_count": self.owner._cached_ttl(
+                        f"audit_record_count:{self.owner._scope_cache_fragment()}",
+                        300,
+                        self.owner.runtime.audit_repo.count,
+                    ),
                     "last_replay_validation": (
                         self.owner.runtime.replay_validation_history[-1]
                         if self.owner.runtime.replay_validation_history

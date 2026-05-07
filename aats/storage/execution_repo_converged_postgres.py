@@ -338,14 +338,23 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
         query = select(ExecutionFillModelV2)
         if since is not None:
             query = query.where(ExecutionFillModelV2.ingestion_ts >= since)
-        query = self._scope_fill_query(query, scope).order_by(
-            ExecutionFillModelV2.ingestion_ts.asc(),
-            ExecutionFillModelV2.fill_id.asc(),
-        )
         if limit is not None:
+            if limit <= 0:
+                return []
+            query = self._scope_fill_query(query, scope).order_by(
+                ExecutionFillModelV2.ingestion_ts.desc(),
+                ExecutionFillModelV2.fill_id.desc(),
+            )
             query = query.limit(limit)
+        else:
+            query = self._scope_fill_query(query, scope).order_by(
+                ExecutionFillModelV2.ingestion_ts.asc(),
+                ExecutionFillModelV2.fill_id.asc(),
+            )
         with self.session_factory() as session:
             rows = session.execute(query).scalars().all()
+        if limit is not None:
+            rows = list(reversed(rows))
         return [self._hydrate_fill(_fill_model_to_dict(row)) for row in rows]
 
     @staticmethod

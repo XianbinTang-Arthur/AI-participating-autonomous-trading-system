@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, literal_column, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -270,9 +270,16 @@ class PostgresReconciliationRepository:
             .order_by(ReconciliationReportModel.as_of_ts, ReconciliationReportModel.reconciliation_id)
         )
         if limit is not None:
-            query = query.limit(limit)
+            if limit <= 0:
+                return []
+            query = query.order_by(None).order_by(
+                desc(ReconciliationReportModel.as_of_ts),
+                desc(ReconciliationReportModel.reconciliation_id),
+            ).limit(limit)
         with self.session_factory() as session:
             rows = session.scalars(query).all()
+        if limit is not None:
+            rows = list(reversed(rows))
         return [self._to_report(row) for row in rows]
 
     def latest_for_scope(self, *, scope: RuntimeStateScope) -> ReconciliationReport | None:
@@ -304,7 +311,14 @@ class PostgresReconciliationRepository:
         DISTINCT。NULL ref 被过滤（业务上 snapshot_ref=NULL 的对账不参与
         "snapshot_without_reconciliation" 聚合）。
         """
-        portfolio_snapshot_ref = ReconciliationReportModel.payload["portfolio_snapshot_ref"].as_string()
+        # Keep the JSON key literal so PostgreSQL can match the live expression
+        # index on ``payload ->> 'portfolio_snapshot_ref'``. SQLAlchemy's JSON
+        # accessor parameterizes the key, which led PG to prefer the plain
+        # as_of_ts index and repeatedly read heap payload pages on dashboard
+        # refresh.
+        portfolio_snapshot_ref = literal_column(
+            "(reconciliation_reports.payload ->> 'portfolio_snapshot_ref')"
+        )
         base_query = (
             select(portfolio_snapshot_ref.label("portfolio_snapshot_ref"))
             .where(ReconciliationReportModel.product_type == scope.product_type)

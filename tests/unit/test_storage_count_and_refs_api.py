@@ -13,13 +13,24 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import EventEnvelope, utc_now
+from aats.schemas.execution import FillEvent, OrderState
+from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.event_store import InMemoryEventStore
+from aats.storage.execution_fill_repo_v2_postgres import PostgresExecutionFillRepositoryV2
+from aats.storage.execution_repo_postgres import PostgresExecutionRepository
+from aats.storage.portfolio_repo_postgres import PostgresPortfolioRepository
 from aats.storage.reconciliation_repo import InMemoryReconciliationRepository
+from aats.storage.reconciliation_repo_postgres import PostgresReconciliationRepository
+from aats.storage.sqlalchemy_models import Base
 
 
 def _spot_scope() -> RuntimeStateScope:
@@ -78,6 +89,87 @@ def _reconciliation_report(
         position_diff={},
         severity="OK",
         halt_required=False,
+    )
+
+
+def _session_factory() -> sessionmaker[Session]:
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine, expire_on_commit=False, future=True)
+
+
+def _portfolio_snapshot(
+    *,
+    decision_id: str,
+    snapshot_ts: datetime,
+    product_type: str = "spot",
+    margin_mode: str = "cash",
+) -> PortfolioSnapshot:
+    return PortfolioSnapshot(
+        decision_id=decision_id,
+        snapshot_ts=snapshot_ts,
+        balances={"USDT": Decimal("100")},
+        positions=[],
+        realized_pnl=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        total_equity=Decimal("100"),
+        gross_exposure=Decimal("0"),
+        net_exposure=Decimal("0"),
+        product_type=product_type,  # type: ignore[arg-type]
+        margin_mode=margin_mode,  # type: ignore[arg-type]
+    )
+
+
+def _fill_event(
+    *,
+    fill_id: str,
+    fill_ts: datetime,
+    product_type: str = "spot",
+    margin_mode: str = "cash",
+    symbol: str = "BTC-USDT",
+) -> FillEvent:
+    return FillEvent(
+        fill_id=fill_id,
+        decision_id=f"decision_{fill_id}",
+        intent_id=f"intent_{fill_id}",
+        client_order_id=f"client_{fill_id}",
+        exchange_order_id=f"exchange_{fill_id}",
+        symbol=symbol,
+        side="buy",
+        fill_qty=Decimal("0.01"),
+        fill_price=Decimal("100"),
+        fee_amount=Decimal("0.01"),
+        liquidity_role="taker",
+        exchange_timestamp=fill_ts,
+        ingestion_timestamp=fill_ts,
+        product_type=product_type,  # type: ignore[arg-type]
+        margin_mode=margin_mode,  # type: ignore[arg-type]
+    )
+
+
+def _order_state(
+    *,
+    client_order_id: str,
+    created_at: datetime,
+    last_update_ts: datetime | None = None,
+    product_type: str = "spot",
+    margin_mode: str = "cash",
+    symbol: str = "BTC-USDT",
+) -> OrderState:
+    return OrderState(
+        decision_id=f"decision_{client_order_id}",
+        intent_id=f"intent_{client_order_id}",
+        symbol=symbol,
+        client_order_id=client_order_id,
+        status="SUBMITTED",
+        created_at=created_at,
+        submitted_ts=created_at,
+        last_update_ts=last_update_ts,
+        requested_qty=Decimal("0.01"),
+        filled_qty=Decimal("0"),
+        remaining_qty=Decimal("0.01"),
+        product_type=product_type,  # type: ignore[arg-type]
+        margin_mode=margin_mode,  # type: ignore[arg-type]
     )
 
 
@@ -253,6 +345,85 @@ class TestReconciliationRepoPortfolioSnapshotRefs(unittest.TestCase):
         refs = repo.portfolio_snapshot_refs_for_scope(scope=_spot_scope(), limit=2)
 
         self.assertEqual(refs, {"new_1", "new_2"})
+
+
+class TestPostgresScopedLimitSemantics(unittest.TestCase):
+    def test_portfolio_history_for_scope_limit_returns_latest_rows_in_chronological_order(self) -> None:
+        repo = PostgresPortfolioRepository(_session_factory())
+        base_ts = datetime(2026, 5, 7, tzinfo=timezone.utc)
+        for index in range(4):
+            repo.save_snapshot(_portfolio_snapshot(
+                decision_id=f"decision_{index + 1}",
+                snapshot_ts=base_ts + timedelta(minutes=index),
+            ))
+
+        rows = repo.history_for_scope(scope=_spot_scope(), limit=2)
+
+        self.assertEqual([row.decision_id for row in rows], ["decision_3", "decision_4"])
+
+    def test_reconciliation_history_for_scope_limit_returns_latest_rows_in_chronological_order(self) -> None:
+        repo = PostgresReconciliationRepository(_session_factory())
+        base_ts = datetime(2026, 5, 7, tzinfo=timezone.utc)
+        for index in range(4):
+            repo.save_report(_reconciliation_report(
+                reconciliation_id=f"recon_{index + 1}",
+                product_type="spot",
+                margin_mode="cash",
+                portfolio_snapshot_ref=f"snap_{index + 1}",
+                as_of_ts=base_ts + timedelta(minutes=index),
+            ))
+
+        rows = repo.history_for_scope(scope=_spot_scope(), limit=2)
+
+        self.assertEqual([row.reconciliation_id for row in rows], ["recon_3", "recon_4"])
+
+    def test_legacy_execution_fills_for_scope_limit_returns_latest_rows_in_chronological_order(self) -> None:
+        repo = PostgresExecutionRepository(_session_factory())
+        base_ts = datetime(2026, 5, 7, tzinfo=timezone.utc)
+        for index in range(4):
+            repo.save_fill(_fill_event(
+                fill_id=f"fill_{index + 1}",
+                fill_ts=base_ts + timedelta(minutes=index),
+            ))
+
+        rows = repo.fills_for_scope(scope=_spot_scope(), limit=2)
+
+        self.assertEqual([row.fill_id for row in rows], ["fill_3", "fill_4"])
+
+    def test_legacy_execution_order_states_for_scope_limit_uses_update_or_created_time(self) -> None:
+        repo = PostgresExecutionRepository(_session_factory())
+        base_ts = datetime(2026, 5, 7, tzinfo=timezone.utc)
+        repo.save_order_state(_order_state(client_order_id="order_1", created_at=base_ts))
+        repo.save_order_state(_order_state(client_order_id="order_2", created_at=base_ts + timedelta(minutes=1)))
+        repo.save_order_state(_order_state(
+            client_order_id="order_3",
+            created_at=base_ts + timedelta(minutes=2),
+            last_update_ts=base_ts + timedelta(minutes=4),
+        ))
+        repo.save_order_state(_order_state(client_order_id="order_4", created_at=base_ts + timedelta(minutes=3)))
+
+        rows = repo.order_states_for_scope(scope=_spot_scope(), limit=2)
+
+        self.assertEqual([row.client_order_id for row in rows], ["order_4", "order_3"])
+
+    def test_execution_fill_v2_fills_since_limit_returns_latest_rows_in_chronological_order(self) -> None:
+        repo = PostgresExecutionFillRepositoryV2(_session_factory())
+        base_ts = datetime(2026, 5, 7, tzinfo=timezone.utc)
+        for index in range(4):
+            fill = _fill_event(
+                fill_id=f"fill_v2_{index + 1}",
+                fill_ts=base_ts + timedelta(minutes=index),
+            )
+            repo.save_fill(
+                fill=fill,
+                order_id=f"order_{index + 1}",
+                source="test",
+                raw_payload={"fill_id": fill.fill_id},
+            )
+
+        rows = repo.fills_since(limit=2)
+
+        self.assertEqual([row["fill_id"] for row in rows], ["fill_v2_3", "fill_v2_4"])
 
 
 if __name__ == "__main__":

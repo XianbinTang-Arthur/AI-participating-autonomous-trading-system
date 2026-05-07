@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import asc, func, select
+from sqlalchemy import asc, desc, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -166,17 +166,28 @@ class PostgresExecutionFillRepositoryV2:
         since: datetime | None = None,
         limit: int | None = None,
     ) -> list[dict]:
-        query = select(ExecutionFillModelV2).order_by(
-            asc(ExecutionFillModelV2.exchange_ts),
-            asc(ExecutionFillModelV2.ingestion_ts),
-            asc(ExecutionFillModelV2.fill_id),
-        )
+        query = select(ExecutionFillModelV2)
         if since is not None:
             query = query.where(ExecutionFillModelV2.ingestion_ts >= since)
         if limit is not None:
+            if limit <= 0:
+                return []
+            query = query.order_by(
+                desc(ExecutionFillModelV2.exchange_ts),
+                desc(ExecutionFillModelV2.ingestion_ts),
+                desc(ExecutionFillModelV2.fill_id),
+            )
             query = query.limit(limit)
+        else:
+            query = query.order_by(
+                asc(ExecutionFillModelV2.exchange_ts),
+                asc(ExecutionFillModelV2.ingestion_ts),
+                asc(ExecutionFillModelV2.fill_id),
+            )
         with self.session_factory() as session:
             rows = session.scalars(query).all()
+        if limit is not None:
+            rows = list(reversed(rows))
         return [_fill_row_to_dict(row) for row in rows]
 
     def recent_fills(self, *, limit: int, offset: int = 0) -> list[dict]:

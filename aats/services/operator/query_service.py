@@ -132,6 +132,7 @@ _ORDERBOOK_DIFF_SEQUENCE_MISSING_EVIDENCE = (
 )
 _ORDERBOOK_DIFF_PAYLOAD_PERSISTED_STATUS = "local_snapshot_row_sequence_validated_diff_payload_persisted"
 _LIVE_DASHBOARD_EVENT_LIMIT = 5_000
+_LIVE_DASHBOARD_RECONCILIATION_REF_LIMIT = 1_000
 _PHASE5_SCOPE_FETCH_MULTIPLIER = 4
 
 
@@ -2362,7 +2363,11 @@ class OperatorQueryService:
             settings=self.runtime.settings,
             symbol=target_symbol,
             fills=scoped_fills,
-            snapshots=snapshots_for_scope(self.runtime.portfolio_repo, self.state_scope),
+            snapshots=snapshots_for_scope(
+                self.runtime.portfolio_repo,
+                self.state_scope,
+                limit=_LIVE_DASHBOARD_EVENT_LIMIT,
+            ),
             current_position_qty=self._current_symbol_position_qty(target_symbol),
             current_long_position_qty=(
                 Decimal("0") if position_state is None else position_state.long_position_qty
@@ -10418,7 +10423,7 @@ class OperatorQueryService:
             ),
             "reconciliation_refs": lambda: self.runtime.reconciliation_repo.portfolio_snapshot_refs_for_scope(
                 scope=self.state_scope,
-                limit=_LIVE_DASHBOARD_EVENT_LIMIT,
+                limit=_LIVE_DASHBOARD_RECONCILIATION_REF_LIMIT,
             ),
             "rejections": lambda: order_states_for_scope(
                 self.runtime.execution_repo,
@@ -10459,6 +10464,7 @@ class OperatorQueryService:
             "portfolio_snapshot_count": portfolio_snapshot_event_count,
             "portfolio_snapshot_recent_window_count": len(snapshot_events),
             "snapshot_reconciliation_window_limit": _LIVE_DASHBOARD_EVENT_LIMIT,
+            "reconciliation_ref_window_limit": _LIVE_DASHBOARD_RECONCILIATION_REF_LIMIT,
             "fill_without_snapshot_count": sum(1 for fill in fills if fill.fill_id not in snapshot_fill_ids),
             "snapshot_without_reconciliation_count": sum(
                 1 for event in snapshot_events if event.event_id not in reconciliation_refs

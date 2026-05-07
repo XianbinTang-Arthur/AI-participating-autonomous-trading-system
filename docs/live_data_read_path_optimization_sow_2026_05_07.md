@@ -45,6 +45,7 @@ Known gaps:
 - No expression index for `reconciliation_reports.payload ->> 'portfolio_snapshot_ref'`.
 - Hot `event_store` retention is not currently meeting the 14-day intent; more than 800k rows are older than 14 days.
 - Some live queries still hydrate JSON payloads before counting or paginating.
+- Several Postgres repository `limit` paths returned the oldest N rows while in-memory repositories returned the latest N rows. Online bounded reads must use the latest window and keep chronological return order.
 
 ## Transactions, Consistency, Concurrency
 
@@ -70,6 +71,9 @@ Target fixes:
 
 - Bound portfolio snapshot event reads in operator metrics.
 - Bound reconciliation snapshot-ref reads for online metrics.
+- Use a smaller reconciliation-ref window for dashboard metrics because the UI only compares against the latest bounded snapshot event window, and the live DISTINCT query is otherwise the dominant refresh cost.
+- Cache expensive exact audit record counts behind a short operator TTL instead of running `count(distinct decision_id)` on every runtime panel refresh.
+- Align Postgres `limit` semantics with in-memory repositories: fetch the latest N rows, then return them in chronological order.
 - Replace recent policy/risk/AI history full loads with bounded DB reads.
 - Avoid phase 5 fill list full loads in gateway.
 - Make execution UI distinguish current runtime orderless subsystem failures from stale failed orders/fills.

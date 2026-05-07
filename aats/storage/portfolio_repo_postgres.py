@@ -106,9 +106,13 @@ class PostgresPortfolioRepository:
             .order_by(PortfolioSnapshotModel.sequence_id)
         )
         if limit is not None:
-            query = query.limit(limit)
+            if limit <= 0:
+                return []
+            query = query.order_by(None).order_by(desc(PortfolioSnapshotModel.sequence_id)).limit(limit)
         with self.session_factory() as session:
             rows = session.scalars(query).all()
+        if limit is not None:
+            rows = list(reversed(rows))
         return [self._to_snapshot(row) for row in rows]
 
     def latest_for_scope(self, *, scope: RuntimeStateScope) -> PortfolioSnapshot | None:

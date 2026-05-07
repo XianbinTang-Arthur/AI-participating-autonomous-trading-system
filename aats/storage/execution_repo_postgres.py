@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import and_, desc, or_, select
+from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -305,15 +305,25 @@ class PostgresExecutionRepository:
         query = select(FillEventModel)
         if since is not None:
             query = query.where(FillEventModel.ingestion_timestamp >= since)
-        query = query.order_by(
-            FillEventModel.exchange_timestamp,
-            FillEventModel.ingestion_timestamp,
-            FillEventModel.fill_id,
-        )
         if limit is not None:
+            if limit <= 0:
+                return []
+            query = query.order_by(
+                desc(FillEventModel.exchange_timestamp),
+                desc(FillEventModel.ingestion_timestamp),
+                desc(FillEventModel.fill_id),
+            )
             query = query.limit(limit)
+        else:
+            query = query.order_by(
+                FillEventModel.exchange_timestamp,
+                FillEventModel.ingestion_timestamp,
+                FillEventModel.fill_id,
+            )
         with self.session_factory() as session:
             rows = session.scalars(query).all()
+        if limit is not None:
+            rows = list(reversed(rows))
         return [self._to_fill_event(row) for row in rows]
 
     def order_states_for_scope(
@@ -330,11 +340,25 @@ class PostgresExecutionRepository:
             query = query.where(~OrderStateModel.status.in_(final_statuses))
         if statuses is not None:
             query = query.where(OrderStateModel.status.in_(tuple(statuses)))
-        query = self._scope_order_query(query, scope).order_by(OrderStateModel.created_at, OrderStateModel.client_order_id)
         if limit is not None:
+            if limit <= 0:
+                return []
+            updated_sort_key = func.coalesce(OrderStateModel.last_update_ts, OrderStateModel.created_at)
+            query = self._scope_order_query(query, scope).order_by(
+                desc(updated_sort_key),
+                desc(OrderStateModel.created_at),
+                desc(OrderStateModel.client_order_id),
+            )
             query = query.limit(limit)
+        else:
+            query = self._scope_order_query(query, scope).order_by(
+                OrderStateModel.created_at,
+                OrderStateModel.client_order_id,
+            )
         with self.session_factory() as session:
             rows = session.scalars(query).all()
+        if limit is not None:
+            rows = list(reversed(rows))
         return [self._to_order_state(row) for row in rows]
 
     def fills_for_scope(
@@ -347,15 +371,25 @@ class PostgresExecutionRepository:
         query = select(FillEventModel)
         if since is not None:
             query = query.where(FillEventModel.ingestion_timestamp >= since)
-        query = self._scope_fill_query(query, scope).order_by(
-            FillEventModel.exchange_timestamp,
-            FillEventModel.ingestion_timestamp,
-            FillEventModel.fill_id,
-        )
         if limit is not None:
+            if limit <= 0:
+                return []
+            query = self._scope_fill_query(query, scope).order_by(
+                desc(FillEventModel.exchange_timestamp),
+                desc(FillEventModel.ingestion_timestamp),
+                desc(FillEventModel.fill_id),
+            )
             query = query.limit(limit)
+        else:
+            query = self._scope_fill_query(query, scope).order_by(
+                FillEventModel.exchange_timestamp,
+                FillEventModel.ingestion_timestamp,
+                FillEventModel.fill_id,
+            )
         with self.session_factory() as session:
             rows = session.scalars(query).all()
+        if limit is not None:
+            rows = list(reversed(rows))
         return [self._to_fill_event(row) for row in rows]
 
     @staticmethod
