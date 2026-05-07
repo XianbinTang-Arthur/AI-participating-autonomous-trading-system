@@ -10136,8 +10136,9 @@ class OperatorQueryService:
             lambda: self._build_recent_decisions(limit=normalized_limit, offset=normalized_offset),
         )
 
-    def _build_recent_decisions(self, *, limit: int, offset: int) -> dict[str, Any]:
-        rows = self.runtime.audit_repo.recent(limit=limit + offset)
+    def _build_recent_decisions(self, *, limit: int, offset: int, include_total: bool = True) -> dict[str, Any]:
+        fetch_limit = limit + offset + (0 if include_total else 1)
+        rows = self.runtime.audit_repo.recent(limit=fetch_limit)
         paged_rows = rows[offset : offset + limit]
         payloads: list[dict[str, Any]] = []
         for record in paged_rows:
@@ -10234,13 +10235,18 @@ class OperatorQueryService:
                     },
                 }
             )
-        total_available = self.runtime.audit_repo.count()
+        if include_total:
+            total_available = self.runtime.audit_repo.count()
+            has_more = offset + len(payloads) < total_available
+        else:
+            has_more = len(rows) > offset + len(payloads)
+            total_available = offset + len(payloads) + (1 if has_more else 0)
         return {
             "decisions": payloads,
             "limit": limit,
             "offset": offset,
             "total_available": total_available,
-            "has_more": offset + len(payloads) < total_available,
+            "has_more": has_more,
         }
 
     def latest_decision(self) -> dict[str, Any]:
@@ -10269,7 +10275,14 @@ class OperatorQueryService:
                 "strategy_execution_health": self.strategy_execution_health(),
             }
         detail = self.decision_view(decision_id)
-        detail["summary"] = next((item for item in self.recent_decisions(limit=1)["decisions"] if item["decision_id"] == decision_id), None)
+        detail["summary"] = next(
+            (
+                item
+                for item in self._build_recent_decisions(limit=1, offset=0, include_total=False)["decisions"]
+                if item["decision_id"] == decision_id
+            ),
+            None,
+        )
         detail["strategy_execution_health"] = self.strategy_execution_health(
             detail["decision_context"]["symbol"] if detail["decision_context"] else None
         )

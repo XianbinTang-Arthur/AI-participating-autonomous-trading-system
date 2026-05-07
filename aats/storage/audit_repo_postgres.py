@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from threading import Lock
+from time import monotonic
+
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -8,9 +11,18 @@ from aats.schemas.common import utc_now
 from aats.storage.sqlalchemy_models import DecisionAuditRecordModel
 
 
+_RECENT_DECISION_CANDIDATE_MULTIPLIER = 32
+_RECENT_DECISION_MIN_CANDIDATES = 512
+_RECENT_DECISION_MAX_CANDIDATES = 100_000
+_COUNT_CACHE_TTL_SECONDS = 30.0
+
+
 class PostgresAuditRepository:
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self.session_factory = session_factory
+        self._count_cache_lock = Lock()
+        self._count_cache_value: int | None = None
+        self._count_cache_expires_at = 0.0
 
     def upsert(self, record: DecisionAuditRecord) -> None:
         with self.session_factory() as session:
@@ -46,6 +58,7 @@ class PostgresAuditRepository:
                 )
             )
             session.commit()
+        self._invalidate_count_cache()
 
     def upsert_batch(self, records: list[DecisionAuditRecord]) -> None:
         """P2-1：批量写入多条 audit records，单 session / 单 commit。"""
@@ -86,6 +99,7 @@ class PostgresAuditRepository:
                     )
                 )
             session.commit()
+        self._invalidate_count_cache()
 
     def get(self, decision_id: str) -> DecisionAuditRecord | None:
         with self.session_factory() as session:
@@ -122,60 +136,68 @@ class PostgresAuditRepository:
         return [DecisionAuditRecord.model_validate(row.payload) for row in rows]
 
     def latest(self) -> DecisionAuditRecord | None:
-        with self.session_factory() as session:
-            per_decision = (
-                select(
-                    DecisionAuditRecordModel.decision_id,
-                    func.max(DecisionAuditRecordModel.audit_revision_id).label("max_revision"),
-                    # 排序键用"该 decision 第一次被 upsert 的时刻"——这与
-                    # DecisionContext.as_of_ts 只差几十毫秒，和前端展示的
-                    # "记录时间"语义一致；不用 max(updated_at)，否则任何后续
-                    # handler/对账事件都会把旧决策顶到最前面。
-                    func.min(DecisionAuditRecordModel.updated_at).label("decision_created_at"),
-                )
-                .group_by(DecisionAuditRecordModel.decision_id)
-                .subquery()
-            )
-            row = session.scalar(
-                select(DecisionAuditRecordModel)
-                .join(
-                    per_decision,
-                    DecisionAuditRecordModel.audit_revision_id == per_decision.c.max_revision,
-                )
-                .order_by(
-                    desc(per_decision.c.decision_created_at),
-                    desc(DecisionAuditRecordModel.audit_revision_id),
-                )
-                .limit(1)
-            )
-        return DecisionAuditRecord.model_validate(row.payload) if row is not None else None
+        rows = self.recent(limit=1)
+        return rows[0] if rows else None
 
     def recent(self, *, limit: int) -> list[DecisionAuditRecord]:
+        normalized_limit = max(int(limit), 1)
+        candidate_limit = min(
+            max(
+                normalized_limit * _RECENT_DECISION_CANDIDATE_MULTIPLIER,
+                _RECENT_DECISION_MIN_CANDIDATES,
+            ),
+            _RECENT_DECISION_MAX_CANDIDATES,
+        )
+        created_at_expr = DecisionAuditRecordModel.payload["created_at"].as_string()
         with self.session_factory() as session:
-            per_decision = (
-                select(
-                    DecisionAuditRecordModel.decision_id,
-                    func.max(DecisionAuditRecordModel.audit_revision_id).label("max_revision"),
-                    # 同 latest()：按决策诞生时间排，而不是最新 revision 的
-                    # updated_at——否则对账等事后事件会把旧决策永远粘在顶部。
-                    func.min(DecisionAuditRecordModel.updated_at).label("decision_created_at"),
-                )
+            while True:
+                rows = session.scalars(
+                    select(DecisionAuditRecordModel)
+                    .order_by(
+                        desc(created_at_expr).nulls_last(),
+                        desc(DecisionAuditRecordModel.audit_revision_id),
+                    )
+                    .limit(candidate_limit)
+                ).all()
+
+                records: list[DecisionAuditRecord] = []
+                seen_decision_ids: set[str] = set()
+                for row in rows:
+                    if row.decision_id in seen_decision_ids:
+                        continue
+                    seen_decision_ids.add(row.decision_id)
+                    records.append(DecisionAuditRecord.model_validate(row.payload))
+                    if len(records) >= normalized_limit:
+                        return records
+
+                if len(rows) < candidate_limit or candidate_limit >= _RECENT_DECISION_MAX_CANDIDATES:
+                    return records
+                candidate_limit = min(candidate_limit * 2, _RECENT_DECISION_MAX_CANDIDATES)
+
+    def _invalidate_count_cache(self) -> None:
+        with self._count_cache_lock:
+            self._count_cache_value = None
+            self._count_cache_expires_at = 0.0
+
+    def _count_distinct_decisions(self) -> int:
+        with self.session_factory() as session:
+            decisions = (
+                select(DecisionAuditRecordModel.decision_id)
                 .group_by(DecisionAuditRecordModel.decision_id)
                 .subquery()
             )
-            rows = session.scalars(
-                select(DecisionAuditRecordModel)
-                .join(
-                    per_decision,
-                    DecisionAuditRecordModel.audit_revision_id == per_decision.c.max_revision,
-                )
-                .order_by(
-                    desc(per_decision.c.decision_created_at),
-                    desc(DecisionAuditRecordModel.audit_revision_id),
-                )
-                .limit(limit)
-            ).all()
-        return [DecisionAuditRecord.model_validate(row.payload) for row in rows]
+            count = session.scalar(select(func.count()).select_from(decisions))
+        return int(count or 0)
+
+    def count(self) -> int:
+        now = monotonic()
+        with self._count_cache_lock:
+            if self._count_cache_value is not None and now < self._count_cache_expires_at:
+                return self._count_cache_value
+            count = self._count_distinct_decisions()
+            self._count_cache_value = count
+            self._count_cache_expires_at = now + _COUNT_CACHE_TTL_SECONDS
+            return count
 
     def all(self) -> list[DecisionAuditRecord]:
         with self.session_factory() as session:
@@ -205,8 +227,3 @@ class PostgresAuditRepository:
                 .order_by(DecisionAuditRecordModel.audit_revision_id)
             ).all()
         return [DecisionAuditRecord.model_validate(row.payload) for row in rows]
-
-    def count(self) -> int:
-        with self.session_factory() as session:
-            count = session.scalar(select(func.count(func.distinct(DecisionAuditRecordModel.decision_id))))
-        return int(count or 0)

@@ -651,6 +651,37 @@ class TestAuditRepoBatchLatestLookup(unittest.TestCase):
         self.assertEqual(set(by_id), {"decision_a", "decision_b"})
         self.assertEqual(by_id["decision_a"].decision_context_ref, "ctx_a_new")
 
+    def test_postgres_recent_orders_by_payload_created_at_not_insert_time(self) -> None:
+        repo = PostgresAuditRepository(_session_factory())
+        base_ts = datetime(2026, 5, 7, tzinfo=timezone.utc)
+        repo.upsert(
+            _audit_record(decision_id="decision_new", decision_context_ref="ctx_new")
+            .model_copy(update={"created_at": base_ts + timedelta(minutes=1)})
+        )
+        repo.upsert(
+            _audit_record(decision_id="decision_old", decision_context_ref="ctx_old")
+            .model_copy(update={"created_at": base_ts})
+        )
+        repo.upsert(
+            _audit_record(decision_id="decision_old", decision_context_ref="ctx_old_latest")
+            .model_copy(update={"created_at": base_ts})
+        )
+
+        rows = repo.recent(limit=2)
+
+        self.assertEqual([row.decision_id for row in rows], ["decision_new", "decision_old"])
+        self.assertEqual(rows[1].decision_context_ref, "ctx_old_latest")
+        self.assertEqual(repo.latest().decision_id, "decision_new")
+
+    def test_postgres_count_cache_is_invalidated_by_writes(self) -> None:
+        repo = PostgresAuditRepository(_session_factory())
+        repo.upsert(_audit_record(decision_id="decision_a", decision_context_ref="ctx_a"))
+        self.assertEqual(repo.count(), 1)
+
+        repo.upsert(_audit_record(decision_id="decision_b", decision_context_ref="ctx_b"))
+
+        self.assertEqual(repo.count(), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
