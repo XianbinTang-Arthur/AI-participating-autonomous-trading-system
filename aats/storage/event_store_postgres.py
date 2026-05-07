@@ -263,28 +263,29 @@ class PostgresEventStore:
         if limit is not None:
             if limit <= 0:
                 return 0
-            hot_seq_query = select(EventEnvelopeModel.sequence_id.label("seq")).where(
-                EventEnvelopeModel.topic == topic
+            scoped_sequence_selects = [
+                *self._limited_scope_sequence_selects(
+                    model=EventEnvelopeModel,
+                    sequence_column=EventEnvelopeModel.sequence_id,
+                    topic=topic,
+                    scope=scope,
+                    limit=limit,
+                ),
+                *self._limited_scope_sequence_selects(
+                    model=EventEnvelopeArchiveModel,
+                    sequence_column=EventEnvelopeArchiveModel.source_sequence_id,
+                    topic=topic,
+                    scope=scope,
+                    limit=limit,
+                ),
+            ]
+            if not scoped_sequence_selects:
+                return 0
+            combined = (
+                scoped_sequence_selects[0].subquery()
+                if len(scoped_sequence_selects) == 1
+                else union_all(*scoped_sequence_selects).subquery()
             )
-            hot_seq_query = (
-                self._scope_query(hot_seq_query, scope, EventEnvelopeModel)
-                .order_by(desc(EventEnvelopeModel.sequence_id))
-                .limit(limit)
-                .subquery()
-            )
-            archive_seq_query = select(EventEnvelopeArchiveModel.source_sequence_id.label("seq")).where(
-                EventEnvelopeArchiveModel.topic == topic
-            )
-            archive_seq_query = (
-                self._scope_query(archive_seq_query, scope, EventEnvelopeArchiveModel)
-                .order_by(desc(EventEnvelopeArchiveModel.source_sequence_id))
-                .limit(limit)
-                .subquery()
-            )
-            combined = union_all(
-                select(hot_seq_query.c.seq),
-                select(archive_seq_query.c.seq),
-            ).subquery()
             latest_window = (
                 select(combined.c.seq)
                 .order_by(desc(combined.c.seq))
@@ -549,6 +550,63 @@ class PostgresEventStore:
             ),
         )
         return query.where(or_(regular_clause, smart_arbitrage_clause))
+
+    @staticmethod
+    def _limited_scope_sequence_selects(
+        *,
+        model,
+        sequence_column,
+        topic: str,
+        scope: RuntimeStateScope,
+        limit: int,
+    ):
+        allowed_symbols = tuple(scope.allowed_symbols) if scope.allowed_symbols else (scope.default_symbol,)
+        symbol_clause = or_(
+            model.symbol.is_(None),
+            model.symbol.in_(allowed_symbols),
+        )
+        strategy_family = model.payload["strategy_family"].as_string()
+        branch_specs: set[tuple[str | None, str | None, str]] = set()
+        for product_type in {None, scope.product_type}:
+            for margin_mode in {None, scope.margin_mode}:
+                branch_specs.add((product_type, margin_mode, "regular"))
+        if scope.product_type == "derivatives":
+            branch_specs.add((scope.product_type, scope.margin_mode, "smart_arbitrage"))
+            for margin_mode in scope.smart_arbitrage_spot_margin_modes:
+                branch_specs.add(("spot", margin_mode, "smart_arbitrage"))
+
+        selects = []
+        for product_type, margin_mode, family_kind in sorted(
+            branch_specs,
+            key=lambda item: (
+                "" if item[0] is None else item[0],
+                "" if item[1] is None else item[1],
+                item[2],
+            ),
+        ):
+            family_clause = (
+                strategy_family == "smart_arbitrage"
+                if family_kind == "smart_arbitrage"
+                else or_(strategy_family.is_(None), strategy_family != "smart_arbitrage")
+            )
+            branch = (
+                select(sequence_column.label("seq"))
+                .where(
+                    model.topic == topic,
+                    symbol_clause,
+                    model.product_type.is_(None) if product_type is None else model.product_type == product_type,
+                    model.margin_mode.is_(None) if margin_mode is None else model.margin_mode == margin_mode,
+                    family_clause,
+                )
+                # Match ix_event_store*_topic_scope_seq exactly so Postgres uses
+                # a backward index scan for the newest window instead of a
+                # topic-only bitmap heap scan plus top-N sort.
+                .order_by(desc(model.topic), desc(model.product_type), desc(model.margin_mode), desc(sequence_column))
+                .limit(limit)
+                .subquery()
+            )
+            selects.append(select(branch.c.seq))
+        return selects
 
     @staticmethod
     def _decision_id(envelope: EventEnvelope) -> str | None:

@@ -57,18 +57,28 @@ def _derivatives_scope() -> RuntimeStateScope:
     )
 
 
-def _event(*, topic: str, symbol: str, product_type: str, margin_mode: str) -> EventEnvelope:
+def _event(
+    *,
+    topic: str,
+    symbol: str,
+    product_type: str,
+    margin_mode: str,
+    strategy_family: str | None = None,
+) -> EventEnvelope:
+    payload = {
+        "symbol": symbol,
+        "product_type": product_type,
+        "margin_mode": margin_mode,
+    }
+    if strategy_family is not None:
+        payload["strategy_family"] = strategy_family
     return EventEnvelope(
         event_type="test.event",
         event_timestamp=utc_now(),
         source_component="test",
         topic=topic,
         key=symbol,
-        payload={
-            "symbol": symbol,
-            "product_type": product_type,
-            "margin_mode": margin_mode,
-        },
+        payload=payload,
     )
 
 
@@ -353,6 +363,57 @@ class TestEventStoreCountByTopicScoped(unittest.TestCase):
 
         self.assertEqual(store.count_by_topic_scoped("strategy.decision_context", scope=scope, limit=2), len(limited_rows))
         self.assertEqual(store.count_by_topic_scoped("strategy.decision_context", scope=scope, limit=0), 0)
+
+    def test_postgres_count_limit_matches_derivatives_smart_arbitrage_scope(self) -> None:
+        store = PostgresEventStore(_session_factory())
+        scope = RuntimeStateScope(
+            product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP", "BTC-USDT"),
+            smart_arbitrage_spot_margin_modes=("cash",),
+        )
+        for event in [
+            _event(
+                topic="strategy.decision_context",
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            _event(
+                topic="strategy.decision_context",
+                symbol="BTC-USDT",
+                product_type="spot",
+                margin_mode="cash",
+                strategy_family="smart_arbitrage",
+            ),
+            _event(
+                topic="strategy.decision_context",
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="cross",
+                strategy_family="smart_arbitrage",
+            ),
+            _event(
+                topic="strategy.decision_context",
+                symbol="BTC-USDT",
+                product_type="spot",
+                margin_mode="isolated",
+                strategy_family="smart_arbitrage",
+            ),
+            _event(
+                topic="strategy.decision_context",
+                symbol="BTC-USDT",
+                product_type="spot",
+                margin_mode="cash",
+            ),
+        ]:
+            store.append(event)
+
+        limited_rows = store.by_topic_scoped("strategy.decision_context", scope=scope, limit=10)
+
+        self.assertEqual(len(limited_rows), 3)
+        self.assertEqual(store.count_by_topic_scoped("strategy.decision_context", scope=scope, limit=10), 3)
 
 
 class TestEventStoreBatchGet(unittest.TestCase):
