@@ -376,6 +376,15 @@ def test_dockerfile_runtime_copies_root_migrations_for_live_startup() -> None:
     )
 
 
+def test_apply_current_migrations_serializes_postgres_startup_roles() -> None:
+    """多进程启动时 migration 必须串行，否则 CREATE INDEX IF NOT EXISTS 仍可能并发撞名。"""
+    session_source = REPO_ROOT / "aats" / "storage" / "session.py"
+    text = session_source.read_text(encoding="utf-8")
+
+    assert "_SCHEMA_MIGRATION_ADVISORY_LOCK_KEY" in text
+    assert "pg_advisory_xact_lock" in text
+
+
 # ─────────────────────────────────────────────────────────────────────
 # 5) Stage 7 心跳：daemon 进程的 docker healthcheck 信号源
 # ─────────────────────────────────────────────────────────────────────

@@ -48,7 +48,7 @@ Known gaps:
 
 ## Transactions, Consistency, Concurrency
 
-Read-side changes must use ordinary read transactions only. Index creation should be idempotent and safe to re-run. No code path should hold long transactions while scanning historical JSON payloads.
+Read-side changes must use ordinary read transactions only. Index creation should be idempotent and safe to re-run. Startup migration execution must be serialized by a Postgres advisory transaction lock because multiple process roles can boot at the same time. No code path should hold long transactions while scanning historical JSON payloads.
 
 ## Authorization, Authentication, Data Security
 

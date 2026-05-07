@@ -115,6 +115,10 @@ _EXPECTED_NUMERIC_COLUMNS: tuple[tuple[str, str], ...] = (
 )
 
 _SCHEMA_MIGRATIONS_TABLE = "schema_migrations"
+_SCHEMA_MIGRATION_ADVISORY_LOCK_KEY = (
+    int.from_bytes(hashlib.sha256(b"aats:schema_migrations").digest()[:8], byteorder="big", signed=False)
+    & ((1 << 63) - 1)
+) or 1
 
 
 @dataclass(slots=True)
@@ -262,6 +266,11 @@ def apply_current_migrations(runtime: DatabaseRuntime) -> list[str]:
     migrations_dir = Path(__file__).resolve().parents[2] / "migrations"
     applied_versions: list[str] = []
     with runtime.engine.begin() as connection:
+        if runtime.engine.dialect.name == "postgresql":
+            connection.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                {"lock_key": _SCHEMA_MIGRATION_ADVISORY_LOCK_KEY},
+            )
         _ensure_schema_migrations_table(connection)
         applied = _applied_migration_checksums(connection)
         raw_connection = connection.connection
