@@ -958,6 +958,89 @@ def test_executable_terminal_no_fill_pretrade_microstructure_drilldown_links_con
     ] is False
 
 
+def test_executable_terminal_no_fill_pretrade_microstructure_uses_context_probe_rows() -> None:
+    mod = load_module()
+    executable_episode = {
+        "status": "verified_executable_terminal_order_no_fill_truth",
+        "latest_executable_decision": {
+            "decision_id": "decision_exec_old",
+            "created_at": "2026-04-28T03:40:50+08:00",
+            "symbol": "BTC-USDT-SWAP",
+            "route_action": "override_target",
+            "primary_family": "directional",
+            "order_expected": True,
+            "fill_expected": False,
+        },
+        "terminal_no_fill": {
+            "terminal_states": ["FAILED"],
+            "terminal_source_systems": ["local_order_manager"],
+            "terminal_execution_styles": ["taker"],
+        },
+        "terminal_no_fill_drilldown": {
+            "status": "verified_terminal_no_fill_order_state_drilldown",
+            "coverage": {
+                "drilldown_order_count": 1,
+                "exchange_ack_absent_count": 1,
+                "fill_absent_count": 1,
+            },
+        },
+    }
+    rdp_microstructure = {
+        "ok": True,
+        "recent_silver_orderbook": [],
+        "recent_silver_trade_flow": [],
+        "context_silver_orderbook": [
+            {
+                "ts": "2026-04-28T03:30:00+08:00",
+                "bbo_samples_n": 800,
+                "books5_samples_n": 1568,
+                "mid_price_last": "76001.0",
+                "spread_bps_mean": "0.014",
+                "spread_bps_max": "0.016",
+                "spread_bps_min": "0.012",
+                "quality_flags": [],
+            }
+        ],
+        "context_silver_trade_flow": [
+            {
+                "ts": "2026-04-28T03:30:00+08:00",
+                "trade_count": 15454,
+                "total_volume_ccy": "4200",
+                "taker_buy_ratio": "0.58",
+                "trade_flow_imbalance": "0.16",
+                "vwap_minus_mid_bps": "0.9",
+                "quality_flags": [],
+            }
+        ],
+    }
+    truth = mod.summarize_directional_executable_terminal_no_fill_pretrade_microstructure_truth(
+        directional_executable_episode=executable_episode,
+        rdp_microstructure=rdp_microstructure,
+        execution_science={
+            "payload_sequence": {
+                "status": "sequence_continuous",
+                "window_minutes": 30,
+                "sequence_gap_count": 0,
+            }
+        },
+        orderbook_payload_depth={
+            "status": "verified_books5_payload_depth_evidence_present",
+            "sequence": {"books5_sequence_gap_count": 0},
+        },
+        depth_slippage_lifecycle={},
+        slippage_cost={
+            "status": "verified_slippage_cost_calibration_evidence_present",
+            "fee": {"sample_count": 73},
+            "slippage_proxy": {"sample_count": 17, "coverage_audit": {}},
+        },
+    )
+
+    assert truth["status"] == "verified_executable_terminal_no_fill_pretrade_microstructure_drilldown"
+    assert truth["smallest_missing_field"] is None
+    assert truth["pretrade_microstructure"]["decision_context"]["orderbook"]["books5_samples_n"] == 1568
+    assert truth["pretrade_microstructure"]["decision_context"]["trade_flow"]["trade_count"] == 15454
+
+
 def test_execution_science_truth_verifies_orderbook_sequence_and_silver_bar() -> None:
     mod = load_module()
     raw = {

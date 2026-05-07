@@ -1621,6 +1621,12 @@ try:
 except ValueError:
     recent_silver_limit = 672
 recent_silver_limit = max(192, min(recent_silver_limit, 1344))
+context_target_ts = os.environ.get("AATS_EXECUTION_SCIENCE_CONTEXT_TS")
+try:
+    context_window_minutes = int(os.environ.get("AATS_EXECUTION_SCIENCE_CONTEXT_WINDOW_MINUTES", "120"))
+except ValueError:
+    context_window_minutes = 120
+context_window_minutes = max(60, min(context_window_minutes, 1440))
 engine = create_engine(url)
 
 def table_exists(conn, name):
@@ -1707,6 +1713,41 @@ def recent_silver_trade_flow(conn):
             "where symbol=:symbol order by ts desc limit :limit"
         ),
         {"symbol": symbol, "limit": recent_silver_limit},
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+def context_silver_orderbook(conn):
+    if not context_target_ts or not table_exists(conn, "silver.market_orderbook_metrics_15m"):
+        return []
+    rows = conn.execute(
+        text(
+            "select ts, bbo_samples_n, books5_samples_n, spread_bps_mean, "
+            "spread_bps_max, spread_bps_min, mid_price_last, quality_flags "
+            "from silver.market_orderbook_metrics_15m "
+            "where symbol=:symbol "
+            "  and ts between (:target_ts)::timestamptz - (:window_minutes * interval '1 minute') "
+            "             and (:target_ts)::timestamptz + (:window_minutes * interval '1 minute') "
+            "order by ts desc limit :limit"
+        ),
+        {"symbol": symbol, "target_ts": context_target_ts, "window_minutes": context_window_minutes, "limit": 256},
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+def context_silver_trade_flow(conn):
+    if not context_target_ts or not table_exists(conn, "silver.market_trade_flow_15m"):
+        return []
+    rows = conn.execute(
+        text(
+            "select ts, total_volume_ccy, trade_count, taker_buy_ratio, "
+            "trade_flow_imbalance, vwap, mid_price_ref, vwap_minus_mid_bps, "
+            "quality_flags "
+            "from silver.market_trade_flow_15m "
+            "where symbol=:symbol "
+            "  and ts between (:target_ts)::timestamptz - (:window_minutes * interval '1 minute') "
+            "             and (:target_ts)::timestamptz + (:window_minutes * interval '1 minute') "
+            "order by ts desc limit :limit"
+        ),
+        {"symbol": symbol, "target_ts": context_target_ts, "window_minutes": context_window_minutes, "limit": 256},
     ).mappings().all()
     return [dict(row) for row in rows]
 
@@ -1827,6 +1868,10 @@ with engine.connect() as conn:
                 "recent_silver_limit": recent_silver_limit,
                 "recent_silver_orderbook": recent_silver_orderbook(conn),
                 "recent_silver_trade_flow": recent_silver_trade_flow(conn),
+                "context_silver_target_ts": context_target_ts,
+                "context_silver_window_minutes": context_window_minutes,
+                "context_silver_orderbook": context_silver_orderbook(conn),
+                "context_silver_trade_flow": context_silver_trade_flow(conn),
                 "payload_sequence": payload_sequence(conn),
                 "latest_orderbook_payloads": latest_orderbook_payloads(conn),
                 "workflow": microstructure_workflow(conn),
@@ -3917,6 +3962,26 @@ def _nearest_microstructure_bar_at_or_after(
     return selected, age_seconds
 
 
+def _microstructure_rows(
+    rdp_microstructure: dict[str, Any],
+    *,
+    recent_key: str,
+    context_key: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for key in (context_key, recent_key):
+        for row in as_list(rdp_microstructure.get(key)):
+            item = as_dict(row)
+            dedupe_key = str(item.get("ts") or "")
+            if dedupe_key and dedupe_key in seen:
+                continue
+            if dedupe_key:
+                seen.add(dedupe_key)
+            rows.append(item)
+    return rows
+
+
 def _microstructure_orderbook_context(row: dict[str, Any], age_seconds: int | None) -> dict[str, Any]:
     if not row:
         return {}
@@ -4071,8 +4136,16 @@ def _directional_episode_microstructure_context(
     *,
     rdp_microstructure: dict[str, Any],
 ) -> dict[str, Any]:
-    orderbook_rows = [as_dict(row) for row in as_list(rdp_microstructure.get("recent_silver_orderbook"))]
-    trade_flow_rows = [as_dict(row) for row in as_list(rdp_microstructure.get("recent_silver_trade_flow"))]
+    orderbook_rows = _microstructure_rows(
+        rdp_microstructure,
+        recent_key="recent_silver_orderbook",
+        context_key="context_silver_orderbook",
+    )
+    trade_flow_rows = _microstructure_rows(
+        rdp_microstructure,
+        recent_key="recent_silver_trade_flow",
+        context_key="context_silver_trade_flow",
+    )
     decision_ts = decision.get("created_at")
     latest_fill = as_dict(decision.get("latest_fill"))
     fill_count = int_or_zero(as_dict(decision.get("fill")).get("count"))
@@ -5042,8 +5115,13 @@ def database_truth_probe(distro: str, gateway_container: str) -> dict[str, Any]:
     return parse_db_probe(completed["stdout"], completed["stderr"])
 
 
-def rdp_microstructure_probe_command(distro: str, gateway_container: str) -> list[str]:
-    return [
+def rdp_microstructure_probe_command(
+    distro: str,
+    gateway_container: str,
+    *,
+    context_ts: str | None = None,
+) -> list[str]:
+    command = [
         "wsl",
         "-d",
         distro,
@@ -5051,10 +5129,11 @@ def rdp_microstructure_probe_command(distro: str, gateway_container: str) -> lis
         "docker",
         "exec",
         "-i",
-        gateway_container,
-        "python",
-        "-",
     ]
+    if context_ts:
+        command.extend(["-e", f"AATS_EXECUTION_SCIENCE_CONTEXT_TS={context_ts}"])
+    command.extend([gateway_container, "python", "-"])
+    return command
 
 
 def parse_rdp_microstructure_probe(stdout: str, stderr: str = "") -> dict[str, Any]:
@@ -5075,9 +5154,14 @@ def parse_rdp_microstructure_probe(stdout: str, stderr: str = "") -> dict[str, A
     return payload if isinstance(payload, dict) else {"ok": False, "reason": "rdp_microstructure_probe_non_object"}
 
 
-def rdp_microstructure_truth_probe(distro: str, gateway_container: str) -> dict[str, Any]:
+def rdp_microstructure_truth_probe(
+    distro: str,
+    gateway_container: str,
+    *,
+    context_ts: str | None = None,
+) -> dict[str, Any]:
     completed = run_command(
-        rdp_microstructure_probe_command(distro, gateway_container),
+        rdp_microstructure_probe_command(distro, gateway_container, context_ts=context_ts),
         timeout=45,
         stdin=RDP_MICROSTRUCTURE_PROBE,
     )
@@ -13958,6 +14042,10 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     artifact_projection = load_artifact_runtime_projection(repo_root, generated_at)
     operator_auth_context = operator_read_auth_context(args.operator_read_api_key_env)
     operator_auth_headers = operator_auth_context.get("headers") or None
+    database_truth = database_truth_probe(args.wsl_distro, args.gateway_container)
+    executable_context_ts = as_dict(
+        database_truth.get("latest_executable_directional_decision"),
+    ).get("created_at")
     report: dict[str, Any] = {
         "ok": True,
         "generated_at": generated_at,
@@ -13981,8 +14069,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "artifact_last_known_sources": artifact_projection["sources"],
             "artifact_last_known_status": artifact_projection["status"],
         },
-        "database_truth": database_truth_probe(args.wsl_distro, args.gateway_container),
-        "rdp_microstructure_truth": rdp_microstructure_truth_probe(args.wsl_distro, args.gateway_container),
+        "database_truth": database_truth,
+        "rdp_microstructure_truth": rdp_microstructure_truth_probe(
+            args.wsl_distro,
+            args.gateway_container,
+            context_ts=executable_context_ts,
+        ),
         "microstructure_collector_truth": microstructure_collector_truth_probe(
             args.wsl_distro,
             args.microstructure_container,
