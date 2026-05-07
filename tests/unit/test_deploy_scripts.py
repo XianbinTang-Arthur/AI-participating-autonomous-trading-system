@@ -47,6 +47,16 @@ def test_deploy_script_health_check_logs_progress_and_gateway_state() -> None:
     assert "容器=${container_states}" in text
 
 
+def test_deploy_script_compose_up_nonzero_falls_through_to_health_check() -> None:
+    text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+
+    assert "基础设施 docker compose up 返回非零；继续检查实际容器状态" in text
+    assert "应用 docker compose up 返回非零；继续进入健康检查确认实际容器状态" in text
+    assert "应用服务启动命令已返回，等待健康检查确认" in text
+    assert "step_app_up" in text
+    assert "step_health" in text
+
+
 def test_deploy_script_accepts_root_and_legacy_wsl2_env_file_locations() -> None:
     text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
 

@@ -10435,8 +10435,8 @@ class OperatorQueryService:
         # 对 event_store 热表（~545K 行 / 6.2GB）而言单路可达 45s，叠加 12 路
         # 并发让 wall time 飙到 79s。改为用 SQL 层的 count(*) / DISTINCT 直接
         # 得到 int / set[str]，避免 jsonb 反序列化与 Python 行对象构造。
-        # snapshot_events 因为下游 snapshot_fill_ids 需要 payload，仅取在线窗口
-        # 内最新 N 条；完整审计历史仍由 replay/audit 路径显式读取。
+        # 在线 dashboard 只展示近期短频窗口：count 与 snapshot_events 都取最新
+        # N 条；完整审计历史仍由 replay/audit 路径显式读取。
         phase1_queries = {
             "snapshot": self._latest_scoped_snapshot,
             "metrics": self.runtime.metrics.snapshot,
@@ -10445,14 +10445,17 @@ class OperatorQueryService:
             "order_intent_event_count": lambda: self.runtime.event_store.count_by_topic_scoped(
                 topics.ORDER_INTENTS,
                 scope=self.state_scope,
+                limit=_LIVE_DASHBOARD_EVENT_LIMIT,
             ),
             "decision_context_event_count": lambda: self.runtime.event_store.count_by_topic_scoped(
                 topics.DECISION_CONTEXTS,
                 scope=self.state_scope,
+                limit=_LIVE_DASHBOARD_EVENT_LIMIT,
             ),
             "portfolio_snapshot_event_count": lambda: self.runtime.event_store.count_by_topic_scoped(
                 topics.PORTFOLIO_SNAPSHOTS,
                 scope=self.state_scope,
+                limit=_LIVE_DASHBOARD_EVENT_LIMIT,
             ),
             "snapshot_events": lambda: list(
                 self.runtime.event_store.by_topic_scoped(
@@ -10504,6 +10507,7 @@ class OperatorQueryService:
             "portfolio_snapshot_count": portfolio_snapshot_event_count,
             "portfolio_snapshot_recent_window_count": len(snapshot_events),
             "snapshot_reconciliation_window_limit": _LIVE_DASHBOARD_EVENT_LIMIT,
+            "event_count_window_limit": _LIVE_DASHBOARD_EVENT_LIMIT,
             "reconciliation_ref_window_limit": _LIVE_DASHBOARD_RECONCILIATION_REF_LIMIT,
             "fill_without_snapshot_count": sum(1 for fill in fills if fill.fill_id not in snapshot_fill_ids),
             "snapshot_without_reconciliation_count": sum(

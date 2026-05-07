@@ -144,6 +144,7 @@ class EventStore(Protocol):
         topic: str,
         *,
         scope: RuntimeStateScope,
+        limit: int | None = None,
     ) -> int:
         """返回指定 topic + scope 的事件数。
 
@@ -153,6 +154,9 @@ class EventStore(Protocol):
         反序列化 + jsonb 解码。本方法直接 ``SELECT count(*)``，不解码
         payload，作为 gateway_slow_query_systematic_fix_sow.md §S1 的一部分
         引入。
+
+        ``limit`` 用于在线页面的最新窗口计数，避免短频 dashboard 为展示
+        状态触发全历史 count；默认 ``None`` 保留完整审计语义。
         """
         ...
 

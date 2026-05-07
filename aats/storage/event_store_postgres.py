@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime
 
-from sqlalchemy import Select, and_, desc, func, or_, select
+from sqlalchemy import Select, and_, desc, func, or_, select, union_all
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import EventEnvelope
@@ -246,6 +246,7 @@ class PostgresEventStore:
         topic: str,
         *,
         scope: RuntimeStateScope,
+        limit: int | None = None,
     ) -> int:
         """返回指定 topic + scope 的事件数（hot + archive 两表合计）。
 
@@ -259,6 +260,41 @@ class PostgresEventStore:
         Scope 过滤语义与 ``by_topic_scoped`` 完全一致（共用 ``_scope_query``
         构造 WHERE 子句），保证 count 结果等于 ``len(by_topic_scoped(...))``。
         """
+        if limit is not None:
+            if limit <= 0:
+                return 0
+            hot_seq_query = select(EventEnvelopeModel.sequence_id.label("seq")).where(
+                EventEnvelopeModel.topic == topic
+            )
+            hot_seq_query = (
+                self._scope_query(hot_seq_query, scope, EventEnvelopeModel)
+                .order_by(desc(EventEnvelopeModel.sequence_id))
+                .limit(limit)
+                .subquery()
+            )
+            archive_seq_query = select(EventEnvelopeArchiveModel.source_sequence_id.label("seq")).where(
+                EventEnvelopeArchiveModel.topic == topic
+            )
+            archive_seq_query = (
+                self._scope_query(archive_seq_query, scope, EventEnvelopeArchiveModel)
+                .order_by(desc(EventEnvelopeArchiveModel.source_sequence_id))
+                .limit(limit)
+                .subquery()
+            )
+            combined = union_all(
+                select(hot_seq_query.c.seq),
+                select(archive_seq_query.c.seq),
+            ).subquery()
+            latest_window = (
+                select(combined.c.seq)
+                .order_by(desc(combined.c.seq))
+                .limit(limit)
+                .subquery()
+            )
+            limited_count = select(func.count()).select_from(latest_window)
+            with self.session_factory() as session:
+                return int(session.scalar(limited_count) or 0)
+
         hot_query = (
             select(func.count())
             .select_from(EventEnvelopeModel)

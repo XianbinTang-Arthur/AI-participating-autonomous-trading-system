@@ -221,6 +221,54 @@ class TestEventStoreCountByTopicScoped(unittest.TestCase):
         self.assertEqual(count, len(listed))
         self.assertEqual(count, 5)
 
+    def test_count_limit_caps_latest_window(self) -> None:
+        store = InMemoryEventStore()
+        scope = _spot_scope()
+        for _ in range(5):
+            store.append(_event(
+                topic="strategy.decision_context",
+                symbol="BTC-USDT",
+                product_type="spot",
+                margin_mode="cash",
+            ))
+
+        self.assertEqual(
+            store.count_by_topic_scoped("strategy.decision_context", scope=scope, limit=3),
+            3,
+        )
+        self.assertEqual(
+            store.count_by_topic_scoped("strategy.decision_context", scope=scope, limit=10),
+            5,
+        )
+        self.assertEqual(
+            store.count_by_topic_scoped("strategy.decision_context", scope=scope, limit=0),
+            0,
+        )
+
+    def test_postgres_count_limit_caps_latest_window(self) -> None:
+        store = PostgresEventStore(_session_factory())
+        scope = _spot_scope()
+        for _ in range(5):
+            store.append(_event(
+                topic="strategy.decision_context",
+                symbol="BTC-USDT",
+                product_type="spot",
+                margin_mode="cash",
+            ))
+
+        self.assertEqual(
+            store.count_by_topic_scoped("strategy.decision_context", scope=scope, limit=3),
+            3,
+        )
+        self.assertEqual(
+            store.count_by_topic_scoped("strategy.decision_context", scope=scope, limit=10),
+            5,
+        )
+        self.assertEqual(
+            store.count_by_topic_scoped("strategy.decision_context", scope=scope, limit=0),
+            0,
+        )
+
     def test_count_filters_topic(self) -> None:
         store = InMemoryEventStore()
         scope = _spot_scope()
@@ -263,6 +311,48 @@ class TestEventStoreCountByTopicScoped(unittest.TestCase):
             store.count_by_topic_scoped("strategy.decision_context", scope=_derivatives_scope()),
             1,
         )
+
+    def test_inmemory_count_limit_matches_limited_scoped_rows(self) -> None:
+        store = InMemoryEventStore()
+        scope = _spot_scope()
+        for symbol, product_type, margin_mode in [
+            ("BTC-USDT", "spot", "cash"),
+            ("BTC-USDT-SWAP", "derivatives", "cross"),
+            ("BTC-USDT", "spot", "cash"),
+            ("BTC-USDT", "spot", "cash"),
+        ]:
+            store.append(_event(
+                topic="strategy.decision_context",
+                symbol=symbol,
+                product_type=product_type,
+                margin_mode=margin_mode,
+            ))
+
+        limited_rows = store.by_topic_scoped("strategy.decision_context", scope=scope, limit=2)
+
+        self.assertEqual(store.count_by_topic_scoped("strategy.decision_context", scope=scope, limit=2), len(limited_rows))
+        self.assertEqual(store.count_by_topic_scoped("strategy.decision_context", scope=scope, limit=0), 0)
+
+    def test_postgres_count_limit_matches_limited_scoped_rows(self) -> None:
+        store = PostgresEventStore(_session_factory())
+        scope = _spot_scope()
+        for symbol, product_type, margin_mode in [
+            ("BTC-USDT", "spot", "cash"),
+            ("BTC-USDT-SWAP", "derivatives", "cross"),
+            ("BTC-USDT", "spot", "cash"),
+            ("BTC-USDT", "spot", "cash"),
+        ]:
+            store.append(_event(
+                topic="strategy.decision_context",
+                symbol=symbol,
+                product_type=product_type,
+                margin_mode=margin_mode,
+            ))
+
+        limited_rows = store.by_topic_scoped("strategy.decision_context", scope=scope, limit=2)
+
+        self.assertEqual(store.count_by_topic_scoped("strategy.decision_context", scope=scope, limit=2), len(limited_rows))
+        self.assertEqual(store.count_by_topic_scoped("strategy.decision_context", scope=scope, limit=0), 0)
 
 
 class TestEventStoreBatchGet(unittest.TestCase):

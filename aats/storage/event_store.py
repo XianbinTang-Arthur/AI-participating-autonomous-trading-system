@@ -117,6 +117,8 @@ class InMemoryEventStore:
     ) -> list[EventEnvelope]:
         rows = [event for event in self.by_topic(topic) if self._event_matches_scope(event, scope)]
         if limit is not None:
+            if limit <= 0:
+                return []
             rows = rows[-limit:]
         return rows
 
@@ -139,6 +141,7 @@ class InMemoryEventStore:
         topic: str,
         *,
         scope: RuntimeStateScope,
+        limit: int | None = None,
     ) -> int:
         """内存实现：遍历 by_topic(topic) 做 scope 过滤后计数。
 
@@ -146,6 +149,8 @@ class InMemoryEventStore:
         直接定义 count 以匹配 Protocol 签名，并让测试里 count 语义
         ``==len(by_topic_scoped(...))`` 成为显式契约。
         """
+        if limit is not None:
+            return len(self.by_topic_scoped(topic, scope=scope, limit=limit))
         return sum(
             1
             for event in self.by_topic(topic)

@@ -390,7 +390,9 @@ step_prune() {
 
 step_infra_up() {
     log_info "Step 6/7: 启动基础设施（Postgres/Redis/NATS/...）..."
-    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && docker compose -f docker-compose.yml --env-file $WSL2_ENV_FILE up -d"
+    if ! wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && docker compose -f docker-compose.yml --env-file $WSL2_ENV_FILE up -d"; then
+        log_warn "基础设施 docker compose up 返回非零；继续检查实际容器状态"
+    fi
 
     local elapsed=0
     while [[ $elapsed -lt 30 ]]; do
@@ -415,8 +417,10 @@ step_app_up() {
     log_info "Step 7/7: 启动应用服务..."
     local env_prefix
     env_prefix="$(compose_env_prefix)"
-    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && ${env_prefix:+env $env_prefix }docker compose $COMPOSE_CMD_ARGS up -d"
-    log_ok "应用服务已启动"
+    if ! wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && ${env_prefix:+env $env_prefix }docker compose $COMPOSE_CMD_ARGS up -d"; then
+        log_warn "应用 docker compose up 返回非零；继续进入健康检查确认实际容器状态"
+    fi
+    log_info "应用服务启动命令已返回，等待健康检查确认"
 }
 
 step_health() {
