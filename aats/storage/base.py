@@ -487,6 +487,9 @@ class AuditRepository(Protocol):
     def get(self, decision_id: str) -> DecisionAuditRecord | None:
         ...
 
+    def get_many_latest(self, decision_ids: list[str]) -> list[DecisionAuditRecord]:
+        ...
+
     def latest(self) -> DecisionAuditRecord | None:
         ...
 

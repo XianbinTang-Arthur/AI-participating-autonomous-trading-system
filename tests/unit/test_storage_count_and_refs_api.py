@@ -19,11 +19,14 @@ from decimal import Decimal
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.common import EventEnvelope, utc_now
 from aats.schemas.execution import FillEvent, OrderState
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.services.runtime_scope import RuntimeStateScope
+from aats.storage.audit_repo import InMemoryAuditRepository
+from aats.storage.audit_repo_postgres import PostgresAuditRepository
 from aats.storage.event_store import InMemoryEventStore
 from aats.storage.execution_fill_repo_v2_postgres import PostgresExecutionFillRepositoryV2
 from aats.storage.execution_repo_postgres import PostgresExecutionRepository
@@ -170,6 +173,13 @@ def _order_state(
         remaining_qty=Decimal("0.01"),
         product_type=product_type,  # type: ignore[arg-type]
         margin_mode=margin_mode,  # type: ignore[arg-type]
+    )
+
+
+def _audit_record(*, decision_id: str, decision_context_ref: str) -> DecisionAuditRecord:
+    return DecisionAuditRecord(
+        decision_id=decision_id,
+        decision_context_ref=decision_context_ref,
     )
 
 
@@ -424,6 +434,32 @@ class TestPostgresScopedLimitSemantics(unittest.TestCase):
         rows = repo.fills_since(limit=2)
 
         self.assertEqual([row["fill_id"] for row in rows], ["fill_v2_3", "fill_v2_4"])
+
+
+class TestAuditRepoBatchLatestLookup(unittest.TestCase):
+    def test_inmemory_get_many_latest_returns_requested_latest_records(self) -> None:
+        repo = InMemoryAuditRepository()
+        repo.upsert(_audit_record(decision_id="decision_a", decision_context_ref="ctx_a_old"))
+        repo.upsert(_audit_record(decision_id="decision_b", decision_context_ref="ctx_b"))
+        repo.upsert(_audit_record(decision_id="decision_a", decision_context_ref="ctx_a_new"))
+
+        rows = repo.get_many_latest(["decision_a", "missing", "decision_b"])
+
+        by_id = {row.decision_id: row for row in rows}
+        self.assertEqual(set(by_id), {"decision_a", "decision_b"})
+        self.assertEqual(by_id["decision_a"].decision_context_ref, "ctx_a_new")
+
+    def test_postgres_get_many_latest_returns_one_latest_revision_per_decision(self) -> None:
+        repo = PostgresAuditRepository(_session_factory())
+        repo.upsert(_audit_record(decision_id="decision_a", decision_context_ref="ctx_a_old"))
+        repo.upsert(_audit_record(decision_id="decision_b", decision_context_ref="ctx_b"))
+        repo.upsert(_audit_record(decision_id="decision_a", decision_context_ref="ctx_a_new"))
+
+        rows = repo.get_many_latest(["decision_a", "missing", "decision_b"])
+
+        by_id = {row.decision_id: row for row in rows}
+        self.assertEqual(set(by_id), {"decision_a", "decision_b"})
+        self.assertEqual(by_id["decision_a"].decision_context_ref, "ctx_a_new")
 
 
 if __name__ == "__main__":

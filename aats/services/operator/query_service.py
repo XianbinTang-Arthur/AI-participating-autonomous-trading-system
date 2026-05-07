@@ -2388,11 +2388,16 @@ class OperatorQueryService:
         decision_ids = decision_ids_for_guard_exclusions(fills=fills)
         if not decision_ids:
             return set()
-        audits = [
-            audit
-            for decision_id in decision_ids
-            if (audit := self.runtime.audit_repo.get(decision_id)) is not None
-        ]
+        ordered_decision_ids = sorted(decision_ids)
+        get_many_latest = getattr(self.runtime.audit_repo, "get_many_latest", None)
+        if callable(get_many_latest):
+            audits = list(get_many_latest(ordered_decision_ids))
+        else:
+            audits = [
+                audit
+                for decision_id in ordered_decision_ids
+                if (audit := self.runtime.audit_repo.get(decision_id)) is not None
+            ]
         return guard_excluded_fill_ids_for_independent_residual_exits(
             fills=fills,
             audits=audits,

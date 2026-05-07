@@ -97,6 +97,30 @@ class PostgresAuditRepository:
             )
         return DecisionAuditRecord.model_validate(row.payload) if row is not None else None
 
+    def get_many_latest(self, decision_ids: list[str]) -> list[DecisionAuditRecord]:
+        unique_ids = sorted({str(decision_id).strip() for decision_id in decision_ids if str(decision_id).strip()})
+        if not unique_ids:
+            return []
+        with self.session_factory() as session:
+            latest_revision = (
+                select(
+                    DecisionAuditRecordModel.decision_id,
+                    func.max(DecisionAuditRecordModel.audit_revision_id).label("max_revision"),
+                )
+                .where(DecisionAuditRecordModel.decision_id.in_(unique_ids))
+                .group_by(DecisionAuditRecordModel.decision_id)
+                .subquery()
+            )
+            rows = session.scalars(
+                select(DecisionAuditRecordModel)
+                .join(
+                    latest_revision,
+                    DecisionAuditRecordModel.audit_revision_id == latest_revision.c.max_revision,
+                )
+                .order_by(DecisionAuditRecordModel.decision_id)
+            ).all()
+        return [DecisionAuditRecord.model_validate(row.payload) for row in rows]
+
     def latest(self) -> DecisionAuditRecord | None:
         with self.session_factory() as session:
             per_decision = (

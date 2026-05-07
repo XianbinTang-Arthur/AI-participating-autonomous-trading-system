@@ -19,6 +19,13 @@ class InMemoryAuditRepository:
     def get(self, decision_id: str) -> DecisionAuditRecord | None:
         return self._latest_by_decision.get(decision_id)
 
+    def get_many_latest(self, decision_ids: list[str]) -> list[DecisionAuditRecord]:
+        return [
+            record
+            for decision_id in decision_ids
+            if (record := self._latest_by_decision.get(decision_id)) is not None
+        ]
+
     def latest(self) -> DecisionAuditRecord | None:
         return max(self._latest_by_decision.values(), key=lambda item: item.created_at, default=None)
 
