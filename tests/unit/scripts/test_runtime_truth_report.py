@@ -434,6 +434,22 @@ def test_gateway_health_probe_falls_back_to_wsl_localhost(monkeypatch) -> None:
     assert health["fallback_from_error"] == "<urlopen error [SSL: WRONG_VERSION_NUMBER]>"
 
 
+def test_fetch_url_text_reports_remote_disconnect_without_crashing(monkeypatch) -> None:
+    mod = load_module()
+
+    def fake_urlopen(*args, **kwargs):
+        raise mod.RemoteDisconnected("remote closed")
+
+    monkeypatch.setattr(mod, "urlopen", fake_urlopen)
+
+    result = mod.fetch_url_text("https://operator.local/dashboard/bundle", timeout=1)
+
+    assert result["ok"] is False
+    assert result["status"] is None
+    assert result["body"] == ""
+    assert "RemoteDisconnected" in result["error"]
+
+
 def test_db_probe_executable_directional_query_excludes_hold_current_notional() -> None:
     mod = load_module()
 

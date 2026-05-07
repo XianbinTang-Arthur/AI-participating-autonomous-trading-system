@@ -19,6 +19,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from http.client import RemoteDisconnected
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -4627,8 +4628,13 @@ def fetch_url_text(url: str, *, timeout: int = 10, headers: dict[str, str] | Non
             "body": redact_secret_text(body),
             "error": redact_secret_text(str(exc)),
         }
-    except (URLError, TimeoutError) as exc:
-        return {"ok": False, "status": None, "body": "", "error": redact_secret_text(str(exc))}
+    except (URLError, TimeoutError, RemoteDisconnected, ConnectionError, OSError) as exc:
+        return {
+            "ok": False,
+            "status": None,
+            "body": "",
+            "error": redact_secret_text(f"{type(exc).__name__}: {exc}"),
+        }
 
 
 def fetch_json_url(url: str, *, timeout: int = 10, headers: dict[str, str] | None = None) -> dict[str, Any]:
