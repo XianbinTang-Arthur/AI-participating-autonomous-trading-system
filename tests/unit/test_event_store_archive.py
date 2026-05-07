@@ -3,10 +3,32 @@ from __future__ import annotations
 from datetime import timedelta
 import unittest
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+
 from aats.schemas.common import EventEnvelope, utc_now
 from aats.schemas.reconciliation import ReplayProjectionOffset
 from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.event_store import InMemoryEventStore
+from aats.storage.event_store_postgres import PostgresEventStore
+from aats.storage.sqlalchemy_models import Base
+
+
+def _session_factory() -> sessionmaker[Session]:
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine, expire_on_commit=False, future=True)
+
+
+def _event(*, age_hours: int) -> EventEnvelope:
+    return EventEnvelope(
+        event_type="test.event",
+        event_timestamp=utc_now() - timedelta(hours=age_hours),
+        source_component="test",
+        topic="test.topic",
+        key="BTC-USDT",
+        payload={"symbol": "BTC-USDT", "product_type": "spot", "margin_mode": "cash"},
+    )
 
 
 class TestEventStoreArchive(unittest.TestCase):
@@ -68,6 +90,48 @@ class TestEventStoreArchive(unittest.TestCase):
         self.assertEqual(loaded.offset_id, offset.offset_id)
         self.assertEqual(loaded.baseline_generation_id, "base_1")
         self.assertEqual(loaded.exchange_ack_watermark_id, "watermark_1")
+
+
+class TestEventStoreBatchLookup(unittest.TestCase):
+    def test_inmemory_get_many_returns_hot_and_archived_rows(self) -> None:
+        store = InMemoryEventStore()
+        old_event = _event(age_hours=2)
+        new_event = _event(age_hours=0)
+        store.append(old_event)
+        store.append(new_event)
+        store.archive_before(before_ts=utc_now() - timedelta(hours=1))
+
+        rows = store.get_many([
+            old_event.event_id,
+            "",
+            new_event.event_id,
+            old_event.event_id,
+            "missing_event",
+        ])
+
+        self.assertEqual(set(rows), {old_event.event_id, new_event.event_id})
+        self.assertEqual(rows[old_event.event_id].event_id, old_event.event_id)
+        self.assertEqual(rows[new_event.event_id].event_id, new_event.event_id)
+
+    def test_postgres_get_many_returns_hot_and_archived_rows(self) -> None:
+        store = PostgresEventStore(_session_factory())
+        old_event = _event(age_hours=2)
+        new_event = _event(age_hours=0)
+        store.append(old_event)
+        store.append(new_event)
+        store.archive_before(before_ts=utc_now() - timedelta(hours=1))
+
+        rows = store.get_many([
+            old_event.event_id,
+            "",
+            new_event.event_id,
+            old_event.event_id,
+            "missing_event",
+        ])
+
+        self.assertEqual(set(rows), {old_event.event_id, new_event.event_id})
+        self.assertEqual(rows[old_event.event_id].payload["symbol"], "BTC-USDT")
+        self.assertEqual(rows[new_event.event_id].payload["symbol"], "BTC-USDT")
 
 
 if __name__ == "__main__":

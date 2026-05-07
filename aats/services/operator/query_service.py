@@ -2398,10 +2398,24 @@ class OperatorQueryService:
                 for decision_id in ordered_decision_ids
                 if (audit := self.runtime.audit_repo.get(decision_id)) is not None
             ]
+        payload_refs = list(
+            dict.fromkeys(
+                ref
+                for audit in audits
+                for ref in (
+                    getattr(audit, "position_target_ref", None),
+                    getattr(audit, "decision_outcome_ref", None),
+                    getattr(audit, "policy_decision_ref", None),
+                    getattr(audit, "risk_decision_ref", None),
+                )
+                if ref
+            )
+        )
+        payload_by_ref = self.payloads_by_ref_map(payload_refs)
         return guard_excluded_fill_ids_for_independent_residual_exits(
             fills=fills,
             audits=audits,
-            payload_by_ref=self.payload_by_ref,
+            payload_by_ref=payload_by_ref.get,
         )
 
     def _current_runtime_started_at(self) -> datetime:
@@ -2442,12 +2456,33 @@ class OperatorQueryService:
     def payload_by_ref(self, ref: str | None) -> dict[str, Any] | None:
         if ref is None:
             return None
-        return self.payload(self.runtime.event_store.get(ref))
+        return self.payloads_by_ref_map([ref]).get(ref)
+
+    def payloads_by_ref_map(self, refs: list[str]) -> dict[str, dict[str, Any]]:
+        unique_refs = list(dict.fromkeys(str(ref).strip() for ref in refs if str(ref).strip()))
+        if not unique_refs:
+            return {}
+        get_many = getattr(self.runtime.event_store, "get_many", None)
+        if callable(get_many):
+            envelopes_by_ref = get_many(unique_refs)
+        else:
+            envelopes_by_ref = {
+                ref: envelope
+                for ref in unique_refs
+                if (envelope := self.runtime.event_store.get(ref)) is not None
+            }
+        rows: dict[str, dict[str, Any]] = {}
+        for ref, envelope in envelopes_by_ref.items():
+            payload = self.payload(envelope)
+            if payload is not None:
+                rows[ref] = payload
+        return rows
 
     def payloads_by_refs(self, refs: list[str]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
+        payloads_by_ref = self.payloads_by_ref_map(refs)
         for ref in refs:
-            payload = self.payload_by_ref(ref)
+            payload = payloads_by_ref.get(ref)
             if payload is not None:
                 rows.append(payload)
         return rows

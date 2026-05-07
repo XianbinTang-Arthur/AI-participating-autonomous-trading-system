@@ -56,6 +56,20 @@ class InMemoryEventStore:
                 return e
         return None
 
+    def get_many(self, event_ids: list[str]) -> dict[str, EventEnvelope]:
+        unique_ids = list(dict.fromkeys(str(event_id).strip() for event_id in event_ids if str(event_id).strip()))
+        if not unique_ids:
+            return {}
+        rows: dict[str, EventEnvelope] = {
+            event_id: event for event_id in unique_ids if (event := self._index.get(event_id)) is not None
+        }
+        missing = set(unique_ids) - set(rows)
+        if missing:
+            for event in self._archive_events:
+                if event.event_id in missing:
+                    rows[event.event_id] = event
+        return rows
+
     def latest(self, topic: str, key: str | None = None) -> EventEnvelope | None:
         for event in reversed(self._events):
             if event.topic != topic:

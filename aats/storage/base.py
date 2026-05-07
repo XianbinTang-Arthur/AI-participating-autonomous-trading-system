@@ -106,6 +106,9 @@ class EventStore(Protocol):
     def get(self, event_id: str) -> EventEnvelope | None:
         ...
 
+    def get_many(self, event_ids: list[str]) -> dict[str, EventEnvelope]:
+        ...
+
     def latest(self, topic: str, key: str | None = None) -> EventEnvelope | None:
         ...
 

@@ -28,6 +28,7 @@ from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.audit_repo import InMemoryAuditRepository
 from aats.storage.audit_repo_postgres import PostgresAuditRepository
 from aats.storage.event_store import InMemoryEventStore
+from aats.storage.event_store_postgres import PostgresEventStore
 from aats.storage.execution_fill_repo_v2_postgres import PostgresExecutionFillRepositoryV2
 from aats.storage.execution_repo_postgres import PostgresExecutionRepository
 from aats.storage.portfolio_repo_postgres import PostgresPortfolioRepository
@@ -69,6 +70,22 @@ def _event(*, topic: str, symbol: str, product_type: str, margin_mode: str) -> E
             "margin_mode": margin_mode,
         },
     )
+
+
+def _event_with_id(
+    *,
+    event_id: str,
+    topic: str = "strategy.decision_context",
+    symbol: str = "BTC-USDT",
+    product_type: str = "spot",
+    margin_mode: str = "cash",
+) -> EventEnvelope:
+    return _event(
+        topic=topic,
+        symbol=symbol,
+        product_type=product_type,
+        margin_mode=margin_mode,
+    ).model_copy(update={"event_id": event_id})
 
 
 def _reconciliation_report(
@@ -246,6 +263,28 @@ class TestEventStoreCountByTopicScoped(unittest.TestCase):
             store.count_by_topic_scoped("strategy.decision_context", scope=_derivatives_scope()),
             1,
         )
+
+
+class TestEventStoreBatchGet(unittest.TestCase):
+    def test_inmemory_get_many_returns_existing_events_by_id(self) -> None:
+        store = InMemoryEventStore()
+        store.append(_event_with_id(event_id="event_a"))
+        store.append(_event_with_id(event_id="event_b"))
+
+        rows = store.get_many(["event_b", "missing", "event_a", "event_b"])
+
+        self.assertEqual(set(rows), {"event_a", "event_b"})
+        self.assertEqual(rows["event_a"].event_id, "event_a")
+
+    def test_postgres_get_many_returns_existing_events_by_id(self) -> None:
+        store = PostgresEventStore(_session_factory())
+        store.append(_event_with_id(event_id="event_a"))
+        store.append(_event_with_id(event_id="event_b"))
+
+        rows = store.get_many(["event_b", "missing", "event_a", "event_b"])
+
+        self.assertEqual(set(rows), {"event_a", "event_b"})
+        self.assertEqual(rows["event_b"].event_id, "event_b")
 
 
 class TestReconciliationRepoPortfolioSnapshotRefs(unittest.TestCase):

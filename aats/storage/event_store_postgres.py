@@ -94,6 +94,23 @@ class PostgresEventStore:
                 row = session.scalar(select(EventEnvelopeArchiveModel).where(EventEnvelopeArchiveModel.event_id == event_id))
         return self._to_schema(row) if row is not None else None
 
+    def get_many(self, event_ids: list[str]) -> dict[str, EventEnvelope]:
+        unique_ids = list(dict.fromkeys(str(event_id).strip() for event_id in event_ids if str(event_id).strip()))
+        if not unique_ids:
+            return {}
+        with self.session_factory() as session:
+            hot_rows = session.scalars(
+                select(EventEnvelopeModel).where(EventEnvelopeModel.event_id.in_(unique_ids))
+            ).all()
+            rows: dict[str, EventEnvelope] = {row.event_id: self._to_schema(row) for row in hot_rows}
+            missing_ids = [event_id for event_id in unique_ids if event_id not in rows]
+            if missing_ids:
+                archive_rows = session.scalars(
+                    select(EventEnvelopeArchiveModel).where(EventEnvelopeArchiveModel.event_id.in_(missing_ids))
+                ).all()
+                rows.update({row.event_id: self._to_schema(row) for row in archive_rows})
+        return rows
+
     def latest(self, topic: str, key: str | None = None) -> EventEnvelope | None:
         query: Select[tuple[EventEnvelopeModel]] = select(EventEnvelopeModel).where(EventEnvelopeModel.topic == topic)
         if key is not None:
