@@ -29,6 +29,15 @@ def _fake_request() -> SimpleNamespace:
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(runtime=None)))
 
 
+def _fake_snapshot_request(runtime: object | None = None) -> SimpleNamespace:
+    if runtime is None:
+        runtime = object()
+    return SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(runtime=runtime)),
+        state=SimpleNamespace(_dashboard_snapshot_loader=True),
+    )
+
+
 class TestRdpControlSummary(TestCase):
     def test_control_summary_splits_running_and_pending_tasks_by_workflow(self) -> None:
         request = _fake_request()
@@ -301,6 +310,80 @@ class TestRdpControlSummary(TestCase):
         self.assertEqual(queue, [])
         self.assertEqual(effectiveness_registry.call_count, 0)
         self.assertEqual(observation_result.call_count, 0)
+
+    def test_snapshot_control_summary_cache_is_snapshot_only_and_copy_safe(self) -> None:
+        def _health_payload(_root):
+            return {
+                "overall_health": "healthy",
+                "blocking_reasons": [],
+                "warnings": [],
+                "checks": [],
+            }
+
+        rdp_control_summary._rdp_control_summary_snapshot_cache.clear()
+        try:
+            with (
+                patch("aats.api.rdp_control_summary._governance_session", _dummy_session),
+                patch("aats.data_platform.governance.rdp_task_db.db_get_recent_tasks", return_value=[]),
+                patch("aats.api.rdp_control_summary._environment_summary", return_value={"name": "staging"}),
+                patch(
+                    "aats.api.rdp_control_summary.query_rdp_health",
+                    side_effect=_health_payload,
+                ) as health_query,
+                patch("aats.api.rdp_control_summary._load_recent_gate_results", return_value=[]),
+                patch("aats.api.rdp_control_summary._load_recent_releases", return_value=[]),
+                patch("aats.api.rdp_control_summary._build_observation_queue", return_value=[]),
+                patch(
+                    "aats.api.rdp_control_summary.query_latest_recommendations",
+                    return_value={"recommendations": []},
+                ),
+                patch("aats.api.rdp_control_summary.query_active_parameter_sets", return_value={
+                    "generated_at": "2026-04-10T11:40:00Z",
+                    "governance_managed": True,
+                    "paused_combos": [],
+                    "known_combos": [],
+                    "active_sets": {},
+                    "parameter_sets": [],
+                }),
+                patch("aats.api.rdp_control_summary.query_latest_decision_round", return_value={"available": False}),
+                patch("aats.api.rdp_control_summary.query_latest_decisions", return_value={
+                    "available": False,
+                    "generated_at": None,
+                    "status_distribution": {},
+                    "decisions": [],
+                }),
+                patch("aats.api.rdp_control_summary.query_parameter_registry", return_value={
+                    "available": True,
+                    "parameter_sets": [],
+                }),
+                patch(
+                    "aats.data_platform.production_workflow.release_registry.load_release_history",
+                    return_value={"releases": []},
+                ),
+            ):
+                snapshot_runtime = object()
+                first = build_rdp_control_summary(_fake_snapshot_request(snapshot_runtime))
+                first["health"]["overall_health"] = "mutated"
+                second = build_rdp_control_summary(_fake_snapshot_request(snapshot_runtime))
+
+                self.assertEqual(health_query.call_count, 1)
+                self.assertEqual(second["health"]["overall_health"], "healthy")
+
+                separate_runtime = build_rdp_control_summary(_fake_snapshot_request(object()))
+
+                self.assertEqual(health_query.call_count, 2)
+                self.assertEqual(separate_runtime["health"]["overall_health"], "healthy")
+
+                direct_request = SimpleNamespace(
+                    app=SimpleNamespace(state=SimpleNamespace(runtime=object())),
+                    state=SimpleNamespace(),
+                )
+                direct = build_rdp_control_summary(direct_request)
+
+                self.assertEqual(health_query.call_count, 3)
+                self.assertEqual(direct["health"]["overall_health"], "healthy")
+        finally:
+            rdp_control_summary._rdp_control_summary_snapshot_cache.clear()
 
     def test_control_summary_builds_observation_queue_from_full_release_history(self) -> None:
         request = _fake_request()

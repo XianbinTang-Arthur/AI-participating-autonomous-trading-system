@@ -447,7 +447,7 @@ def _dashboard_snapshot_default_payload(snapshot_key: str) -> dict[str, Any]:
 def _dashboard_snapshot_rdp_request(runtime: ApplicationRuntime) -> Any:
     return SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(runtime=runtime)),
-        state=SimpleNamespace(),
+        state=SimpleNamespace(_dashboard_snapshot_loader=True),
     )
 
 

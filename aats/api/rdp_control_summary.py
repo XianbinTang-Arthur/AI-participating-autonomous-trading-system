@@ -5,6 +5,8 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
+from time import monotonic
 from typing import Any
 from urllib.parse import quote as _url_quote
 
@@ -32,6 +34,9 @@ from aats.services.operator.rdp_queries import (
 logger = logging.getLogger(__name__)
 
 _PENDING_RECOMMENDATION_STATUSES = {"draft", "approved"}
+_RDP_CONTROL_SUMMARY_SNAPSHOT_CACHE_TTL_SECONDS = 5.0
+_rdp_control_summary_snapshot_cache_lock = Lock()
+_rdp_control_summary_snapshot_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def _project_root(request: Request) -> Path:
@@ -52,6 +57,38 @@ def _combo_key(family: str | None, timeframe: str | None) -> str:
     if not family or not timeframe:
         return ""
     return f"{family}_{str(timeframe).lower()}"
+
+
+def _snapshot_summary_cache_runtime(request: Request) -> Any | None:
+    request_state = getattr(request, "state", None)
+    if not bool(getattr(request_state, "_dashboard_snapshot_loader", False)):
+        return None
+    app_state = getattr(getattr(request, "app", None), "state", None)
+    return getattr(app_state, "runtime", None)
+
+
+def _snapshot_summary_cache_key(root: Path, runtime: Any) -> str:
+    return f"{root}|runtime={id(runtime)}"
+
+
+def _get_snapshot_summary_cache(root: Path, runtime: Any) -> dict[str, Any] | None:
+    cache_key = _snapshot_summary_cache_key(root, runtime)
+    now = monotonic()
+    with _rdp_control_summary_snapshot_cache_lock:
+        entry = _rdp_control_summary_snapshot_cache.get(cache_key)
+        if entry is None:
+            return None
+        cached_at, payload = entry
+        if now - cached_at > _RDP_CONTROL_SUMMARY_SNAPSHOT_CACHE_TTL_SECONDS:
+            _rdp_control_summary_snapshot_cache.pop(cache_key, None)
+            return None
+        return copy.deepcopy(payload)
+
+
+def _put_snapshot_summary_cache(root: Path, runtime: Any, payload: dict[str, Any]) -> None:
+    cache_key = _snapshot_summary_cache_key(root, runtime)
+    with _rdp_control_summary_snapshot_cache_lock:
+        _rdp_control_summary_snapshot_cache[cache_key] = (monotonic(), copy.deepcopy(payload))
 
 
 def _build_applied_recommendation_ids(active_parameters: dict[str, Any]) -> set[str]:
@@ -530,6 +567,17 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         return copy.deepcopy(cached)
 
     root = _project_root(request)
+    snapshot_cache_runtime = _snapshot_summary_cache_runtime(request)
+    if snapshot_cache_runtime is not None:
+        cached_snapshot = _get_snapshot_summary_cache(root, snapshot_cache_runtime)
+        if cached_snapshot is not None:
+            try:
+                if request_state is not None:
+                    request_state._rdp_control_summary_cache = copy.deepcopy(cached_snapshot)
+            except Exception:
+                pass
+            return cached_snapshot
+
     environment = _environment_summary()
 
     tasks_by_workflow: dict[str, Any] = {}
@@ -856,6 +904,8 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         # Starlette Request.state 是 State()，setattr 总能成功；极少数 mock
         # request 不支持 setattr，吞掉并回退到 no-cache 语义。
         pass
+    if snapshot_cache_runtime is not None:
+        _put_snapshot_summary_cache(root, snapshot_cache_runtime, result)
     return result
 
 
