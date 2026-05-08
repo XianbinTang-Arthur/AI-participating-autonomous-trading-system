@@ -390,6 +390,7 @@ class DashboardSnapshotPlane:
         scheduler_interval_seconds: float = 1.0,
         priority_concurrency: Mapping[str, int] | None = None,
         scheduler_priority_batch_size: Mapping[str, int] | None = None,
+        loader_concurrency: int = 3,
         startup_panel_interval_seconds: float = 0.5,
         startup_priority_pause_seconds: float = 1.0,
     ) -> None:
@@ -413,6 +414,7 @@ class DashboardSnapshotPlane:
             priority: asyncio.Semaphore(max(int(limit), 1))
             for priority, limit in concurrency.items()
         }
+        self._loader_semaphore = asyncio.Semaphore(max(int(loader_concurrency), 1))
         scheduler_batch_size = {
             "p0": 2,
             "p1": 1,
@@ -721,7 +723,8 @@ class DashboardSnapshotPlane:
         policy = self._policies[panel_key]
         semaphore = self._priority_semaphores.setdefault(policy.priority, asyncio.Semaphore(1))
         async with semaphore:
-            await self._refresh_panel_locked(panel_key, variant_key=variant_key, policy=policy, reason=reason)
+            async with self._loader_semaphore:
+                await self._refresh_panel_locked(panel_key, variant_key=variant_key, policy=policy, reason=reason)
 
     async def _refresh_panel_locked(
         self,

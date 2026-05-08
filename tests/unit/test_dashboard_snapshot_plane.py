@@ -300,6 +300,67 @@ class DashboardSnapshotPlaneTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await plane.stop()
 
+    async def test_loader_concurrency_limits_refreshes_across_priorities(self) -> None:
+        active = 0
+        max_active = 0
+
+        async def loader(panel_key: str) -> dict[str, Any]:
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.02)
+            active -= 1
+            return {"panel": panel_key}
+
+        plane = DashboardSnapshotPlane(
+            loader=loader,
+            default_factory=lambda _panel_key: {},
+            policies={
+                "runtime": DashboardSnapshotPolicy(
+                    panel_key="runtime",
+                    ttl_seconds=60.0,
+                    stale_after_seconds=60.0,
+                    hard_expire_seconds=120.0,
+                    timeout_seconds=1.0,
+                    priority="p0",
+                ),
+                "latestDecision": DashboardSnapshotPolicy(
+                    panel_key="latestDecision",
+                    ttl_seconds=60.0,
+                    stale_after_seconds=60.0,
+                    hard_expire_seconds=120.0,
+                    timeout_seconds=1.0,
+                    priority="p1",
+                ),
+                "rdpWorkbenchOverview": DashboardSnapshotPolicy(
+                    panel_key="rdpWorkbenchOverview",
+                    ttl_seconds=60.0,
+                    stale_after_seconds=60.0,
+                    hard_expire_seconds=120.0,
+                    timeout_seconds=1.0,
+                    priority="p2",
+                ),
+            },
+            scheduler_interval_seconds=60.0,
+            priority_concurrency={"p0": 3, "p1": 3, "p2": 3},
+            loader_concurrency=2,
+        )
+        try:
+            self.assertTrue(await plane.enqueue("runtime", reason="test"))
+            self.assertTrue(await plane.enqueue("latestDecision", reason="test"))
+            self.assertTrue(await plane.enqueue("rdpWorkbenchOverview", reason="test"))
+
+            await _wait_for_panel_snapshot(plane, "runtime", {"panel": "runtime"})
+            await _wait_for_panel_snapshot(plane, "latestDecision", {"panel": "latestDecision"})
+            await _wait_for_panel_snapshot(
+                plane,
+                "rdpWorkbenchOverview",
+                {"panel": "rdpWorkbenchOverview"},
+            )
+            self.assertEqual(max_active, 2)
+        finally:
+            await plane.stop()
+
     async def test_p3_refresh_does_not_block_p2_refresh(self) -> None:
         heavy_started = asyncio.Event()
         release_heavy = asyncio.Event()
