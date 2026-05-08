@@ -13,6 +13,7 @@ from aats.services.operator.dashboard_snapshot import (
     P0_DASHBOARD_SNAPSHOT_PANEL_KEYS,
     P1_DASHBOARD_SNAPSHOT_PANEL_KEYS,
     P2_DASHBOARD_SNAPSHOT_PANEL_KEYS,
+    P3_DASHBOARD_SNAPSHOT_PANEL_KEYS,
     dashboard_snapshot_storage_key,
     dashboard_snapshot_storage_parts,
 )
@@ -63,10 +64,12 @@ class DashboardSnapshotPlaneTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(P0_DASHBOARD_SNAPSHOT_PANEL_KEYS.issubset(DASHBOARD_SNAPSHOT_PANEL_KEYS))
         self.assertTrue(P1_DASHBOARD_SNAPSHOT_PANEL_KEYS.issubset(DASHBOARD_SNAPSHOT_PANEL_KEYS))
         self.assertTrue(P2_DASHBOARD_SNAPSHOT_PANEL_KEYS.issubset(DASHBOARD_SNAPSHOT_PANEL_KEYS))
+        self.assertTrue(P3_DASHBOARD_SNAPSHOT_PANEL_KEYS.issubset(DASHBOARD_SNAPSHOT_PANEL_KEYS))
         self.assertIn("latestDecision", DASHBOARD_SNAPSHOT_PANEL_KEYS)
         self.assertIn("strategyRuntime", DASHBOARD_SNAPSHOT_PANEL_KEYS)
         self.assertIn("guardedLiveRunPacket", DASHBOARD_SNAPSHOT_PANEL_KEYS)
         self.assertIn("rdpWorkbenchOverview", DASHBOARD_SNAPSHOT_PANEL_KEYS)
+        self.assertIn("positionLifecycleAttribution", P3_DASHBOARD_SNAPSHOT_PANEL_KEYS)
 
     async def test_missing_read_returns_default_and_enqueues_refresh(self) -> None:
         loader_called = asyncio.Event()
@@ -168,6 +171,65 @@ class DashboardSnapshotPlaneTest(unittest.IsolatedAsyncioTestCase):
             await _wait_for_panel_snapshot(plane, "health", {"panel": "health"})
             self.assertEqual(max_active, 1)
         finally:
+            await plane.stop()
+
+    async def test_p3_refresh_does_not_block_p2_refresh(self) -> None:
+        heavy_started = asyncio.Event()
+        release_heavy = asyncio.Event()
+        rdp_started = asyncio.Event()
+
+        async def loader(panel_key: str) -> dict[str, Any]:
+            if panel_key == "strategyAttribution":
+                heavy_started.set()
+                await release_heavy.wait()
+                return {"panel": panel_key}
+            rdp_started.set()
+            return {"panel": panel_key}
+
+        plane = DashboardSnapshotPlane(
+            loader=loader,
+            default_factory=lambda _panel_key: {},
+            policies={
+                "strategyAttribution": DashboardSnapshotPolicy(
+                    panel_key="strategyAttribution",
+                    ttl_seconds=60.0,
+                    stale_after_seconds=60.0,
+                    hard_expire_seconds=120.0,
+                    timeout_seconds=1.0,
+                    priority="p3",
+                ),
+                "rdpWorkbenchOverview": DashboardSnapshotPolicy(
+                    panel_key="rdpWorkbenchOverview",
+                    ttl_seconds=60.0,
+                    stale_after_seconds=60.0,
+                    hard_expire_seconds=120.0,
+                    timeout_seconds=1.0,
+                    priority="p2",
+                ),
+            },
+            scheduler_interval_seconds=60.0,
+            priority_concurrency={"p2": 1, "p3": 1},
+        )
+        try:
+            self.assertTrue(await plane.enqueue("strategyAttribution", reason="test_heavy"))
+            await asyncio.wait_for(heavy_started.wait(), timeout=1.0)
+
+            self.assertTrue(await plane.enqueue("rdpWorkbenchOverview", reason="test_rdp"))
+            await asyncio.wait_for(rdp_started.wait(), timeout=1.0)
+            await _wait_for_panel_snapshot(
+                plane,
+                "rdpWorkbenchOverview",
+                {"panel": "rdpWorkbenchOverview"},
+            )
+
+            release_heavy.set()
+            await _wait_for_panel_snapshot(
+                plane,
+                "strategyAttribution",
+                {"panel": "strategyAttribution"},
+            )
+        finally:
+            release_heavy.set()
             await plane.stop()
 
     async def test_refresh_timeout_keeps_singleflight_until_loader_settles(self) -> None:

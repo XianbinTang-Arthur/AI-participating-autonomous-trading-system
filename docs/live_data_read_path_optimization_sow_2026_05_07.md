@@ -84,6 +84,8 @@ Target fixes:
   sync read settles. `asyncio.to_thread()` cannot stop DB work already running in a
   worker thread, so releasing the panel slot immediately would start duplicate reads
   and starve the dashboard snapshot plane.
+- Heavy attribution/review panels run in a separate `p3` lane so long-running
+  report builders cannot block RDP workbench or recent-decision snapshots.
 
 ## Logging, Monitoring, Auditing
 

@@ -317,13 +317,18 @@ P2_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
         timeout_seconds=25.0,
         priority="p2",
     ),
+}
+
+P2_DASHBOARD_SNAPSHOT_PANEL_KEYS = frozenset(P2_DASHBOARD_SNAPSHOT_POLICIES)
+
+P3_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
     "strategyAttribution": DashboardSnapshotPolicy(
         panel_key="strategyAttribution",
         ttl_seconds=120.0,
         stale_after_seconds=300.0,
         hard_expire_seconds=900.0,
         timeout_seconds=35.0,
-        priority="p2",
+        priority="p3",
     ),
     "positionLifecycleAttribution": DashboardSnapshotPolicy(
         panel_key="positionLifecycleAttribution",
@@ -331,7 +336,7 @@ P2_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
         stale_after_seconds=300.0,
         hard_expire_seconds=900.0,
         timeout_seconds=35.0,
-        priority="p2",
+        priority="p3",
     ),
     "trialReviewSummary": DashboardSnapshotPolicy(
         panel_key="trialReviewSummary",
@@ -339,16 +344,17 @@ P2_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
         stale_after_seconds=300.0,
         hard_expire_seconds=900.0,
         timeout_seconds=35.0,
-        priority="p2",
+        priority="p3",
     ),
 }
 
-P2_DASHBOARD_SNAPSHOT_PANEL_KEYS = frozenset(P2_DASHBOARD_SNAPSHOT_POLICIES)
+P3_DASHBOARD_SNAPSHOT_PANEL_KEYS = frozenset(P3_DASHBOARD_SNAPSHOT_POLICIES)
 
 DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
     **P0_DASHBOARD_SNAPSHOT_POLICIES,
     **P1_DASHBOARD_SNAPSHOT_POLICIES,
     **P2_DASHBOARD_SNAPSHOT_POLICIES,
+    **P3_DASHBOARD_SNAPSHOT_POLICIES,
 }
 
 DASHBOARD_SNAPSHOT_PANEL_KEYS = frozenset(DASHBOARD_SNAPSHOT_POLICIES)
@@ -385,6 +391,7 @@ class DashboardSnapshotPlane:
             "p0": 4,
             "p1": 2,
             "p2": 1,
+            "p3": 1,
             **(dict(priority_concurrency or {})),
         }
         self._priority_semaphores = {
