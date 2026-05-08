@@ -10153,6 +10153,302 @@ class OperatorQueryService:
             ),
         )
 
+    def _position_target_dashboard_payload(self, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return payload
+        normalized = normalize_independent_payload(payload=payload) or dict(payload)
+        if normalized.get("book_expectancy_summary") is None:
+            normalized["book_expectancy_summary"] = self._book_expectancy_summary_from_payload(normalized)
+        if not normalized.get("book_runtime_states"):
+            normalized["book_runtime_states"] = self._book_runtime_states_from_payload(normalized)
+        if normalized.get("independent_adaptive_summary") is None:
+            normalized["independent_adaptive_summary"] = self._independent_adaptive_summary_from_payload(normalized)
+        if normalized.get("independent_transition_exception_summary") is None:
+            normalized["independent_transition_exception_summary"] = (
+                self._independent_transition_exception_summary_from_payload(normalized)
+            )
+        if not normalized.get("diagnostic_metric_flags"):
+            normalized["diagnostic_metric_flags"] = self._effective_diagnostic_metric_flags(normalized)
+        parent_signal_fields = self._overlay_parent_signal_fields_from_payload(normalized)
+        if parent_signal_fields is not None:
+            for key, value in parent_signal_fields.items():
+                if normalized.get(key) is None:
+                    normalized[key] = value
+        return dump_payload_exact(normalized)
+
+    def _decision_outcome_dashboard_payload(
+        self,
+        *,
+        finalized_decision_outcome: dict[str, Any] | None,
+        position_target: dict[str, Any] | None,
+        policy_decision: dict[str, Any] | None,
+        risk_decision: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        native_outcome = finalized_decision_outcome
+        if not isinstance(native_outcome, dict) and isinstance(position_target, dict):
+            nested_outcome = position_target.get("decision_outcome")
+            native_outcome = nested_outcome if isinstance(nested_outcome, dict) else None
+        if not isinstance(native_outcome, dict):
+            return None
+        payload = normalize_independent_payload(payload=native_outcome) or dict(native_outcome)
+        payload["finalized"] = bool(payload.get("finalized", True))
+        if payload.get("family_execution_summary") is None and isinstance(position_target, dict):
+            payload["family_execution_summary"] = position_target.get("family_execution_summary")
+        if payload.get("book_expectancy_summary") is None:
+            payload["book_expectancy_summary"] = (
+                self._book_expectancy_summary_from_payload(payload)
+                or self._book_expectancy_summary_from_payload(position_target)
+            )
+        if not payload.get("book_runtime_states"):
+            payload["book_runtime_states"] = (
+                self._book_runtime_states_from_payload(payload)
+                or self._book_runtime_states_from_payload(position_target)
+            )
+        if payload.get("independent_adaptive_summary") is None:
+            payload["independent_adaptive_summary"] = (
+                self._independent_adaptive_summary_from_payload(payload)
+                or self._independent_adaptive_summary_from_payload(position_target)
+            )
+        if payload.get("independent_transition_exception_summary") is None:
+            payload["independent_transition_exception_summary"] = (
+                self._independent_transition_exception_summary_from_payload(payload)
+                or self._independent_transition_exception_summary_from_payload(position_target)
+            )
+        if not payload.get("diagnostic_metric_flags"):
+            payload["diagnostic_metric_flags"] = self._effective_diagnostic_metric_flags(
+                payload,
+                position_target,
+            )
+        payload["sizing_breakdown"] = self._resolved_sizing_breakdown_payload(
+            finalized_decision_outcome=payload,
+            position_target=position_target,
+            policy_decision=policy_decision,
+            risk_decision=risk_decision,
+            sizing_breakdown=(
+                payload.get("sizing_breakdown")
+                if payload.get("sizing_breakdown") is not None
+                else (
+                    None
+                    if not isinstance(position_target, dict)
+                    else position_target.get("sizing_breakdown")
+                )
+            ),
+        )
+        parent_signal_fields = (
+            self._overlay_parent_signal_fields_from_payload(payload)
+            or self._overlay_parent_signal_fields_from_payload(position_target)
+        )
+        if parent_signal_fields is not None:
+            for key, value in parent_signal_fields.items():
+                if payload.get(key) is None:
+                    payload[key] = value
+        return dump_payload_exact(payload)
+
+    def latest_decision_dashboard(self) -> dict[str, Any]:
+        cache_key = f"latest_decision_dashboard:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 20, self._build_latest_decision_dashboard)
+
+    def _build_latest_decision_dashboard(self) -> dict[str, Any]:
+        audit = self._cached("latest_decision_record", self.runtime.audit_repo.latest)
+        if audit is None:
+            return {
+                "decision_id": None,
+                "decision_context": None,
+                "baseline_assessment": None,
+                "ai_assessment": None,
+                "position_target": None,
+                "policy_decision": None,
+                "risk_decision": None,
+                "decision_outcome": None,
+                "execution_plan": None,
+                "audit": None,
+                "order_intents": [],
+                "order_updates": [],
+                "fills": [],
+                "portfolio_snapshot": None,
+                "reconciliations": [],
+                "summary": None,
+                "strategy_execution_health": None,
+            }
+        ai_visible = self._ai_history_visible()
+        ref_by_name = {
+            "decision_context": audit.decision_context_ref,
+            "baseline_assessment": audit.baseline_assessment_ref,
+            "ai_decision_brief": audit.ai_decision_brief_ref if ai_visible else None,
+            "ai_assessment": audit.ai_market_assessment_ref if ai_visible else None,
+            "position_target": audit.position_target_ref,
+            "policy_decision": audit.policy_decision_ref,
+            "risk_decision": audit.risk_decision_ref,
+            "decision_outcome": audit.decision_outcome_ref,
+            "execution_plan": audit.execution_plan_ref,
+            "portfolio_snapshot": audit.portfolio_delta_ref,
+        }
+        payload_by_ref = self.payloads_by_ref_map(
+            [ref for ref in ref_by_name.values() if ref]
+        )
+
+        def _payload(name: str) -> dict[str, Any] | None:
+            ref = ref_by_name.get(name)
+            return payload_by_ref.get(ref) if ref else None
+
+        decision_context = _payload("decision_context")
+        baseline_assessment = _payload("baseline_assessment")
+        ai_decision_brief = _payload("ai_decision_brief")
+        ai_assessment = _payload("ai_assessment")
+        policy_decision = _payload("policy_decision")
+        risk_decision = self._risk_decision_payload(_payload("risk_decision"))
+        position_target = self._position_target_dashboard_payload(_payload("position_target"))
+        decision_outcome = self._decision_outcome_dashboard_payload(
+            finalized_decision_outcome=_payload("decision_outcome"),
+            position_target=position_target,
+            policy_decision=policy_decision,
+            risk_decision=risk_decision,
+        )
+        no_trade_classification = self._no_trade_classification_payload(
+            decision_outcome=decision_outcome,
+            position_target=position_target,
+            policy_decision=policy_decision,
+            risk_decision=risk_decision,
+            strategy_sleeve_intents=[],
+            order_count=len(audit.order_intent_refs),
+            fill_count=len(audit.fill_event_refs),
+        )
+        if isinstance(decision_outcome, dict):
+            decision_outcome.setdefault("no_trade_classification", no_trade_classification)
+        summary = {
+            "decision_id": audit.decision_id,
+            "symbol": decision_context.get("symbol") if decision_context else None,
+            "timeframe": decision_context.get("timeframe") if decision_context else None,
+            "decision_time": decision_context.get("as_of_ts") if decision_context else None,
+            "product_type": (
+                position_target.get("product_type")
+                if position_target
+                else (decision_context.get("product_type") if decision_context else None)
+            ),
+            "margin_mode": (
+                position_target.get("margin_mode")
+                if position_target
+                else (decision_context.get("margin_mode") if decision_context else None)
+            ),
+            "position_intent": position_target.get("position_intent") if position_target else None,
+            "current_position_qty": (
+                position_target.get("current_position_qty") if position_target else None
+            ),
+            "target_position_qty": (
+                position_target.get("target_position_qty") if position_target else None
+            ),
+            "delta_position_qty": (
+                position_target.get("delta_position_qty") if position_target else None
+            ),
+            "target_delta_qty": (
+                position_target.get("delta_position_qty") if position_target else None
+            ),
+            "strategy_family": position_target.get("strategy_family") if position_target else None,
+            "strategy_route_action": (
+                position_target.get("strategy_route_action") if position_target else None
+            ),
+            "family_execution_summary": (
+                position_target.get("family_execution_summary") if position_target else None
+            ),
+            "book_expectancy_summary": (
+                position_target.get("book_expectancy_summary") if position_target else None
+            ),
+            "book_runtime_states": self._book_runtime_states_from_payload(position_target),
+            "independent_adaptive_summary": (
+                self._independent_adaptive_summary_from_payload(position_target)
+            ),
+            "independent_transition_exception_summary": (
+                self._independent_transition_exception_summary_from_payload(position_target)
+            ),
+            "diagnostic_metric_flags": self._effective_diagnostic_metric_flags(position_target),
+            "sizing_breakdown": None if position_target is None else position_target.get("sizing_breakdown"),
+            "overlay_parent_exposure": (
+                self._overlay_parent_exposure_from_payload(position_target)
+                or self._overlay_parent_exposure_from_payload(decision_outcome)
+            ),
+            "overlay_parent_exposure_summary": (
+                self._overlay_parent_exposure_summary_from_payload(position_target)
+                or self._overlay_parent_exposure_summary_from_payload(decision_outcome)
+            ),
+            **(
+                self._overlay_parent_signal_fields_from_payload(position_target)
+                or self._overlay_parent_signal_fields_from_payload(decision_outcome)
+                or {}
+            ),
+            "independent_expected_vs_realized_summary": None,
+            "strategy_reason_codes": (
+                [] if position_target is None else list(position_target.get("strategy_reason_codes") or [])
+            ),
+            "guardrail_flags": position_target.get("guardrail_flags") if position_target else [],
+            "expected_net_edge_bps": (
+                position_target.get("expected_net_edge_bps") if position_target else None
+            ),
+            "no_trade_classification": no_trade_classification,
+            "policy_result": policy_decision.get("execution_allowed") if policy_decision else None,
+            "risk_result": risk_decision.get("approved") if risk_decision else None,
+            "execution_result": {
+                "order_count": len(audit.order_intent_refs),
+                "fill_count": len(audit.fill_event_refs),
+                "reconciled": bool(audit.reconciliation_refs),
+            },
+        }
+        return {
+            "decision_id": audit.decision_id,
+            "decision_time": summary["decision_time"],
+            "decision_context": decision_context,
+            "baseline_assessment": baseline_assessment,
+            "baseline_reference": self._baseline_reference_payload(
+                baseline_assessment=baseline_assessment,
+                decision_context=decision_context,
+            ),
+            "ai_decision_brief": ai_decision_brief,
+            "ai_assessment": ai_assessment,
+            "ai_decision_intent": self._ai_decision_intent_payload(
+                ai_assessment=ai_assessment,
+                decision_context=decision_context,
+                position_target=position_target,
+            ),
+            "profile_control_decision": self._profile_control_decision_payload(
+                position_target=position_target,
+            ),
+            "ai_shadow_decisions": [],
+            "ai_shadow_evaluations": [],
+            "position_target": position_target,
+            "policy_decision": policy_decision,
+            "risk_decision": risk_decision,
+            "decision_outcome": decision_outcome,
+            "no_trade_classification": no_trade_classification,
+            "execution_plan": self._execution_plan_payload(_payload("execution_plan")),
+            "truth_chain": None,
+            "audit": audit.model_dump(mode="json"),
+            "audit_ref_counts": {
+                "order_intents": len(audit.order_intent_refs),
+                "order_updates": len(audit.order_state_refs),
+                "fills": len(audit.fill_event_refs),
+                "reconciliations": len(audit.reconciliation_refs),
+                "shadow_decisions": len(audit.ai_shadow_decision_refs),
+                "shadow_evaluations": len(audit.ai_shadow_evaluation_refs),
+            },
+            "latest_order_intent": None,
+            "latest_order_update": None,
+            "latest_fill_event": None,
+            "latest_reconciliation": None,
+            "order_intents": [],
+            "order_updates": [],
+            "fills": [],
+            "strategy_sleeve_intents": [],
+            "portfolio_snapshot": _payload("portfolio_snapshot"),
+            "reconciliations": [],
+            "strategy_execution_health": None,
+            "hedge_mode_audit": None,
+            "independent_expected_vs_realized_summary": None,
+            "ai_decision_audit": None,
+            "ai_economic_actionability": None,
+            "ai_execution_suggestion": None,
+            "summary": summary,
+            "dashboard_summary_only": True,
+        }
+
     def _build_recent_decisions(self, *, limit: int, offset: int, include_total: bool = True) -> dict[str, Any]:
         fetch_limit = limit + offset + (0 if include_total else 1)
         rows = self.runtime.audit_repo.recent(limit=fetch_limit)

@@ -77,6 +77,9 @@ Target fixes:
 - Replace recent policy/risk/AI history full loads with bounded DB reads.
 - Avoid phase 5 fill list full loads in gateway.
 - Make execution UI distinguish current runtime orderless subsystem failures from stale failed orders/fills.
+- Keep dashboard `latestDecision` on a lightweight summary path; full decision chains,
+  orders, fills, reconciliation refs, and dedicated overlay event history stay available
+  behind explicit detail endpoints instead of blocking first-screen refresh.
 
 ## Logging, Monitoring, Auditing
 

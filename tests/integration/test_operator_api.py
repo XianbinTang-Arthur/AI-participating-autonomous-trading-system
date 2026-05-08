@@ -751,6 +751,11 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 OperatorQueryService,
+                "latest_decision_dashboard",
+                side_effect=AssertionError("latestDecision should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
                 "strategy_runtime",
                 side_effect=AssertionError("strategyRuntime should read dashboard snapshot"),
             ),
@@ -801,6 +806,45 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["panels"]["reconciliationLatest"]["data"]["reconciliation"]["status"], "snapshot_ok")
         self.assertEqual(payload["panels"]["executionLatest"]["meta"]["source"], "dashboard_snapshot")
         self.assertEqual(payload["panels"]["strategyRuntime"]["meta"]["status"], "fresh")
+
+    async def test_dashboard_bundle_falls_back_to_dashboard_latest_decision_summary(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+        calls: list[str] = []
+
+        def fake_latest_decision_dashboard(self) -> dict[str, object]:
+            calls.append("dashboard")
+            return {
+                "decision_id": "dashboard-latest",
+                "dashboard_summary_only": True,
+                "position_target": {"delta_position_qty": "0.01"},
+                "policy_decision": {"execution_allowed": True},
+                "risk_decision": {"approved": True},
+            }
+
+        with (
+            patch.object(
+                OperatorQueryService,
+                "latest_decision",
+                side_effect=AssertionError("dashboard latestDecision must not load full decision detail"),
+            ),
+            patch.object(OperatorQueryService, "latest_decision_dashboard", fake_latest_decision_dashboard),
+            TestClient(app) as client,
+        ):
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="strategy",
+                    panels=["latestDecision"],
+                )
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        panel = payload["panels"]["latestDecision"]
+        self.assertIsNone(panel["error"])
+        self.assertEqual(panel["data"]["decision_id"], "dashboard-latest")
+        self.assertTrue(panel["data"]["dashboard_summary_only"])
+        self.assertEqual(calls, ["dashboard"])
 
     async def test_dashboard_bundle_reads_p2_panels_from_snapshot_plane(self) -> None:
         runtime = await self._runtime()

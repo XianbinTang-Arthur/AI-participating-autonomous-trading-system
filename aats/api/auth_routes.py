@@ -484,7 +484,7 @@ async def _load_dashboard_snapshot_panel(runtime: ApplicationRuntime, snapshot_k
         if panel_key == "accountState":
             return query.account_state()
         if panel_key == "latestDecision":
-            return query.latest_decision()
+            return query.latest_decision_dashboard()
         if panel_key == "strategyRuntime":
             return query.strategy_runtime()
         if panel_key == "executionLatest":
@@ -882,7 +882,7 @@ def _protected_dashboard_panel_payload(
     if panel_key == "positions":
         return query.positions()
     if panel_key == "latestDecision":
-        return query.latest_decision()
+        return query.latest_decision_dashboard()
     if panel_key == "executionLatest":
         return query.execution_latest()
     if panel_key == "reconciliationLatest":
