@@ -389,6 +389,7 @@ class DashboardSnapshotPlane:
         default_variants: Mapping[str, Sequence[str]] | None = None,
         scheduler_interval_seconds: float = 1.0,
         priority_concurrency: Mapping[str, int] | None = None,
+        scheduler_priority_batch_size: Mapping[str, int] | None = None,
         startup_panel_interval_seconds: float = 0.5,
         startup_priority_pause_seconds: float = 1.0,
     ) -> None:
@@ -411,6 +412,17 @@ class DashboardSnapshotPlane:
         self._priority_semaphores = {
             priority: asyncio.Semaphore(max(int(limit), 1))
             for priority, limit in concurrency.items()
+        }
+        scheduler_batch_size = {
+            "p0": 2,
+            "p1": 1,
+            "p2": 1,
+            "p3": 1,
+            **(dict(scheduler_priority_batch_size or {})),
+        }
+        self._scheduler_priority_batch_sizes = {
+            priority: max(int(limit), 1)
+            for priority, limit in scheduler_batch_size.items()
         }
         self._startup_panel_interval_seconds = max(float(startup_panel_interval_seconds), 0.0)
         self._startup_priority_pause_seconds = max(float(startup_priority_pause_seconds), 0.0)
@@ -599,17 +611,30 @@ class DashboardSnapshotPlane:
 
     async def _enqueue_due_panels(self) -> None:
         now = utc_now()
+        enqueued_by_priority: dict[str, int] = {}
         for target in self._iter_snapshot_targets():
             policy = self._policies[target.panel_key]
             snapshot = await self._snapshot(target.snapshot_key)
+            reason: str | None = None
             if snapshot is None:
                 if await self._is_startup_pending(target.snapshot_key):
                     continue
-                await self.enqueue(target.panel_key, variant_key=target.variant_key, reason="scheduler_missing")
+                reason = "scheduler_missing"
+            else:
+                age_seconds = max((now - snapshot.generated_at).total_seconds(), 0.0)
+                if age_seconds >= policy.ttl_seconds:
+                    reason = "scheduler_ttl"
+            if reason is None:
                 continue
-            age_seconds = max((now - snapshot.generated_at).total_seconds(), 0.0)
-            if age_seconds >= policy.ttl_seconds:
-                await self.enqueue(target.panel_key, variant_key=target.variant_key, reason="scheduler_ttl")
+            priority_count = enqueued_by_priority.get(policy.priority, 0)
+            if priority_count >= self._scheduler_priority_batch_limit(policy.priority):
+                continue
+            enqueued = await self.enqueue(target.panel_key, variant_key=target.variant_key, reason=reason)
+            if enqueued:
+                enqueued_by_priority[policy.priority] = priority_count + 1
+
+    def _scheduler_priority_batch_limit(self, priority: str) -> int:
+        return self._scheduler_priority_batch_sizes.get(priority, 1)
 
     async def _startup_prewarm_loop(self, targets: Sequence[_DashboardSnapshotTarget]) -> None:
         if not targets:

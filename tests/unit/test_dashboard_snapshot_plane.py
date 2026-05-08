@@ -239,6 +239,67 @@ class DashboardSnapshotPlaneTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await plane.stop()
 
+    async def test_scheduler_batches_due_panels_per_priority(self) -> None:
+        calls: list[str] = []
+
+        async def loader(snapshot_key: str) -> dict[str, Any]:
+            calls.append(snapshot_key)
+            return {"snapshot_key": snapshot_key}
+
+        async def wait_for_call_count(expected: int) -> None:
+            for _ in range(100):
+                if len(calls) >= expected:
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError(f"expected {expected} calls, got {calls!r}")
+
+        plane = DashboardSnapshotPlane(
+            loader=loader,
+            default_factory=lambda _snapshot_key: {},
+            policies={
+                "runtime": DashboardSnapshotPolicy(
+                    panel_key="runtime",
+                    ttl_seconds=60.0,
+                    stale_after_seconds=60.0,
+                    hard_expire_seconds=120.0,
+                    timeout_seconds=1.0,
+                    priority="p0",
+                ),
+                "health": DashboardSnapshotPolicy(
+                    panel_key="health",
+                    ttl_seconds=60.0,
+                    stale_after_seconds=60.0,
+                    hard_expire_seconds=120.0,
+                    timeout_seconds=1.0,
+                    priority="p0",
+                ),
+                "mode": DashboardSnapshotPolicy(
+                    panel_key="mode",
+                    ttl_seconds=60.0,
+                    stale_after_seconds=60.0,
+                    hard_expire_seconds=120.0,
+                    timeout_seconds=1.0,
+                    priority="p0",
+                ),
+            },
+            scheduler_interval_seconds=60.0,
+            scheduler_priority_batch_size={"p0": 1},
+        )
+        try:
+            await plane._enqueue_due_panels()
+            await wait_for_call_count(1)
+            self.assertEqual(calls, ["runtime"])
+
+            await plane._enqueue_due_panels()
+            await wait_for_call_count(2)
+            self.assertEqual(calls, ["runtime", "health"])
+
+            await plane._enqueue_due_panels()
+            await wait_for_call_count(3)
+            self.assertEqual(calls, ["runtime", "health", "mode"])
+        finally:
+            await plane.stop()
+
     async def test_p3_refresh_does_not_block_p2_refresh(self) -> None:
         heavy_started = asyncio.Event()
         release_heavy = asyncio.Event()
