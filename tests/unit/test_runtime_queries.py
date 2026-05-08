@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import os
 import unittest
@@ -556,6 +557,12 @@ class TestAiRuntimeStubWhenServiceMissing(unittest.TestCase):
 
 
 class TestAiRuntimeAuthoritativeRead(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        RuntimeQueryFacade.invalidate_authoritative_ai_runtime_cache()
+
+    async def asyncTearDown(self) -> None:
+        RuntimeQueryFacade.invalidate_authoritative_ai_runtime_cache()
+
     async def test_gateway_uses_ai_command_client_for_authoritative_status(self) -> None:
         owner = _AIRuntimeFakeOwner(ai_service=None, process_role="gateway")
         owner.runtime.ai_command_client = SimpleNamespace(
@@ -588,6 +595,126 @@ class TestAiRuntimeAuthoritativeRead(unittest.IsolatedAsyncioTestCase):
             command="ai_runtime_status",
             payload={},
         )
+
+    async def test_gateway_reuses_recent_authoritative_status(self) -> None:
+        owner = _AIRuntimeFakeOwner(ai_service=None, process_role="gateway")
+        owner.runtime.ai_command_client = SimpleNamespace(
+            invoke=AsyncMock(
+                return_value={
+                    "provider": "deepseek",
+                    "configured": True,
+                    "provider_ready": True,
+                    "ai_service_loaded": True,
+                    "process_role": "decision",
+                }
+            )
+        )
+        facade = RuntimeQueryFacade(owner)
+
+        first = await facade.ai_runtime_authoritative()
+        second = await facade.ai_runtime_authoritative()
+
+        self.assertEqual(first["provider"], "deepseek")
+        self.assertEqual(second["provider"], "deepseek")
+        owner.runtime.ai_command_client.invoke.assert_awaited_once_with(
+            command="ai_runtime_status",
+            payload={},
+        )
+
+    async def test_gateway_coalesces_concurrent_authoritative_status_reads(self) -> None:
+        owner = _AIRuntimeFakeOwner(ai_service=None, process_role="gateway")
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _invoke(**_kwargs: object) -> dict[str, object]:
+            started.set()
+            await release.wait()
+            return {
+                "provider": "deepseek",
+                "configured": True,
+                "provider_ready": True,
+                "ai_service_loaded": True,
+                "process_role": "decision",
+            }
+
+        owner.runtime.ai_command_client = SimpleNamespace(invoke=AsyncMock(side_effect=_invoke))
+        facade = RuntimeQueryFacade(owner)
+
+        first_task = asyncio.create_task(facade.ai_runtime_authoritative())
+        await started.wait()
+        second_task = asyncio.create_task(facade.ai_runtime_authoritative())
+        await asyncio.sleep(0)
+        self.assertEqual(owner.runtime.ai_command_client.invoke.await_count, 1)
+
+        release.set()
+        first, second = await asyncio.gather(first_task, second_task)
+
+        self.assertEqual(first["provider"], "deepseek")
+        self.assertEqual(second["provider"], "deepseek")
+        self.assertEqual(owner.runtime.ai_command_client.invoke.await_count, 1)
+
+    async def test_gateway_status_inflight_survives_cancelled_waiter(self) -> None:
+        owner = _AIRuntimeFakeOwner(ai_service=None, process_role="gateway")
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _invoke(**_kwargs: object) -> dict[str, object]:
+            started.set()
+            await release.wait()
+            return {
+                "provider": "deepseek",
+                "configured": True,
+                "provider_ready": True,
+                "ai_service_loaded": True,
+                "process_role": "decision",
+            }
+
+        owner.runtime.ai_command_client = SimpleNamespace(invoke=AsyncMock(side_effect=_invoke))
+        facade = RuntimeQueryFacade(owner)
+
+        first_task = asyncio.create_task(facade.ai_runtime_authoritative())
+        await started.wait()
+        first_task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await first_task
+
+        release.set()
+        second = await facade.ai_runtime_authoritative()
+
+        self.assertEqual(second["provider"], "deepseek")
+        self.assertEqual(owner.runtime.ai_command_client.invoke.await_count, 1)
+
+    async def test_authoritative_status_cache_can_be_invalidated_after_mutation(self) -> None:
+        owner = _AIRuntimeFakeOwner(ai_service=None, process_role="gateway")
+        owner.runtime.ai_command_client = SimpleNamespace(
+            invoke=AsyncMock(
+                side_effect=[
+                    {
+                        "provider": "deepseek",
+                        "configured": True,
+                        "provider_ready": True,
+                        "ai_service_loaded": True,
+                        "process_role": "decision",
+                    },
+                    {
+                        "provider": "openai",
+                        "configured": True,
+                        "provider_ready": True,
+                        "ai_service_loaded": True,
+                        "process_role": "decision",
+                    },
+                ]
+            )
+        )
+        facade = RuntimeQueryFacade(owner)
+
+        first = await facade.ai_runtime_authoritative()
+        RuntimeQueryFacade.invalidate_authoritative_ai_runtime_cache(owner.runtime)
+        second = await facade.ai_runtime_authoritative()
+
+        self.assertEqual(first["provider"], "deepseek")
+        self.assertEqual(second["provider"], "openai")
+        self.assertEqual(owner.runtime.ai_command_client.invoke.await_count, 2)
 
     async def test_authoritative_runtime_reports_ui_override_capability_when_enabled(self) -> None:
         owner = _AIRuntimeFakeOwner(ai_service=None, process_role="gateway")

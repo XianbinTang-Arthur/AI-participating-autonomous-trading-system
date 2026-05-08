@@ -464,6 +464,7 @@ class OperatorQueryService:
             return await client.invoke(command=command, payload=payload)
         finally:
             self._invalidate_cache()
+            RuntimeQueryFacade.invalidate_authoritative_ai_runtime_cache(self.runtime)
 
     def _scope_cache_fragment(self) -> str:
         return (

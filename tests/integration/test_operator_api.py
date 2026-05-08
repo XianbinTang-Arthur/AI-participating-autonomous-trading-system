@@ -1363,7 +1363,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bundle_summary_ai["effective_operating_mode"], "ai_decision_maker")
         self.assertTrue(bundle_summary_ai["strategy_profile_auto_control_effective"])
         self.assertEqual(bundle_overview_runtime["effective_operating_mode"], "ai_decision_maker")
-        self.assertEqual(runtime.ai_command_client.invoke.await_count, 3)
+        self.assertEqual(runtime.ai_command_client.invoke.await_count, 1)
 
     async def test_dashboard_bundle_keeps_session_context_when_read_access_is_denied(self) -> None:
         runtime = await self._runtime(

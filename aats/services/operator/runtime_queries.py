@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import threading
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from aats.events import topics
@@ -14,9 +16,56 @@ if TYPE_CHECKING:
     from aats.services.operator.query_service import OperatorQueryService
 
 
+_AI_RUNTIME_AUTHORITATIVE_CACHE_TTL_SECONDS = 20.0
+_AI_RUNTIME_AUTHORITATIVE_CACHE: dict[tuple[int, int, int], tuple[float, dict[str, Any]]] = {}
+_AI_RUNTIME_AUTHORITATIVE_INFLIGHT: dict[tuple[int, int, int], tuple[int, asyncio.Task[dict[str, Any]]]] = {}
+_AI_RUNTIME_AUTHORITATIVE_GENERATION: dict[tuple[int, int], int] = {}
+
+
 class RuntimeQueryFacade:
     def __init__(self, owner: "OperatorQueryService") -> None:
         self.owner = owner
+
+    def _authoritative_ai_runtime_cache_key(self) -> tuple[int, int, int]:
+        runtime = self.owner.runtime
+        client = getattr(runtime, "ai_command_client", None)
+        return (
+            id(runtime),
+            id(client),
+            id(asyncio.get_running_loop()),
+        )
+
+    @staticmethod
+    def invalidate_authoritative_ai_runtime_cache(runtime: Any | None = None) -> None:
+        if runtime is None:
+            _AI_RUNTIME_AUTHORITATIVE_CACHE.clear()
+            _AI_RUNTIME_AUTHORITATIVE_INFLIGHT.clear()
+            _AI_RUNTIME_AUTHORITATIVE_GENERATION.clear()
+            return
+
+        runtime_id = id(runtime)
+        client_id = id(getattr(runtime, "ai_command_client", None))
+        generation_keys = {(runtime_id, client_id)}
+        generation_keys.update(
+            (cache_key[0], cache_key[1])
+            for cache_key in _AI_RUNTIME_AUTHORITATIVE_CACHE
+            if cache_key[0] == runtime_id
+        )
+        generation_keys.update(
+            (cache_key[0], cache_key[1])
+            for cache_key in _AI_RUNTIME_AUTHORITATIVE_INFLIGHT
+            if cache_key[0] == runtime_id
+        )
+        for generation_key in generation_keys:
+            _AI_RUNTIME_AUTHORITATIVE_GENERATION[generation_key] = (
+                _AI_RUNTIME_AUTHORITATIVE_GENERATION.get(generation_key, 0) + 1
+            )
+        for cache_key in list(_AI_RUNTIME_AUTHORITATIVE_CACHE):
+            if cache_key[0] == runtime_id:
+                _AI_RUNTIME_AUTHORITATIVE_CACHE.pop(cache_key, None)
+        for cache_key in list(_AI_RUNTIME_AUTHORITATIVE_INFLIGHT):
+            if cache_key[0] == runtime_id:
+                _AI_RUNTIME_AUTHORITATIVE_INFLIGHT.pop(cache_key, None)
 
     def _control_plane_consistency(self) -> dict[str, Any]:
         phase5_enabled = bool(self.owner._phase5_control_plane_enabled())
@@ -183,12 +232,7 @@ class RuntimeQueryFacade:
             status.setdefault("ai_runtime_source", "local_stub")
             return status
 
-        status = dict(
-            await client.invoke(
-                command="ai_runtime_status",
-                payload={},
-            )
-        )
+        status = await self._remote_ai_runtime_authoritative_cached(client)
         status["ui_operating_mode_override"] = ui_operating_mode_override_policy()
         status.setdefault("ai_runtime_source", "remote_decision")
         status.setdefault(
@@ -196,6 +240,81 @@ class RuntimeQueryFacade:
             getattr(self.owner.runtime.settings, "process_role", None),
         )
         return status
+
+    async def _remote_ai_runtime_authoritative_cached(self, client: Any) -> dict[str, Any]:
+        cache_key = self._authoritative_ai_runtime_cache_key()
+        generation_key = (cache_key[0], cache_key[1])
+        generation = _AI_RUNTIME_AUTHORITATIVE_GENERATION.get(generation_key, 0)
+        now = monotonic()
+        cached = _AI_RUNTIME_AUTHORITATIVE_CACHE.get(cache_key)
+        if cached is not None:
+            expires_at, payload = cached
+            if expires_at > now:
+                return dict(payload)
+            _AI_RUNTIME_AUTHORITATIVE_CACHE.pop(cache_key, None)
+
+        inflight = _AI_RUNTIME_AUTHORITATIVE_INFLIGHT.get(cache_key)
+        if inflight is not None and inflight[0] == generation and inflight[1].done():
+            result = self._complete_authoritative_ai_runtime_inflight(
+                cache_key,
+                generation_key,
+                inflight,
+            )
+            if result is not None:
+                return result
+            inflight = None
+
+        if inflight is None or inflight[0] != generation:
+            task = asyncio.create_task(
+                self._remote_ai_runtime_authoritative_uncached(client),
+            )
+            inflight = (generation, task)
+            _AI_RUNTIME_AUTHORITATIVE_INFLIGHT[cache_key] = inflight
+
+        inflight_generation, task = inflight
+        try:
+            result = dict(await asyncio.shield(task))
+        finally:
+            if task.done() and _AI_RUNTIME_AUTHORITATIVE_INFLIGHT.get(cache_key) == inflight:
+                _AI_RUNTIME_AUTHORITATIVE_INFLIGHT.pop(cache_key, None)
+
+        if _AI_RUNTIME_AUTHORITATIVE_GENERATION.get(generation_key, 0) == inflight_generation:
+            _AI_RUNTIME_AUTHORITATIVE_CACHE[cache_key] = (
+                monotonic() + _AI_RUNTIME_AUTHORITATIVE_CACHE_TTL_SECONDS,
+                dict(result),
+            )
+        return result
+
+    @staticmethod
+    async def _remote_ai_runtime_authoritative_uncached(client: Any) -> dict[str, Any]:
+        return dict(
+            await client.invoke(
+                command="ai_runtime_status",
+                payload={},
+            )
+        )
+
+    @staticmethod
+    def _complete_authoritative_ai_runtime_inflight(
+        cache_key: tuple[int, int, int],
+        generation_key: tuple[int, int],
+        inflight: tuple[int, asyncio.Task[dict[str, Any]]],
+    ) -> dict[str, Any] | None:
+        inflight_generation, task = inflight
+        if _AI_RUNTIME_AUTHORITATIVE_INFLIGHT.get(cache_key) == inflight:
+            _AI_RUNTIME_AUTHORITATIVE_INFLIGHT.pop(cache_key, None)
+        try:
+            result = dict(task.result())
+        except asyncio.CancelledError:
+            return None
+        except Exception:
+            return None
+        if _AI_RUNTIME_AUTHORITATIVE_GENERATION.get(generation_key, 0) == inflight_generation:
+            _AI_RUNTIME_AUTHORITATIVE_CACHE[cache_key] = (
+                monotonic() + _AI_RUNTIME_AUTHORITATIVE_CACHE_TTL_SECONDS,
+                dict(result),
+            )
+        return result
 
     def ai_performance_overview(self) -> dict[str, Any]:
         return self.owner._ai_performance_overview_impl()
