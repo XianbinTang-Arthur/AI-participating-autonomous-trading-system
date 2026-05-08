@@ -130,7 +130,9 @@ class RecoveryQueryFacade:
         base_payload["independent_recovery_snapshots"] = self.owner._independent_recovery_snapshots_view(
             base_payload.get("independent_recovery_snapshots") or []
         )
-        claimed_submit_recovery_gate = self._claimed_submit_recovery_gate()
+        claimed_submit_recovery_gate = self._claimed_submit_recovery_gate(
+            dashboard_summary_only=dashboard_summary_only,
+        )
         latest_reconciliation_summary = (
             None
             if dashboard_summary_only
@@ -196,7 +198,13 @@ class RecoveryQueryFacade:
             )
         return payload
 
-    def _claimed_submit_recovery_gate(self) -> dict[str, Any]:
+    def _claimed_submit_recovery_gate(self, *, dashboard_summary_only: bool = False) -> dict[str, Any]:
+        if dashboard_summary_only:
+            return {
+                "active": False,
+                "status": "deferred_from_dashboard_summary",
+                "detail_endpoint": "/system/recovery",
+            }
         try:
             order = self.owner.latest_order()
         except Exception as exc:  # pragma: no cover - defensive read surface

@@ -247,7 +247,7 @@ class _DashboardRecoveryOwner:
         return list(snapshots or [])
 
     def latest_order(self):
-        return None
+        raise AssertionError("dashboard recovery must not query latest order for claimed-submit gate")
 
     def latest_operator_action(self, _action: str):
         raise AssertionError("dashboard recovery must not query operator actions")
@@ -357,7 +357,10 @@ class TestRuntimeQueryFacade(unittest.TestCase):
             [{"parent_intent_id": "parent_dashboard"}],
         )
         self.assertIsNone(payload["ai_runtime"])
-        self.assertEqual(payload["claimed_submit_recovery_gate"]["status"], "no_latest_order")
+        self.assertEqual(
+            payload["claimed_submit_recovery_gate"]["status"],
+            "deferred_from_dashboard_summary",
+        )
 
     def test_lightweight_run_packet_summary_does_not_call_full_packet_loader(self) -> None:
         owner = _RunPacketSummaryOwner()
