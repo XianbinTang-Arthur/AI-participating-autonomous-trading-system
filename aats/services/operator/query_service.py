@@ -440,6 +440,20 @@ class OperatorQueryService:
             for k in stale_keys:
                 del ttl_cache[k]
 
+    def _cached_ttl_peek(self, key: str) -> Any | None:
+        ttl_cache = getattr(self, "_ttl_cache", None)
+        cache_lock = getattr(self, "_cache_lock", None)
+        if ttl_cache is None or cache_lock is None:
+            return None
+        with cache_lock:
+            cached = ttl_cache.get(key)
+            if cached is None:
+                return None
+            expires_at, value = cached
+            if expires_at <= utc_now() or isinstance(value, _CachedError):
+                return None
+            return value
+
     async def _invoke_operator_command_mutation(
         self,
         *,
@@ -7514,11 +7528,21 @@ class OperatorQueryService:
         ).model_dump(mode="json")
 
     def blocker_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
-        return self.blocker_queries.blocker_history(limit=limit, offset=offset)
+        cache_key = f"blocker_history:{self._scope_cache_fragment()}:{limit}:{offset}"
+        return self._cached_ttl(
+            cache_key,
+            10,
+            lambda: self.blocker_queries.blocker_history(limit=limit, offset=offset),
+        )
 
     def metrics(self) -> dict[str, Any]:
         cache_key = f"metrics:{self._scope_cache_fragment()}"
         return self._cached_ttl(cache_key, 35, self.runtime_queries.metrics)
+
+    def metrics_if_cached(self) -> dict[str, Any] | None:
+        cache_key = f"metrics:{self._scope_cache_fragment()}"
+        payload = self._cached_ttl_peek(cache_key)
+        return payload if isinstance(payload, dict) else None
 
     def phase1_shadow(self) -> dict[str, Any]:
         cache_key = f"phase1_shadow:{self._scope_cache_fragment()}"

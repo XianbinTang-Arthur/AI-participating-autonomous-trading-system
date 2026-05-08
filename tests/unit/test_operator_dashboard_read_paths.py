@@ -693,6 +693,129 @@ def test_legacy_blockers_reuses_cached_blocker_control_payload() -> None:
     assert payload[0]["actions"] == [{"action_id": "inspect-reconciliation"}]
 
 
+def test_dashboard_health_payload_uses_lightweight_execution_summary_on_metrics_miss() -> None:
+    class Query:
+        def system_health_dashboard(self):
+            return {
+                "runtime_state": "healthy",
+                "subsystems": {
+                    "phase1_shadow": {
+                        "status": "healthy",
+                        "lag": {
+                            "order_backlog": 1,
+                            "fill_backlog": 2,
+                            "obligation_backlog": 3,
+                        },
+                    }
+                },
+            }
+
+        def metrics_if_cached(self):
+            return None
+
+        def metrics(self):
+            raise AssertionError("dashboard health must not build full metrics on cache miss")
+
+        def _scoped_order_states(self):
+            raise AssertionError("dashboard health must not hydrate order history")
+
+        def _scoped_fills(self):
+            raise AssertionError("dashboard health must not hydrate fill history")
+
+        def _scoped_open_order_states(self):
+            raise AssertionError("dashboard health must not hydrate open order history")
+
+    runtime = SimpleNamespace(
+        metrics=SimpleNamespace(
+            snapshot=lambda: {
+                "order_intents_generated": 7,
+                "fills_processed": 4,
+                "processing_failures": 1,
+                "portfolio_snapshot_repairs": 2,
+            }
+        )
+    )
+
+    payload = auth_routes._system_health_payload_for_runtime(runtime, Query())
+
+    summary = payload["execution_summary"]
+    assert summary["summary_source"] == "runtime_metrics_dashboard_summary"
+    assert summary["order_intents_generated"] == 7
+    assert summary["fills_processed"] == 4
+    assert summary["fill_count"] is None
+    assert summary["phase1_shadow_order_backlog"] == 1
+    assert "fill_count" in summary["deferred_sections"]
+
+
+def test_dashboard_health_payload_reuses_cached_operator_metrics_without_rebuild() -> None:
+    class Query:
+        def system_health_dashboard(self):
+            return {"runtime_state": "healthy", "subsystems": {}}
+
+        def metrics_if_cached(self):
+            return {
+                "fill_count": 12,
+                "current_open_order_count": 3,
+                "processing_failure_count": 4,
+                "portfolio_snapshot_repair_count": 5,
+                "fill_without_snapshot_count": 6,
+                "snapshot_without_reconciliation_count": 7,
+                "phase1_shadow": {"status": "lagging"},
+                "phase1_shadow_failure_count": 8,
+                "phase1_shadow_alert_count": 9,
+                "phase1_shadow_recovery_count": 10,
+                "phase1_shadow_order_backlog": 11,
+                "phase1_shadow_fill_backlog": 12,
+                "phase1_shadow_obligation_backlog": 13,
+            }
+
+        def metrics(self):
+            raise AssertionError("dashboard health should peek cached metrics, not rebuild them")
+
+    runtime = SimpleNamespace(
+        metrics=SimpleNamespace(
+            snapshot=lambda: {
+                "order_intents_generated": 2,
+                "fills_processed": 1,
+            }
+        )
+    )
+
+    payload = auth_routes._system_health_payload_for_runtime(runtime, Query())
+
+    summary = payload["execution_summary"]
+    assert summary["summary_source"] == "cached_operator_metrics"
+    assert summary["fill_count"] == 12
+    assert summary["open_order_count"] == 3
+    assert summary["phase1_shadow_status"] == "lagging"
+    assert summary["deferred_sections"] == []
+
+
+def test_blocker_history_uses_short_ttl_cache() -> None:
+    service = OperatorQueryService.__new__(OperatorQueryService)
+    service._ttl_cache = {}
+    service._cache_lock = threading.RLock()
+    service._inflight = {}
+    service.state_scope = SimpleNamespace(
+        product_type="derivatives",
+        margin_mode="cross",
+        allowed_symbols={"BTC-USDT-SWAP"},
+    )
+    calls = []
+
+    def _history(*, limit: int, offset: int):
+        calls.append((limit, offset))
+        return {"history": [{"blocker": "one"}], "limit": limit, "offset": offset}
+
+    service.blocker_queries = SimpleNamespace(blocker_history=_history)
+
+    first = service.blocker_history(limit=20, offset=0)
+    second = service.blocker_history(limit=20, offset=0)
+
+    assert first == second
+    assert calls == [(20, 0)]
+
+
 def test_dashboard_bundle_uses_summary_recovery_and_mode_panels() -> None:
     request_loader_source = inspect.getsource(auth_routes._protected_dashboard_panel_payload)
     snapshot_loader_source = inspect.getsource(auth_routes._load_dashboard_snapshot_panel)

@@ -221,28 +221,117 @@ def _dashboard_bundle_auth_summary(
     }
 
 
+def _runtime_metrics_snapshot(runtime: ApplicationRuntime) -> dict[str, Any]:
+    metrics = getattr(runtime, "metrics", None)
+    snapshot = getattr(metrics, "snapshot", None)
+    if not callable(snapshot):
+        return {}
+    payload = snapshot()
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _cached_operator_metrics(query: OperatorQueryService) -> dict[str, Any] | None:
+    metrics_if_cached = getattr(query, "metrics_if_cached", None)
+    if not callable(metrics_if_cached):
+        return None
+    payload = metrics_if_cached()
+    return payload if isinstance(payload, dict) else None
+
+
+def _health_phase1_shadow_summary(health: dict[str, Any], operator_metrics: dict[str, Any] | None) -> dict[str, Any]:
+    if operator_metrics is not None:
+        phase1_shadow = operator_metrics.get("phase1_shadow")
+        if isinstance(phase1_shadow, dict):
+            return phase1_shadow
+    subsystems = health.get("subsystems")
+    if isinstance(subsystems, dict):
+        phase1_shadow = subsystems.get("phase1_shadow")
+        if isinstance(phase1_shadow, dict):
+            return phase1_shadow
+    return {}
+
+
+def _phase1_shadow_lag(phase1_shadow: dict[str, Any]) -> dict[str, Any]:
+    lag = phase1_shadow.get("lag")
+    return lag if isinstance(lag, dict) else {}
+
+
+def _dashboard_execution_summary_for_runtime(
+    runtime: ApplicationRuntime,
+    query: OperatorQueryService,
+    health: dict[str, Any],
+) -> dict[str, Any]:
+    runtime_metrics = _runtime_metrics_snapshot(runtime)
+    operator_metrics = _cached_operator_metrics(query)
+    phase1_shadow = _health_phase1_shadow_summary(health, operator_metrics)
+    phase1_shadow_lag = _phase1_shadow_lag(phase1_shadow)
+    cached = operator_metrics is not None
+    return {
+        "order_count": None,
+        "fill_count": operator_metrics.get("fill_count") if cached else None,
+        "open_order_count": operator_metrics.get("current_open_order_count") if cached else None,
+        "order_intents_generated": runtime_metrics.get("order_intents_generated", 0),
+        "fills_processed": runtime_metrics.get("fills_processed", 0),
+        "processing_failures": (
+            operator_metrics.get("processing_failure_count")
+            if cached
+            else runtime_metrics.get("processing_failures", 0)
+        ),
+        "portfolio_snapshot_repairs": (
+            operator_metrics.get("portfolio_snapshot_repair_count")
+            if cached
+            else runtime_metrics.get("portfolio_snapshot_repairs", 0)
+        ),
+        "fills_without_snapshot": operator_metrics.get("fill_without_snapshot_count") if cached else None,
+        "snapshots_without_reconciliation": (
+            operator_metrics.get("snapshot_without_reconciliation_count") if cached else None
+        ),
+        "phase1_shadow_status": phase1_shadow.get("status"),
+        "phase1_shadow_failure_count": (
+            operator_metrics.get("phase1_shadow_failure_count")
+            if cached
+            else runtime_metrics.get("phase1_shadow_failures", 0)
+        ),
+        "phase1_shadow_alert_count": (
+            operator_metrics.get("phase1_shadow_alert_count")
+            if cached
+            else runtime_metrics.get("phase1_shadow_alerts", 0)
+        ),
+        "phase1_shadow_recovery_count": (
+            operator_metrics.get("phase1_shadow_recovery_count")
+            if cached
+            else runtime_metrics.get("phase1_shadow_recoveries", 0)
+        ),
+        "phase1_shadow_order_backlog": (
+            operator_metrics.get("phase1_shadow_order_backlog")
+            if cached
+            else phase1_shadow_lag.get("order_backlog")
+        ),
+        "phase1_shadow_fill_backlog": (
+            operator_metrics.get("phase1_shadow_fill_backlog")
+            if cached
+            else phase1_shadow_lag.get("fill_backlog")
+        ),
+        "phase1_shadow_obligation_backlog": (
+            operator_metrics.get("phase1_shadow_obligation_backlog")
+            if cached
+            else phase1_shadow_lag.get("obligation_backlog")
+        ),
+        "summary_source": "cached_operator_metrics" if cached else "runtime_metrics_dashboard_summary",
+        "deferred_sections": [] if cached else [
+            "order_count",
+            "fill_count",
+            "open_order_count",
+            "fills_without_snapshot",
+            "snapshots_without_reconciliation",
+        ],
+    }
+
+
 def _system_health_payload_for_runtime(runtime: ApplicationRuntime, query: OperatorQueryService) -> dict[str, Any]:
     dashboard_health = getattr(query, "system_health_dashboard", None)
     health = dashboard_health() if callable(dashboard_health) else query.system_health()
-    operator_metrics = query.metrics()
-    health["execution_summary"] = {
-        "order_count": len(query._scoped_order_states()),
-        "fill_count": len(query._scoped_fills()),
-        "open_order_count": len(query._scoped_open_order_states()),
-        "order_intents_generated": runtime.metrics.snapshot().get("order_intents_generated", 0),
-        "fills_processed": runtime.metrics.snapshot().get("fills_processed", 0),
-        "processing_failures": operator_metrics.get("processing_failure_count", 0),
-        "portfolio_snapshot_repairs": operator_metrics.get("portfolio_snapshot_repair_count", 0),
-        "fills_without_snapshot": operator_metrics.get("fill_without_snapshot_count", 0),
-        "snapshots_without_reconciliation": operator_metrics.get("snapshot_without_reconciliation_count", 0),
-        "phase1_shadow_status": operator_metrics.get("phase1_shadow", {}).get("status"),
-        "phase1_shadow_failure_count": operator_metrics.get("phase1_shadow_failure_count", 0),
-        "phase1_shadow_alert_count": operator_metrics.get("phase1_shadow_alert_count", 0),
-        "phase1_shadow_recovery_count": operator_metrics.get("phase1_shadow_recovery_count", 0),
-        "phase1_shadow_order_backlog": operator_metrics.get("phase1_shadow_order_backlog"),
-        "phase1_shadow_fill_backlog": operator_metrics.get("phase1_shadow_fill_backlog"),
-        "phase1_shadow_obligation_backlog": operator_metrics.get("phase1_shadow_obligation_backlog"),
-    }
+    health["execution_summary"] = _dashboard_execution_summary_for_runtime(runtime, query, health)
     return health
 
 
