@@ -483,10 +483,9 @@ class TestLifecycleAttributionFacade(unittest.TestCase):
         self.assertEqual(detail["trace_completeness"], "candidate_only")
         self.assertGreater(detail["missing_linked_reference_count"], 0)
 
-    def test_position_lifecycle_dashboard_uses_bounded_recent_sources(self) -> None:
+    def test_position_lifecycle_dashboard_uses_bounded_recent_sources_without_audit_hydration(self) -> None:
         owner = _FakeOwner()
         calls: list[tuple[str, int | None]] = []
-        audits = owner.runtime.audit_repo.all()
 
         class FillRepo:
             def outcomes_for_scope(self, *, scope, since=None, limit=None):
@@ -507,8 +506,8 @@ class TestLifecycleAttributionFacade(unittest.TestCase):
                 raise AssertionError("dashboard lifecycle list should not load all audits")
 
             def recent(self, *, limit: int):
-                calls.append(("audits", limit))
-                return list(audits)
+                _ = limit
+                raise AssertionError("dashboard lifecycle list should defer decision trace audits")
 
         owner.runtime = SimpleNamespace(
             fill_outcome_repo=FillRepo(),
@@ -521,9 +520,10 @@ class TestLifecycleAttributionFacade(unittest.TestCase):
 
         self.assertEqual(payload["read_scope"], "recent_bounded")
         self.assertEqual(payload["lifecycles"][0]["lifecycle_id"], "lifecycle:BTC-USDT-SWAP:fill_open")
+        self.assertTrue(payload["lifecycles"][0]["decision_trace_deferred"])
+        self.assertEqual(payload["lifecycles"][0]["trace_completeness"], "deferred_dashboard_detail")
         self.assertIn(("outcomes", 500), calls)
         self.assertIn(("funding", 500), calls)
-        self.assertIn(("audits", 1000), calls)
 
     def test_position_lifecycle_dashboard_skips_audits_when_no_lifecycles_exist(self) -> None:
         owner = _FakeOwner()

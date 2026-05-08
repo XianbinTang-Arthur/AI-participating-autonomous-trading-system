@@ -54,7 +54,10 @@ class LifecycleAttributionFacade:
             "lifecycles": visible_rows,
             "unassigned_funding_fees": compiled["unassigned_funding_fees"][:normalized_limit],
             "has_more": has_more,
-            "truth_source": "fill_outcomes_plus_funding_fee_records_plus_decision_audits",
+            "truth_source": compiled.get(
+                "truth_source",
+                "fill_outcomes_plus_funding_fee_records_plus_decision_audits",
+            ),
             "read_scope": compiled.get("read_scope", "full_history"),
         }
 
@@ -94,12 +97,10 @@ class LifecycleAttributionFacade:
             outcomes=outcomes,
             funding_records=funding_records,
         )
-        if limit is not None and not base_lifecycles:
-            audits = []
-        elif limit is None:
+        if limit is None:
             audits = list(results["audits"])
         else:
-            audits = self._load_audits(limit=audit_limit)
+            audits = []
         base_lifecycles.sort(
             key=lambda item: (
                 item.get("closed_at") or item.get("opened_at") or datetime.min.replace(tzinfo=timezone.utc),
@@ -128,6 +129,11 @@ class LifecycleAttributionFacade:
                 funding_by_bill_id=funding_by_bill_id,
                 decision_rows=decision_rows_by_symbol.get(str(lifecycle.get("symbol") or ""), []),
             )
+            if limit is not None:
+                summary_row, detail_payload = self._defer_dashboard_decision_trace(
+                    summary_row=summary_row,
+                    detail_payload=detail_payload,
+                )
             lifecycles.append(summary_row)
             details_by_id[str(summary_row.get("lifecycle_id") or "")] = detail_payload
 
@@ -182,6 +188,11 @@ class LifecycleAttributionFacade:
             "details_by_id": details_by_id,
             "unassigned_funding_fees": unassigned_funding_fees,
             "read_scope": "recent_bounded" if limit is not None else "full_history",
+            "truth_source": (
+                "fill_outcomes_plus_funding_fee_records_dashboard_summary"
+                if limit is not None
+                else "fill_outcomes_plus_funding_fee_records_plus_decision_audits"
+            ),
             "source_window_exhausted": (
                 limit is not None
                 and (
@@ -218,6 +229,39 @@ class LifecycleAttributionFacade:
         if callable(recent):
             return list(recent(limit=max(count, 1)))
         return []
+
+    @staticmethod
+    def _defer_dashboard_decision_trace(
+        *,
+        summary_row: dict[str, Any],
+        detail_payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        summary_row = dict(summary_row)
+        detail_payload = dict(detail_payload)
+        summary_row.update(
+            {
+                "decision_trace_count": None,
+                "candidate_decision_count": None,
+                "trace_completeness": "deferred_dashboard_detail",
+                "unmatched_actionable_decision_count": None,
+                "missing_linked_reference_count": None,
+                "exit_reason_breakdown": [],
+                "decision_trace_deferred": True,
+            }
+        )
+        detail_payload.update(
+            {
+                "summary": summary_row,
+                "decision_trace": [],
+                "candidate_decisions": [],
+                "trace_completeness": "deferred_dashboard_detail",
+                "unmatched_actionable_decision_count": None,
+                "missing_linked_reference_count": None,
+                "exit_reason_breakdown": [],
+                "decision_trace_deferred": True,
+            }
+        )
+        return summary_row, detail_payload
 
     def _decision_rows_by_symbol(self, audits: list[Any]) -> dict[str, list[dict[str, Any]]]:
         refs: list[str] = []
