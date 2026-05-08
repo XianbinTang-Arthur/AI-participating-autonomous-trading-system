@@ -454,7 +454,6 @@ class RuntimeQueryFacade:
                 "derivatives_live_guard": self.owner.derivatives_live_guard,
                 "latest_reconciliation": self.owner._latest_scoped_reconciliation,
                 "latest_portfolio": self.owner._latest_scoped_snapshot,
-                "account_baseline": self.owner.latest_account_baseline,
                 "trial_guard": self.owner.trial_guard,
             })
         else:
@@ -481,7 +480,14 @@ class RuntimeQueryFacade:
         derivatives_live_guard = r["derivatives_live_guard"]
         latest_reconciliation = r["latest_reconciliation"]
         latest_portfolio = r["latest_portfolio"]
-        account_baseline = r["account_baseline"]
+        if dashboard_summary_only:
+            account_baseline = (
+                recovery.get("latest_account_baseline")
+                if isinstance(recovery, dict)
+                else None
+            )
+        else:
+            account_baseline = r["account_baseline"]
         if dashboard_summary_only:
             mode_snapshot = self.owner.recovery_queries.build_system_mode(
                 recovery=recovery,
@@ -588,10 +594,19 @@ class RuntimeQueryFacade:
                 "audit_replay": {
                     "ready": True,
                     "fresh": bool(self.owner.runtime.replay_validation_history),
-                    "audit_record_count": self.owner._cached_ttl(
-                        f"audit_record_count:{self.owner._scope_cache_fragment()}",
-                        300,
-                        self.owner.runtime.audit_repo.count,
+                    "audit_record_count": (
+                        None
+                        if dashboard_summary_only
+                        else self.owner._cached_ttl(
+                            f"audit_record_count:{self.owner._scope_cache_fragment()}",
+                            300,
+                            self.owner.runtime.audit_repo.count,
+                        )
+                    ),
+                    "audit_record_count_status": (
+                        "deferred_from_dashboard_summary"
+                        if dashboard_summary_only
+                        else "available"
                     ),
                     "last_replay_validation": (
                         self.owner.runtime.replay_validation_history[-1]

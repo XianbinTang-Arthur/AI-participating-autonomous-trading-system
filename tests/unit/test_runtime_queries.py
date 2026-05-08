@@ -119,7 +119,11 @@ class _DashboardHealthOwner:
             recovery_policy=SimpleNamespace(to_dict=lambda: {}),
             runtime_profile_resolution=SimpleNamespace(profile_source="unit"),
             settings=SimpleNamespace(storage_mode="postgres"),
-            audit_repo=SimpleNamespace(count=lambda: 0),
+            audit_repo=SimpleNamespace(
+                count=lambda: (_ for _ in ()).throw(
+                    AssertionError("dashboard health should defer audit counts")
+                )
+            ),
             replay_validation_history=[],
         )
         self.recovery_queries = RecoveryQueryFacade(self)
@@ -139,6 +143,7 @@ class _DashboardHealthOwner:
             "rebaseline_available": False,
             "resume_eligible": True,
             "resume_blocked_reasons": [],
+            "latest_account_baseline": {"baseline_id": "baseline_from_recovery"},
         }
 
     def recovery_view_dashboard(self) -> dict:
@@ -166,7 +171,7 @@ class _DashboardHealthOwner:
         return SimpleNamespace(snapshot_ts=None)
 
     def latest_account_baseline(self) -> dict:
-        return {}
+        raise AssertionError("dashboard health should reuse recovery baseline")
 
     def trial_guard(self) -> dict:
         return {"status": "monitoring"}
@@ -342,6 +347,12 @@ class TestRuntimeQueryFacade(unittest.TestCase):
         self.assertTrue(payload["dashboard_summary_only"])
         self.assertEqual(payload["truth_source"], "runtime_health_dashboard_summary")
         self.assertEqual(payload["mode_contract"]["recovery_state"], "normal_operation")
+        self.assertEqual(payload["account_baseline"]["baseline_id"], "baseline_from_recovery")
+        self.assertIsNone(payload["subsystems"]["audit_replay"]["audit_record_count"])
+        self.assertEqual(
+            payload["subsystems"]["audit_replay"]["audit_record_count_status"],
+            "deferred_from_dashboard_summary",
+        )
         self.assertTrue(any(item["blocker"] == "phase1_shadow_recovery_required" for item in payload["blockers"]))
         self.assertFalse(owner.persist_called)
 
