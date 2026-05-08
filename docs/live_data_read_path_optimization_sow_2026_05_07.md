@@ -133,6 +133,13 @@ Target fixes:
 - Dashboard `guardedLivePreflight` uses the dashboard guarded preflight
   summary; the explicit `/system/guarded-live-preflight` endpoint keeps the
   full preflight.
+- Dashboard `reconciliationLatest` uses dashboard recovery summary instead of
+  full recovery hydration. `/reconciliation/latest` keeps the full recovery
+  view.
+- `/reconciliation/recent` fetches only `limit + offset + 1` scoped reports and
+  uses repo-level `count_for_scope` for pagination totals; it no longer pulls
+  the full reconciliation history before slicing. `/reconciliation/{id}` uses a
+  direct repo lookup when available.
 
 ## Logging, Monitoring, Auditing
 

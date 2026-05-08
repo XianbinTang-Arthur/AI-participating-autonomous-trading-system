@@ -13493,6 +13493,10 @@ class OperatorQueryService:
         cache_key = f"reconciliation_latest:{self._scope_cache_fragment()}"
         return self._cached_ttl(cache_key, 35, self.reconciliation_system_queries.reconciliation_latest)
 
+    def reconciliation_latest_dashboard(self) -> dict[str, Any]:
+        cache_key = f"reconciliation_latest_dashboard:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 10, self.reconciliation_system_queries.reconciliation_latest_dashboard)
+
     def reconciliation_recent(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
         return self.reconciliation_system_queries.reconciliation_recent(limit=limit, offset=offset)
 

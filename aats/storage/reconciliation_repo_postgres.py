@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from sqlalchemy import desc, literal_column, select
+from sqlalchemy import desc, func, literal_column, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -282,6 +282,18 @@ class PostgresReconciliationRepository:
             rows = list(reversed(rows))
         return [self._to_report(row) for row in rows]
 
+    def count_for_scope(self, *, scope: RuntimeStateScope) -> int:
+        with self.session_factory() as session:
+            return int(
+                session.scalar(
+                    select(func.count())
+                    .select_from(ReconciliationReportModel)
+                    .where(ReconciliationReportModel.product_type == scope.product_type)
+                    .where(ReconciliationReportModel.margin_mode == scope.margin_mode)
+                )
+                or 0
+            )
+
     def latest_for_scope(self, *, scope: RuntimeStateScope) -> ReconciliationReport | None:
         with self.session_factory() as session:
             row = session.scalar(
@@ -291,6 +303,11 @@ class PostgresReconciliationRepository:
                 .order_by(desc(ReconciliationReportModel.as_of_ts), desc(ReconciliationReportModel.reconciliation_id))
                 .limit(1)
             )
+        return self._to_report(row) if row is not None else None
+
+    def get_report(self, reconciliation_id: str) -> ReconciliationReport | None:
+        with self.session_factory() as session:
+            row = session.get(ReconciliationReportModel, reconciliation_id)
         return self._to_report(row) if row is not None else None
 
     def portfolio_snapshot_refs_for_scope(

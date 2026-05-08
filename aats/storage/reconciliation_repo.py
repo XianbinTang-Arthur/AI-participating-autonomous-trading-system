@@ -117,8 +117,17 @@ class InMemoryReconciliationRepository:
             rows = rows[-limit:]
         return rows
 
+    def count_for_scope(self, *, scope: RuntimeStateScope) -> int:
+        return sum(1 for report in self._reports if reconciliation_report_matches_scope(report, scope))
+
     def latest_for_scope(self, *, scope: RuntimeStateScope) -> ReconciliationReport | None:
         return latest_matching_reconciliation(self._reports, scope)
+
+    def get_report(self, reconciliation_id: str) -> ReconciliationReport | None:
+        for report in reversed(self._reports):
+            if report.reconciliation_id == reconciliation_id:
+                return report
+        return None
 
     def portfolio_snapshot_refs_for_scope(
         self,

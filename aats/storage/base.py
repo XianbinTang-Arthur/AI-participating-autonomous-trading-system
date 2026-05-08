@@ -441,7 +441,13 @@ class ReconciliationRepository(Protocol):
     ) -> list[ReconciliationReport]:
         ...
 
+    def count_for_scope(self, *, scope: RuntimeStateScope) -> int:
+        ...
+
     def latest_for_scope(self, *, scope: RuntimeStateScope) -> ReconciliationReport | None:
+        ...
+
+    def get_report(self, reconciliation_id: str) -> ReconciliationReport | None:
         ...
 
     def portfolio_snapshot_refs_for_scope(

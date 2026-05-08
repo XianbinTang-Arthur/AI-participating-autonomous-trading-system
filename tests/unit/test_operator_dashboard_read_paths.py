@@ -10,6 +10,7 @@ from aats.api import auth_routes
 from aats.services.blocker_control import BlockerControlService
 from aats.services.operator.account_queries import AccountQueryFacade
 from aats.services.operator.query_service import OperatorQueryService
+from aats.services.operator.reconciliation_system_queries import ReconciliationSystemQueryFacade
 from aats.services.operator.runtime_queries import RuntimeQueryFacade
 from aats.services.operator.strategy_queries import StrategyQueryFacade
 
@@ -349,6 +350,107 @@ def test_account_state_dashboard_uses_status_summary_without_full_account_loader
     assert "persisted_funding_fee_summary" in payload["deferred_sections"]
 
 
+class _ReconReport:
+    def __init__(self, reconciliation_id: str, *, index: int = 0) -> None:
+        self.reconciliation_id = reconciliation_id
+        self.product_type = "derivatives"
+        self.margin_mode = "cross"
+        self.allowed_symbols: list[str] = []
+        self.exchange_bills_summary = {"bill_count": index}
+        self.exchange_bills_explanations = [{"bill": index}]
+
+    def model_dump(self, *, mode: str = "json") -> dict:
+        return {
+            "reconciliation_id": self.reconciliation_id,
+            "product_type": self.product_type,
+            "margin_mode": self.margin_mode,
+            "exchange_bills_summary": self.exchange_bills_summary,
+        }
+
+
+class _ReconRepo:
+    def __init__(self, rows: list[_ReconReport]) -> None:
+        self.rows = rows
+        self.history_limits: list[int | None] = []
+        self.get_report_calls: list[str] = []
+        self.history_called = False
+
+    def history_for_scope(self, *, scope, limit: int | None = None):
+        self.history_limits.append(limit)
+        return self.rows if limit is None else self.rows[-limit:]
+
+    def count_for_scope(self, *, scope) -> int:
+        return len(self.rows)
+
+    def get_report(self, reconciliation_id: str):
+        self.get_report_calls.append(reconciliation_id)
+        return next((row for row in self.rows if row.reconciliation_id == reconciliation_id), None)
+
+    def history(self):
+        self.history_called = True
+        raise AssertionError("reconciliation detail must use direct repo lookup")
+
+
+def _reconciliation_owner(repo: _ReconRepo):
+    return SimpleNamespace(
+        runtime=SimpleNamespace(
+            reconciliation_repo=repo,
+            event_store=SimpleNamespace(latest=lambda _topic: None),
+        ),
+        state_scope=SimpleNamespace(product_type="derivatives", margin_mode="cross"),
+        _exchange_bills_summary=lambda: {"fallback": True},
+        _reconciliation_mismatch_summary=lambda _report: {},
+        recovery_view=lambda: (_ for _ in ()).throw(
+            AssertionError("dashboard reconciliation latest must not build full recovery")
+        ),
+        recovery_view_dashboard=lambda: {
+            "latest_baseline_generation": None,
+            "latest_exchange_ack_watermark": None,
+            "latest_state_snapshot": None,
+        },
+    )
+
+
+def test_reconciliation_latest_dashboard_uses_summary_recovery() -> None:
+    report = _ReconReport("recon_1", index=1)
+    owner = _reconciliation_owner(_ReconRepo([report]))
+    owner._latest_scoped_reconciliation = lambda: report
+
+    payload = ReconciliationSystemQueryFacade(owner).reconciliation_latest_dashboard()
+
+    assert payload["reconciliation"]["reconciliation_id"] == "recon_1"
+    assert payload["exchange_bills_summary"] == {"bill_count": 1}
+    assert payload["dashboard_summary_only"] is True
+    assert payload["truth_source"] == "latest_reconciliation_plus_recovery_dashboard_summary"
+
+
+def test_reconciliation_recent_fetches_only_bounded_window() -> None:
+    rows = [_ReconReport(f"recon_{index}", index=index) for index in range(10)]
+    repo = _ReconRepo(rows)
+    owner = _reconciliation_owner(repo)
+
+    payload = ReconciliationSystemQueryFacade(owner).reconciliation_recent(limit=2, offset=3)
+
+    assert repo.history_limits == [6]
+    assert [row["reconciliation_id"] for row in payload["reconciliations"]] == ["recon_6", "recon_5"]
+    assert payload["total_available"] == 10
+    assert payload["has_more"] is True
+    assert payload["read_window_limit"] == 6
+
+
+def test_reconciliation_detail_uses_direct_repo_lookup_without_history_scan() -> None:
+    rows = [_ReconReport("recon_1", index=1)]
+    repo = _ReconRepo(rows)
+    owner = _reconciliation_owner(repo)
+    owner.recovery_view = lambda: {"latest_state_snapshot": {"state": "ok"}}
+
+    payload = ReconciliationSystemQueryFacade(owner).reconciliation_detail("recon_1")
+
+    assert repo.get_report_calls == ["recon_1"]
+    assert repo.history_called is False
+    assert payload["reconciliation"]["reconciliation_id"] == "recon_1"
+
+
 def test_legacy_blockers_reuses_cached_blocker_control_payload() -> None:
     class Owner:
         def __init__(self) -> None:
@@ -397,7 +499,9 @@ def test_dashboard_bundle_uses_summary_recovery_and_mode_panels() -> None:
     assert "query.system_recovery_dashboard()" in request_loader_source
     assert "query.account_state_dashboard()" in request_loader_source
     assert "query.guarded_live_preflight_dashboard()" in request_loader_source
+    assert "query.reconciliation_latest_dashboard()" in request_loader_source
     assert "query.system_mode_dashboard()" in snapshot_loader_source
     assert "query.system_recovery_dashboard()" in snapshot_loader_source
     assert "query.account_state_dashboard()" in snapshot_loader_source
     assert "query.guarded_live_preflight_dashboard()" in snapshot_loader_source
+    assert "query.reconciliation_latest_dashboard()" in snapshot_loader_source

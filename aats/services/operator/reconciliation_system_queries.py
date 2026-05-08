@@ -16,7 +16,11 @@ from aats.schemas.operator import (
 )
 from aats.services.execution_engine.baseline_import import AccountBaselineImportService
 from aats.services.execution_engine.state_writer import save_order_state_direct_legacy_only
-from aats.services.runtime_scope import latest_topic_event_for_scope, reconciliation_reports_for_scope
+from aats.services.runtime_scope import (
+    latest_topic_event_for_scope,
+    reconciliation_report_matches_scope,
+    reconciliation_reports_for_scope,
+)
 
 if TYPE_CHECKING:
     from aats.services.operator.query_service import OperatorQueryService
@@ -51,34 +55,72 @@ class ReconciliationSystemQueryFacade:
         self.owner = owner
 
     def reconciliation_latest(self) -> dict[str, Any]:
+        return self._build_reconciliation_latest(dashboard_summary_only=False)
+
+    def reconciliation_latest_dashboard(self) -> dict[str, Any]:
+        return self._build_reconciliation_latest(dashboard_summary_only=True)
+
+    def _build_reconciliation_latest(self, *, dashboard_summary_only: bool) -> dict[str, Any]:
+        recovery_loader = self.owner.recovery_view_dashboard if dashboard_summary_only else self.owner.recovery_view
         r = parallel_fetch({
             "report": self.owner._latest_scoped_reconciliation,
             "latest_validation": lambda: self.owner.runtime.event_store.latest(topics.RECONCILIATION_VALIDATIONS),
-            "recovery": self.owner.recovery_view,
+            "recovery": recovery_loader,
         })
         report = r["report"]
         latest_validation = r["latest_validation"]
         recovery = r["recovery"]
-        return {
+        if dashboard_summary_only:
+            exchange_bills_summary = report.exchange_bills_summary if report is not None else None
+        else:
+            exchange_bills_summary = self.owner._exchange_bills_summary()
+        payload = {
             "reconciliation": report.model_dump(mode="json") if report is not None else None,
             "mismatch_summary": self.owner._reconciliation_mismatch_summary(report),
-            "exchange_bills_summary": self.owner._exchange_bills_summary(),
+            "exchange_bills_summary": exchange_bills_summary,
             "latest_validation": latest_validation.payload if latest_validation is not None else None,
             "baseline_generation": recovery.get("latest_baseline_generation"),
             "exchange_ack_watermark": recovery.get("latest_exchange_ack_watermark"),
             "reconciliation_state_snapshot": recovery.get("latest_state_snapshot"),
             "recovery": recovery,
         }
+        if dashboard_summary_only:
+            payload["dashboard_summary_only"] = True
+            payload["truth_source"] = "latest_reconciliation_plus_recovery_dashboard_summary"
+        return payload
 
     def reconciliation_recent(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
-        history = list(reversed(reconciliation_reports_for_scope(self.owner.runtime.reconciliation_repo, self.owner.state_scope)))
-        return self.owner._paginate_rows(
-            history,
-            limit=limit,
-            offset=offset,
-            key="reconciliations",
-            serializer=lambda report: report.model_dump(mode="json"),
-        ) | {"exchange_bills_summary": self.owner._exchange_bills_summary()}
+        normalized_limit = max(int(limit), 1)
+        normalized_offset = max(int(offset), 0)
+        fetch_limit = normalized_limit + normalized_offset + 1
+        history = list(
+            reversed(
+                reconciliation_reports_for_scope(
+                    self.owner.runtime.reconciliation_repo,
+                    self.owner.state_scope,
+                    limit=fetch_limit,
+                )
+            )
+        )
+        paged_rows = history[normalized_offset : normalized_offset + normalized_limit]
+        count_for_scope = getattr(self.owner.runtime.reconciliation_repo, "count_for_scope", None)
+        if callable(count_for_scope):
+            total_available = int(count_for_scope(scope=self.owner.state_scope))
+            has_more = normalized_offset + len(paged_rows) < total_available
+        else:
+            total_available = normalized_offset + len(paged_rows)
+            has_more = len(history) > normalized_offset + len(paged_rows)
+            if has_more:
+                total_available += 1
+        return {
+            "reconciliations": [report.model_dump(mode="json") for report in paged_rows],
+            "limit": normalized_limit,
+            "offset": normalized_offset,
+            "total_available": total_available,
+            "has_more": has_more,
+            "exchange_bills_summary": self.owner._exchange_bills_summary(),
+            "read_window_limit": fetch_limit,
+        }
 
     def reconciliation_mismatches(self, *, limit: int = 20) -> dict[str, Any]:
         reports = [
@@ -96,14 +138,23 @@ class ReconciliationSystemQueryFacade:
         }
 
     def reconciliation_detail(self, reconciliation_id: str) -> dict[str, Any]:
-        report = next(
-            (
-                item
-                for item in reconciliation_reports_for_scope(self.owner.runtime.reconciliation_repo, self.owner.state_scope)
-                if item.reconciliation_id == reconciliation_id
-            ),
-            None,
-        )
+        get_report = getattr(self.owner.runtime.reconciliation_repo, "get_report", None)
+        if callable(get_report):
+            report = get_report(reconciliation_id)
+            if report is not None and not reconciliation_report_matches_scope(report, self.owner.state_scope):
+                report = None
+        else:
+            report = next(
+                (
+                    item
+                    for item in reconciliation_reports_for_scope(
+                        self.owner.runtime.reconciliation_repo,
+                        self.owner.state_scope,
+                    )
+                    if item.reconciliation_id == reconciliation_id
+                ),
+                None,
+            )
         if report is None:
             raise KeyError(f"reconciliation_not_found:{reconciliation_id}")
         return {
