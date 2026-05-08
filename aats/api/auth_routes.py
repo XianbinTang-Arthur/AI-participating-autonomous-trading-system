@@ -505,7 +505,7 @@ async def _load_dashboard_snapshot_panel(runtime: ApplicationRuntime, snapshot_k
                 limit=_snapshot_int_param(params, "limit", 200, minimum=1, maximum=1000)
             )
         if panel_key == "positionLifecycleAttribution":
-            return query.position_lifecycle_attribution(
+            return query.position_lifecycle_attribution_dashboard(
                 limit=_snapshot_int_param(params, "limit", 8, minimum=1, maximum=500)
             )
         if panel_key == "trialReviewSummary":
@@ -519,7 +519,7 @@ async def _load_dashboard_snapshot_panel(runtime: ApplicationRuntime, snapshot_k
         if panel_key == "guardedLivePreflight":
             return query.guarded_live_preflight()
         if panel_key == "guardedLiveRunPacket":
-            return query.guarded_live_run_packet()
+            return query.guarded_live_run_packet_dashboard()
         if panel_key == "replayStatus":
             return query.replay_status()
         if panel_key == "aiLatest":
@@ -895,7 +895,7 @@ def _protected_dashboard_panel_payload(
         return query.strategy_attribution_report(limit=200)
     if panel_key == "positionLifecycleAttribution":
         limit = 6 if view == "strategy" else 8
-        return query.position_lifecycle_attribution(limit=limit)
+        return query.position_lifecycle_attribution_dashboard(limit=limit)
     if panel_key == "recentDecisions":
         return query.recent_decisions_dashboard(limit=recent_decisions_limit, offset=0)
     if panel_key == "trialReviewSummary":
@@ -915,7 +915,7 @@ def _protected_dashboard_panel_payload(
     if panel_key == "guardedLivePreflight":
         return query.guarded_live_preflight()
     if panel_key == "guardedLiveRunPacket":
-        return query.guarded_live_run_packet()
+        return query.guarded_live_run_packet_dashboard()
     if panel_key == "replayStatus":
         return query.replay_status()
     if panel_key == "replayRecentValidations":

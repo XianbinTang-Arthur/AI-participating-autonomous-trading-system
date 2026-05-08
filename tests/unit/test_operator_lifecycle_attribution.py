@@ -292,6 +292,7 @@ class _FakeOwner:
                 ]
             )
         )
+        self.state_scope = SimpleNamespace(product_type="derivatives", margin_mode="cross", allowed_symbols=("BTC-USDT-SWAP",))
 
     def _scope_cache_fragment(self) -> str:
         return "unit"
@@ -458,6 +459,48 @@ class TestLifecycleAttributionFacade(unittest.TestCase):
         self.assertEqual([item["decision_id"] for item in detail["candidate_decisions"]], ["decision_shadow"])
         self.assertEqual(detail["trace_completeness"], "candidate_only")
         self.assertGreater(detail["missing_linked_reference_count"], 0)
+
+    def test_position_lifecycle_dashboard_uses_bounded_recent_sources(self) -> None:
+        owner = _FakeOwner()
+        calls: list[tuple[str, int | None]] = []
+        audits = owner.runtime.audit_repo.all()
+
+        class FillRepo:
+            def outcomes_for_scope(self, *, scope, since=None, limit=None):
+                _ = scope
+                _ = since
+                calls.append(("outcomes", limit))
+                return list(owner._outcomes)
+
+        class FundingRepo:
+            def records_for_scope(self, *, scope, since=None, limit=None):
+                _ = scope
+                _ = since
+                calls.append(("funding", limit))
+                return []
+
+        class AuditRepo:
+            def all(self):
+                raise AssertionError("dashboard lifecycle list should not load all audits")
+
+            def recent(self, *, limit: int):
+                calls.append(("audits", limit))
+                return list(audits)
+
+        owner.runtime = SimpleNamespace(
+            fill_outcome_repo=FillRepo(),
+            funding_fee_repo=FundingRepo(),
+            audit_repo=AuditRepo(),
+        )
+        facade = LifecycleAttributionFacade(owner)
+
+        payload = facade.position_lifecycle_attribution_dashboard(limit=5)
+
+        self.assertEqual(payload["read_scope"], "recent_bounded")
+        self.assertEqual(payload["lifecycles"][0]["lifecycle_id"], "lifecycle:BTC-USDT-SWAP:fill_open")
+        self.assertIn(("outcomes", 500), calls)
+        self.assertIn(("funding", 500), calls)
+        self.assertIn(("audits", 1000), calls)
 
 
 if __name__ == "__main__":

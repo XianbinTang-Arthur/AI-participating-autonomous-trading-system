@@ -86,6 +86,10 @@ Target fixes:
   and starve the dashboard snapshot plane.
 - Heavy attribution/review panels run in a separate `p3` lane so long-running
   report builders cannot block RDP workbench or recent-decision snapshots.
+- Dashboard `guardedLiveRunPacket` uses a lightweight summary snapshot; the full
+  guarded-live packet remains available from the explicit report endpoint.
+- Dashboard `positionLifecycleAttribution` uses a bounded recent read window; the
+  lifecycle detail endpoint keeps full-history lookup semantics.
 
 ## Logging, Monitoring, Auditing
 

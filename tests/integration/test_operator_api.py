@@ -912,6 +912,11 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 OperatorQueryService,
+                "guarded_live_run_packet_dashboard",
+                side_effect=AssertionError("guardedLiveRunPacket should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
                 "replay_status",
                 side_effect=AssertionError("replayStatus should read dashboard snapshot"),
             ),
@@ -977,6 +982,11 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 OperatorQueryService,
                 "position_lifecycle_attribution",
+                side_effect=AssertionError("positionLifecycleAttribution should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
+                "position_lifecycle_attribution_dashboard",
                 side_effect=AssertionError("positionLifecycleAttribution should read dashboard snapshot"),
             ),
             patch.object(
@@ -1100,6 +1110,11 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 OperatorQueryService,
                 "position_lifecycle_attribution",
+                side_effect=AssertionError("positionLifecycleAttribution should read parameterized dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
+                "position_lifecycle_attribution_dashboard",
                 side_effect=AssertionError("positionLifecycleAttribution should read parameterized dashboard snapshot"),
             ),
             TestClient(app) as client,

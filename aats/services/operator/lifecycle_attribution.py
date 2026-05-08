@@ -12,6 +12,10 @@ if TYPE_CHECKING:
 
 class LifecycleAttributionFacade:
     _EPSILON = Decimal("1e-12")
+    _DASHBOARD_FETCH_MIN_ROWS = 500
+    _DASHBOARD_FETCH_MULTIPLIER = 50
+    _DASHBOARD_AUDIT_MIN_ROWS = 1000
+    _DASHBOARD_AUDIT_MULTIPLIER = 125
     _TRACEABLE_BOOK_ACTIONS = {
         "open",
         "scale_in",
@@ -30,6 +34,9 @@ class LifecycleAttributionFacade:
     def position_lifecycle_attribution(self, *, limit: int = 100) -> dict[str, Any]:
         return self._list_payload(limit=limit)
 
+    def position_lifecycle_attribution_dashboard(self, *, limit: int = 100) -> dict[str, Any]:
+        return self._list_payload(limit=limit, dashboard_recent=True)
+
     def position_lifecycle_attribution_detail(self, *, lifecycle_id: str) -> dict[str, Any]:
         compiled = self._compiled_payload()
         detail = compiled["details_by_id"].get(lifecycle_id)
@@ -37,28 +44,40 @@ class LifecycleAttributionFacade:
             raise KeyError(f"lifecycle_not_found:{lifecycle_id}")
         return detail
 
-    def _list_payload(self, *, limit: int) -> dict[str, Any]:
-        compiled = self._compiled_payload()
+    def _list_payload(self, *, limit: int, dashboard_recent: bool = False) -> dict[str, Any]:
         normalized_limit = max(int(limit), 1)
+        compiled = self._compiled_payload(limit=normalized_limit if dashboard_recent else None)
         visible_rows = compiled["lifecycles"][:normalized_limit]
+        has_more = len(compiled["lifecycles"]) > normalized_limit or bool(compiled.get("source_window_exhausted"))
         return {
             "summary": dict(compiled["summary"]),
             "lifecycles": visible_rows,
             "unassigned_funding_fees": compiled["unassigned_funding_fees"][:normalized_limit],
-            "has_more": len(compiled["lifecycles"]) > normalized_limit,
+            "has_more": has_more,
             "truth_source": "fill_outcomes_plus_funding_fee_records_plus_decision_audits",
+            "read_scope": compiled.get("read_scope", "full_history"),
         }
 
-    def _compiled_payload(self) -> dict[str, Any]:
-        cache_key = f"lifecycle_attribution:{self.owner._scope_cache_fragment()}"
-        return self.owner._cached_ttl(cache_key, 20, self._build_compiled_payload)
+    def _compiled_payload(self, *, limit: int | None = None) -> dict[str, Any]:
+        normalized_limit = None if limit is None else max(int(limit), 1)
+        cache_key = f"lifecycle_attribution:{self.owner._scope_cache_fragment()}:limit={normalized_limit or 'full'}"
+        return self.owner._cached_ttl(
+            cache_key,
+            20,
+            lambda: self._build_compiled_payload(limit=normalized_limit),
+        )
 
-    def _build_compiled_payload(self) -> dict[str, Any]:
+    def _build_compiled_payload(self, *, limit: int | None = None) -> dict[str, Any]:
+        row_limit = None
+        audit_limit = None
+        if limit is not None:
+            row_limit = max(limit * self._DASHBOARD_FETCH_MULTIPLIER, self._DASHBOARD_FETCH_MIN_ROWS)
+            audit_limit = max(limit * self._DASHBOARD_AUDIT_MULTIPLIER, self._DASHBOARD_AUDIT_MIN_ROWS)
         results = parallel_fetch(
             {
-                "outcomes": lambda: list(self.owner._scoped_fill_outcomes()),
-                "funding_records": lambda: list(self.owner._scoped_funding_fee_records()),
-                "audits": self._load_audits,
+                "outcomes": lambda: self._load_outcomes(limit=row_limit),
+                "funding_records": lambda: self._load_funding_records(limit=row_limit),
+                "audits": lambda: self._load_audits(limit=audit_limit),
             }
         )
         outcomes = list(results["outcomes"])
@@ -149,9 +168,35 @@ class LifecycleAttributionFacade:
             "lifecycles": lifecycles,
             "details_by_id": details_by_id,
             "unassigned_funding_fees": unassigned_funding_fees,
+            "read_scope": "recent_bounded" if limit is not None else "full_history",
+            "source_window_exhausted": (
+                limit is not None
+                and (
+                    (row_limit is not None and len(outcomes) >= row_limit)
+                    or (row_limit is not None and len(funding_records) >= row_limit)
+                    or (audit_limit is not None and len(audits) >= audit_limit)
+                )
+            ),
         }
 
-    def _load_audits(self) -> list[Any]:
+    def _load_outcomes(self, *, limit: int | None) -> list[Any]:
+        repo = getattr(self.owner.runtime, "fill_outcome_repo", None)
+        if repo is not None and hasattr(repo, "outcomes_for_scope"):
+            return list(repo.outcomes_for_scope(scope=self.owner.state_scope, limit=limit))
+        return list(self.owner._scoped_fill_outcomes())[-limit:] if limit is not None else list(self.owner._scoped_fill_outcomes())
+
+    def _load_funding_records(self, *, limit: int | None) -> list[Any]:
+        repo = getattr(self.owner.runtime, "funding_fee_repo", None)
+        if repo is not None and hasattr(repo, "records_for_scope"):
+            return list(repo.records_for_scope(scope=self.owner.state_scope, limit=limit))
+        rows = list(self.owner._scoped_funding_fee_records())
+        return rows[-limit:] if limit is not None else rows
+
+    def _load_audits(self, *, limit: int | None = None) -> list[Any]:
+        if limit is not None:
+            recent = getattr(self.owner.runtime.audit_repo, "recent", None)
+            if callable(recent):
+                return list(recent(limit=limit))
         loader = getattr(self.owner.runtime.audit_repo, "all", None)
         if callable(loader):
             return list(loader())

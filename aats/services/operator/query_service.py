@@ -2212,6 +2212,10 @@ class OperatorQueryService:
         cache_key = f"guarded_live_run_packet:{self._scope_cache_fragment()}"
         return self._cached_ttl(cache_key, 35, self._build_guarded_live_run_packet)
 
+    def guarded_live_run_packet_dashboard(self) -> dict[str, Any]:
+        cache_key = f"guarded_live_run_packet_dashboard:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 15, self._build_guarded_live_run_packet_dashboard)
+
     def cached_guarded_live_run_packet(self) -> dict[str, Any] | None:
         """Return the current full run-packet cache without triggering its loader."""
         ttl_cache = getattr(self, "_ttl_cache", None)
@@ -2227,6 +2231,39 @@ class OperatorQueryService:
             if expires_at <= utc_now() or isinstance(value, _CachedError):
                 return None
             return value if isinstance(value, dict) else None
+
+    def _build_guarded_live_run_packet_dashboard(self) -> dict[str, Any]:
+        r = parallel_fetch(
+            {
+                "preflight": self.guarded_live_preflight,
+                "live_guard": self.derivatives_live_guard,
+                "trial_guard": self.trial_guard,
+                "margin_buffer": self.margin_buffer_risk,
+                "recovery": self.recovery_view,
+                "blocker_control": self.blocker_control,
+            }
+        )
+        summary = self.runtime_queries.guarded_live_run_packet_summary(
+            preflight=r["preflight"],
+            live_guard=r["live_guard"],
+            trial_guard=r["trial_guard"],
+            margin_buffer=r["margin_buffer"],
+            recovery=r["recovery"],
+            blocker_control=r["blocker_control"],
+        )
+        return {
+            "generated_at": utc_now(),
+            "status": summary.get("status"),
+            "summary": summary.get("summary"),
+            "summary_metrics": summary.get("summary_metrics") or {},
+            "operator_actions": list(summary.get("operator_actions") or []),
+            "forward_validation_summary": summary.get("forward_validation_summary"),
+            "summary_source": summary.get("summary_source"),
+            "full_packet_cached": bool(summary.get("full_packet_cached")),
+            "deferred_sections": list(summary.get("deferred_sections") or []),
+            "dashboard_summary_only": True,
+            "truth_source": "guarded_live_run_packet_lightweight_dashboard",
+        }
 
     def _build_guarded_live_run_packet(self) -> dict[str, Any]:
         # S3（task P2-1）：原 9 路纯串行。wall 观察到 38s+（preflight 本身 29s
@@ -11704,6 +11741,9 @@ class OperatorQueryService:
 
     def position_lifecycle_attribution(self, *, limit: int = 100) -> dict[str, Any]:
         return self.lifecycle_attribution.position_lifecycle_attribution(limit=limit)
+
+    def position_lifecycle_attribution_dashboard(self, *, limit: int = 100) -> dict[str, Any]:
+        return self.lifecycle_attribution.position_lifecycle_attribution_dashboard(limit=limit)
 
     def position_lifecycle_attribution_detail(self, *, lifecycle_id: str) -> dict[str, Any]:
         return self.lifecycle_attribution.position_lifecycle_attribution_detail(lifecycle_id=lifecycle_id)
