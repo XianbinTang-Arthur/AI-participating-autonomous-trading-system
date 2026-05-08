@@ -1901,9 +1901,10 @@ class OperatorQueryService:
         margin_buffer = r["margin_buffer"]
         live_guard = r["live_guard"]
         trial_guard = r["trial_guard"]
+        submit_blocked_reasons = list(r["submit_blocked_reasons"] or [])
         blocker_control = self.blocker_control_service.execution_blocker_summary(
             recovery=recovery,
-            submit_blocked_reasons=r["submit_blocked_reasons"],
+            submit_blocked_reasons=submit_blocked_reasons,
         )
         active_blockers = [
             item
@@ -1913,14 +1914,127 @@ class OperatorQueryService:
 
         checks = [
             self._guarded_live_preflight_check(
-                check_id="runtime_contract_dashboard",
+                check_id="startup_profile_derivatives_dashboard",
                 category="runtime_contract",
-                label="运行线必须是合约 guarded_live",
-                status="pass",
-                detail="当前运行线是合约 guarded_live。",
+                label="启动档位必须是合约",
+                status="pass" if self.runtime.settings.startup_profile == "derivatives" else "fail",
+                detail=(
+                    "当前启动档位已经明确为 derivatives。"
+                    if self.runtime.settings.startup_profile == "derivatives"
+                    else "当前启动档位不是 derivatives，不能把现货配置误带进合约实盘。"
+                ),
+                observed=self.runtime.settings.startup_profile,
+            ),
+            self._guarded_live_preflight_check(
+                check_id="guarded_live_mode_dashboard",
+                category="runtime_contract",
+                label="运行模式必须是 guarded_live",
+                status="pass" if self.runtime.settings.mode == "guarded_live" else "fail",
+                detail=(
+                    "当前运行模式已经进入 guarded_live。"
+                    if self.runtime.settings.mode == "guarded_live"
+                    else "当前不是 guarded_live，不能拿这份预检结果当作实盘启盘依据。"
+                ),
+                observed=self.runtime.settings.mode,
+            ),
+            self._guarded_live_preflight_check(
+                check_id="exchange_backends_okx_dashboard",
+                category="runtime_contract",
+                label="行情、账户和执行后端必须接到 OKX",
+                status=(
+                    "pass"
+                    if (
+                        self.runtime.settings.market_data_backend == "okx"
+                        and self.runtime.settings.execution_backend == "okx"
+                        and self.runtime.settings.account_backend == "okx"
+                        and self.runtime.settings.account_read_enabled
+                    )
+                    else "fail"
+                ),
+                detail=(
+                    "当前行情、账户和执行链都已接到 OKX，并且账户读取已启用。"
+                    if (
+                        self.runtime.settings.market_data_backend == "okx"
+                        and self.runtime.settings.execution_backend == "okx"
+                        and self.runtime.settings.account_backend == "okx"
+                        and self.runtime.settings.account_read_enabled
+                    )
+                    else "当前行情、账户或执行后端还没有全部接到 OKX，或者账户读取没有启用。"
+                ),
                 observed={
-                    "mode": self.runtime.settings.mode,
-                    "trading_product_type": self.runtime.settings.trading_product_type,
+                    "market_data_backend": self.runtime.settings.market_data_backend,
+                    "execution_backend": self.runtime.settings.execution_backend,
+                    "account_backend": self.runtime.settings.account_backend,
+                    "account_read_enabled": self.runtime.settings.account_read_enabled,
+                },
+            ),
+            self._guarded_live_preflight_check(
+                check_id="postgres_and_runtime_lock_dashboard",
+                category="runtime_contract",
+                label="必须启用 Postgres 和单实例运行锁",
+                status=(
+                    "pass"
+                    if (
+                        self.runtime.settings.storage_mode == "postgres"
+                        and bool(self.runtime.settings.database_url)
+                        and self.runtime.settings.database_single_runtime_guard_enabled
+                    )
+                    else "fail"
+                ),
+                detail=(
+                    "当前已经启用 Postgres 和单实例运行锁。"
+                    if (
+                        self.runtime.settings.storage_mode == "postgres"
+                        and bool(self.runtime.settings.database_url)
+                        and self.runtime.settings.database_single_runtime_guard_enabled
+                    )
+                    else "当前没有完整启用 Postgres 持久化和单实例运行锁，不能把这条线当成合约实盘运行线。"
+                ),
+                observed={
+                    "storage_mode": self.runtime.settings.storage_mode,
+                    "database_single_runtime_guard_enabled": self.runtime.settings.database_single_runtime_guard_enabled,
+                },
+            ),
+            self._guarded_live_preflight_check(
+                check_id="operator_auth_hardened_dashboard",
+                category="operator_safety",
+                label="控制面必须启用认证并禁止未认证写入",
+                status=(
+                    "pass"
+                    if self.runtime.settings.operator_auth_enabled
+                    and not self.runtime.settings.operator_unsafe_write_without_auth
+                    else "fail"
+                ),
+                detail=(
+                    "当前控制面已经启用认证，并关闭了未认证写入。"
+                    if self.runtime.settings.operator_auth_enabled
+                    and not self.runtime.settings.operator_unsafe_write_without_auth
+                    else "当前控制面认证仍不够硬，必须先启用认证并关闭未认证写入。"
+                ),
+                observed={
+                    "operator_auth_enabled": self.runtime.settings.operator_auth_enabled,
+                    "operator_unsafe_write_without_auth": self.runtime.settings.operator_unsafe_write_without_auth,
+                },
+            ),
+            self._guarded_live_preflight_check(
+                check_id="real_money_route_ready_dashboard",
+                category="execution_route",
+                label="真实资金报单路径必须不再处于结构性阻断",
+                status=(
+                    "pass"
+                    if not self.runtime.policy_profile.real_money_submission_structurally_blocked
+                    else "fail"
+                ),
+                detail=(
+                    "当前执行线路已经不再被 real_money_live_not_supported 结构性阻断。"
+                    if not self.runtime.policy_profile.real_money_submission_structurally_blocked
+                    else "当前执行线路仍然被结构性阻断，系统还不会把订单真正发到真实资金线路。"
+                ),
+                observed={
+                    "submit_blocked_reasons": submit_blocked_reasons,
+                    "real_money_submission_structurally_blocked": (
+                        self.runtime.policy_profile.real_money_submission_structurally_blocked
+                    ),
                 },
             ),
             self._guarded_live_preflight_check(
@@ -2020,6 +2134,34 @@ class OperatorQueryService:
                 ),
                 observed={"status": trial_guard.get("status")},
                 required=False,
+            ),
+            self._guarded_live_preflight_check(
+                check_id="small_capital_limits_present_dashboard",
+                category="capital_envelope",
+                label="必须配置小资金运行包的名义与试盘阈值",
+                status=(
+                    "pass"
+                    if (
+                        self.runtime.settings.max_gross_notional_per_symbol > 0
+                        and self.runtime.settings.max_total_open_notional > 0
+                        and self.runtime.settings.trial_guard_max_daily_loss_usdt > 0
+                    )
+                    else "fail"
+                ),
+                detail=(
+                    "当前已经配置小资金运行包的名义上限和试盘止损阈值。"
+                    if (
+                        self.runtime.settings.max_gross_notional_per_symbol > 0
+                        and self.runtime.settings.max_total_open_notional > 0
+                        and self.runtime.settings.trial_guard_max_daily_loss_usdt > 0
+                    )
+                    else "当前没有完整配置小资金运行包的名义上限或试盘止损阈值。"
+                ),
+                observed={
+                    "max_gross_notional_per_symbol": self.runtime.settings.max_gross_notional_per_symbol,
+                    "max_total_open_notional": self.runtime.settings.max_total_open_notional,
+                    "trial_guard_max_daily_loss_usdt": self.runtime.settings.trial_guard_max_daily_loss_usdt,
+                },
             ),
         ]
         fail_count = sum(1 for item in checks if item["status"] == "fail")

@@ -107,6 +107,11 @@ Target fixes:
   execution-blocker summary instead of constructing the full blocker-control
   action tree; the explicit `/system/blocker-control` panel keeps full action
   and reconciliation guidance.
+- Dashboard `guardedLiveRunPacket` also uses a dashboard-only guarded preflight
+  summary. It keeps cheap runtime/account/risk safety checks, but avoids full
+  recovery, account-state, system-mode, and blocker-control hydration; the
+  explicit `/system/guarded-live-preflight` endpoint keeps the full audit
+  preflight.
 - `trialReviewSummary` no longer triggers even the dashboard run-packet loader;
   it derives the nested guarded-live status from already-computed
   scaling/recovery/blocker context and leaves the dedicated guarded-live panel

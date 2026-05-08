@@ -166,6 +166,75 @@ def test_trial_review_summary_reuses_scaling_context_and_lightweight_run_packet(
     assert payload["sections"]["workbench"] == {"latest_action": None}
 
 
+def test_guarded_live_preflight_dashboard_uses_summary_paths_without_full_detail_loaders() -> None:
+    service = OperatorQueryService.__new__(OperatorQueryService)
+    service.runtime = SimpleNamespace(
+        settings=SimpleNamespace(
+            startup_profile="derivatives",
+            mode="guarded_live",
+            trading_product_type="derivatives",
+            market_data_backend="okx",
+            execution_backend="okx",
+            account_backend="okx",
+            account_read_enabled=True,
+            storage_mode="postgres",
+            database_url="postgresql://redacted",
+            database_single_runtime_guard_enabled=True,
+            operator_auth_enabled=True,
+            operator_unsafe_write_without_auth=False,
+            max_gross_notional_per_symbol=Decimal("50"),
+            max_total_open_notional=Decimal("100"),
+            trial_guard_max_daily_loss_usdt=Decimal("5"),
+        ),
+        policy_profile=SimpleNamespace(real_money_submission_structurally_blocked=False),
+        health_service=SimpleNamespace(snapshot=lambda: SimpleNamespace(blockers=[])),
+        kill_switch=SimpleNamespace(halted=False),
+    )
+    service.blocker_control_service = BlockerControlService(service)
+    service.recovery_view = lambda: (_ for _ in ()).throw(
+        AssertionError("dashboard preflight must not build full recovery")
+    )
+    service.blockers = lambda: (_ for _ in ()).throw(
+        AssertionError("dashboard preflight must not build full blockers")
+    )
+    service.account_state = lambda: (_ for _ in ()).throw(
+        AssertionError("dashboard preflight must not build full account state")
+    )
+    service.system_mode = lambda: (_ for _ in ()).throw(
+        AssertionError("dashboard preflight must not build full system mode")
+    )
+    service.recovery_view_dashboard = lambda: {
+        "safe_to_trade": True,
+        "review_required": False,
+        "resume_eligible": True,
+        "resume_blocked_reasons": [],
+        "recovery_state": "running",
+    }
+    service.account_service_status = lambda: {
+        "connected": True,
+        "fresh": True,
+        "ready": True,
+        "blockers": [],
+    }
+    service.margin_buffer_risk = lambda: {"status": "healthy"}
+    service.derivatives_live_guard = lambda: {
+        "auto_halt_required": False,
+        "only_reduce_required": False,
+    }
+    service.trial_guard = lambda: {"status": "monitoring"}
+    service._submit_blocked_reasons_dashboard = lambda: ["live_submit_disabled"]
+
+    payload = service._build_guarded_live_preflight_dashboard()
+
+    check_ids = {item["check_id"] for item in payload["checks"]}
+    assert payload["status"] == "ready"
+    assert payload["launch_ready"] is True
+    assert payload["dashboard_summary_only"] is True
+    assert payload["truth_source"] == "guarded_live_preflight_dashboard_summary"
+    assert "small_capital_limits_present_dashboard" in check_ids
+    assert "account_status_dashboard" in check_ids
+
+
 def test_guarded_live_dashboard_uses_summary_preflight_recovery_and_minimal_blockers() -> None:
     service = OperatorQueryService.__new__(OperatorQueryService)
     service._cache_lock = threading.RLock()
