@@ -67,6 +67,10 @@ class DashboardSnapshotRead:
 _LOGGER = get_logger("aats.operator.dashboard_snapshot")
 
 
+def _is_pending_refresh_timeout(last_error: str | None, *, refreshing: bool) -> bool:
+    return bool(refreshing and str(last_error or "").startswith("dashboard_snapshot_refresh_timeout:"))
+
+
 P0_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
     "runtime": DashboardSnapshotPolicy(
         panel_key="runtime",
@@ -513,9 +517,11 @@ class DashboardSnapshotPlane:
         if snapshot is None or hard_expired:
             data = self._default_factory(snapshot_key)
             last_error, last_error_at = await self._last_error(snapshot_key)
+            soft_timeout_pending = _is_pending_refresh_timeout(last_error, refreshing=refreshing)
+            error = None if last_error is None or soft_timeout_pending else "dashboard_snapshot_refresh_failed"
             return DashboardSnapshotRead(
                 data=data,
-                error=None if last_error is None else "dashboard_snapshot_refresh_failed",
+                error=error,
                 meta=self._meta(
                     policy=policy,
                     snapshot=None,
@@ -527,7 +533,7 @@ class DashboardSnapshotPlane:
                     age_seconds=None,
                     last_error=last_error,
                     last_error_at=last_error_at,
-                    status="missing" if last_error is None else "error",
+                    status="missing" if error is None else "error",
                 ),
                 duration_ms=round((perf_counter() - started_at) * 1000.0, 3),
             )

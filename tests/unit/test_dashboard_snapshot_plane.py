@@ -288,8 +288,8 @@ class DashboardSnapshotPlaneTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await plane.enqueue("runtime", reason="test_duplicate"))
 
             self.assertEqual(read.data, {"panel": "runtime", "ready": False})
-            self.assertEqual(read.error, "dashboard_snapshot_refresh_failed")
-            self.assertEqual(read.meta["status"], "error")
+            self.assertIsNone(read.error)
+            self.assertEqual(read.meta["status"], "missing")
             self.assertTrue(read.meta["loading"])
             self.assertTrue(read.meta["refreshing"])
             self.assertIn("dashboard_snapshot_refresh_timeout", read.meta["last_error"])
