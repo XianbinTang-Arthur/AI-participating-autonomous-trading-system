@@ -184,7 +184,11 @@ class RuntimeQueryFacade:
             status.get("effective_operating_mode"),
         )
         settings = self.owner.runtime.settings
-        strategy_profile_state = self.owner.strategy_profiles.snapshot().get("activation", {})
+        activation_status = getattr(self.owner.strategy_profiles, "activation_status", None)
+        if activation_status is None:
+            strategy_profile_state = self.owner.strategy_profiles.snapshot().get("activation", {})
+        else:
+            strategy_profile_state = activation_status()
         auto_control_configured = settings.strategy_profile_auto_control_configured
         auto_control_enabled = bool(strategy_profile_state.get("auto_switch_enabled", auto_control_configured))
         status["strategy_profile_auto_control_configured"] = settings.strategy_profile_auto_control_configured

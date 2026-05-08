@@ -129,6 +129,9 @@ class StrategyProfileControlService:
     def snapshot(self) -> dict[str, Any]:
         return build_strategy_profile_snapshot(self)
 
+    def activation_status(self) -> dict[str, Any]:
+        return self._activation_state().model_dump(mode="json")
+
     def ai_config_snapshot(self) -> dict[str, Any]:
         return build_strategy_profile_ai_config_snapshot(self)
 

@@ -556,6 +556,36 @@ class TestAiRuntimeStubWhenServiceMissing(unittest.TestCase):
         self.assertIsNone(result["manual_override_default_freeze_seconds"])
 
 
+class TestAiRuntimeLocalServiceRead(unittest.TestCase):
+    def test_ai_runtime_uses_lightweight_strategy_activation_status(self) -> None:
+        class _StrategyProfiles:
+            def activation_status(self) -> dict[str, object]:
+                return {"auto_switch_enabled": True}
+
+            def snapshot(self) -> dict[str, object]:
+                raise AssertionError("ai_runtime must not build full strategy profile snapshot")
+
+        ai_service = SimpleNamespace(
+            status=lambda: {
+                "configured_operating_mode": "baseline",
+                "effective_operating_mode": "baseline",
+                "canonical_configured_operating_mode": "baseline",
+                "canonical_effective_operating_mode": "baseline",
+                "manual_override_active": False,
+            }
+        )
+        owner = _AIRuntimeFakeOwner(ai_service=ai_service, process_role="decision")
+        owner.runtime.settings.strategy_profile_auto_control_configured = True
+        owner.strategy_profiles = _StrategyProfiles()
+        facade = RuntimeQueryFacade(owner)
+
+        result = facade.ai_runtime()
+
+        self.assertTrue(result["strategy_profile_auto_control_configured"])
+        self.assertTrue(result["strategy_profile_auto_control_effective"])
+        self.assertEqual(result["strategy_profile_auto_control_reason"], "configured_auto")
+
+
 class TestAiRuntimeAuthoritativeRead(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         RuntimeQueryFacade.invalidate_authoritative_ai_runtime_cache()

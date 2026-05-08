@@ -15,6 +15,9 @@ panel reads and P0 snapshot timeouts.
   emits at most one `ai_runtime_status` bridge request per runtime/client/loop.
 - Invalidate this cache after AI command mutations so operator mode changes are
   reflected immediately after write-side actions.
+- Keep the decision-side `ai_runtime_status` handler on the lightweight
+  strategy profile activation state instead of the full strategy profile
+  snapshot; the AI runtime payload only needs `auto_switch_enabled`.
 
 ## Non-goals
 
@@ -28,3 +31,5 @@ panel reads and P0 snapshot timeouts.
   agree on the same authoritative decision-process status.
 - Repeated short-window reads reuse one bridge request.
 - AI mutation routes clear the short-window cache.
+- A local `ai_runtime()` read must not build the full strategy profile snapshot
+  merely to compute strategy profile auto-control fields.
