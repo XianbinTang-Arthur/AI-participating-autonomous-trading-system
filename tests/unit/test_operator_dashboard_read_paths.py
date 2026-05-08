@@ -166,7 +166,7 @@ def test_trial_review_summary_reuses_scaling_context_and_lightweight_run_packet(
     assert payload["sections"]["workbench"] == {"latest_action": None}
 
 
-def test_guarded_live_dashboard_uses_minimal_blocker_summary_without_full_blocker_control() -> None:
+def test_guarded_live_dashboard_uses_summary_preflight_recovery_and_minimal_blockers() -> None:
     service = OperatorQueryService.__new__(OperatorQueryService)
     service._cache_lock = threading.RLock()
     service._ttl_cache = {}
@@ -184,14 +184,20 @@ def test_guarded_live_dashboard_uses_minimal_blocker_summary_without_full_blocke
     )
     service.runtime_queries = RuntimeQueryFacade(service)
     service.blocker_control_service = BlockerControlService(service)
-    service.guarded_live_preflight = lambda: {"status": "pass", "launch_ready": True}
+    service.guarded_live_preflight = lambda: (_ for _ in ()).throw(
+        AssertionError("dashboard run packet must not build full preflight")
+    )
+    service.guarded_live_preflight_dashboard = lambda: {"status": "pass", "launch_ready": True}
     service.derivatives_live_guard = lambda: {
         "auto_halt_required": False,
         "only_reduce_required": False,
     }
     service.trial_guard = lambda: {"status": "monitoring"}
     service.margin_buffer_risk = lambda: {"status": "healthy", "current": {}, "liquidation": {}}
-    service.recovery_view = lambda: {
+    service.recovery_view = lambda: (_ for _ in ()).throw(
+        AssertionError("dashboard run packet must not build full recovery")
+    )
+    service.recovery_view_dashboard = lambda: {
         "safe_to_trade": True,
         "review_required": False,
         "resume_eligible": True,

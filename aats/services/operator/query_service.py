@@ -1865,6 +1865,190 @@ class OperatorQueryService:
         cache_key = f"guarded_live_preflight:{self._scope_cache_fragment()}"
         return self._cached_ttl(cache_key, 35, self._build_guarded_live_preflight)
 
+    def guarded_live_preflight_dashboard(self) -> dict[str, Any]:
+        cache_key = f"guarded_live_preflight_dashboard:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 15, self._build_guarded_live_preflight_dashboard)
+
+    def _build_guarded_live_preflight_dashboard(self) -> dict[str, Any]:
+        if not (
+            self.runtime.settings.mode == "guarded_live"
+            and self.runtime.settings.trading_product_type == "derivatives"
+        ):
+            return {
+                "generated_at": utc_now(),
+                "status": "not_applicable",
+                "launch_ready": False,
+                "summary": "当前不是合约 guarded_live 运行线，不需要执行这份启盘前自检。",
+                "counts": {"pass": 0, "warn": 0, "fail": 0},
+                "checks": [],
+                "operator_actions": ["先切到合约 guarded_live 运行线，再执行启盘前自检。"],
+                "dashboard_summary_only": True,
+                "truth_source": "guarded_live_preflight_dashboard_summary",
+            }
+
+        r = parallel_fetch(
+            {
+                "recovery": self.recovery_view_dashboard,
+                "account_status": self.account_service_status,
+                "margin_buffer": self.margin_buffer_risk,
+                "live_guard": self.derivatives_live_guard,
+                "trial_guard": self.trial_guard,
+                "submit_blocked_reasons": self._submit_blocked_reasons_dashboard,
+            }
+        )
+        recovery = r["recovery"]
+        account_status = r["account_status"]
+        margin_buffer = r["margin_buffer"]
+        live_guard = r["live_guard"]
+        trial_guard = r["trial_guard"]
+        blocker_control = self.blocker_control_service.execution_blocker_summary(
+            recovery=recovery,
+            submit_blocked_reasons=r["submit_blocked_reasons"],
+        )
+        active_blockers = [
+            item
+            for item in list(blocker_control.get("blockers") or [])
+            if isinstance(item, dict) and item.get("affects_execution")
+        ]
+
+        checks = [
+            self._guarded_live_preflight_check(
+                check_id="runtime_contract_dashboard",
+                category="runtime_contract",
+                label="运行线必须是合约 guarded_live",
+                status="pass",
+                detail="当前运行线是合约 guarded_live。",
+                observed={
+                    "mode": self.runtime.settings.mode,
+                    "trading_product_type": self.runtime.settings.trading_product_type,
+                },
+            ),
+            self._guarded_live_preflight_check(
+                check_id="account_status_dashboard",
+                category="account_readiness",
+                label="账户服务必须可用且新鲜",
+                status=(
+                    "pass"
+                    if account_status.get("connected")
+                    and account_status.get("fresh")
+                    and account_status.get("ready")
+                    else "fail"
+                ),
+                detail=(
+                    "账户服务状态可用于首屏判断。"
+                    if account_status.get("connected")
+                    and account_status.get("fresh")
+                    and account_status.get("ready")
+                    else "账户服务状态仍未满足首屏启盘判断。"
+                ),
+                observed={
+                    "connected": account_status.get("connected"),
+                    "fresh": account_status.get("fresh"),
+                    "ready": account_status.get("ready"),
+                    "blockers": account_status.get("blockers"),
+                },
+            ),
+            self._guarded_live_preflight_check(
+                check_id="no_active_execution_blockers_dashboard",
+                category="recovery_and_blockers",
+                label="当前不能存在活动中的执行阻断",
+                status="pass" if not active_blockers else "fail",
+                detail=(
+                    "当前没有活动中的执行阻断。"
+                    if not active_blockers
+                    else "当前仍有执行阻断，启盘前必须先处理。"
+                ),
+                observed=[item.get("blocker") for item in active_blockers],
+            ),
+            self._guarded_live_preflight_check(
+                check_id="recovery_state_safe_dashboard",
+                category="recovery_and_blockers",
+                label="恢复状态必须允许安全继续交易",
+                status=(
+                    "pass"
+                    if recovery.get("safe_to_trade") and not recovery.get("review_required")
+                    else "fail"
+                ),
+                detail=(
+                    "当前恢复状态允许继续自动交易。"
+                    if recovery.get("safe_to_trade") and not recovery.get("review_required")
+                    else "当前恢复状态仍不允许安全继续交易。"
+                ),
+                observed={
+                    "recovery_state": recovery.get("recovery_state"),
+                    "review_required": recovery.get("review_required"),
+                    "resume_blocked_reasons": recovery.get("resume_blocked_reasons"),
+                },
+            ),
+            self._guarded_live_preflight_check(
+                check_id="margin_buffer_safe_dashboard",
+                category="risk_buffer",
+                label="当前保证金缓冲不能处于 critical 或 only-reduce",
+                status=(
+                    "pass"
+                    if margin_buffer.get("status") == "healthy" and not live_guard.get("only_reduce_required")
+                    else "fail"
+                ),
+                detail=(
+                    "当前保证金缓冲处于健康区间。"
+                    if margin_buffer.get("status") == "healthy" and not live_guard.get("only_reduce_required")
+                    else "当前保证金缓冲或 only-reduce 状态不允许启盘。"
+                ),
+                observed={
+                    "margin_buffer_status": margin_buffer.get("status"),
+                    "only_reduce_required": live_guard.get("only_reduce_required"),
+                    "auto_halt_required": live_guard.get("auto_halt_required"),
+                },
+            ),
+            self._guarded_live_preflight_check(
+                check_id="trial_guard_status_dashboard",
+                category="trial_guard",
+                label="试盘守护不能处于 breached",
+                status=(
+                    "fail"
+                    if trial_guard.get("status") == "breached"
+                    else "warn"
+                    if trial_guard.get("status") in {"disabled", "not_configured", "warming_up"}
+                    else "pass"
+                ),
+                detail=(
+                    "当前试盘守护已经进入监控中。"
+                    if trial_guard.get("status") == "monitoring"
+                    else "当前试盘守护已经触发自动停机。"
+                    if trial_guard.get("status") == "breached"
+                    else "当前试盘守护还没有形成稳定样本。"
+                ),
+                observed={"status": trial_guard.get("status")},
+                required=False,
+            ),
+        ]
+        fail_count = sum(1 for item in checks if item["status"] == "fail")
+        warn_count = sum(1 for item in checks if item["status"] == "warn")
+        pass_count = sum(1 for item in checks if item["status"] == "pass")
+        required_failures = [item for item in checks if item["required"] and item["status"] == "fail"]
+        status = "fail" if required_failures else "warning" if warn_count else "ready"
+        summary = {
+            "ready": "当前合约 guarded_live 首屏预检摘要已通过。",
+            "warning": "当前首屏预检摘要没有硬失败，但仍有需要人工确认的告警项。",
+            "fail": "当前首屏预检摘要仍有硬失败项。",
+        }[status]
+        operator_actions = [
+            item["detail"]
+            for item in checks
+            if item["status"] in {"fail", "warn"}
+        ]
+        return {
+            "generated_at": utc_now(),
+            "status": status,
+            "launch_ready": not required_failures,
+            "summary": summary,
+            "counts": {"pass": pass_count, "warn": warn_count, "fail": fail_count},
+            "checks": checks,
+            "operator_actions": list(dict.fromkeys(operator_actions)),
+            "dashboard_summary_only": True,
+            "truth_source": "guarded_live_preflight_dashboard_summary",
+        }
+
     def _build_guarded_live_preflight(self) -> dict[str, Any]:
         if not (
             self.runtime.settings.mode == "guarded_live"
@@ -2260,11 +2444,11 @@ class OperatorQueryService:
     def _build_guarded_live_run_packet_dashboard(self) -> dict[str, Any]:
         r = parallel_fetch(
             {
-                "preflight": self.guarded_live_preflight,
+                "preflight": self.guarded_live_preflight_dashboard,
                 "live_guard": self.derivatives_live_guard,
                 "trial_guard": self.trial_guard,
                 "margin_buffer": self.margin_buffer_risk,
-                "recovery": self.recovery_view,
+                "recovery": self.recovery_view_dashboard,
                 "submit_blocked_reasons": self._submit_blocked_reasons_dashboard,
             }
         )
