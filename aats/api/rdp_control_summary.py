@@ -1446,6 +1446,57 @@ def _build_workbench_alerts_payload(
     }
 
 
+def _select_workbench_pending_recommendations(
+    summary: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    pending_recommendations = [
+        item for item in (summary.get("pending_recommendations") or [])
+        if isinstance(item, dict) and item.get("status") == "draft"
+    ]
+
+    # Research can emit parameter_upgrade and keep_active for the same combo in
+    # one round. Keep the same priority rule as the full items payload so the
+    # overview count matches the detail view without building detail evidence.
+    by_combo: dict[str, dict[str, Any]] = {}
+    for rec in sorted(
+        pending_recommendations,
+        key=lambda item: (
+            1 if item.get("recommendation_type") == "parameter_upgrade" else 0,
+            _iso_sort_key(item.get("created_at")),
+        ),
+        reverse=True,
+    ):
+        combo_key = str(
+            rec.get("combo_key")
+            or _combo_key(rec.get("family"), rec.get("timeframe"))
+        )
+        if combo_key and combo_key not in by_combo:
+            by_combo[combo_key] = rec
+    return by_combo
+
+
+def _count_workbench_integrity_blocked_items(
+    pending_items_by_combo: dict[str, dict[str, Any]],
+    alerts_payload: dict[str, Any],
+) -> int:
+    blocking_integrity = [
+        alert for alert in (alerts_payload.get("integrity_alerts") or [])
+        if bool(alert.get("blocks_approval"))
+    ]
+    if not blocking_integrity:
+        return 0
+
+    blocked_count = 0
+    for combo_key in pending_items_by_combo:
+        if any(
+            not str(alert.get("combo_key") or "").strip()
+            or str(alert.get("combo_key") or "").strip() == combo_key
+            for alert in blocking_integrity
+        ):
+            blocked_count += 1
+    return blocked_count
+
+
 def _find_combo_summary(payload: dict[str, Any] | None, combo_key: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
@@ -1600,27 +1651,7 @@ def _build_workbench_items_payload(
         for item in (governance_state.get("combo_states") or [])
         if isinstance(item, dict) and item.get("combo_key")
     }
-    pending_recommendations = [
-        item for item in (summary.get("pending_recommendations") or [])
-        if isinstance(item, dict) and item.get("status") == "draft"
-    ]
-
-    # Research 每轮会为同一个 combo 成对写入 parameter_upgrade + keep_active(时序
-    # 上 keep_active 常常后写),如果只按 created_at 去重,operator 只能看到
-    # keep_active,永远无法选参数升级。这里让 parameter_upgrade 优先露出,
-    # 被拒绝后下一轮刷新 keep_active 才有机会浮上来。
-    by_combo: dict[str, dict[str, Any]] = {}
-    for rec in sorted(
-        pending_recommendations,
-        key=lambda item: (
-            1 if item.get("recommendation_type") == "parameter_upgrade" else 0,
-            _iso_sort_key(item.get("created_at")),
-        ),
-        reverse=True,
-    ):
-        combo_key = str(rec.get("combo_key") or _combo_key(rec.get("family"), rec.get("timeframe")))
-        if combo_key and combo_key not in by_combo:
-            by_combo[combo_key] = rec
+    by_combo = _select_workbench_pending_recommendations(summary)
 
     blocking_integrity = [
         alert for alert in (alerts_payload.get("integrity_alerts") or [])
@@ -1935,7 +1966,12 @@ def build_rdp_workbench_overview(request: Request) -> dict[str, Any]:
     root = _project_root(request)
     summary = build_rdp_control_summary(request)
     alerts_payload = _build_workbench_alerts_payload(root, summary)
-    items_payload = _build_workbench_items_payload(root, summary, alerts_payload)
+    pending_items_by_combo = _select_workbench_pending_recommendations(summary)
+    pending_item_count = len(pending_items_by_combo)
+    integrity_blocked_item_count = _count_workbench_integrity_blocked_items(
+        pending_items_by_combo,
+        alerts_payload,
+    )
     release_candidates_payload = _build_release_candidates_payload(summary)
     tuning_payload = _build_tuning_overview_payload(root)
     current_execution, next_queue = _build_task_lane_summary(summary.get("tasks") or {})
@@ -1946,7 +1982,7 @@ def build_rdp_workbench_overview(request: Request) -> dict[str, Any]:
     overall_status = "idle"
     if any(item.get("observation_status") == "rollback_recommended" for item in observation_queue):
         overall_status = "rollback_required"
-    elif items_payload["items"]:
+    elif pending_item_count:
         overall_status = "needs_approval"
     elif operations_summary.get("approved_release_candidate_count"):
         overall_status = "ready_to_release"
@@ -1961,7 +1997,7 @@ def build_rdp_workbench_overview(request: Request) -> dict[str, Any]:
         headline = "当前有发布进入回滚建议，先处理回滚。"
         subheadline = "回滚完成后，再继续研究和审批。"
     elif overall_status == "needs_approval":
-        headline = f"当前有 {items_payload['total']} 个组合待处理。"
+        headline = f"当前有 {pending_item_count} 个组合待处理。"
         subheadline = "先看结论，再决定是否批准。"
     elif overall_status == "ready_to_release":
         headline = f"已有 {release_candidates_payload['total']} 个参数候选待发布。"
@@ -1982,11 +2018,9 @@ def build_rdp_workbench_overview(request: Request) -> dict[str, Any]:
         "secondary_actions": secondary_actions,
         "blockers": alerts_payload.get("integrity_alerts") or [],
         "summary_counts": {
-            "pending_items": items_payload["total"],
+            "pending_items": pending_item_count,
             "ready_release_items": release_candidates_payload["total"],
-            "integrity_blocked_items": sum(
-                1 for item in items_payload["items"] if item.get("integrity_status") == "blocked"
-            ),
+            "integrity_blocked_items": integrity_blocked_item_count,
             "observing_releases": int(operations_summary.get("observing_release_count") or 0),
             "tuning_pending": int(tuning_payload.get("pending_review_count") or 0),
         },

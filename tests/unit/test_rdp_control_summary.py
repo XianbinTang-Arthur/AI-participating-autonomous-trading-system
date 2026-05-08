@@ -855,18 +855,101 @@ class TestRdpControlSummary(TestCase):
                 "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
                 return_value=False,
             ),
-            patch("aats.api.rdp_control_summary.query_latest_attribution", return_value={"available": True}),
-            patch("aats.api.rdp_control_summary.query_latest_execution_realism", return_value={"available": True}),
+            patch(
+                "aats.api.rdp_control_summary.query_latest_attribution",
+                return_value={"available": True},
+            ) as attribution_query,
+            patch(
+                "aats.api.rdp_control_summary.query_latest_execution_realism",
+                return_value={"available": True},
+            ) as execution_query,
         ):
             payload = build_rdp_workbench_overview(request)
 
         self.assertEqual(payload["overall_status"], "needs_approval")
         self.assertEqual(payload["summary_counts"]["pending_items"], 1)
+        self.assertEqual(attribution_query.call_count, 1)
+        self.assertEqual(execution_query.call_count, 1)
         self.assertEqual(payload["current_execution"]["workflow"], "research_cycle")
         self.assertEqual(payload["next_queue"]["workflow"], "governance_cycle")
         self.assertEqual(payload["primary_action"]["label"], "刷新数据")
         self.assertEqual(payload["secondary_actions"][0]["label"], "运行完整 RDP")
         self.assertEqual(len(payload["secondary_actions"]), 1)
+
+    def test_workbench_overview_counts_pending_items_without_full_items_payload(self) -> None:
+        request = _fake_request()
+        summary = {
+            "tasks": {},
+            "health": {"overall_health": "healthy", "checks": []},
+            "operations_summary": {},
+            "observation_queue": [],
+            "pending_recommendations": [
+                {
+                    "combo_key": "directional_1h",
+                    "family": "directional",
+                    "timeframe": "1h",
+                    "recommendation_type": "keep_active",
+                    "status": "draft",
+                    "created_at": "2026-04-10T12:01:00Z",
+                },
+                {
+                    "combo_key": "directional_1h",
+                    "family": "directional",
+                    "timeframe": "1h",
+                    "recommendation_type": "parameter_upgrade",
+                    "status": "draft",
+                    "created_at": "2026-04-10T12:00:00Z",
+                },
+                {
+                    "combo_key": "mean_reversion_5m",
+                    "family": "mean_reversion",
+                    "timeframe": "5m",
+                    "recommendation_type": "keep_active",
+                    "status": "draft",
+                    "created_at": "2026-04-10T12:02:00Z",
+                },
+                {
+                    "combo_key": "approved_15m",
+                    "recommendation_type": "parameter_upgrade",
+                    "status": "approved",
+                    "created_at": "2026-04-10T12:03:00Z",
+                },
+            ],
+        }
+        alerts = {
+            "integrity_alerts": [
+                {
+                    "code": "combo_specific_block",
+                    "combo_key": "directional_1h",
+                    "blocks_approval": True,
+                }
+            ],
+        }
+
+        with (
+            patch("aats.api.rdp_control_summary.build_rdp_control_summary", return_value=summary),
+            patch("aats.api.rdp_control_summary._build_workbench_alerts_payload", return_value=alerts),
+            patch(
+                "aats.api.rdp_control_summary._build_workbench_items_payload",
+                side_effect=AssertionError("overview must not build full workbench items"),
+            ),
+            patch("aats.api.rdp_control_summary._build_release_candidates_payload", return_value={"total": 0}),
+            patch(
+                "aats.api.rdp_control_summary._build_tuning_overview_payload",
+                return_value={"pending_review_count": 0},
+            ),
+            patch("aats.api.rdp_control_summary._build_task_lane_summary", return_value=({}, {})),
+            patch(
+                "aats.api.rdp_control_summary._build_manual_workflow_actions",
+                return_value=({"label": "刷新数据"}, []),
+            ),
+        ):
+            payload = build_rdp_workbench_overview(request)
+
+        self.assertEqual(payload["overall_status"], "needs_approval")
+        self.assertEqual(payload["headline"], "当前有 2 个组合待处理。")
+        self.assertEqual(payload["summary_counts"]["pending_items"], 2)
+        self.assertEqual(payload["summary_counts"]["integrity_blocked_items"], 1)
 
     def test_workbench_manual_actions_enable_full_rdp_when_config_enabled(self) -> None:
         primary_action, secondary_actions = rdp_control_summary._build_manual_workflow_actions(
