@@ -922,6 +922,11 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 OperatorQueryService,
+                "recent_decisions_dashboard",
+                side_effect=AssertionError("recentDecisions should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
                 "strategy_attribution_report",
                 side_effect=AssertionError("strategyAttribution should read dashboard snapshot"),
             ),
@@ -1045,6 +1050,11 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 OperatorQueryService,
+                "recent_decisions_dashboard",
+                side_effect=AssertionError("recentDecisions should read parameterized dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
                 "position_lifecycle_attribution",
                 side_effect=AssertionError("positionLifecycleAttribution should read parameterized dashboard snapshot"),
             ),
@@ -1112,18 +1122,23 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         )
         app.state.dashboard_snapshot_plane = plane
 
-        def fake_recent_decisions(self, *, limit: int, offset: int) -> dict[str, object]:
+        def fake_recent_decisions_dashboard(self, *, limit: int, offset: int) -> dict[str, object]:
             calls.append({"limit": limit, "offset": offset})
             return {
                 "decisions": [{"decision_id": "live-limit-20"}],
                 "limit": limit,
                 "offset": offset,
-                "total_available": 20,
-                "has_more": False,
+                "total_available": 21,
+                "has_more": True,
             }
 
         with (
-            patch.object(OperatorQueryService, "recent_decisions", fake_recent_decisions),
+            patch.object(
+                OperatorQueryService,
+                "recent_decisions",
+                side_effect=AssertionError("dashboard recentDecisions must not exact-count decisions"),
+            ),
+            patch.object(OperatorQueryService, "recent_decisions_dashboard", fake_recent_decisions_dashboard),
             TestClient(app) as client,
         ):
             response = client.get(

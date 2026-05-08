@@ -496,7 +496,7 @@ async def _load_dashboard_snapshot_panel(runtime: ApplicationRuntime, snapshot_k
         if panel_key == "reconciliationLatest":
             return query.reconciliation_latest()
         if panel_key == "recentDecisions":
-            return query.recent_decisions(
+            return query.recent_decisions_dashboard(
                 limit=_snapshot_int_param(params, "limit", 8, minimum=1, maximum=100),
                 offset=_snapshot_int_param(params, "offset", 0, minimum=0, maximum=5000),
             )
@@ -897,7 +897,7 @@ def _protected_dashboard_panel_payload(
         limit = 6 if view == "strategy" else 8
         return query.position_lifecycle_attribution(limit=limit)
     if panel_key == "recentDecisions":
-        return query.recent_decisions(limit=recent_decisions_limit, offset=0)
+        return query.recent_decisions_dashboard(limit=recent_decisions_limit, offset=0)
     if panel_key == "trialReviewSummary":
         return query.trial_review_summary(segment_limit=100, window_days=7, period_count=4)
     if panel_key == "trialReviewHistory":

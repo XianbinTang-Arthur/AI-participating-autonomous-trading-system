@@ -10136,6 +10136,23 @@ class OperatorQueryService:
             lambda: self._build_recent_decisions(limit=normalized_limit, offset=normalized_offset),
         )
 
+    def recent_decisions_dashboard(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        normalized_limit = max(int(limit), 1)
+        normalized_offset = max(int(offset), 0)
+        cache_key = (
+            f"recent_decisions_dashboard:{self._scope_cache_fragment()}:"
+            f"{normalized_limit}:{normalized_offset}"
+        )
+        return self._cached_ttl(
+            cache_key,
+            20,
+            lambda: self._build_recent_decisions(
+                limit=normalized_limit,
+                offset=normalized_offset,
+                include_total=False,
+            ),
+        )
+
     def _build_recent_decisions(self, *, limit: int, offset: int, include_total: bool = True) -> dict[str, Any]:
         fetch_limit = limit + offset + (0 if include_total else 1)
         rows = self.runtime.audit_repo.recent(limit=fetch_limit)
