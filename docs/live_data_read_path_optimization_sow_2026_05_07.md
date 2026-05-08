@@ -90,6 +90,8 @@ Target fixes:
   guarded-live packet remains available from the explicit report endpoint.
 - Dashboard `positionLifecycleAttribution` uses a bounded recent read window; the
   lifecycle detail endpoint keeps full-history lookup semantics.
+- Lifecycle decision-trace enrichment batches audit payload references before
+  hydrating event payloads, avoiding per-audit `payload_by_ref` N+1 reads.
 
 ## Logging, Monitoring, Auditing
 

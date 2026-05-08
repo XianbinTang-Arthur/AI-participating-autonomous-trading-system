@@ -207,9 +207,22 @@ class LifecycleAttributionFacade:
         return []
 
     def _decision_rows_by_symbol(self, audits: list[Any]) -> dict[str, list[dict[str, Any]]]:
+        refs: list[str] = []
+        for audit in audits:
+            refs.extend(
+                [
+                    getattr(audit, "decision_context_ref", None),
+                    getattr(audit, "position_target_ref", None),
+                    getattr(audit, "decision_outcome_ref", None),
+                    getattr(audit, "policy_decision_ref", None),
+                    getattr(audit, "risk_decision_ref", None),
+                ]
+            )
+        payloads_by_ref = self.owner.payloads_by_ref_map(refs)
+
         rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
         for audit in audits:
-            context = self.owner.payload_by_ref(getattr(audit, "decision_context_ref", None))
+            context = payloads_by_ref.get(str(getattr(audit, "decision_context_ref", "") or ""))
             if not isinstance(context, dict):
                 continue
             symbol = str(context.get("symbol") or "").strip()
@@ -217,12 +230,12 @@ class LifecycleAttributionFacade:
                 continue
             decision_id = str(getattr(audit, "decision_id", "") or "").strip()
             position_target = self.owner._position_target_payload(
-                self.owner.payload_by_ref(getattr(audit, "position_target_ref", None))
+                payloads_by_ref.get(str(getattr(audit, "position_target_ref", "") or ""))
             )
-            finalized_outcome = self.owner.payload_by_ref(getattr(audit, "decision_outcome_ref", None))
-            policy_decision = self.owner.payload_by_ref(getattr(audit, "policy_decision_ref", None))
+            finalized_outcome = payloads_by_ref.get(str(getattr(audit, "decision_outcome_ref", "") or ""))
+            policy_decision = payloads_by_ref.get(str(getattr(audit, "policy_decision_ref", "") or ""))
             risk_decision = self.owner._risk_decision_payload(
-                self.owner.payload_by_ref(getattr(audit, "risk_decision_ref", None))
+                payloads_by_ref.get(str(getattr(audit, "risk_decision_ref", "") or ""))
             )
             resolved_target = self.owner._resolved_position_target_payload(
                 finalized_decision_outcome=finalized_outcome,

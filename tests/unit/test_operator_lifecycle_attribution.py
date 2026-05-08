@@ -312,6 +312,9 @@ class _FakeOwner:
     def payload_by_ref(self, ref: str | None):
         return None if ref is None else self._payloads.get(ref)
 
+    def payloads_by_ref_map(self, refs):
+        return {ref: self._payloads[ref] for ref in refs if ref in self._payloads}
+
     def _position_target_payload(self, payload):
         return payload
 
@@ -395,6 +398,26 @@ class TestLifecycleAttributionFacade(unittest.TestCase):
         self.assertEqual(trace[2]["transition_category"], "execution_guard_exit")
         self.assertEqual(Decimal(str(trace[1]["close_notional_quote"])), Decimal("102"))
         self.assertEqual(Decimal(str(trace[2]["residual_notional_quote"])), Decimal("0"))
+
+    def test_decision_row_enrichment_batches_payload_reference_lookups(self) -> None:
+        owner = _FakeOwner()
+        batch_refs: list[str] = []
+        owner.payload_by_ref = lambda _ref: (_ for _ in ()).throw(
+            AssertionError("decision enrichment should use batched payload lookup")
+        )
+
+        def payloads_by_ref_map(refs):
+            batch_refs.extend(refs)
+            return {ref: owner._payloads[ref] for ref in refs if ref in owner._payloads}
+
+        owner.payloads_by_ref_map = payloads_by_ref_map
+        facade = LifecycleAttributionFacade(owner)
+
+        payload = facade.position_lifecycle_attribution(limit=5)
+
+        self.assertEqual(payload["lifecycles"][0]["decision_trace_count"], 3)
+        self.assertIn("ctx_open", batch_refs)
+        self.assertIn("target_health", batch_refs)
 
     def test_transition_category_maps_protective_and_guard_paths(self) -> None:
         self.assertEqual(
