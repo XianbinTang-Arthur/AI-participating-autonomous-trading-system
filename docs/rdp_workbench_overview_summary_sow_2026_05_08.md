@@ -34,7 +34,10 @@
 
 ## Caching and Performance
 
-核心优化是避免 overview 调用 `_build_workbench_items_payload()`，因为该函数会再次读取 phase3/phase4 并为每个 combo 生成 detail/evidence。overview 改为直接从 pending recommendation 和 alerts 计算 `pending_items` / `integrity_blocked_items`。
+核心优化有两部分：
+
+1. 避免 overview 调用 `_build_workbench_items_payload()`，因为该函数会再次读取 phase3/phase4 并为每个 combo 生成 detail/evidence。overview 改为直接从 pending recommendation 和 alerts 计算 `pending_items` / `integrity_blocked_items`。
+2. `_build_observation_queue()` 先筛选当前 active release，再读取 observation/effectiveness。非当前 active 的历史 release 不会进入 queue，提前跳过可以减少被丢弃 release 的文件/DB IO。
 
 ## Logging, Monitoring, Auditing
 
@@ -42,7 +45,7 @@
 
 ## Testing Strategy
 
-新增/更新 unit test，覆盖 overview 不构造完整 items 明细、phase3/phase4 只读取一次、待处理数量和阻断数量不变。运行 ruff、相关 unit、相关 integration、全量 unit。
+新增/更新 unit test，覆盖 overview 不构造完整 items 明细、phase3/phase4 只读取一次、待处理数量和阻断数量不变，以及非当前 active release 不读取 observation/effectiveness。运行 ruff、相关 unit、相关 integration、全量 unit。
 
 ## Migration, Rollback, Compatibility
 

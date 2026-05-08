@@ -270,11 +270,11 @@ class TestRdpControlSummary(TestCase):
             patch(
                 "aats.data_platform.metrics.release_effectiveness.load_effectiveness_registry",
                 return_value={"evaluations": []},
-            ),
+            ) as effectiveness_registry,
             patch(
                 "aats.data_platform.production_workflow.observation_window.load_observation_result",
                 return_value={},
-            ),
+            ) as observation_result,
         ):
             queue = rdp_control_summary._build_observation_queue(
                 Path("."),
@@ -299,6 +299,8 @@ class TestRdpControlSummary(TestCase):
             )
 
         self.assertEqual(queue, [])
+        self.assertEqual(effectiveness_registry.call_count, 0)
+        self.assertEqual(observation_result.call_count, 0)
 
     def test_control_summary_builds_observation_queue_from_full_release_history(self) -> None:
         request = _fake_request()

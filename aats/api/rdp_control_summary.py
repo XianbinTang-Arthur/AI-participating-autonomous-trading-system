@@ -152,22 +152,10 @@ def _build_observation_queue(
     active_parameters: dict[str, Any],
 ) -> list[dict[str, Any]]:
     queue: list[dict[str, Any]] = []
+    if not isinstance(active_parameters, dict):
+        active_parameters = {}
 
-    effectiveness_by_release: dict[str, dict[str, Any]] = {}
-    try:
-        from aats.data_platform.metrics.release_effectiveness import (
-            load_effectiveness_registry,
-        )
-
-        registry = load_effectiveness_registry(project_root)
-        effectiveness_by_release = {
-            item.get("release_id"): item
-            for item in (registry.get("evaluations") or [])
-            if isinstance(item, dict) and item.get("release_id")
-        }
-    except Exception:
-        effectiveness_by_release = {}
-
+    candidate_releases: list[tuple[dict[str, Any], str, str | None, str]] = []
     for release in releases:
         release_id = str(release.get("release_id") or "").strip()
         if not release_id:
@@ -187,12 +175,6 @@ def _build_observation_queue(
         }:
             continue
 
-        from aats.data_platform.production_workflow.observation_window import (
-            load_observation_result,
-        )
-
-        observation = load_observation_result(project_root, release_id) or {}
-
         combo_key = str(release.get("combo_key") or "").strip()
         active_entry = active_parameters.get(combo_key) if combo_key else None
         current_active_parameter_set_id = None
@@ -204,6 +186,39 @@ def _build_observation_queue(
         )
         if not is_current_active_release:
             continue
+        candidate_releases.append((
+            release,
+            combo_key,
+            current_active_parameter_set_id,
+            observation_status,
+        ))
+
+    if not candidate_releases:
+        return queue
+
+    effectiveness_by_release: dict[str, dict[str, Any]] = {}
+    try:
+        from aats.data_platform.metrics.release_effectiveness import (
+            load_effectiveness_registry,
+        )
+
+        registry = load_effectiveness_registry(project_root)
+        effectiveness_by_release = {
+            item.get("release_id"): item
+            for item in (registry.get("evaluations") or [])
+            if isinstance(item, dict) and item.get("release_id")
+        }
+    except Exception:
+        effectiveness_by_release = {}
+
+    for release, combo_key, current_active_parameter_set_id, observation_status in candidate_releases:
+        release_id = str(release.get("release_id") or "").strip()
+
+        from aats.data_platform.production_workflow.observation_window import (
+            load_observation_result,
+        )
+
+        observation = load_observation_result(project_root, release_id) or {}
 
         queue.append({
             "release_id": release_id,
@@ -223,7 +238,7 @@ def _build_observation_queue(
             "observation": observation,
             "effectiveness": effectiveness_by_release.get(release_id),
             "current_active_parameter_set_id": current_active_parameter_set_id,
-            "is_current_active_release": is_current_active_release,
+            "is_current_active_release": True,
         })
 
     def _observation_sort_key(item: dict[str, Any]) -> tuple[int, float]:
