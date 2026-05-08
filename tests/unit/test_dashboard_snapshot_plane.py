@@ -173,6 +173,72 @@ class DashboardSnapshotPlaneTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await plane.stop()
 
+    async def test_start_paces_startup_prewarm_and_scheduler_skips_pending_missing(self) -> None:
+        calls: list[str] = []
+
+        async def loader(snapshot_key: str) -> dict[str, Any]:
+            calls.append(snapshot_key)
+            return {"snapshot_key": snapshot_key}
+
+        plane = DashboardSnapshotPlane(
+            loader=loader,
+            default_factory=lambda _snapshot_key: {},
+            policies={
+                "runtime": DashboardSnapshotPolicy(
+                    panel_key="runtime",
+                    ttl_seconds=60.0,
+                    stale_after_seconds=60.0,
+                    hard_expire_seconds=120.0,
+                    timeout_seconds=1.0,
+                    priority="p0",
+                ),
+                "health": DashboardSnapshotPolicy(
+                    panel_key="health",
+                    ttl_seconds=60.0,
+                    stale_after_seconds=60.0,
+                    hard_expire_seconds=120.0,
+                    timeout_seconds=1.0,
+                    priority="p0",
+                ),
+                "latestDecision": DashboardSnapshotPolicy(
+                    panel_key="latestDecision",
+                    ttl_seconds=60.0,
+                    stale_after_seconds=60.0,
+                    hard_expire_seconds=120.0,
+                    timeout_seconds=1.0,
+                    priority="p1",
+                ),
+            },
+            scheduler_interval_seconds=0.01,
+            startup_panel_interval_seconds=0.2,
+            startup_priority_pause_seconds=0.05,
+        )
+        try:
+            await plane.start()
+
+            for _ in range(20):
+                if calls:
+                    break
+                await asyncio.sleep(0.005)
+
+            self.assertEqual(calls, ["runtime"])
+            pending_read = await plane.read_panel("latestDecision")
+            self.assertTrue(pending_read.meta["loading"])
+            self.assertTrue(pending_read.meta["refreshing"])
+            self.assertEqual(pending_read.meta["status"], "missing")
+
+            await asyncio.sleep(0.05)
+            self.assertEqual(calls, ["runtime"])
+
+            for _ in range(150):
+                if calls == ["runtime", "health", "latestDecision"]:
+                    break
+                await asyncio.sleep(0.01)
+
+            self.assertEqual(calls, ["runtime", "health", "latestDecision"])
+        finally:
+            await plane.stop()
+
     async def test_p3_refresh_does_not_block_p2_refresh(self) -> None:
         heavy_started = asyncio.Event()
         release_heavy = asyncio.Event()

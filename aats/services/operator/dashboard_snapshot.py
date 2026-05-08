@@ -64,6 +64,14 @@ class DashboardSnapshotRead:
     duration_ms: float
 
 
+@dataclass(frozen=True, slots=True)
+class _DashboardSnapshotTarget:
+    panel_key: str
+    snapshot_key: str
+    variant_key: str | None
+    priority: str
+
+
 _LOGGER = get_logger("aats.operator.dashboard_snapshot")
 
 
@@ -381,6 +389,8 @@ class DashboardSnapshotPlane:
         default_variants: Mapping[str, Sequence[str]] | None = None,
         scheduler_interval_seconds: float = 1.0,
         priority_concurrency: Mapping[str, int] | None = None,
+        startup_panel_interval_seconds: float = 0.5,
+        startup_priority_pause_seconds: float = 1.0,
     ) -> None:
         self._loader = loader
         self._default_factory = default_factory
@@ -402,11 +412,15 @@ class DashboardSnapshotPlane:
             priority: asyncio.Semaphore(max(int(limit), 1))
             for priority, limit in concurrency.items()
         }
+        self._startup_panel_interval_seconds = max(float(startup_panel_interval_seconds), 0.0)
+        self._startup_priority_pause_seconds = max(float(startup_priority_pause_seconds), 0.0)
         self._snapshots: dict[str, DashboardPanelSnapshot] = {}
         self._last_errors: dict[str, tuple[str, Any]] = {}
         self._inflight: dict[str, asyncio.Task[None]] = {}
+        self._startup_pending_snapshot_keys: set[str] = set()
         self._lock = asyncio.Lock()
         self._scheduler_task: asyncio.Task[None] | None = None
+        self._startup_task: asyncio.Task[None] | None = None
         self._stopped = False
 
     @property
@@ -417,11 +431,21 @@ class DashboardSnapshotPlane:
         if self._scheduler_task is not None and not self._scheduler_task.done():
             return
         self._stopped = False
-        await self.enqueue_all(reason="startup")
+        startup_targets = self._startup_targets()
+        async with self._lock:
+            self._startup_pending_snapshot_keys = {target.snapshot_key for target in startup_targets}
+        self._startup_task = asyncio.create_task(
+            self._startup_prewarm_loop(startup_targets),
+            name="dashboard-snapshot-startup-prewarm",
+        )
         self._scheduler_task = asyncio.create_task(self._scheduler_loop(), name="dashboard-snapshot-scheduler")
 
     async def stop(self) -> None:
         self._stopped = True
+        if self._startup_task is not None:
+            self._startup_task.cancel()
+            await asyncio.gather(self._startup_task, return_exceptions=True)
+            self._startup_task = None
         if self._scheduler_task is not None:
             self._scheduler_task.cancel()
             await asyncio.gather(self._scheduler_task, return_exceptions=True)
@@ -429,6 +453,7 @@ class DashboardSnapshotPlane:
         async with self._lock:
             tasks = list(self._inflight.values())
             self._inflight.clear()
+            self._startup_pending_snapshot_keys.clear()
         for task in tasks:
             task.cancel()
         if tasks:
@@ -470,13 +495,8 @@ class DashboardSnapshotPlane:
             self._last_errors.pop(snapshot_key, None)
 
     async def enqueue_all(self, *, reason: str) -> None:
-        for panel_key in self._policies:
-            variants = self._default_variants.get(panel_key)
-            if variants:
-                for variant_key in variants:
-                    await self.enqueue(panel_key, variant_key=variant_key, reason=reason)
-            else:
-                await self.enqueue(panel_key, reason=reason)
+        for target in self._iter_snapshot_targets():
+            await self.enqueue(target.panel_key, variant_key=target.variant_key, reason=reason)
 
     async def enqueue(self, panel_key: str, *, reason: str, variant_key: str | None = None) -> bool:
         if self._stopped or panel_key not in self._policies:
@@ -505,14 +525,18 @@ class DashboardSnapshotPlane:
         hard_expired = snapshot is None or age_seconds is None or age_seconds > policy.hard_expire_seconds
         stale = snapshot is None or age_seconds is None or age_seconds > policy.stale_after_seconds
         refreshing = await self._is_refreshing(snapshot_key)
+        startup_pending = await self._is_startup_pending(snapshot_key)
 
         if stale or hard_expired:
-            enqueued = await self.enqueue(
-                panel_key,
-                variant_key=variant_key,
-                reason="read_stale" if snapshot is not None else "read_missing",
-            )
-            refreshing = refreshing or enqueued
+            if startup_pending:
+                refreshing = True
+            else:
+                enqueued = await self.enqueue(
+                    panel_key,
+                    variant_key=variant_key,
+                    reason="read_stale" if snapshot is not None else "read_missing",
+                )
+                refreshing = refreshing or enqueued
 
         if snapshot is None or hard_expired:
             data = self._default_factory(snapshot_key)
@@ -575,17 +599,98 @@ class DashboardSnapshotPlane:
 
     async def _enqueue_due_panels(self) -> None:
         now = utc_now()
+        for target in self._iter_snapshot_targets():
+            policy = self._policies[target.panel_key]
+            snapshot = await self._snapshot(target.snapshot_key)
+            if snapshot is None:
+                if await self._is_startup_pending(target.snapshot_key):
+                    continue
+                await self.enqueue(target.panel_key, variant_key=target.variant_key, reason="scheduler_missing")
+                continue
+            age_seconds = max((now - snapshot.generated_at).total_seconds(), 0.0)
+            if age_seconds >= policy.ttl_seconds:
+                await self.enqueue(target.panel_key, variant_key=target.variant_key, reason="scheduler_ttl")
+
+    async def _startup_prewarm_loop(self, targets: Sequence[_DashboardSnapshotTarget]) -> None:
+        if not targets:
+            return
+        log_event(
+            _LOGGER,
+            "dashboard_snapshot_startup_prewarm_enqueue_start",
+            target_count=len(targets),
+            panel_interval_seconds=self._startup_panel_interval_seconds,
+            priority_pause_seconds=self._startup_priority_pause_seconds,
+        )
+        try:
+            current_priority: str | None = None
+            for target in targets:
+                if self._stopped:
+                    return
+                if current_priority is not None and target.priority != current_priority:
+                    await self._sleep_startup_interval(self._startup_priority_pause_seconds)
+                    if self._stopped:
+                        return
+                current_priority = target.priority
+                await self._mark_startup_target_reached(target.snapshot_key)
+                await self.enqueue(target.panel_key, variant_key=target.variant_key, reason="startup")
+                await self._sleep_startup_interval(self._startup_panel_interval_seconds)
+            log_event(_LOGGER, "dashboard_snapshot_startup_prewarm_enqueue_complete", target_count=len(targets))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log_event(
+                _LOGGER,
+                "dashboard_snapshot_startup_prewarm_enqueue_failed",
+                level="warning",
+                error=type(exc).__name__,
+                message=str(exc),
+            )
+        finally:
+            if not self._stopped:
+                async with self._lock:
+                    self._startup_pending_snapshot_keys.clear()
+
+    @staticmethod
+    async def _sleep_startup_interval(seconds: float) -> None:
+        if seconds > 0:
+            await asyncio.sleep(seconds)
+
+    async def _mark_startup_target_reached(self, snapshot_key: str) -> None:
+        async with self._lock:
+            self._startup_pending_snapshot_keys.discard(snapshot_key)
+
+    async def _is_startup_pending(self, snapshot_key: str) -> bool:
+        async with self._lock:
+            return snapshot_key in self._startup_pending_snapshot_keys
+
+    def _iter_snapshot_targets(self) -> tuple[_DashboardSnapshotTarget, ...]:
+        targets: list[_DashboardSnapshotTarget] = []
         for panel_key, policy in self._policies.items():
             variants = self._default_variants.get(panel_key)
             for variant_key in (variants if variants else (None,)):
-                snapshot_key = dashboard_snapshot_storage_key(panel_key, variant_key)
-                snapshot = await self._snapshot(snapshot_key)
-                if snapshot is None:
-                    await self.enqueue(panel_key, variant_key=variant_key, reason="scheduler_missing")
-                    continue
-                age_seconds = max((now - snapshot.generated_at).total_seconds(), 0.0)
-                if age_seconds >= policy.ttl_seconds:
-                    await self.enqueue(panel_key, variant_key=variant_key, reason="scheduler_ttl")
+                targets.append(
+                    _DashboardSnapshotTarget(
+                        panel_key=panel_key,
+                        snapshot_key=dashboard_snapshot_storage_key(panel_key, variant_key),
+                        variant_key=variant_key,
+                        priority=policy.priority,
+                    )
+                )
+        return tuple(targets)
+
+    def _startup_targets(self) -> tuple[_DashboardSnapshotTarget, ...]:
+        priority_order = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
+        indexed_targets = tuple(enumerate(self._iter_snapshot_targets()))
+        return tuple(
+            target
+            for _, target in sorted(
+                indexed_targets,
+                key=lambda item: (
+                    priority_order.get(item[1].priority, len(priority_order)),
+                    item[0],
+                ),
+            )
+        )
 
     async def _refresh_panel(self, panel_key: str, *, reason: str, variant_key: str | None = None) -> None:
         policy = self._policies[panel_key]
