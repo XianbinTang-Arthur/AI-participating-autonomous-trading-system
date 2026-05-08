@@ -27,6 +27,32 @@ class StrategyProfileQueryFacade:
     def ai_config_snapshot(self) -> dict[str, Any]:
         return self.owner._cached("strategy_profile_ai_config_snapshot", self.strategy_profiles.ai_config_snapshot)
 
+    def summary_snapshot(self) -> dict[str, Any]:
+        service = self.strategy_profiles
+        service.ensure_seed_profiles()
+        state = service._activation_state()
+        active = service._revision(state.active_revision_id)
+        latest_optimization_report = service._latest_optimization_report_payload() or {}
+        control_summary = (
+            latest_optimization_report.get("control_summary")
+            if isinstance(latest_optimization_report, dict)
+            else None
+        )
+        if not isinstance(control_summary, dict):
+            context_snapshot = service._tuning_context()
+            control_summary = service._profile_control_summary(
+                context=service._context_payload(context_snapshot),
+                replay_summary={},
+                active_profile_id=state.active_profile_id,
+            )
+        return {
+            "control_summary": control_summary or {},
+            "activation": state.model_dump(mode="json"),
+            "active_revision": service._revision_view(active),
+            "latest_optimization_report": latest_optimization_report,
+            "latest_selection_decision": service._latest_selection_decision_payload(),
+        }
+
     def optimization_reports(self, *, limit: int, offset: int) -> dict[str, Any]:
         rows = self.owner._recent_strategy_profile_optimization_report_events()
         return self.owner._paginate_rows(

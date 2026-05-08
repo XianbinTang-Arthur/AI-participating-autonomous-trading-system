@@ -7269,7 +7269,7 @@ class OperatorQueryService:
         return self._cached_ttl(cache_key, 20, self._build_profile_control_summary_report)
 
     def _build_profile_control_summary_report(self) -> dict[str, Any]:
-        snapshot = self.strategy_profile_queries.snapshot()
+        snapshot = self.strategy_profile_queries.summary_snapshot()
         latest_optimization = snapshot.get("latest_optimization_report") or {}
         latest_selection = snapshot.get("latest_selection_decision") or {}
         return {
