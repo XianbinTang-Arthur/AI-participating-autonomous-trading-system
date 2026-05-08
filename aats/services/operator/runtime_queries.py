@@ -315,23 +315,41 @@ class RuntimeQueryFacade:
     def system_health(self) -> dict[str, Any]:
         return self.build_system_health()
 
-    def build_system_health(self) -> dict[str, Any]:
-        r = parallel_fetch({
-            "snapshot": self.owner.runtime.health_service.snapshot,
-            "mode_snapshot": self.owner.system_mode,
-            "recovery": self.owner.recovery_view,
-            "market": self.owner.runtime.market_gateway.status,
-            "account": self.owner.account_service_status,
-            "execution": self.owner.runtime.execution_adapter.readiness,
-            "phase1_shadow": self.owner.phase1_shadow,
-            "derivatives_live_guard": self.owner.derivatives_live_guard,
-            "latest_reconciliation": self.owner._latest_scoped_reconciliation,
-            "latest_portfolio": self.owner._latest_scoped_snapshot,
-            "blockers": self.owner.blockers,
-            "account_baseline": self.owner.latest_account_baseline,
-        })
+    def system_health_dashboard(self) -> dict[str, Any]:
+        return self.build_system_health(dashboard_summary_only=True)
+
+    def build_system_health(self, *, dashboard_summary_only: bool = False) -> dict[str, Any]:
+        if dashboard_summary_only:
+            r = parallel_fetch({
+                "snapshot": self.owner.runtime.health_service.snapshot,
+                "mode_controller_snapshot": lambda: dict(self.owner.runtime.mode_controller.snapshot()),
+                "recovery": self.owner.recovery_view,
+                "market": self.owner.runtime.market_gateway.status,
+                "account": self.owner.account_service_status,
+                "execution": self.owner.runtime.execution_adapter.readiness,
+                "phase1_shadow": self.owner.phase1_shadow,
+                "derivatives_live_guard": self.owner.derivatives_live_guard,
+                "latest_reconciliation": self.owner._latest_scoped_reconciliation,
+                "latest_portfolio": self.owner._latest_scoped_snapshot,
+                "account_baseline": self.owner.latest_account_baseline,
+                "trial_guard": self.owner.trial_guard,
+            })
+        else:
+            r = parallel_fetch({
+                "snapshot": self.owner.runtime.health_service.snapshot,
+                "mode_snapshot": self.owner.system_mode,
+                "recovery": self.owner.recovery_view,
+                "market": self.owner.runtime.market_gateway.status,
+                "account": self.owner.account_service_status,
+                "execution": self.owner.runtime.execution_adapter.readiness,
+                "phase1_shadow": self.owner.phase1_shadow,
+                "derivatives_live_guard": self.owner.derivatives_live_guard,
+                "latest_reconciliation": self.owner._latest_scoped_reconciliation,
+                "latest_portfolio": self.owner._latest_scoped_snapshot,
+                "blockers": self.owner.blockers,
+                "account_baseline": self.owner.latest_account_baseline,
+            })
         snapshot = r["snapshot"]
-        mode_snapshot = r["mode_snapshot"]
         recovery = r["recovery"]
         market = r["market"]
         account = r["account"]
@@ -340,8 +358,27 @@ class RuntimeQueryFacade:
         derivatives_live_guard = r["derivatives_live_guard"]
         latest_reconciliation = r["latest_reconciliation"]
         latest_portfolio = r["latest_portfolio"]
-        blockers = r["blockers"]
         account_baseline = r["account_baseline"]
+        if dashboard_summary_only:
+            mode_snapshot = self.owner.recovery_queries.build_system_mode(
+                recovery=recovery,
+                snapshot=r["mode_controller_snapshot"],
+                readiness=execution,
+                health_blockers=list(getattr(snapshot, "blockers", []) or []),
+                trial_guard=r["trial_guard"],
+            )
+            blocker_control = self.owner.blocker_control_service.execution_blocker_summary(
+                recovery=recovery,
+                submit_blocked_reasons=list(mode_snapshot.get("submit_blocked_reasons") or []),
+            )
+            blockers = [
+                item
+                for item in list(blocker_control.get("blockers") or [])
+                if isinstance(item, dict)
+            ]
+        else:
+            mode_snapshot = r["mode_snapshot"]
+            blockers = r["blockers"]
         reconciliation_component = next(
             (component for component in snapshot.components if component.component == "reconciliation"),
             None,
@@ -371,17 +408,18 @@ class RuntimeQueryFacade:
             runtime_state = "degraded"
         else:
             runtime_state = "healthy"
-        threading.Thread(
-            target=self.owner._persist_blocker_snapshot,
-            kwargs=dict(
-                source="system_health",
-                runtime_state=runtime_state,
-                mode_snapshot=mode_snapshot,
-                blockers=blockers,
-            ),
-            daemon=True,
-        ).start()
-        return {
+        if not dashboard_summary_only:
+            threading.Thread(
+                target=self.owner._persist_blocker_snapshot,
+                kwargs=dict(
+                    source="system_health",
+                    runtime_state=runtime_state,
+                    mode_snapshot=mode_snapshot,
+                    blockers=blockers,
+                ),
+                daemon=True,
+            ).start()
+        payload = {
             "overall_status": snapshot.status,
             "runtime_state": runtime_state,
             "operating_state": snapshot.operating_state,
@@ -459,6 +497,10 @@ class RuntimeQueryFacade:
             "account_baseline": account_baseline,
             "mode_contract": mode_snapshot,
         }
+        if dashboard_summary_only:
+            payload["dashboard_summary_only"] = True
+            payload["truth_source"] = "runtime_health_dashboard_summary"
+        return payload
 
     def system_runtime(self) -> dict[str, Any]:
         return self.build_system_runtime()

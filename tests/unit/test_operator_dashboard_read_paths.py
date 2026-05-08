@@ -204,3 +204,43 @@ def test_guarded_live_dashboard_uses_minimal_blocker_summary_without_full_blocke
     assert payload["status"] == "critical"
     assert payload["summary_metrics"]["execution_blocker_count"] == 1
     assert payload["dashboard_summary_only"] is True
+
+
+def test_legacy_blockers_reuses_cached_blocker_control_payload() -> None:
+    class Owner:
+        def __init__(self) -> None:
+            self.blocker_control_calls = 0
+
+        def blocker_control(self):
+            self.blocker_control_calls += 1
+            return {
+                "blockers": [
+                    {
+                        "blocker": "operator_rebaseline_required",
+                        "subsystem": "reconciliation",
+                        "affects_execution": True,
+                        "submit_only": False,
+                        "recommended_next_step": "先查看最新对账。",
+                        "title": "需要确认新基线",
+                        "description": "账实状态需要确认。",
+                        "impact": "未确认前阻断执行。",
+                        "priority": 10,
+                        "root_cause": True,
+                        "derived_from": [],
+                        "resolution_mode": "operator",
+                        "actions": [{"action_id": "inspect-reconciliation"}],
+                    }
+                ]
+            }
+
+        def _build_blocker_control(self):
+            raise AssertionError("legacy blockers must not build another blockerControl snapshot")
+
+    owner = Owner()
+
+    payload = OperatorQueryService._build_blockers(owner)
+
+    assert owner.blocker_control_calls == 1
+    assert payload[0]["blocker"] == "operator_rebaseline_required"
+    assert payload[0]["recommended_action"] == "先查看最新对账。"
+    assert payload[0]["actions"] == [{"action_id": "inspect-reconciliation"}]

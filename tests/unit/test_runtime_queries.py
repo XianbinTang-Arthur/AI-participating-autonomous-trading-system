@@ -6,6 +6,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from aats.services.blocker_control import BlockerControlService
+from aats.services.operator.recovery_queries import RecoveryQueryFacade
 from aats.services.operator.runtime_queries import RuntimeQueryFacade
 from aats.services.operator.ui_capabilities import UI_OPERATING_MODE_OVERRIDE_DISABLED_REASON
 
@@ -60,6 +62,117 @@ class _RunPacketSummaryOwner:
     def guarded_live_run_packet(self) -> dict:
         self.full_packet_called = True
         raise AssertionError("system runtime must not build the full guarded-live run packet")
+
+
+class _DashboardHealthOwner:
+    def __init__(self) -> None:
+        self.persist_called = False
+        self.recovery_posture = SimpleNamespace(
+            execution_blockers=lambda *, health_blockers, recovery_blockers, submit_blocked_reasons: list(
+                dict.fromkeys(
+                    list(health_blockers)
+                    + list(recovery_blockers)
+                    + list(submit_blocked_reasons)
+                )
+            )
+        )
+        self.runtime = SimpleNamespace(
+            kill_switch=SimpleNamespace(halted=False),
+            health_service=SimpleNamespace(
+                snapshot=lambda: SimpleNamespace(
+                    status="ok",
+                    operating_state="running",
+                    mode="guarded_live",
+                    blockers=["phase1_shadow_recovery_required"],
+                    components=[
+                        SimpleNamespace(
+                            component="reconciliation",
+                            status="ok",
+                            fresh=True,
+                            detail="ok",
+                            blockers=[],
+                            last_update_ts=None,
+                        )
+                    ],
+                ),
+            ),
+            mode_controller=SimpleNamespace(
+                snapshot=lambda: {
+                    "operating_state": "running",
+                    "mode": "guarded_live",
+                    "halted": False,
+                    "submit_blocked_reasons": ["live_submit_disabled"],
+                    "exchange_submit_allowed": True,
+                }
+            ),
+            execution_adapter=SimpleNamespace(
+                readiness=lambda: {
+                    "exchange_submit_allowed": True,
+                    "submit_blocked_reasons": [],
+                }
+            ),
+            market_gateway=SimpleNamespace(status=lambda: {"fresh": True}),
+            runtime_profile=SimpleNamespace(to_dict=lambda: {}),
+            environment_capabilities=SimpleNamespace(to_dict=lambda: {}),
+            policy_profile=SimpleNamespace(to_dict=lambda: {}),
+            recovery_policy=SimpleNamespace(to_dict=lambda: {}),
+            runtime_profile_resolution=SimpleNamespace(profile_source="unit"),
+            settings=SimpleNamespace(storage_mode="postgres"),
+            audit_repo=SimpleNamespace(count=lambda: 0),
+            replay_validation_history=[],
+        )
+        self.recovery_queries = RecoveryQueryFacade(self)
+        self.blocker_control_service = BlockerControlService(self)
+
+    def _cached_ttl(self, _key: str, _ttl_seconds: int, loader):
+        return loader()
+
+    def _scope_cache_fragment(self) -> str:
+        return "derivatives:cross:BTC-USDT-SWAP"
+
+    def recovery_view(self) -> dict:
+        return {
+            "recovery_state": "normal_operation",
+            "safe_to_trade": True,
+            "review_required": False,
+            "rebaseline_available": False,
+            "resume_eligible": True,
+            "resume_blocked_reasons": [],
+        }
+
+    def system_mode(self) -> dict:
+        raise AssertionError("dashboard health should derive mode from the existing recovery context")
+
+    def blockers(self) -> list[dict]:
+        raise AssertionError("dashboard health should use a minimal blocker summary")
+
+    def account_service_status(self) -> dict:
+        return {"fresh": True}
+
+    def phase1_shadow(self) -> dict:
+        return {"status": "healthy", "summary": "ok"}
+
+    def derivatives_live_guard(self) -> dict:
+        return {}
+
+    def _latest_scoped_reconciliation(self):
+        return None
+
+    def _latest_scoped_snapshot(self):
+        return SimpleNamespace(snapshot_ts=None)
+
+    def latest_account_baseline(self) -> dict:
+        return {}
+
+    def trial_guard(self) -> dict:
+        return {"status": "monitoring"}
+
+    def runtime_profile_snapshot(self) -> dict:
+        return {}
+
+    def _persist_blocker_snapshot(self, **_kwargs) -> None:
+        self.persist_called = True
+        raise AssertionError("dashboard health should not write blocker snapshots")
 
 
 class TestRuntimeQueryFacade(unittest.TestCase):
@@ -118,6 +231,18 @@ class TestRuntimeQueryFacade(unittest.TestCase):
             source,
         )
         self.assertIn('"truth_source": "/replay/status"', source)
+
+    def test_dashboard_health_reuses_recovery_context_and_minimal_blockers(self) -> None:
+        owner = _DashboardHealthOwner()
+        facade = RuntimeQueryFacade(owner)
+
+        payload = facade.system_health_dashboard()
+
+        self.assertTrue(payload["dashboard_summary_only"])
+        self.assertEqual(payload["truth_source"], "runtime_health_dashboard_summary")
+        self.assertEqual(payload["mode_contract"]["recovery_state"], "normal_operation")
+        self.assertTrue(any(item["blocker"] == "phase1_shadow_recovery_required" for item in payload["blockers"]))
+        self.assertFalse(owner.persist_called)
 
     def test_lightweight_run_packet_summary_does_not_call_full_packet_loader(self) -> None:
         owner = _RunPacketSummaryOwner()

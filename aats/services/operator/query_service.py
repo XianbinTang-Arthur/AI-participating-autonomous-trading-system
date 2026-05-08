@@ -7089,6 +7089,10 @@ class OperatorQueryService:
         cache_key = f"system_health:{self._scope_cache_fragment()}"
         return self._cached_ttl(cache_key, 35, self.runtime_queries.system_health)
 
+    def system_health_dashboard(self) -> dict[str, Any]:
+        cache_key = f"system_health_dashboard:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 15, self.runtime_queries.system_health_dashboard)
+
     def system_runtime(self) -> dict[str, Any]:
         cache_key = f"system_runtime:{self._scope_cache_fragment()}"
         return self._cached_ttl(cache_key, 35, self.runtime_queries.system_runtime)
@@ -10810,25 +10814,27 @@ class OperatorQueryService:
         )
 
     def _build_blockers(self) -> list[dict[str, Any]]:
-        snapshot = self._build_blocker_control()
+        snapshot = self.blocker_control()
+        blocker_items = snapshot.get("blockers") if isinstance(snapshot, dict) else []
         return [
             {
-                "blocker": item.blocker,
-                "subsystem": item.subsystem,
-                "affects_execution": item.affects_execution,
-                "affects_account_synchronization": item.subsystem == "account_state",
-                "submit_only": item.submit_only,
-                "recommended_action": item.recommended_next_step,
-                "title": item.title,
-                "description": item.description,
-                "impact": item.impact,
-                "priority": item.priority,
-                "root_cause": item.root_cause,
-                "derived_from": item.derived_from,
-                "resolution_mode": item.resolution_mode,
-                "actions": [action.model_dump(mode="json") for action in item.actions],
+                "blocker": item.get("blocker"),
+                "subsystem": item.get("subsystem"),
+                "affects_execution": item.get("affects_execution", True),
+                "affects_account_synchronization": item.get("subsystem") == "account_state",
+                "submit_only": item.get("submit_only", False),
+                "recommended_action": item.get("recommended_next_step"),
+                "title": item.get("title"),
+                "description": item.get("description"),
+                "impact": item.get("impact"),
+                "priority": item.get("priority"),
+                "root_cause": item.get("root_cause", False),
+                "derived_from": item.get("derived_from", []),
+                "resolution_mode": item.get("resolution_mode"),
+                "actions": item.get("actions", []),
             }
-            for item in snapshot.blockers
+            for item in blocker_items
+            if isinstance(item, dict)
         ]
 
     def _build_blocker_control(self) -> BlockerControlSnapshot:

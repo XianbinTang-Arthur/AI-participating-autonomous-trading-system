@@ -111,6 +111,12 @@ Target fixes:
   it derives the nested guarded-live status from already-computed
   scaling/recovery/blocker context and leaves the dedicated guarded-live panel
   as the source for full packet details.
+- Dashboard `health` uses a summary health builder that derives mode and
+  blocker state from one recovery context and a minimal blocker summary. The
+  explicit `/system/health` endpoint keeps the full health builder and
+  blocker-snapshot audit persistence.
+- `blockers()` now reuses the cached `blockerControl` payload instead of
+  building another blocker-control snapshot under a separate cache key.
 
 ## Logging, Monitoring, Auditing
 

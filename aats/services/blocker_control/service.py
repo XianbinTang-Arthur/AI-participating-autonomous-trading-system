@@ -31,7 +31,23 @@ class BlockerControlService:
     def snapshot(self) -> BlockerControlSnapshot:
         recovery = self.owner.recovery_view()
         latest_reconciliation = self.owner._latest_scoped_reconciliation()
-        items = self._build_items(recovery=recovery)
+        health_snapshot = self.owner.runtime.health_service.snapshot()
+        mode_builder = getattr(getattr(self.owner, "recovery_queries", None), "build_system_mode", None)
+        system_mode = (
+            mode_builder(
+                recovery=recovery,
+                health_blockers=list(getattr(health_snapshot, "blockers", []) or []),
+            )
+            if callable(mode_builder)
+            else self.owner.system_mode()
+        )
+        items = self._build_items(
+            recovery=recovery,
+            health_snapshot=health_snapshot,
+            system_mode=system_mode,
+            ai_runtime=self.owner.ai_runtime(),
+            latest_reconciliation=latest_reconciliation,
+        )
         primary, secondary = self._primary_and_secondary_items(items)
         primary_task = self._primary_task(
             primary=primary,
@@ -100,8 +116,10 @@ class BlockerControlService:
             "blockers": [
                 {
                     "blocker": code,
+                    "subsystem": self._subsystem_for(code),
                     "affects_execution": not submit_only,
                     "submit_only": submit_only,
+                    "recommended_action": "Inspect subsystem status and operator logs before resuming execution.",
                 }
                 for code, submit_only in blockers
             ],
@@ -119,15 +137,15 @@ class BlockerControlService:
                     return item.blocker, item.blocker_instance_id
         return None, None
 
-    def _build_items(self, *, recovery: dict[str, Any]) -> list[BlockerControlItem]:
-        health_snapshot = self.owner.runtime.health_service.snapshot()
-        system_mode = self.owner.system_mode()
-        # Stage 7 修复（gateway-only role /system/blocker-control 500）：
-        # gateway/market/execution role 下 runtime.ai_service 为 None；
-        # 走 OperatorQueryService.ai_runtime() → RuntimeQueryFacade.ai_runtime()
-        # 拿到 stub dict（key 齐全、value falsy），下游 .get() / bool() 安全。
-        ai_runtime = self.owner.ai_runtime()
-        latest_reconciliation = self.owner._latest_scoped_reconciliation()
+    def _build_items(
+        self,
+        *,
+        recovery: dict[str, Any],
+        health_snapshot: Any,
+        system_mode: dict[str, Any],
+        ai_runtime: dict[str, Any],
+        latest_reconciliation: Any | None,
+    ) -> list[BlockerControlItem]:
         blockers: list[tuple[str, str, bool]] = []
         for code in health_snapshot.blockers:
             blockers.append((code, self._subsystem_for(code), code in self._SUBMIT_ONLY))

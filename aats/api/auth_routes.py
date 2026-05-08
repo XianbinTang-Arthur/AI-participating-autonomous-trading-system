@@ -222,7 +222,8 @@ def _dashboard_bundle_auth_summary(
 
 
 def _system_health_payload_for_runtime(runtime: ApplicationRuntime, query: OperatorQueryService) -> dict[str, Any]:
-    health = query.system_health()
+    dashboard_health = getattr(query, "system_health_dashboard", None)
+    health = dashboard_health() if callable(dashboard_health) else query.system_health()
     operator_metrics = query.metrics()
     health["execution_summary"] = {
         "order_count": len(query._scoped_order_states()),

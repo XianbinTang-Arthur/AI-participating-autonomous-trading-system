@@ -296,25 +296,39 @@ class RecoveryQueryFacade:
         cache_key = f"system_mode:{self.owner._scope_cache_fragment()}"
         return self.owner._cached_ttl(cache_key, 35, self.build_system_mode)
 
-    def build_system_mode(self) -> dict[str, Any]:
-        r = parallel_fetch({
-            "snapshot": lambda: dict(self.owner.runtime.mode_controller.snapshot()),
-            "readiness": self.owner.runtime.execution_adapter.readiness,
-            "recovery": self.recovery_view,
-            "health_blockers": lambda: list(dict.fromkeys(self.owner.runtime.health_service.execution_blockers())),
-            "trial_guard": self.owner.trial_guard,
-        })
-        snapshot = r["snapshot"]
-        readiness = r["readiness"]
-        recovery = r["recovery"]
+    def build_system_mode(
+        self,
+        *,
+        recovery: dict[str, Any] | None = None,
+        snapshot: dict[str, Any] | None = None,
+        readiness: dict[str, Any] | None = None,
+        health_blockers: list[str] | None = None,
+        trial_guard: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        queries: dict[str, Any] = {}
+        if snapshot is None:
+            queries["snapshot"] = lambda: dict(self.owner.runtime.mode_controller.snapshot())
+        if readiness is None:
+            queries["readiness"] = self.owner.runtime.execution_adapter.readiness
+        if recovery is None:
+            queries["recovery"] = self.recovery_view
+        if health_blockers is None:
+            queries["health_blockers"] = lambda: list(dict.fromkeys(self.owner.runtime.health_service.execution_blockers()))
+        if trial_guard is None:
+            queries["trial_guard"] = self.owner.trial_guard
+        r = parallel_fetch(queries)
+        snapshot = dict(snapshot if snapshot is not None else r["snapshot"])
+        readiness = dict(readiness if readiness is not None else r["readiness"])
+        recovery = dict(recovery if recovery is not None else r["recovery"])
+        health_blockers = list(health_blockers if health_blockers is not None else r["health_blockers"])
+        trial_guard = dict(trial_guard if trial_guard is not None else r["trial_guard"])
         submit_blocked_reasons = list(
             dict.fromkeys(
                 list(snapshot.get("submit_blocked_reasons", []))
                 + list(readiness.get("submit_blocked_reasons", []))
             )
         )
-        health_blockers = r["health_blockers"]
-        recovery_blockers = list(dict.fromkeys(recovery["resume_blocked_reasons"]))
+        recovery_blockers = list(dict.fromkeys(recovery.get("resume_blocked_reasons", [])))
         exchange_submit_allowed = bool(
             readiness.get("exchange_submit_allowed", snapshot.get("exchange_submit_allowed", False))
         )
@@ -336,5 +350,5 @@ class RecoveryQueryFacade:
         snapshot["active_profile_revision_id"] = None
         snapshot["pending_profile_revision_id"] = None
         snapshot["restart_required"] = False
-        snapshot["trial_guard"] = r["trial_guard"]
+        snapshot["trial_guard"] = trial_guard
         return snapshot
