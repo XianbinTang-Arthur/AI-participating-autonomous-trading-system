@@ -566,16 +566,34 @@ class AccountQueryFacade:
         return self.build_execution_latest(dashboard_summary_only=True)
 
     def build_execution_latest(self, *, dashboard_summary_only: bool = False) -> dict[str, Any]:
-        latest_order = self.owner.latest_order()
-        latest_fill = self.owner.latest_fill()
+        if dashboard_summary_only:
+            r = parallel_fetch(
+                {
+                    "latest_order": self.owner.latest_order,
+                    "latest_fill": self.owner.latest_fill,
+                    "recovery": self.owner.recovery_view_dashboard,
+                    "mode": self.owner.system_mode_dashboard,
+                }
+            )
+            latest_order = r["latest_order"]
+            latest_fill = r["latest_fill"]
+            latest_reconciliation = None
+            recovery = r["recovery"]
+            mode = r["mode"]
+            execution = self._dashboard_execution_readiness(mode_snapshot=mode)
+        else:
+            latest_order = self.owner.latest_order()
+            latest_fill = self.owner.latest_fill()
+            latest_reconciliation = self.owner._latest_scoped_reconciliation()
+            recovery = self.owner.recovery_view()
+            mode = self.owner.system_mode()
+            execution = self.owner.runtime.execution_adapter.readiness()
         latest_order_payload = self.owner._execution_record_payload(latest_order) if latest_order is not None else None
         latest_fill_payload = self.owner._execution_record_payload(latest_fill) if latest_fill is not None else None
-        latest_reconciliation = self.owner._latest_scoped_reconciliation()
-        recovery = self.owner.recovery_view_dashboard() if dashboard_summary_only else self.owner.recovery_view()
         terminal_no_fill_explanation = self._latest_terminal_no_fill_explanation(latest_order=latest_order)
         payload = {
-            "mode": self.owner.system_mode_dashboard() if dashboard_summary_only else self.owner.system_mode(),
-            "execution": self.owner.runtime.execution_adapter.readiness(),
+            "mode": mode,
+            "execution": execution,
             "latest_order": latest_order_payload,
             "latest_fill": latest_fill_payload,
             "latest_order_is_current_runtime": self._payload_is_current_runtime(
@@ -599,9 +617,29 @@ class AccountQueryFacade:
         if dashboard_summary_only:
             payload["dashboard_summary_only"] = True
             payload["recent_failures_deferred"] = True
-            payload["deferred_sections"] = ["recent_failures"]
+            payload["deferred_sections"] = [
+                "recent_failures",
+                "execution_adapter.readiness",
+                "latest_reconciliation",
+            ]
             payload["truth_source"]["summary"] = "execution_latest_dashboard_summary"
         return payload
+
+    def _dashboard_execution_readiness(self, *, mode_snapshot: dict[str, Any]) -> dict[str, Any]:
+        settings = getattr(self.owner.runtime, "settings", None)
+        return {
+            "ready": not bool(mode_snapshot.get("execution_blocked", False)),
+            "backend": self.owner.runtime.execution_adapter.__class__.__name__,
+            "mode": mode_snapshot.get("mode", getattr(settings, "mode", None)),
+            "execution_mode": "dashboard_summary",
+            "live_submit_enabled": getattr(settings, "live_submit_enabled", None),
+            "guarded_execution_dry_run": getattr(settings, "guarded_execution_dry_run", None),
+            "okx_simulated_trading": getattr(settings, "okx_simulated_trading", None),
+            "exchange_submit_allowed": bool(mode_snapshot.get("exchange_submit_allowed", False)),
+            "submit_blocked": bool(mode_snapshot.get("submit_blocked", False)),
+            "submit_blocked_reasons": list(mode_snapshot.get("submit_blocked_reasons") or []),
+            "truth_source": "system_mode_dashboard_summary",
+        }
 
     def _payload_is_current_runtime(
         self,

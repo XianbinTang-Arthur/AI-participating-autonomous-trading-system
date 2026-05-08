@@ -7245,6 +7245,45 @@ console.log(JSON.stringify({
         self.assertIn('"describesOrderlessError":true', stdout)
         self.assertIn('"hidesOldGenericHeadline":true', stdout)
 
+    def test_execution_view_labels_deferred_reconciliation_as_deferred(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderExecutionSections } from './aats/api/static/modules/views/execution-view.js';
+
+const sections = renderExecutionSections({
+  executionLatest: {
+    latest_order: null,
+    latest_fill: null,
+    dashboard_summary_only: true,
+    deferred_sections: ['latest_reconciliation'],
+  },
+  recentOrders: { orders: [] },
+  recentFills: { fills: [] },
+  executionErrors: { errors: [] },
+  metrics: { current_open_order_count: 0 },
+});
+
+const html = sections.executionHero;
+console.log(JSON.stringify({
+  showsDeferredReconciliation: html.includes('延迟加载'),
+  pointsToReconciliationPanel: html.includes('请查看对账面板的最新状态'),
+  doesNotClaimMissingReconciliation: !html.includes('暂时没有最新对账'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"showsDeferredReconciliation":true', stdout)
+        self.assertIn('"pointsToReconciliationPanel":true', stdout)
+        self.assertIn('"doesNotClaimMissingReconciliation":true', stdout)
+
     def test_execution_view_surfaces_lifecycle_diagnostics_with_detail_action(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """

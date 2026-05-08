@@ -23,7 +23,9 @@ export function renderExecutionSections(data) {
   const latestFillIsCurrent = executionLatest.latest_fill_is_current_runtime !== false;
   const latestOrderLabel = latestOrder && !latestOrderIsCurrent ? "历史最新委托" : "最新委托";
   const latestFillLabel = latestFill && !latestFillIsCurrent ? "历史最新成交" : "最新成交";
-  const latestReconciliation = executionLatest.latest_reconciliation || null;
+  const executionDeferredSections = new Set(executionLatest.deferred_sections || []);
+  const latestReconciliation = executionLatest.latest_reconciliation || data.reconciliationLatest?.reconciliation || null;
+  const latestReconciliationDeferred = !latestReconciliation && executionDeferredSections.has("latest_reconciliation");
   const ordersPayload = data.recentOrders || {};
   const fillsPayload = data.recentFills || {};
   const recentOrders = ordersPayload.orders || [];
@@ -52,7 +54,7 @@ export function renderExecutionSections(data) {
         { label: latestOrderLabel, value: latestOrderStatusLabel(latestOrder), meta: latestOrder ? `${middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托")} | ${latestOrderIsCurrent ? "当前运行时" : "历史记录"}` : "暂未生成委托", tone: latestOrderTone(latestOrder, latestOrderIsCurrent) },
         { label: "最近委托量", value: latestOrder?.requested_qty !== undefined ? formatSigned(latestOrder.requested_qty) : "暂无委托", meta: latestOrder ? `${readableState(latestOrder.order_type, "当前没有委托类型信息")} | ${latestOrder.symbol || "当前没有标的信息"}` : "当前没有最新委托" , tone: latestOrder && latestOrderIsCurrent ? "info" : "neutral" },
         { label: latestFillLabel, value: latestFill ? formatNumber(latestFill.fill_qty) : "暂未成交", meta: latestFill ? `价格 ${formatNumber(latestFill.fill_price)} | ${middleEllipsis(latestFill.fill_id)} | ${latestFillIsCurrent ? "当前运行时" : "历史记录"}` : "当前暂无成交编号", tone: latestFill && latestFillIsCurrent ? "positive" : "neutral" },
-        { label: "最新对账", value: latestReconciliation ? readableState(latestReconciliation.severity || "unknown") : "暂无对账", meta: middleEllipsis(latestReconciliation?.reconciliation_id, 10, 6, "暂时没有最新对账"), tone: latestReconciliation?.halt_required ? "danger" : latestReconciliation?.severity ? "warning" : "neutral" },
+        { label: "最新对账", value: latestReconciliation ? readableState(latestReconciliation.severity || "unknown") : latestReconciliationDeferred ? "延迟加载" : "暂无对账", meta: latestReconciliationDeferred ? "请查看对账面板的最新状态" : middleEllipsis(latestReconciliation?.reconciliation_id, 10, 6, "暂时没有最新对账"), tone: latestReconciliation?.halt_required ? "danger" : latestReconciliation?.severity ? "warning" : latestReconciliationDeferred ? "info" : "neutral" },
       ],
     }),
     executionExceptions: surfaceCard({

@@ -14,6 +14,8 @@ class _FakeOwner:
         order_count: int | None = None,
         fill_count: int | None = None,
         current_runtime_timestamps: set[str] | None = None,
+        readiness_raises: bool = False,
+        reconciliation_raises: bool = False,
     ) -> None:
         self.orders = orders
         self.fills = fills or []
@@ -23,11 +25,27 @@ class _FakeOwner:
         self.dashboard_recovery_calls = 0
         self.dashboard_mode_calls = 0
         self.execution_error_calls = 0
+        self.execution_readiness_calls = 0
+        self.reconciliation_calls = 0
+        self.readiness_raises = readiness_raises
+        self.reconciliation_raises = reconciliation_raises
         self.runtime = SimpleNamespace(
-            execution_adapter=SimpleNamespace(readiness=lambda: {"ready": True}),
+            settings=SimpleNamespace(
+                mode="paper",
+                live_submit_enabled=False,
+                guarded_execution_dry_run=True,
+                okx_simulated_trading=True,
+            ),
+            execution_adapter=SimpleNamespace(readiness=self.execution_readiness),
             execution_order_repo=SimpleNamespace(count_orders=lambda: len(orders) if order_count is None else order_count),
             execution_fill_repo_v2=SimpleNamespace(count_fills=lambda: len(self.fills) if fill_count is None else fill_count),
         )
+
+    def execution_readiness(self):
+        self.execution_readiness_calls += 1
+        if self.readiness_raises:
+            raise AssertionError("dashboard executionLatest must not call full execution readiness")
+        return {"ready": True}
 
     def latest_order(self):
         return self.orders[0] if self.orders else None
@@ -36,6 +54,9 @@ class _FakeOwner:
         return self.fills[0] if self.fills else None
 
     def _latest_scoped_reconciliation(self):
+        self.reconciliation_calls += 1
+        if self.reconciliation_raises:
+            raise AssertionError("dashboard executionLatest must not call latest reconciliation")
         return None
 
     def recovery_view(self):
@@ -50,7 +71,14 @@ class _FakeOwner:
 
     def system_mode_dashboard(self):
         self.dashboard_mode_calls += 1
-        return {"execution_route": "derivatives_live_dashboard"}
+        return {
+            "execution_route": "derivatives_live_dashboard",
+            "mode": "derivatives-live",
+            "execution_blocked": False,
+            "exchange_submit_allowed": True,
+            "submit_blocked": False,
+            "submit_blocked_reasons": [],
+        }
 
     def _execution_record_payload(self, record):
         payload = dict(record)
@@ -199,13 +227,15 @@ def test_execution_latest_dashboard_uses_summary_recovery_and_defers_errors() ->
                 "order_id": "order-dashboard",
                 "client_order_id": "client-dashboard",
                 "decision_id": "decision-dashboard",
-                "state": "BLOCKED",
+                "state": "SUBMITTING",
                 "updated_at": "2026-04-27T09:49:54Z",
                 "product_type": "derivatives",
                 "margin_mode": "cross",
                 "symbol": "BTC-USDT-SWAP",
             }
-        ]
+        ],
+        readiness_raises=True,
+        reconciliation_raises=True,
     )
 
     payload = AccountQueryFacade(owner).execution_latest_dashboard()
@@ -213,12 +243,19 @@ def test_execution_latest_dashboard_uses_summary_recovery_and_defers_errors() ->
     assert payload["dashboard_summary_only"] is True
     assert payload["recent_failures"] == []
     assert payload["recent_failures_deferred"] is True
+    assert payload["latest_reconciliation"] is None
+    assert payload["execution"]["truth_source"] == "system_mode_dashboard_summary"
+    assert payload["execution"]["ready"] is True
+    assert "execution_adapter.readiness" in payload["deferred_sections"]
+    assert "latest_reconciliation" in payload["deferred_sections"]
     assert payload["recovery"]["recovery_state"] == "dashboard_normal_operation"
     assert payload["mode"]["execution_route"] == "derivatives_live_dashboard"
     assert payload["truth_source"]["summary"] == "execution_latest_dashboard_summary"
     assert owner.dashboard_recovery_calls == 1
     assert owner.dashboard_mode_calls == 1
     assert owner.execution_error_calls == 0
+    assert owner.execution_readiness_calls == 0
+    assert owner.reconciliation_calls == 0
 
 
 def test_phase5_orders_recent_uses_bounded_page_fetch() -> None:

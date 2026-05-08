@@ -10,7 +10,7 @@ Reduce operator dashboard snapshot latency for the `executionLatest` panel witho
 
 ## Input/Output Interfaces
 
-Input is the active `ApplicationRuntime` and current operator scope. Output is the existing `executionLatest` dashboard panel shape plus `dashboard_summary_only`, `recent_failures_deferred`, and `deferred_sections` metadata. Full `/execution/latest` continues to include full `recent_failures` and normalized full recovery context.
+Input is the active `ApplicationRuntime` and current operator scope. Output is the existing `executionLatest` dashboard panel shape plus `dashboard_summary_only`, `recent_failures_deferred`, and `deferred_sections` metadata. Full `/execution/latest` continues to include full `recent_failures`, normalized full recovery context, latest reconciliation, and full execution adapter readiness.
 
 ## Database Schema / Tables / Indexes / Constraints
 
@@ -34,7 +34,7 @@ No lifecycle state transitions are added. `recent_failures` are explicitly defer
 
 ## Caching And Performance
 
-Dashboard `executionLatest` now uses dashboard recovery/mode readers and avoids synchronous `execution_errors()` scanning. Snapshot-plane loader and request fallback both call `query.execution_latest_dashboard()`.
+Dashboard `executionLatest` now uses dashboard recovery/mode readers, avoids synchronous `execution_errors()` scanning, defers full execution adapter readiness, defers latest reconciliation, and parallelizes independent latest order/fill/recovery/mode reads. Snapshot-plane loader and request fallback both call `query.execution_latest_dashboard()`.
 
 ## Logging, Monitoring, Auditing
 
@@ -42,7 +42,7 @@ No new logs are required. Existing dashboard snapshot timing and timeout logs re
 
 ## Testing Strategy
 
-Add unit coverage for the new summary path and source-level guardrails that dashboard bundle loaders call dashboard readers. Add integration coverage that dashboard bundle fallback does not call the full `execution_latest()` method.
+Add unit coverage for the new summary path and source-level guardrails that dashboard bundle loaders call dashboard readers. The dashboard summary unit should fail if full execution adapter readiness or latest reconciliation is accidentally called. Add integration coverage that dashboard bundle fallback does not call the full `execution_latest()` method and UI coverage that deferred reconciliation is not displayed as missing data.
 
 ## Migration, Rollback, Compatibility
 
