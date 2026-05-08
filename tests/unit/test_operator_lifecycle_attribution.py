@@ -525,6 +525,27 @@ class TestLifecycleAttributionFacade(unittest.TestCase):
         self.assertIn(("funding", 500), calls)
         self.assertIn(("audits", 1000), calls)
 
+    def test_position_lifecycle_dashboard_skips_audits_when_no_lifecycles_exist(self) -> None:
+        owner = _FakeOwner()
+        owner._outcomes = []
+        owner._build_position_lifecycle_rows = lambda *, outcomes, funding_records: ([], [])
+        owner.runtime = SimpleNamespace(
+            fill_outcome_repo=SimpleNamespace(outcomes_for_scope=lambda *, scope, limit: []),
+            funding_fee_repo=SimpleNamespace(records_for_scope=lambda *, scope, limit: []),
+            audit_repo=SimpleNamespace(
+                recent=lambda *, limit: (_ for _ in ()).throw(
+                    AssertionError("empty dashboard lifecycle list should not hydrate audits")
+                )
+            ),
+        )
+        facade = LifecycleAttributionFacade(owner)
+
+        payload = facade.position_lifecycle_attribution_dashboard(limit=5)
+
+        self.assertEqual(payload["read_scope"], "recent_bounded")
+        self.assertEqual(payload["lifecycles"], [])
+        self.assertFalse(payload["has_more"])
+
 
 if __name__ == "__main__":
     unittest.main()

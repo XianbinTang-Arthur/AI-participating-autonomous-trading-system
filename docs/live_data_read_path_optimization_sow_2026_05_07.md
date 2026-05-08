@@ -92,6 +92,8 @@ Target fixes:
   lifecycle detail endpoint keeps full-history lookup semantics.
 - Lifecycle decision-trace enrichment batches audit payload references before
   hydrating event payloads, avoiding per-audit `payload_by_ref` N+1 reads.
+- Dashboard lifecycle attribution skips audit hydration when the bounded fill
+  window contains no lifecycle rows, so an empty execution history renders fast.
 
 ## Logging, Monitoring, Auditing
 

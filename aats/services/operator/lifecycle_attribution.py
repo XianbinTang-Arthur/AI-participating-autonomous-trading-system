@@ -73,20 +73,33 @@ class LifecycleAttributionFacade:
         if limit is not None:
             row_limit = max(limit * self._DASHBOARD_FETCH_MULTIPLIER, self._DASHBOARD_FETCH_MIN_ROWS)
             audit_limit = max(limit * self._DASHBOARD_AUDIT_MULTIPLIER, self._DASHBOARD_AUDIT_MIN_ROWS)
-        results = parallel_fetch(
-            {
-                "outcomes": lambda: self._load_outcomes(limit=row_limit),
-                "funding_records": lambda: self._load_funding_records(limit=row_limit),
-                "audits": lambda: self._load_audits(limit=audit_limit),
-            }
-        )
+        if limit is None:
+            results = parallel_fetch(
+                {
+                    "outcomes": lambda: self._load_outcomes(limit=row_limit),
+                    "funding_records": lambda: self._load_funding_records(limit=row_limit),
+                    "audits": lambda: self._load_audits(limit=audit_limit),
+                }
+            )
+        else:
+            results = parallel_fetch(
+                {
+                    "outcomes": lambda: self._load_outcomes(limit=row_limit),
+                    "funding_records": lambda: self._load_funding_records(limit=row_limit),
+                }
+            )
         outcomes = list(results["outcomes"])
         funding_records = list(results["funding_records"])
-        audits = list(results["audits"])
         base_lifecycles, unassigned_funding_fees = self.owner._build_position_lifecycle_rows(
             outcomes=outcomes,
             funding_records=funding_records,
         )
+        if limit is not None and not base_lifecycles:
+            audits = []
+        elif limit is None:
+            audits = list(results["audits"])
+        else:
+            audits = self._load_audits(limit=audit_limit)
         base_lifecycles.sort(
             key=lambda item: (
                 item.get("closed_at") or item.get("opened_at") or datetime.min.replace(tzinfo=timezone.utc),
