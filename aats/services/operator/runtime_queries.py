@@ -451,7 +451,6 @@ class RuntimeQueryFacade:
                 "account": self.owner.account_service_status,
                 "phase1_shadow": self.owner.phase1_shadow,
                 "derivatives_live_guard": self.owner.derivatives_live_guard,
-                "latest_reconciliation": self.owner._latest_scoped_reconciliation,
                 "trial_guard": self.owner.trial_guard,
             })
         else:
@@ -482,7 +481,7 @@ class RuntimeQueryFacade:
             execution = r["execution"]
         phase1_shadow = r["phase1_shadow"]
         derivatives_live_guard = r["derivatives_live_guard"]
-        latest_reconciliation = r["latest_reconciliation"]
+        latest_reconciliation = None if dashboard_summary_only else r["latest_reconciliation"]
         latest_portfolio = None if dashboard_summary_only else r["latest_portfolio"]
         if dashboard_summary_only:
             account_baseline = (
@@ -516,6 +515,11 @@ class RuntimeQueryFacade:
         reconciliation_component = next(
             (component for component in snapshot.components if component.component == "reconciliation"),
             None,
+        )
+        reconciliation_last_update_ts = (
+            reconciliation_component.last_update_ts
+            if reconciliation_component is not None
+            else (latest_reconciliation.as_of_ts if latest_reconciliation else None)
         )
         warnings = [
             {
@@ -576,11 +580,7 @@ class RuntimeQueryFacade:
                 "reconciliation": {
                     "ready": reconciliation_component.status == "ok" if reconciliation_component is not None else False,
                     "fresh": reconciliation_component.fresh if reconciliation_component is not None else False,
-                    "last_update_ts": (
-                        reconciliation_component.last_update_ts
-                        if reconciliation_component is not None
-                        else (latest_reconciliation.as_of_ts if latest_reconciliation else None)
-                    ),
+                    "last_update_ts": reconciliation_last_update_ts,
                     "severity": latest_reconciliation.severity if latest_reconciliation else None,
                     "halt_required": latest_reconciliation.halt_required if latest_reconciliation else False,
                     "blockers": (
@@ -631,7 +631,7 @@ class RuntimeQueryFacade:
                 "market": market.get("last_update_ts"),
                 "account": account.get("last_update_ts"),
                 "portfolio": latest_portfolio.snapshot_ts if latest_portfolio else None,
-                "reconciliation": latest_reconciliation.as_of_ts if latest_reconciliation else None,
+                "reconciliation": reconciliation_last_update_ts,
             },
             "recovery": recovery,
             "recovery_state": recovery["recovery_state"],
@@ -643,7 +643,11 @@ class RuntimeQueryFacade:
         if dashboard_summary_only:
             payload["dashboard_summary_only"] = True
             payload["truth_source"] = "runtime_health_dashboard_summary"
-            payload["deferred_sections"] = ["execution_adapter.readiness", "latest_portfolio"]
+            payload["deferred_sections"] = [
+                "execution_adapter.readiness",
+                "latest_portfolio",
+                "latest_reconciliation",
+            ]
         return payload
 
     def _dashboard_execution_readiness(

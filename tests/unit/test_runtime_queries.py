@@ -92,7 +92,7 @@ class _DashboardHealthOwner:
                             fresh=True,
                             detail="ok",
                             blockers=[],
-                            last_update_ts=None,
+                            last_update_ts="2026-05-08T00:00:00Z",
                         )
                     ],
                 ),
@@ -164,7 +164,7 @@ class _DashboardHealthOwner:
         return {}
 
     def _latest_scoped_reconciliation(self):
-        return None
+        raise AssertionError("dashboard health should use health snapshot reconciliation summary")
 
     def _latest_scoped_snapshot(self):
         raise AssertionError("dashboard health should defer latest portfolio snapshot")
@@ -347,7 +347,16 @@ class TestRuntimeQueryFacade(unittest.TestCase):
         self.assertEqual(payload["truth_source"], "runtime_health_dashboard_summary")
         self.assertIn("latest_portfolio", payload["deferred_sections"])
         self.assertIn("execution_adapter.readiness", payload["deferred_sections"])
+        self.assertIn("latest_reconciliation", payload["deferred_sections"])
         self.assertEqual(payload["mode_contract"]["recovery_state"], "normal_operation")
+        self.assertEqual(
+            payload["subsystems"]["reconciliation"]["last_update_ts"],
+            "2026-05-08T00:00:00Z",
+        )
+        self.assertEqual(
+            payload["last_success_timestamps"]["reconciliation"],
+            "2026-05-08T00:00:00Z",
+        )
         self.assertEqual(
             payload["subsystems"]["execution_adapter"]["truth_source"],
             "mode_controller_plus_account_status_dashboard_summary",
