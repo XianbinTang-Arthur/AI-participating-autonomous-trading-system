@@ -181,6 +181,7 @@ class OperatorQueryService:
 
     _shared_init_lock = __import__("threading").Lock()
     _shared_stores: dict[int, tuple[dict, "__import__('threading').RLock"]] = {}
+    _shared_inflight: dict[int, dict[str, "__import__('threading').Event"]] = {}
 
     def __init__(self, runtime: ApplicationRuntime) -> None:
         self.runtime = runtime
@@ -195,7 +196,10 @@ class OperatorQueryService:
                     {},
                     __import__("threading").RLock(),
                 )
+            if runtime_id not in OperatorQueryService._shared_inflight:
+                OperatorQueryService._shared_inflight[runtime_id] = {}
         self._ttl_cache, self._cache_lock = OperatorQueryService._shared_stores[runtime_id]
+        self._inflight = OperatorQueryService._shared_inflight[runtime_id]
         self.strategy_profiles = StrategyProfileControlService(runtime)
         self.blocker_control_service = BlockerControlService(self)
         self.blocker_action_service = BlockerActionService(self)

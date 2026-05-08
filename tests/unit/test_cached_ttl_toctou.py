@@ -37,6 +37,7 @@ from __future__ import annotations
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from aats.services.operator.query_service import OperatorQueryService
@@ -74,8 +75,72 @@ def _make_service() -> OperatorQueryService:
     return service
 
 
+class _RuntimeSettings(SimpleNamespace):
+    def expanded_allowed_symbols(self) -> tuple[str, ...]:
+        return ("BTC-USDT-SWAP",)
+
+
+def _make_runtime() -> SimpleNamespace:
+    return SimpleNamespace(
+        settings=_RuntimeSettings(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            smart_arbitrage_margin_short_enabled=False,
+            smart_arbitrage_negative_basis_mode="disabled",
+            smart_arbitrage_margin_short_spot_margin_mode="cross",
+        )
+    )
+
+
 class TestCachedTtlTocTouRaceFix(unittest.TestCase):
     """Leader 完成 loader 后，所有 follower 必须读到缓存，不能兜底重跑 loader。"""
+
+    def test_operator_query_instances_share_inflight_for_same_runtime(self) -> None:
+        runtime = _make_runtime()
+        with patch(
+            "aats.services.operator.query_service.StrategyProfileControlService",
+            lambda _runtime: SimpleNamespace(),
+        ):
+            first = OperatorQueryService(runtime)
+            second = OperatorQueryService(runtime)
+        self.assertIs(first._ttl_cache, second._ttl_cache)
+        self.assertIs(first._cache_lock, second._cache_lock)
+        self.assertIs(first._inflight, second._inflight)
+
+        leader_entered = threading.Event()
+        leader_release = threading.Event()
+        loader_call_count = 0
+        counter_lock = threading.Lock()
+        results: list[str] = []
+
+        def slow_loader() -> str:
+            nonlocal loader_call_count
+            with counter_lock:
+                loader_call_count += 1
+                is_leader = loader_call_count == 1
+            if is_leader:
+                leader_entered.set()
+                leader_release.wait(timeout=3.0)
+            return "shared-value"
+
+        def run(service: OperatorQueryService) -> None:
+            results.append(service._cached_ttl("shared-runtime-key", 60, slow_loader))
+
+        leader = threading.Thread(target=run, args=(first,))
+        follower = threading.Thread(target=run, args=(second,))
+        leader.start()
+        self.assertTrue(leader_entered.wait(timeout=2.0))
+        follower.start()
+        time.sleep(0.05)
+        leader_release.set()
+        leader.join(timeout=3.0)
+        follower.join(timeout=3.0)
+
+        self.assertFalse(leader.is_alive())
+        self.assertFalse(follower.is_alive())
+        self.assertEqual(loader_call_count, 1)
+        self.assertEqual(results, ["shared-value", "shared-value"])
 
     def _run_contention_test(self, *, cache_method_name: str, ttl_seconds: int) -> int:
         """返回 loader 被调用次数。修复后应为 1。"""
