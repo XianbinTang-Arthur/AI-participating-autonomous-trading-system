@@ -8,6 +8,60 @@ from aats.services.blocker_control.service import BlockerControlService
 
 
 class TestBlockerControlSummary(unittest.TestCase):
+    def test_snapshot_builds_mode_from_parallel_context_without_system_mode_fallback(self) -> None:
+        mode_builder_calls: list[dict[str, object]] = []
+
+        def build_system_mode(**kwargs):
+            mode_builder_calls.append(kwargs)
+            return {
+                "submit_blocked_reasons": list(kwargs["readiness"].get("submit_blocked_reasons", [])),
+                "execution_blocked": False,
+            }
+
+        owner = SimpleNamespace(
+            runtime=SimpleNamespace(
+                kill_switch=SimpleNamespace(halted=False),
+                health_service=SimpleNamespace(snapshot=lambda: SimpleNamespace(blockers=["health_blocker"])),
+                mode_controller=SimpleNamespace(
+                    snapshot=lambda: {
+                        "submit_blocked_reasons": ["mode_blocker"],
+                    }
+                ),
+                execution_adapter=SimpleNamespace(
+                    readiness=lambda: {
+                        "exchange_submit_allowed": False,
+                        "submit_blocked_reasons": ["execution_blocker"],
+                    }
+                ),
+            ),
+            recovery_queries=SimpleNamespace(build_system_mode=build_system_mode),
+            recovery_view=lambda: {
+                "safe_to_trade": True,
+                "review_required": False,
+                "resume_eligible": True,
+                "halted": False,
+                "rebaseline_available": False,
+                "resume_blocked_reasons": [],
+            },
+            _latest_scoped_reconciliation=lambda: None,
+            trial_guard=lambda: {"status": "monitoring"},
+            ai_runtime=lambda: {},
+            system_mode=lambda: (_ for _ in ()).throw(
+                AssertionError("snapshot should pass preloaded context to build_system_mode")
+            ),
+        )
+        service = BlockerControlService(owner)
+
+        snapshot = service.snapshot()
+
+        self.assertEqual(len(mode_builder_calls), 1)
+        call = mode_builder_calls[0]
+        self.assertEqual(call["snapshot"]["submit_blocked_reasons"], ["mode_blocker"])
+        self.assertEqual(call["readiness"]["submit_blocked_reasons"], ["execution_blocker"])
+        self.assertEqual(call["health_blockers"], ["health_blocker"])
+        self.assertEqual(call["trial_guard"], {"status": "monitoring"})
+        self.assertTrue(snapshot.blockers)
+
     def test_snapshot_panel_version_is_stable_when_state_does_not_change(self) -> None:
         owner = SimpleNamespace(
             runtime=SimpleNamespace(

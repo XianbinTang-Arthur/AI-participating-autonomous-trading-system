@@ -2,7 +2,7 @@
 
 ## Business objectives and boundaries
 
-目标是继续压低 operator dashboard 首屏 P0 快照刷新延迟，避免 `runtime` panel 因同步构建完整 guarded-live 预检和策略摘要而触发 2s 软超时；同时避免 P3 复盘/归因重报表在启动和定时调度中长期占用 snapshot loader。
+目标是继续压低 operator dashboard 首屏 P0 快照刷新延迟，避免 `runtime` panel 因同步构建完整 guarded-live 预检和策略摘要而触发 2s 软超时；同时降低 `blockerControl/blockers` 诊断链的串行读取耗时，并避免 P3 复盘/归因重报表在启动和定时调度中长期占用 snapshot loader。
 
 边界：只调整 dashboard snapshot/read summary 路径。不改变交易决策、风控阈值、订单生成、对账恢复、执行适配器、数据库 schema 或完整详情端点语义。
 
@@ -10,6 +10,7 @@
 
 - `RuntimeQueryFacade.build_system_runtime(dashboard_summary_only=True)`: 负责首屏运行时摘要，不再同步构建完整策略运行摘要和完整 guarded-live 预检矩阵。
 - `RuntimeQueryFacade`: 从 runtime 已有上下文组装 lightweight preflight 摘要，供 runtime panel 和 run-packet summary 使用。
+- `BlockerControlService.snapshot`: 负责阻断控制面快照，读取 recovery/health/reconciliation/mode/readiness/trial/ai runtime 时改为同批并行获取，再把上下文传给 system mode builder。
 - `DashboardSnapshotPolicy`: 描述 panel 的刷新策略，新增启动预热和定时刷新开关。
 - P3 报表 panel: `strategyAttribution`、`positionLifecycleAttribution`、`trialReviewSummary` 保持按需读取，但不再参与启动预热和后台周期扫表。
 
@@ -44,6 +45,7 @@ Dashboard summary 仍是只读幂等路径。P3 缺失时继续返回默认 payl
 - `runtime` dashboard 不再调用 `strategy_runtime_dashboard()`，避免 P0 与 P1 `strategyRuntime` panel 竞争同一策略摘要构建。
 - `runtime` dashboard 不再调用 `guarded_live_preflight_dashboard()`，改用同一次 runtime build 已经取得的 recovery/account/margin/live-guard/trial-guard/submit-reason 上下文组装 lightweight summary。
 - `_submit_blocked_reasons_dashboard()` 不再作为 runtime P0 的嵌套 parallel_fetch 子调用，改为在同一 fan-out 内读取 mode snapshot 和 execution readiness 后本地合并。
+- `BlockerControlService.snapshot()` 不再先串行 recovery/health/reconciliation 后再嵌套读取 readiness；它在同一批 fan-out 内取得 mode/readiness/trial 上下文，减少 `blockerControl` 与 derived `blockers` panel 的 3s timeout 风险。
 - P3 重报表不参与 startup prewarm 和 scheduler refresh，避免未查看的历史报表占用 global loader 并挤压 P0/P1。
 
 ## Logging, Monitoring, Auditing
@@ -54,6 +56,7 @@ Dashboard summary 仍是只读幂等路径。P3 缺失时继续返回默认 payl
 
 - 单元测试确认 `system_runtime_dashboard` 不调用 full strategy/preflight/blocker，也不调用 `strategy_runtime_dashboard()` / `guarded_live_preflight_dashboard()`。
 - 单元测试确认 P3 policy 不参与 startup targets 和 scheduler missing refresh，但 read-missing 仍能按需 enqueue。
+- 单元测试确认 blocker control snapshot 会把并行预取的 mode/readiness/trial 上下文传入 system mode builder，而不是回退到额外 `system_mode()` 读取。
 - 运行 ruff、全量 unit、最窄 WSL2 operator dashboard bundle integration。
 
 ## Migration, Rollback, Compatibility
@@ -79,4 +82,5 @@ Dashboard summary 仍是只读幂等路径。P3 缺失时继续返回默认 payl
 1. 必需 derivatives-live 容器全部 running/healthy。
 2. DB active long queries 维持 0 或可解释的短暂波动。
 3. 监控窗口内 `runtime` P0 快照刷新不再因为 guarded-live preflight 或 strategy runtime summary 超过 2s。
-4. P3 panel 不在启动 prewarm 中自动刷新；打开对应视图时仍能按需产生快照。
+4. `blockerControl/blockers` 不再因串行 mode/readiness 构建持续超过 3s。
+5. P3 panel 不在启动 prewarm 中自动刷新；打开对应视图时仍能按需产生快照。

@@ -11,6 +11,7 @@ from aats.schemas.blocker_control import (
     BlockerControlTask,
 )
 from aats.services.blocker_control.priority import blocker_priority
+from aats.services.operator._parallel import parallel_fetch
 
 if TYPE_CHECKING:
     from aats.services.operator.query_service import OperatorQueryService
@@ -29,14 +30,44 @@ class BlockerControlService:
         self.owner = owner
 
     def snapshot(self) -> BlockerControlSnapshot:
-        recovery = self.owner.recovery_view()
-        latest_reconciliation = self.owner._latest_scoped_reconciliation()
-        health_snapshot = self.owner.runtime.health_service.snapshot()
         mode_builder = getattr(getattr(self.owner, "recovery_queries", None), "build_system_mode", None)
+        mode_context_available = (
+            callable(mode_builder)
+            and hasattr(getattr(self.owner.runtime, "mode_controller", None), "snapshot")
+            and hasattr(getattr(self.owner.runtime, "execution_adapter", None), "readiness")
+            and hasattr(self.owner, "trial_guard")
+        )
+        queries = {
+            "recovery": self.owner.recovery_view,
+            "latest_reconciliation": self.owner._latest_scoped_reconciliation,
+            "health_snapshot": self.owner.runtime.health_service.snapshot,
+            "ai_runtime": self.owner.ai_runtime,
+        }
+        if mode_context_available:
+            queries.update(
+                {
+                    "mode_snapshot": lambda: dict(self.owner.runtime.mode_controller.snapshot()),
+                    "readiness": self.owner.runtime.execution_adapter.readiness,
+                    "trial_guard": self.owner.trial_guard,
+                }
+            )
+        r = parallel_fetch(queries)
+        recovery = r["recovery"]
+        latest_reconciliation = r["latest_reconciliation"]
+        health_snapshot = r["health_snapshot"]
+        health_blockers = list(getattr(health_snapshot, "blockers", []) or [])
         system_mode = (
             mode_builder(
                 recovery=recovery,
-                health_blockers=list(getattr(health_snapshot, "blockers", []) or []),
+                snapshot=r["mode_snapshot"],
+                readiness=r["readiness"],
+                health_blockers=health_blockers,
+                trial_guard=r["trial_guard"],
+            )
+            if mode_context_available
+            else mode_builder(
+                recovery=recovery,
+                health_blockers=health_blockers,
             )
             if callable(mode_builder)
             else self.owner.system_mode()
@@ -45,7 +76,7 @@ class BlockerControlService:
             recovery=recovery,
             health_snapshot=health_snapshot,
             system_mode=system_mode,
-            ai_runtime=self.owner.ai_runtime(),
+            ai_runtime=r["ai_runtime"],
             latest_reconciliation=latest_reconciliation,
         )
         primary, secondary = self._primary_and_secondary_items(items)
