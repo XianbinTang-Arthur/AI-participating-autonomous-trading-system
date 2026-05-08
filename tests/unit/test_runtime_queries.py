@@ -168,7 +168,7 @@ class _DashboardHealthOwner:
         return None
 
     def _latest_scoped_snapshot(self):
-        return SimpleNamespace(snapshot_ts=None)
+        raise AssertionError("dashboard health should defer latest portfolio snapshot")
 
     def latest_account_baseline(self) -> dict:
         raise AssertionError("dashboard health should reuse recovery baseline")
@@ -346,6 +346,7 @@ class TestRuntimeQueryFacade(unittest.TestCase):
 
         self.assertTrue(payload["dashboard_summary_only"])
         self.assertEqual(payload["truth_source"], "runtime_health_dashboard_summary")
+        self.assertIn("latest_portfolio", payload["deferred_sections"])
         self.assertEqual(payload["mode_contract"]["recovery_state"], "normal_operation")
         self.assertEqual(payload["account_baseline"]["baseline_id"], "baseline_from_recovery")
         self.assertIsNone(payload["subsystems"]["audit_replay"]["audit_record_count"])

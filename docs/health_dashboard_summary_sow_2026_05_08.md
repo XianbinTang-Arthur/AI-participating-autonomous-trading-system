@@ -21,12 +21,13 @@ Input remains the same runtime services and repositories. Dashboard output keeps
 - `truth_source = runtime_health_dashboard_summary`
 - `subsystems.audit_replay.audit_record_count = null`
 - `subsystems.audit_replay.audit_record_count_status = deferred_from_dashboard_summary`
+- `deferred_sections` includes `latest_portfolio`
 
 Full health output remains unchanged.
 
 ## Database schema / tables / indexes / constraints
 
-No schema changes. The optimization removes one dashboard-time `audit_repo.count()` call and one duplicate dashboard-time account baseline lookup; it does not add tables, indexes, or constraints.
+No schema changes. The optimization removes one dashboard-time `audit_repo.count()` call, one duplicate dashboard-time account baseline lookup, and the dashboard-time latest portfolio snapshot lookup; it does not add tables, indexes, or constraints.
 
 ## Transactions, consistency, concurrency
 
@@ -50,6 +51,7 @@ The dashboard summary path avoids:
 
 - duplicate `latest_account_baseline` lookup already covered by recovery summary
 - synchronous audit distinct decision count in first-screen health
+- latest portfolio snapshot lookup already covered by the dedicated portfolio panel
 
 The detail/full health path keeps current caching and count behavior.
 
@@ -59,7 +61,7 @@ No new log stream. Acceptance is based on gateway `dashboard_snapshot_refresh_*`
 
 ## Testing strategy
 
-Unit tests assert dashboard health reuses recovery baseline and does not call the full account baseline or audit count loaders.
+Unit tests assert dashboard health reuses recovery baseline and does not call the full account baseline, audit count, or latest portfolio snapshot loaders.
 
 Validation:
 

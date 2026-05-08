@@ -453,7 +453,6 @@ class RuntimeQueryFacade:
                 "phase1_shadow": self.owner.phase1_shadow,
                 "derivatives_live_guard": self.owner.derivatives_live_guard,
                 "latest_reconciliation": self.owner._latest_scoped_reconciliation,
-                "latest_portfolio": self.owner._latest_scoped_snapshot,
                 "trial_guard": self.owner.trial_guard,
             })
         else:
@@ -479,7 +478,7 @@ class RuntimeQueryFacade:
         phase1_shadow = r["phase1_shadow"]
         derivatives_live_guard = r["derivatives_live_guard"]
         latest_reconciliation = r["latest_reconciliation"]
-        latest_portfolio = r["latest_portfolio"]
+        latest_portfolio = None if dashboard_summary_only else r["latest_portfolio"]
         if dashboard_summary_only:
             account_baseline = (
                 recovery.get("latest_account_baseline")
@@ -639,6 +638,7 @@ class RuntimeQueryFacade:
         if dashboard_summary_only:
             payload["dashboard_summary_only"] = True
             payload["truth_source"] = "runtime_health_dashboard_summary"
+            payload["deferred_sections"] = ["latest_portfolio"]
         return payload
 
     def system_runtime(self) -> dict[str, Any]:
