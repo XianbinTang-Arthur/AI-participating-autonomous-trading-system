@@ -80,6 +80,10 @@ Target fixes:
 - Keep dashboard `latestDecision` on a lightweight summary path; full decision chains,
   orders, fills, reconciliation refs, and dedicated overlay event history stay available
   behind explicit detail endpoints instead of blocking first-screen refresh.
+- Snapshot refresh timeouts must keep a single inflight loader until the underlying
+  sync read settles. `asyncio.to_thread()` cannot stop DB work already running in a
+  worker thread, so releasing the panel slot immediately would start duplicate reads
+  and starve the dashboard snapshot plane.
 
 ## Logging, Monitoring, Auditing
 

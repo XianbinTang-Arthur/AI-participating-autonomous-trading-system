@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import timedelta
 from time import perf_counter
@@ -66,11 +65,6 @@ class DashboardSnapshotRead:
 
 
 _LOGGER = get_logger("aats.operator.dashboard_snapshot")
-
-
-def _discard_loader_task_result(task: asyncio.Task[Any]) -> None:
-    with suppress(asyncio.CancelledError, Exception):
-        task.result()
 
 
 P0_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
@@ -608,8 +602,6 @@ class DashboardSnapshotPlane:
         loader_task = asyncio.create_task(self._call_loader(snapshot_key), name=f"dashboard-snapshot-loader-{snapshot_key}")
         done, _pending = await asyncio.wait({loader_task}, timeout=policy.timeout_seconds)
         if not done:
-            loader_task.cancel()
-            loader_task.add_done_callback(_discard_loader_task_result)
             await self._record_error(
                 snapshot_key,
                 error_code="dashboard_snapshot_refresh_timeout",
@@ -624,7 +616,10 @@ class DashboardSnapshotPlane:
                 variant_key=variant_key,
                 timeout_seconds=policy.timeout_seconds,
             )
-            return
+            # ``asyncio.to_thread`` cannot stop the underlying sync DB work when
+            # its coroutine is cancelled. Keep this refresh inflight until the
+            # loader settles so the scheduler/read path cannot start duplicate
+            # full-panel reads that saturate the DB and default thread pool.
         try:
             payload = await loader_task
         except asyncio.CancelledError:
@@ -668,6 +663,7 @@ class DashboardSnapshotPlane:
             variant_key=variant_key,
             priority=policy.priority,
             duration_ms=duration_ms,
+            late=duration_ms > policy.timeout_seconds * 1000.0,
         )
 
     async def _call_loader(self, snapshot_key: str) -> Any:
