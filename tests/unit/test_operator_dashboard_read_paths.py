@@ -160,12 +160,13 @@ class _RuntimeDashboardOwner:
             mode_controller=SimpleNamespace(
                 snapshot=lambda: {
                     "submit_blocked_reasons": ["exchange_not_ready"],
+                    "exchange_submit_allowed": True,
                 },
             ),
             execution_adapter=SimpleNamespace(
-                readiness=lambda: {
-                    "submit_blocked_reasons": [],
-                },
+                readiness=lambda: (_ for _ in ()).throw(
+                    AssertionError("dashboard runtime must synthesize execution readiness")
+                ),
             ),
             runtime_profile=_RuntimeDict(profile="derivatives-live"),
             environment_capabilities=_RuntimeDict(okx=True),
@@ -234,7 +235,7 @@ class _RuntimeDashboardOwner:
         return None
 
     def _latest_scoped_reconciliation(self):
-        return None
+        raise AssertionError("dashboard runtime must defer latest reconciliation")
 
     def latest_account_baseline(self):
         return {"baseline_kind": "exchange"}
@@ -301,6 +302,8 @@ def test_system_runtime_dashboard_uses_summary_loaders_without_full_runtime() ->
     assert payload["guarded_live_preflight"]["truth_source"] == "runtime_context_guarded_live_preflight_summary"
     assert payload["guarded_live_run_packet_summary"]["summary_source"] == "runtime_lightweight"
     assert payload["guarded_live_run_packet_summary"]["summary_metrics"]["execution_blocker_count"] == 1
+    assert "execution_adapter.readiness" in payload["deferred_sections"]
+    assert "latest_reconciliation" in payload["deferred_sections"]
 
 
 class _StrategyRuntimeDashboardFacadeOwner:

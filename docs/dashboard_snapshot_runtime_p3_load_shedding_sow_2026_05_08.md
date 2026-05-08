@@ -10,6 +10,7 @@
 
 - `RuntimeQueryFacade.build_system_runtime(dashboard_summary_only=True)`: 负责首屏运行时摘要，不再同步构建完整策略运行摘要和完整 guarded-live 预检矩阵。
 - `RuntimeQueryFacade`: 从 runtime 已有上下文组装 lightweight preflight 摘要，供 runtime panel 和 run-packet summary 使用。
+- `RecoveryQueryFacade.system_mode_dashboard()`: 负责首屏 mode 摘要，使用 mode controller + account status 合成 readiness，不再同步调用完整 execution adapter readiness 或 health blockers。
 - `BlockerControlService.snapshot`: 负责阻断控制面快照，读取 recovery/health/reconciliation/mode/readiness/trial/ai runtime 时改为同批并行获取，再把上下文传给 system mode builder。
 - `DashboardSnapshotPolicy`: 描述 panel 的刷新策略，新增启动预热和定时刷新开关。
 - P3 报表 panel: `strategyAttribution`、`positionLifecycleAttribution`、`trialReviewSummary` 保持按需读取，但不再参与启动预热和后台周期扫表。
@@ -45,6 +46,7 @@ Dashboard summary 仍是只读幂等路径。P3 缺失时继续返回默认 payl
 - `runtime` dashboard 不再调用 `strategy_runtime_dashboard()`，避免 P0 与 P1 `strategyRuntime` panel 竞争同一策略摘要构建。
 - `runtime` dashboard 不再调用 `guarded_live_preflight_dashboard()`，改用同一次 runtime build 已经取得的 recovery/account/margin/live-guard/trial-guard/submit-reason 上下文组装 lightweight summary。
 - `_submit_blocked_reasons_dashboard()` 不再作为 runtime P0 的嵌套 parallel_fetch 子调用，改为在同一 fan-out 内读取 mode snapshot 和 execution readiness 后本地合并。
+- `system_mode_dashboard()` 不再调用完整 `execution_adapter.readiness()` 和 `health_service.execution_blockers()`；runtime dashboard 也复用合成 readiness，不再读取最新 reconciliation report。
 - `BlockerControlService.snapshot()` 不再先串行 recovery/health/reconciliation 后再嵌套读取 readiness；它在同一批 fan-out 内取得 mode/readiness/trial 上下文，减少 `blockerControl` 与 derived `blockers` panel 的 3s timeout 风险。
 - P3 重报表不参与 startup prewarm 和 scheduler refresh，避免未查看的历史报表占用 global loader 并挤压 P0/P1。
 
@@ -55,6 +57,7 @@ Dashboard summary 仍是只读幂等路径。P3 缺失时继续返回默认 payl
 ## Testing Strategy
 
 - 单元测试确认 `system_runtime_dashboard` 不调用 full strategy/preflight/blocker，也不调用 `strategy_runtime_dashboard()` / `guarded_live_preflight_dashboard()`。
+- 单元测试确认 `system_mode_dashboard` 和 `system_runtime_dashboard` 都不调用完整 execution readiness，runtime 首屏也不查最新 reconciliation report。
 - 单元测试确认 P3 policy 不参与 startup targets 和 scheduler missing refresh，但 read-missing 仍能按需 enqueue。
 - 单元测试确认 blocker control snapshot 会把并行预取的 mode/readiness/trial 上下文传入 system mode builder，而不是回退到额外 `system_mode()` 读取。
 - 运行 ruff、全量 unit、最窄 WSL2 operator dashboard bundle integration。

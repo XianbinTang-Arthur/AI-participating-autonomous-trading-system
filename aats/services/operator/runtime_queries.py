@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from aats.events import topics
 from aats.schemas.common import utc_now
+from aats.schemas.system import ComponentHealth, SystemHealthSnapshot
 from aats.services.execution_engine.okx_account import derivatives_position_mode_contract
 from aats.services.operator._parallel import parallel_fetch
 from aats.services.operator.ui_capabilities import ui_operating_mode_override_policy
@@ -444,7 +445,6 @@ class RuntimeQueryFacade:
     def build_system_health(self, *, dashboard_summary_only: bool = False) -> dict[str, Any]:
         if dashboard_summary_only:
             r = parallel_fetch({
-                "snapshot": self.owner.runtime.health_service.snapshot,
                 "mode_controller_snapshot": lambda: dict(self.owner.runtime.mode_controller.snapshot()),
                 "recovery": self.owner.recovery_view_dashboard,
                 "market": self.owner.runtime.market_gateway.status,
@@ -468,7 +468,6 @@ class RuntimeQueryFacade:
                 "blockers": self.owner.blockers,
                 "account_baseline": self.owner.latest_account_baseline,
             })
-        snapshot = r["snapshot"]
         recovery = r["recovery"]
         market = r["market"]
         account = r["account"]
@@ -483,6 +482,17 @@ class RuntimeQueryFacade:
         derivatives_live_guard = r["derivatives_live_guard"]
         latest_reconciliation = None if dashboard_summary_only else r["latest_reconciliation"]
         latest_portfolio = None if dashboard_summary_only else r["latest_portfolio"]
+        if dashboard_summary_only:
+            snapshot = self._dashboard_health_snapshot(
+                mode_controller_snapshot=r["mode_controller_snapshot"],
+                market_status=market,
+                account_status=account,
+                recovery=recovery,
+                phase1_shadow=phase1_shadow,
+                derivatives_live_guard=derivatives_live_guard,
+            )
+        else:
+            snapshot = r["snapshot"]
         if dashboard_summary_only:
             account_baseline = (
                 recovery.get("latest_account_baseline")
@@ -644,11 +654,86 @@ class RuntimeQueryFacade:
             payload["dashboard_summary_only"] = True
             payload["truth_source"] = "runtime_health_dashboard_summary"
             payload["deferred_sections"] = [
+                "health_service.snapshot",
                 "execution_adapter.readiness",
                 "latest_portfolio",
                 "latest_reconciliation",
             ]
         return payload
+
+    def _dashboard_health_snapshot(
+        self,
+        *,
+        mode_controller_snapshot: dict[str, Any],
+        market_status: dict[str, Any],
+        account_status: dict[str, Any],
+        recovery: dict[str, Any],
+        phase1_shadow: dict[str, Any],
+        derivatives_live_guard: dict[str, Any],
+    ) -> SystemHealthSnapshot:
+        components = [
+            self._dashboard_component_from_status("market_data", market_status),
+            self._dashboard_component_from_status("account_state", account_status),
+            self._dashboard_reconciliation_component(recovery),
+            self._dashboard_component_from_status("phase1_shadow", phase1_shadow),
+            self._dashboard_component_from_status("derivatives_live_guard", derivatives_live_guard),
+        ]
+        blockers = [blocker for component in components for blocker in component.blockers]
+        if self.owner.runtime.kill_switch.halted:
+            blockers.append("kill_switch_active")
+        status = "blocked" if blockers else "warn" if any(component.status == "warn" for component in components) else "ok"
+        mode = mode_controller_snapshot.get("mode")
+        if mode is None:
+            mode = getattr(self.owner.runtime.settings, "mode", "unknown")
+        operating_state = mode_controller_snapshot.get("operating_state")
+        if operating_state is None:
+            operating_state_getter = getattr(self.owner.runtime.mode_controller, "operating_state", None)
+            operating_state = operating_state_getter() if callable(operating_state_getter) else "guarded_live_enabled"
+        return SystemHealthSnapshot(
+            mode=str(mode),
+            operating_state=operating_state,
+            status=status,
+            halted=bool(self.owner.runtime.kill_switch.halted),
+            blockers=list(dict.fromkeys(blockers)),
+            components=components,
+        )
+
+    @staticmethod
+    def _dashboard_component_from_status(component: str, status: dict[str, Any]) -> ComponentHealth:
+        blockers = list(status.get("blockers", []) or [])
+        connected = bool(status.get("connected", True))
+        ready = bool(status.get("ready", status.get("fresh", True)))
+        detail = status.get("detail") or status.get("last_error") or status.get("summary")
+        return ComponentHealth(
+            component=component,
+            status="ok" if ready and connected else "warn" if connected else "blocked",
+            connected=connected,
+            fresh=bool(status.get("fresh", True)),
+            last_update_ts=status.get("last_update_ts"),
+            detail=str(detail) if detail is not None else None,
+            blockers=blockers,
+        )
+
+    def _dashboard_reconciliation_component(self, recovery: dict[str, Any]) -> ComponentHealth:
+        blockers = list(dict.fromkeys(recovery.get("resume_blocked_reasons", []) or []))
+        if recovery.get("halt_required"):
+            blockers.append("reconciliation_halt_required")
+        if recovery.get("review_required"):
+            blockers.append("operator_rebaseline_required")
+        recovered = bool(recovery.get("recovered_reconciliation_available", False))
+        if not recovered:
+            blockers.append("reconciliation_status_deferred")
+        safe_to_trade = bool(recovery.get("safe_to_trade", False))
+        status = "blocked" if blockers else "ok" if safe_to_trade else "warn"
+        return ComponentHealth(
+            component="reconciliation",
+            status=status,
+            connected=True,
+            fresh=recovered,
+            last_update_ts=None,
+            detail=str(recovery.get("recovery_state") or "unknown"),
+            blockers=list(dict.fromkeys(blockers)),
+        )
 
     def _dashboard_execution_readiness(
         self,
@@ -1038,7 +1123,6 @@ class RuntimeQueryFacade:
         runtime_loaders = {
             "latest_decision": lambda: self.owner.runtime.event_store.latest(topics.DECISION_CONTEXTS),
             "latest_fill": self.owner.latest_fill,
-            "latest_reconciliation": self.owner._latest_scoped_reconciliation,
             "account_baseline": self.owner.latest_account_baseline,
             "account_snapshot": self.owner.latest_exchange_snapshot,
             "recovery": self.owner.recovery_view_dashboard if dashboard_summary_only else self.owner.recovery_view,
@@ -1051,8 +1135,8 @@ class RuntimeQueryFacade:
         }
         if dashboard_summary_only:
             runtime_loaders["mode_controller_snapshot"] = lambda: dict(self.owner.runtime.mode_controller.snapshot())
-            runtime_loaders["execution_readiness"] = self.owner.runtime.execution_adapter.readiness
         else:
+            runtime_loaders["latest_reconciliation"] = self.owner._latest_scoped_reconciliation
             runtime_loaders["guarded_live_preflight"] = self.owner.guarded_live_preflight
             runtime_loaders["strategy_runtime_summary"] = strategy_runtime_summary_loader
             runtime_loaders["blocker_control"] = self.owner.blocker_control
@@ -1061,16 +1145,20 @@ class RuntimeQueryFacade:
         # ── 阶段 2：依赖性计算（需要上面的结果） ─────────────────
         latest_decision = r["latest_decision"]
         latest_fill = r["latest_fill"]
-        latest_reconciliation = r["latest_reconciliation"]
+        latest_reconciliation = None if dashboard_summary_only else r["latest_reconciliation"]
         account_baseline = r["account_baseline"]
         account_snapshot = r["account_snapshot"]
         recovery = r["recovery"]
         control_plane_consistency = r["control_plane_consistency"]
         account_status = r["account_status"]
         if dashboard_summary_only:
+            execution_readiness = self._dashboard_execution_readiness(
+                mode_controller_snapshot=r["mode_controller_snapshot"],
+                account_status=account_status,
+            )
             submit_blocked_reasons = self._dashboard_submit_blocked_reasons_from_context(
                 mode_snapshot=r["mode_controller_snapshot"],
-                execution_readiness=r["execution_readiness"],
+                execution_readiness=execution_readiness,
             )
             blocker_control = self.owner.blocker_control_service.execution_blocker_summary(
                 recovery=recovery,
@@ -1235,6 +1323,8 @@ class RuntimeQueryFacade:
                 "full_guarded_live_preflight",
                 "full_guarded_live_preflight_check_matrix",
                 "full_blocker_control",
+                "execution_adapter.readiness",
+                "latest_reconciliation",
             ]
         return payload
 

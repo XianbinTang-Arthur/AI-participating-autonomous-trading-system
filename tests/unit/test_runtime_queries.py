@@ -80,26 +80,13 @@ class _DashboardHealthOwner:
         self.runtime = SimpleNamespace(
             kill_switch=SimpleNamespace(halted=False),
             health_service=SimpleNamespace(
-                snapshot=lambda: SimpleNamespace(
-                    status="ok",
-                    operating_state="running",
-                    mode="guarded_live",
-                    blockers=["phase1_shadow_recovery_required"],
-                    components=[
-                        SimpleNamespace(
-                            component="reconciliation",
-                            status="ok",
-                            fresh=True,
-                            detail="ok",
-                            blockers=[],
-                            last_update_ts="2026-05-08T00:00:00Z",
-                        )
-                    ],
+                snapshot=lambda: (_ for _ in ()).throw(
+                    AssertionError("dashboard health should synthesize health snapshot")
                 ),
             ),
             mode_controller=SimpleNamespace(
                 snapshot=lambda: {
-                    "operating_state": "running",
+                    "operating_state": "guarded_live_enabled",
                     "mode": "guarded_live",
                     "halted": False,
                     "submit_blocked_reasons": ["live_submit_disabled"],
@@ -142,6 +129,7 @@ class _DashboardHealthOwner:
             "rebaseline_available": False,
             "resume_eligible": True,
             "resume_blocked_reasons": [],
+            "recovered_reconciliation_available": True,
             "latest_account_baseline": {"baseline_id": "baseline_from_recovery"},
         }
 
@@ -158,7 +146,13 @@ class _DashboardHealthOwner:
         return {"fresh": True}
 
     def phase1_shadow(self) -> dict:
-        return {"status": "healthy", "summary": "ok"}
+        return {
+            "status": "lagging",
+            "summary": "lagging",
+            "ready": False,
+            "fresh": True,
+            "blockers": ["phase1_shadow_recovery_required"],
+        }
 
     def derivatives_live_guard(self) -> dict:
         return {}
@@ -247,7 +241,7 @@ class _DashboardRecoveryOwner:
         return loader()
 
     def _latest_scoped_reconciliation(self):
-        return None
+        raise AssertionError("dashboard recovery must defer latest reconciliation")
 
     def latest_account_baseline(self) -> dict:
         return {"baseline_id": "baseline_dashboard"}
@@ -278,6 +272,69 @@ class _DashboardRecoveryOwner:
 
     def payload(self, _envelope):
         raise AssertionError("dashboard recovery must not serialize AI events")
+
+
+class _DashboardModeOwner:
+    def __init__(self) -> None:
+        self.runtime = SimpleNamespace(
+            mode_controller=SimpleNamespace(
+                snapshot=lambda: {
+                    "mode": "guarded_live",
+                    "operating_state": "guarded_live_enabled",
+                    "submit_blocked_reasons": ["live_submit_disabled"],
+                    "exchange_submit_allowed": True,
+                }
+            ),
+            execution_adapter=SimpleNamespace(
+                readiness=lambda: (_ for _ in ()).throw(
+                    AssertionError("dashboard mode must synthesize execution readiness")
+                )
+            ),
+            health_service=SimpleNamespace(
+                execution_blockers=lambda: (_ for _ in ()).throw(
+                    AssertionError("dashboard mode must defer full health blockers")
+                )
+            ),
+            runtime_profile_resolution=SimpleNamespace(profile_source="unit"),
+            settings=SimpleNamespace(
+                mode="guarded_live",
+                live_submit_enabled=True,
+                guarded_execution_dry_run=False,
+                okx_simulated_trading=False,
+            ),
+        )
+        self.recovery_posture = SimpleNamespace(
+            execution_blockers=lambda *, health_blockers, recovery_blockers, submit_blocked_reasons: list(
+                dict.fromkeys(
+                    list(health_blockers)
+                    + list(recovery_blockers)
+                    + list(submit_blocked_reasons)
+                )
+            )
+        )
+
+    def _scope_cache_fragment(self) -> str:
+        return "derivatives:cross:BTC-USDT-SWAP"
+
+    def _cached_ttl(self, _key: str, _ttl_seconds: int, loader):
+        return loader()
+
+    def recovery_view_dashboard(self) -> dict:
+        return {
+            "recovery_state": "normal_operation",
+            "review_required": False,
+            "rebaseline_available": False,
+            "resume_blocked_reasons": [],
+        }
+
+    def recovery_view(self) -> dict:
+        raise AssertionError("dashboard mode must not build full recovery")
+
+    def account_service_status(self) -> dict:
+        return {"ready": True, "fresh": True}
+
+    def trial_guard(self) -> dict:
+        return {"status": "monitoring"}
 
 
 class TestRuntimeQueryFacade(unittest.TestCase):
@@ -348,14 +405,15 @@ class TestRuntimeQueryFacade(unittest.TestCase):
         self.assertIn("latest_portfolio", payload["deferred_sections"])
         self.assertIn("execution_adapter.readiness", payload["deferred_sections"])
         self.assertIn("latest_reconciliation", payload["deferred_sections"])
+        self.assertIn("health_service.snapshot", payload["deferred_sections"])
         self.assertEqual(payload["mode_contract"]["recovery_state"], "normal_operation")
         self.assertEqual(
             payload["subsystems"]["reconciliation"]["last_update_ts"],
-            "2026-05-08T00:00:00Z",
+            None,
         )
         self.assertEqual(
             payload["last_success_timestamps"]["reconciliation"],
-            "2026-05-08T00:00:00Z",
+            None,
         )
         self.assertEqual(
             payload["subsystems"]["execution_adapter"]["truth_source"],
@@ -391,6 +449,18 @@ class TestRuntimeQueryFacade(unittest.TestCase):
             payload["claimed_submit_recovery_gate"]["status"],
             "deferred_from_dashboard_summary",
         )
+        self.assertIn("latest_reconciliation", payload["deferred_sections"])
+
+    def test_dashboard_mode_synthesizes_readiness_and_defers_full_blockers(self) -> None:
+        owner = _DashboardModeOwner()
+        facade = RecoveryQueryFacade(owner)
+
+        payload = facade.system_mode_dashboard()
+
+        self.assertTrue(payload["exchange_submit_allowed"])
+        self.assertTrue(payload["submit_blocked"])
+        self.assertEqual(payload["blocked_reason"], "live_submit_disabled")
+        self.assertEqual(payload["trial_guard"], {"status": "monitoring"})
 
     def test_lightweight_run_packet_summary_does_not_call_full_packet_loader(self) -> None:
         owner = _RunPacketSummaryOwner()

@@ -21,14 +21,14 @@ Input remains the same runtime services and repositories. Dashboard output keeps
 - `truth_source = runtime_health_dashboard_summary`
 - `subsystems.audit_replay.audit_record_count = null`
 - `subsystems.audit_replay.audit_record_count_status = deferred_from_dashboard_summary`
-- `subsystems.reconciliation.last_update_ts` comes from the in-memory health component when present
-- `deferred_sections` includes `execution_adapter.readiness`, `latest_portfolio`, and `latest_reconciliation`
+- `subsystems.reconciliation` is synthesized from recovery summary status; full timestamps and severity stay on detail surfaces
+- `deferred_sections` includes `health_service.snapshot`, `execution_adapter.readiness`, `latest_portfolio`, and `latest_reconciliation`
 
 Full health output remains unchanged.
 
 ## Database schema / tables / indexes / constraints
 
-No schema changes. The optimization removes one dashboard-time `audit_repo.count()` call, one duplicate dashboard-time account baseline lookup, the dashboard-time latest portfolio snapshot lookup, the dashboard-time latest reconciliation report lookup, and the dashboard-time full execution adapter readiness call; it does not add tables, indexes, or constraints.
+No schema changes. The optimization removes one dashboard-time `health_service.snapshot()` fan-out, one dashboard-time `audit_repo.count()` call, one duplicate dashboard-time account baseline lookup, the dashboard-time latest portfolio snapshot lookup, the dashboard-time latest reconciliation report lookup, and the dashboard-time full execution adapter readiness call; it does not add tables, indexes, or constraints.
 
 ## Transactions, consistency, concurrency
 
@@ -50,6 +50,7 @@ No trading or recovery state transition changes.
 
 The dashboard summary path avoids:
 
+- full `health_service.snapshot()`, which otherwise re-enters execution readiness, reconciliation, account, market, and phase1 providers
 - duplicate `latest_account_baseline` lookup already covered by recovery summary
 - synchronous audit distinct decision count in first-screen health
 - latest portfolio snapshot lookup already covered by the dedicated portfolio panel
@@ -64,7 +65,7 @@ No new log stream. Acceptance is based on gateway `dashboard_snapshot_refresh_*`
 
 ## Testing strategy
 
-Unit tests assert dashboard health reuses recovery baseline and does not call the full account baseline, audit count, latest portfolio snapshot, latest reconciliation report, or execution adapter readiness loaders.
+Unit tests assert dashboard health reuses recovery baseline and does not call full `health_service.snapshot()`, the full account baseline, audit count, latest portfolio snapshot, latest reconciliation report, or execution adapter readiness loaders.
 
 Validation:
 

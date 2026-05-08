@@ -44,9 +44,10 @@ class RecoveryQueryFacade:
             None,
         )
         queries: dict[str, Any] = {
-            "latest_reconciliation": self.owner._latest_scoped_reconciliation,
             "latest_baseline": self.owner.latest_account_baseline,
         }
+        if not dashboard_summary_only:
+            queries["latest_reconciliation"] = self.owner._latest_scoped_reconciliation
         if callable(latest_state_snapshot_getter):
             queries["latest_state_snapshot"] = lambda: latest_state_snapshot_getter(scope=self.owner.state_scope)
         if not dashboard_summary_only:
@@ -73,7 +74,7 @@ class RecoveryQueryFacade:
 
         r = parallel_fetch(queries)
 
-        latest_reconciliation = r["latest_reconciliation"]
+        latest_reconciliation = None if dashboard_summary_only else r["latest_reconciliation"]
         latest_state_snapshot = r.get("latest_state_snapshot")
         latest_baseline_generation = r.get("latest_baseline_generation")
         latest_exchange_ack_watermark = r.get("latest_exchange_ack_watermark")
@@ -199,6 +200,7 @@ class RecoveryQueryFacade:
                 {
                     "dashboard_summary_only": True,
                     "truth_source": "recovery_dashboard_summary",
+                    "deferred_sections": ["latest_reconciliation"],
                 }
             )
         return payload
@@ -428,8 +430,49 @@ class RecoveryQueryFacade:
         return self.owner._cached_ttl(
             cache_key,
             15,
-            lambda: self.build_system_mode(recovery=self.recovery_view_dashboard()),
+            self._build_system_mode_dashboard,
         )
+
+    def _build_system_mode_dashboard(self) -> dict[str, Any]:
+        r = parallel_fetch({
+            "recovery": self.owner.recovery_view_dashboard,
+            "snapshot": lambda: dict(self.owner.runtime.mode_controller.snapshot()),
+            "account": self.owner.account_service_status,
+            "trial_guard": self.owner.trial_guard,
+        })
+        readiness = self._dashboard_execution_readiness(
+            mode_controller_snapshot=r["snapshot"],
+            account_status=r["account"],
+        )
+        return self.build_system_mode(
+            recovery=r["recovery"],
+            snapshot=r["snapshot"],
+            readiness=readiness,
+            health_blockers=[],
+            trial_guard=r["trial_guard"],
+        )
+
+    def _dashboard_execution_readiness(
+        self,
+        *,
+        mode_controller_snapshot: dict[str, Any],
+        account_status: dict[str, Any],
+    ) -> dict[str, Any]:
+        settings = self.owner.runtime.settings
+        return {
+            "ready": bool(account_status.get("credentials_configured", account_status.get("ready", True)))
+            and bool(account_status.get("enabled", True)),
+            "backend": self.owner.runtime.execution_adapter.__class__.__name__,
+            "mode": mode_controller_snapshot.get("mode", getattr(settings, "mode", None)),
+            "execution_mode": "dashboard_summary",
+            "live_submit_enabled": getattr(settings, "live_submit_enabled", None),
+            "guarded_execution_dry_run": getattr(settings, "guarded_execution_dry_run", None),
+            "okx_simulated_trading": getattr(settings, "okx_simulated_trading", None),
+            "exchange_submit_allowed": bool(mode_controller_snapshot.get("exchange_submit_allowed", False)),
+            "submit_blocked_reasons": list(mode_controller_snapshot.get("submit_blocked_reasons") or []),
+            "account_status": account_status,
+            "truth_source": "mode_controller_plus_account_status_dashboard_summary",
+        }
 
     def build_system_mode(
         self,
