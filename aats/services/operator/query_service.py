@@ -2265,8 +2265,12 @@ class OperatorQueryService:
                 "trial_guard": self.trial_guard,
                 "margin_buffer": self.margin_buffer_risk,
                 "recovery": self.recovery_view,
-                "blocker_control": self.blocker_control,
+                "submit_blocked_reasons": self._submit_blocked_reasons_dashboard,
             }
+        )
+        blocker_control = self.blocker_control_service.execution_blocker_summary(
+            recovery=r["recovery"],
+            submit_blocked_reasons=r["submit_blocked_reasons"],
         )
         summary = self.runtime_queries.guarded_live_run_packet_summary(
             preflight=r["preflight"],
@@ -2274,7 +2278,7 @@ class OperatorQueryService:
             trial_guard=r["trial_guard"],
             margin_buffer=r["margin_buffer"],
             recovery=r["recovery"],
-            blocker_control=r["blocker_control"],
+            blocker_control=blocker_control,
         )
         return {
             "generated_at": utc_now(),
@@ -2289,6 +2293,22 @@ class OperatorQueryService:
             "dashboard_summary_only": True,
             "truth_source": "guarded_live_run_packet_lightweight_dashboard",
         }
+
+    def _submit_blocked_reasons_dashboard(self) -> list[str]:
+        r = parallel_fetch(
+            {
+                "snapshot": lambda: dict(self.runtime.mode_controller.snapshot()),
+                "readiness": self.runtime.execution_adapter.readiness,
+            }
+        )
+        snapshot = r["snapshot"] if isinstance(r.get("snapshot"), dict) else {}
+        readiness = r["readiness"] if isinstance(r.get("readiness"), dict) else {}
+        return list(
+            dict.fromkeys(
+                list(snapshot.get("submit_blocked_reasons", []) or [])
+                + list(readiness.get("submit_blocked_reasons", []) or [])
+            )
+        )
 
     def _build_guarded_live_run_packet(self) -> dict[str, Any]:
         # S3（task P2-1）：原 9 路纯串行。wall 观察到 38s+（preflight 本身 29s
@@ -12468,6 +12488,13 @@ class OperatorQueryService:
             recovery=recovery,
             blocker_rows=blocker_rows,
         )
+        guarded_status = "warning"
+        if hard_stop.get("active") or trial_guard.get("status") == "breached" or blocker_rows:
+            guarded_status = "critical"
+        guarded_summary_map = {
+            "warning": "试盘摘要不重复计算完整运行包，继续保持小资金和人工盯盘。",
+            "critical": "当前试盘复盘存在硬停机或执行阻断，不应继续自动运行。",
+        }
         return {
             "generated_at": utc_now(),
             "summary": {
@@ -12503,13 +12530,20 @@ class OperatorQueryService:
                     runtime_constraints=runtime_constraints,
                     action_items=action_items,
                 ),
-                "guarded_live_run_packet": (lambda _p: {
-                    "status": _p.get("status"),
-                    "summary": _p.get("summary"),
-                    "summary_metrics": _p.get("summary_metrics"),
-                    "dashboard_summary_only": _p.get("dashboard_summary_only"),
-                    "deferred_sections": _p.get("deferred_sections"),
-                })(self.guarded_live_run_packet_dashboard()),
+                "guarded_live_run_packet": {
+                    "status": guarded_status,
+                    "summary": guarded_summary_map[guarded_status],
+                    "summary_metrics": {
+                        "safe_to_trade": recovery.get("safe_to_trade"),
+                        "review_required": recovery.get("review_required"),
+                        "active_blocker_count": len(blocker_rows),
+                        "trial_guard_hard_stop_active": bool(hard_stop.get("active")),
+                        "status_context_only": True,
+                    },
+                    "dashboard_summary_only": True,
+                    "summary_source": "trial_review_scaling_context",
+                    "deferred_sections": ["guarded_live_run_packet"],
+                },
                 "strategy_segments": {
                     "group_by": segments.get("group_by"),
                     "strongest_segment": strongest_segment,

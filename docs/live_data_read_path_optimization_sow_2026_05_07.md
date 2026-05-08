@@ -103,6 +103,14 @@ Target fixes:
 - `trialReviewSummary` reuses the recovery/blocker/trial-guard context already
   computed by scaling readiness and embeds the lightweight guarded-live packet
   summary instead of building the full run packet during dashboard refresh.
+- Dashboard `guardedLiveRunPacket` builds its blocker input from a minimal
+  execution-blocker summary instead of constructing the full blocker-control
+  action tree; the explicit `/system/blocker-control` panel keeps full action
+  and reconciliation guidance.
+- `trialReviewSummary` no longer triggers even the dashboard run-packet loader;
+  it derives the nested guarded-live status from already-computed
+  scaling/recovery/blocker context and leaves the dedicated guarded-live panel
+  as the source for full packet details.
 
 ## Logging, Monitoring, Auditing
 

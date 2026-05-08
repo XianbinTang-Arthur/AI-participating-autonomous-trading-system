@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+import threading
 from types import SimpleNamespace
 
+from aats.services.blocker_control import BlockerControlService
 from aats.services.operator.query_service import OperatorQueryService
+from aats.services.operator.runtime_queries import RuntimeQueryFacade
 from aats.services.operator.strategy_queries import StrategyQueryFacade
 
 
@@ -125,14 +128,7 @@ class _TrialReviewSummaryOwner:
         raise AssertionError("summary must not build the full guarded-live packet")
 
     def guarded_live_run_packet_dashboard(self):
-        self.dashboard_packet_calls += 1
-        return {
-            "status": "ready",
-            "summary": "lightweight",
-            "summary_metrics": {},
-            "dashboard_summary_only": True,
-            "deferred_sections": ["forward_validation"],
-        }
+        raise AssertionError("summary must reuse scaling context instead of run-packet loaders")
 
     @staticmethod
     def _to_decimal(value):
@@ -162,6 +158,49 @@ def test_trial_review_summary_reuses_scaling_context_and_lightweight_run_packet(
         period_count=4,
     )
 
-    assert owner.dashboard_packet_calls == 1
+    assert owner.dashboard_packet_calls == 0
     assert payload["sections"]["guarded_live_run_packet"]["dashboard_summary_only"] is True
+    assert payload["sections"]["guarded_live_run_packet"]["summary_source"] == "trial_review_scaling_context"
     assert payload["sections"]["workbench"] == {"latest_action": None}
+
+
+def test_guarded_live_dashboard_uses_minimal_blocker_summary_without_full_blocker_control() -> None:
+    service = OperatorQueryService.__new__(OperatorQueryService)
+    service._cache_lock = threading.RLock()
+    service._ttl_cache = {}
+    service._inflight = {}
+    service._scope_cache_fragment = lambda: "derivatives:cross:BTC-USDT-SWAP"
+    service.runtime = SimpleNamespace(
+        mode_controller=SimpleNamespace(
+            snapshot=lambda: {"submit_blocked_reasons": ["live_submit_disabled"]}
+        ),
+        execution_adapter=SimpleNamespace(
+            readiness=lambda: {"submit_blocked_reasons": ["exchange_not_ready"]}
+        ),
+        health_service=SimpleNamespace(snapshot=lambda: SimpleNamespace(blockers=["db_unavailable"])),
+        kill_switch=SimpleNamespace(halted=False),
+    )
+    service.runtime_queries = RuntimeQueryFacade(service)
+    service.blocker_control_service = BlockerControlService(service)
+    service.guarded_live_preflight = lambda: {"status": "pass", "launch_ready": True}
+    service.derivatives_live_guard = lambda: {
+        "auto_halt_required": False,
+        "only_reduce_required": False,
+    }
+    service.trial_guard = lambda: {"status": "monitoring"}
+    service.margin_buffer_risk = lambda: {"status": "healthy", "current": {}, "liquidation": {}}
+    service.recovery_view = lambda: {
+        "safe_to_trade": True,
+        "review_required": False,
+        "resume_eligible": True,
+        "resume_blocked_reasons": [],
+    }
+    service.blocker_control = lambda: (_ for _ in ()).throw(
+        AssertionError("dashboard run packet must not build full blockerControl")
+    )
+
+    payload = service._build_guarded_live_run_packet_dashboard()
+
+    assert payload["status"] == "critical"
+    assert payload["summary_metrics"]["execution_blocker_count"] == 1
+    assert payload["dashboard_summary_only"] is True

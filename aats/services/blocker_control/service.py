@@ -66,6 +66,48 @@ class BlockerControlService:
             ),
         )
 
+    def execution_blocker_summary(
+        self,
+        *,
+        recovery: dict[str, Any],
+        submit_blocked_reasons: list[str],
+    ) -> dict[str, Any]:
+        health_snapshot = self.owner.runtime.health_service.snapshot()
+        blockers: list[tuple[str, bool]] = []
+
+        def _add(code: Any, *, submit_only: bool) -> None:
+            normalized = str(code or "").strip()
+            if not normalized:
+                return
+            if any(existing == normalized for existing, _ in blockers):
+                return
+            blockers.append((normalized, submit_only))
+
+        for code in getattr(health_snapshot, "blockers", []) or []:
+            _add(code, submit_only=str(code or "").strip() in self._SUBMIT_ONLY)
+        if self.owner.runtime.kill_switch.halted:
+            _add("kill_switch_active", submit_only=False)
+        for code in submit_blocked_reasons:
+            _add(code, submit_only=True)
+        for code in recovery.get("resume_blocked_reasons", []) or []:
+            _add(code, submit_only=str(code or "").strip() in self._SUBMIT_ONLY)
+
+        return {
+            "halted": bool(self.owner.runtime.kill_switch.halted),
+            "review_required": bool(recovery.get("review_required")),
+            "resume_eligible": bool(recovery.get("resume_eligible")),
+            "safe_to_trade": bool(recovery.get("safe_to_trade")),
+            "blockers": [
+                {
+                    "blocker": code,
+                    "affects_execution": not submit_only,
+                    "submit_only": submit_only,
+                }
+                for code, submit_only in blockers
+            ],
+            "summary_source": "minimal_execution_blocker_summary",
+        }
+
     def has_active_blocker(self, code: str) -> bool:
         return any(item.blocker == code for item in self.snapshot().blockers)
 
