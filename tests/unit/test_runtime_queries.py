@@ -226,9 +226,13 @@ class _DashboardRecoveryOwner:
                 latest_state_snapshot_for_scope=lambda *, scope: _DashboardStateSnapshot()
             ),
             event_store=SimpleNamespace(),
+            recovery_status=_RecoveryStatus(),
+            kill_switch=SimpleNamespace(halted=False),
         )
         self.recovery_posture = SimpleNamespace(
-            finalize_status=lambda *, latest_reconciliation: _RecoveryStatus()
+            finalize_status=lambda *, latest_reconciliation: (_ for _ in ()).throw(
+                AssertionError("dashboard recovery must not finalize full recovery posture")
+            )
         )
 
     def _scope_cache_fragment(self) -> str:
