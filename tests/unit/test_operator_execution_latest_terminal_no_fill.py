@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from aats.services.operator.account_queries import AccountQueryFacade
+from aats.services.operator.query_service import OperatorQueryService
 
 
 class _FakeOwner:
@@ -107,6 +108,65 @@ class _FakeOwner:
         self.fill_row_calls.append({"limit": limit, "offset": offset})
         rows = self.fills[offset:]
         return rows[:limit] if limit is not None else rows
+
+
+class _ScopedOrderRepo:
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+        self.scoped_calls: list[dict] = []
+
+    def list_orders_for_scope(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        symbols: tuple[str, ...] = (),
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict]:
+        self.scoped_calls.append(
+            {
+                "product_type": product_type,
+                "margin_mode": margin_mode,
+                "symbols": symbols,
+                "limit": limit,
+                "offset": offset,
+            }
+        )
+        return self.rows
+
+    def list_orders(self, *, limit=None, offset=0):
+        raise AssertionError("scoped dashboard order reads must not fall back to global list_orders")
+
+
+def test_phase5_order_rows_uses_scope_aware_repo_reader() -> None:
+    repo = _ScopedOrderRepo(rows=[{"order_id": "order-scope"}])
+    service = object.__new__(OperatorQueryService)
+    service.runtime = SimpleNamespace(
+        settings=SimpleNamespace(operator_control_plane_execution_ledger_enabled=True),
+        execution_order_repo=repo,
+        execution_fill_repo_v2=object(),
+        ledger_account_repo=object(),
+        ledger_entry_repo=object(),
+    )
+    service.state_scope = SimpleNamespace(
+        product_type="derivatives",
+        margin_mode="cross",
+        allowed_symbols=("BTC-USDT-SWAP",),
+    )
+
+    rows = service._phase5_order_rows(limit=1, offset=2)
+
+    assert rows == [{"order_id": "order-scope"}]
+    assert repo.scoped_calls == [
+        {
+            "product_type": "derivatives",
+            "margin_mode": "cross",
+            "symbols": ("BTC-USDT-SWAP",),
+            "limit": 1,
+            "offset": 2,
+        }
+    ]
 
 
 def test_execution_latest_exposes_terminal_no_fill_explanation_for_blocked_directional_decision() -> None:

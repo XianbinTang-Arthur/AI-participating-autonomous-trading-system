@@ -51,6 +51,17 @@ class ExecutionOrderRepository(Protocol):
     ) -> list[dict]:
         ...
 
+    def list_orders_for_scope(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        symbols: tuple[str, ...] = (),
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict]:
+        ...
+
     def count_orders(self) -> int:
         ...
 

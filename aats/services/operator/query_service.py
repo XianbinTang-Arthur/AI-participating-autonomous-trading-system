@@ -1320,13 +1320,23 @@ class OperatorQueryService:
         if not self._phase5_control_plane_enabled():
             return []
         normalized_offset = max(int(offset), 0)
+        allowed_symbols = tuple(self.state_scope.allowed_symbols)
+        scoped_reader = getattr(self.runtime.execution_order_repo, "list_orders_for_scope", None)
+        if callable(scoped_reader):
+            return scoped_reader(
+                product_type=self.state_scope.product_type,
+                margin_mode=self.state_scope.margin_mode,
+                symbols=allowed_symbols,
+                limit=_LIVE_DASHBOARD_EVENT_LIMIT if limit is None else max(int(limit), 0),
+                offset=normalized_offset,
+            )
         if limit is None:
             repo_limit = _LIVE_DASHBOARD_EVENT_LIMIT
         else:
             fetch_limit = max(int(limit), 0) + normalized_offset
             repo_limit = max(fetch_limit * _PHASE5_SCOPE_FETCH_MULTIPLIER, fetch_limit)
         rows = self.runtime.execution_order_repo.list_orders(limit=repo_limit, offset=0)
-        allowed_symbols = set(self.state_scope.allowed_symbols)
+        allowed_symbols = set(allowed_symbols)
         scoped = [
             row
             for row in rows

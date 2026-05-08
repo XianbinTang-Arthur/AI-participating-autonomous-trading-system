@@ -285,6 +285,37 @@ class PostgresExecutionOrderRepository:
             rows = session.scalars(query).all()
         return [_order_row_to_dict(row) for row in rows]
 
+    def list_orders_for_scope(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        symbols: tuple[str, ...] = (),
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict]:
+        query = (
+            select(ExecutionOrderModel)
+            .where(
+                ExecutionOrderModel.product_type == product_type,
+                ExecutionOrderModel.margin_mode == margin_mode,
+            )
+            .order_by(
+                ExecutionOrderModel.updated_at.desc(),
+                ExecutionOrderModel.created_at.desc(),
+                ExecutionOrderModel.order_id.desc(),
+            )
+            .offset(offset)
+        )
+        scoped_symbols = tuple(symbol for symbol in symbols if symbol)
+        if scoped_symbols:
+            query = query.where(ExecutionOrderModel.symbol.in_(scoped_symbols))
+        if limit is not None:
+            query = query.limit(limit)
+        with self.session_factory() as session:
+            rows = session.scalars(query).all()
+        return [_order_row_to_dict(row) for row in rows]
+
     def count_orders(self) -> int:
         with self.session_factory() as session:
             return int(session.scalar(select(func.count()).select_from(ExecutionOrderModel)) or 0)

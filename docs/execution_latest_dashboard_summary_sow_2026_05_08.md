@@ -34,7 +34,7 @@ No lifecycle state transitions are added. `recent_failures` are explicitly defer
 
 ## Caching And Performance
 
-Dashboard `executionLatest` now uses dashboard recovery/mode readers, avoids synchronous `execution_errors()` scanning, defers full execution adapter readiness, defers latest reconciliation, and parallelizes independent latest order/fill/recovery/mode reads. Snapshot-plane loader and request fallback both call `query.execution_latest_dashboard()`.
+Dashboard `executionLatest` now uses dashboard recovery/mode readers, avoids synchronous `execution_errors()` scanning, defers full execution adapter readiness, defers latest reconciliation, parallelizes independent latest order/fill/recovery/mode reads, and resolves latest orders through a scope-aware repository query so the live read path can use the existing `execution_orders(product_type, margin_mode, updated_at, created_at)` index. Snapshot-plane loader and request fallback both call `query.execution_latest_dashboard()`.
 
 ## Logging, Monitoring, Auditing
 
