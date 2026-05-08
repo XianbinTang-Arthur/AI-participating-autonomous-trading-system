@@ -62,6 +62,64 @@ class TestBlockerControlSummary(unittest.TestCase):
         self.assertEqual(call["trial_guard"], {"status": "monitoring"})
         self.assertTrue(snapshot.blockers)
 
+    def test_snapshot_uses_dashboard_recovery_summary_when_available(self) -> None:
+        owner = SimpleNamespace(
+            runtime=SimpleNamespace(
+                kill_switch=SimpleNamespace(halted=False),
+                health_service=SimpleNamespace(snapshot=lambda: SimpleNamespace(blockers=[])),
+                ai_service=SimpleNamespace(status=lambda: {}),
+            ),
+            recovery_view_dashboard=lambda: {
+                "safe_to_trade": True,
+                "review_required": False,
+                "resume_eligible": True,
+                "halted": False,
+                "rebaseline_available": False,
+                "resume_blocked_reasons": [],
+            },
+            recovery_view=lambda: (_ for _ in ()).throw(
+                AssertionError("dashboard blocker control must not build full recovery")
+            ),
+            _latest_scoped_reconciliation=lambda: None,
+            system_mode=lambda: {"submit_blocked_reasons": []},
+            ai_runtime=lambda: {},
+        )
+        service = BlockerControlService(owner)
+
+        snapshot = service.snapshot()
+
+        self.assertTrue(snapshot.safe_to_trade)
+
+    def test_execution_blocker_summary_reuses_preloaded_health_snapshot(self) -> None:
+        owner = SimpleNamespace(
+            runtime=SimpleNamespace(
+                kill_switch=SimpleNamespace(halted=False),
+                health_service=SimpleNamespace(
+                    snapshot=lambda: (_ for _ in ()).throw(
+                        AssertionError("summary should reuse preloaded health snapshot")
+                    )
+                ),
+            )
+        )
+        service = BlockerControlService(owner)
+
+        summary = service.execution_blocker_summary(
+            recovery={
+                "safe_to_trade": False,
+                "review_required": False,
+                "resume_eligible": False,
+                "resume_blocked_reasons": ["operator_rebaseline_required"],
+            },
+            submit_blocked_reasons=["live_submit_disabled"],
+            health_snapshot=SimpleNamespace(blockers=["account_state_stale"]),
+        )
+
+        blockers = [item["blocker"] for item in summary["blockers"]]
+        self.assertEqual(
+            blockers,
+            ["account_state_stale", "live_submit_disabled", "operator_rebaseline_required"],
+        )
+
     def test_snapshot_panel_version_is_stable_when_state_does_not_change(self) -> None:
         owner = SimpleNamespace(
             runtime=SimpleNamespace(

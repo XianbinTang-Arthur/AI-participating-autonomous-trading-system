@@ -31,6 +31,9 @@ class BlockerControlService:
 
     def snapshot(self) -> BlockerControlSnapshot:
         mode_builder = getattr(getattr(self.owner, "recovery_queries", None), "build_system_mode", None)
+        recovery_loader = getattr(self.owner, "recovery_view_dashboard", None)
+        if not callable(recovery_loader):
+            recovery_loader = self.owner.recovery_view
         mode_context_available = (
             callable(mode_builder)
             and hasattr(getattr(self.owner.runtime, "mode_controller", None), "snapshot")
@@ -38,7 +41,7 @@ class BlockerControlService:
             and hasattr(self.owner, "trial_guard")
         )
         queries = {
-            "recovery": self.owner.recovery_view,
+            "recovery": recovery_loader,
             "latest_reconciliation": self.owner._latest_scoped_reconciliation,
             "health_snapshot": self.owner.runtime.health_service.snapshot,
             "ai_runtime": self.owner.ai_runtime,
@@ -118,8 +121,10 @@ class BlockerControlService:
         *,
         recovery: dict[str, Any],
         submit_blocked_reasons: list[str],
+        health_snapshot: Any | None = None,
     ) -> dict[str, Any]:
-        health_snapshot = self.owner.runtime.health_service.snapshot()
+        if health_snapshot is None:
+            health_snapshot = self.owner.runtime.health_service.snapshot()
         blockers: list[tuple[str, bool]] = []
 
         def _add(code: Any, *, submit_only: bool) -> None:

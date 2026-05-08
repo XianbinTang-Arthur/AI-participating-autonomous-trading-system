@@ -499,6 +499,7 @@ class RuntimeQueryFacade:
             blocker_control = self.owner.blocker_control_service.execution_blocker_summary(
                 recovery=recovery,
                 submit_blocked_reasons=list(mode_snapshot.get("submit_blocked_reasons") or []),
+                health_snapshot=snapshot,
             )
             blockers = [
                 item
