@@ -117,6 +117,10 @@ Target fixes:
   blocker-snapshot audit persistence.
 - `blockers()` now reuses the cached `blockerControl` payload instead of
   building another blocker-control snapshot under a separate cache key.
+- Dashboard `systemRecovery` and `mode` panels use recovery/mode summary
+  builders that skip full exit-execution review history, AI recovery history,
+  and operator-action hydration. The explicit `/system/recovery` and
+  `/system/mode` endpoints keep the full audit/detail semantics.
 
 ## Logging, Monitoring, Auditing
 

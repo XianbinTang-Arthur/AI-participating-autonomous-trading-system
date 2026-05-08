@@ -19,7 +19,15 @@ class RecoveryQueryFacade:
         cache_key = f"recovery_view:{self.owner._scope_cache_fragment()}"
         return self.owner._cached_ttl(cache_key, 35, self.build_recovery_view)
 
-    def build_recovery_view(self) -> dict[str, Any]:
+    def recovery_view_dashboard(self) -> dict[str, Any]:
+        cache_key = f"recovery_view_dashboard:{self.owner._scope_cache_fragment()}"
+        return self.owner._cached_ttl(
+            cache_key,
+            15,
+            lambda: self.build_recovery_view(dashboard_summary_only=True),
+        )
+
+    def build_recovery_view(self, *, dashboard_summary_only: bool = False) -> dict[str, Any]:
         latest_state_snapshot_getter = getattr(
             self.owner.runtime.reconciliation_repo,
             "latest_state_snapshot_for_scope",
@@ -38,24 +46,29 @@ class RecoveryQueryFacade:
         queries: dict[str, Any] = {
             "latest_reconciliation": self.owner._latest_scoped_reconciliation,
             "latest_baseline": self.owner.latest_account_baseline,
-            "latest_rebaseline_action": lambda: self.owner.latest_operator_action("rebaseline"),
-            "latest_resume_action": lambda: self.owner.latest_operator_action("resume"),
-            "latest_ai_degradation": lambda: latest_topic_event_for_scope(
-                self.owner.runtime.event_store,
-                topics.AI_DEGRADATION_EVENTS,
-                self.owner.state_scope,
-            ),
-            "latest_ai_shadow_evaluation": lambda: latest_topic_event_for_scope(
-                self.owner.runtime.event_store,
-                topics.AI_SHADOW_EVALUATIONS,
-                self.owner.state_scope,
-            ),
         }
         if callable(latest_state_snapshot_getter):
             queries["latest_state_snapshot"] = lambda: latest_state_snapshot_getter(scope=self.owner.state_scope)
-        if callable(latest_generation_getter):
+        if not dashboard_summary_only:
+            queries.update(
+                {
+                    "latest_rebaseline_action": lambda: self.owner.latest_operator_action("rebaseline"),
+                    "latest_resume_action": lambda: self.owner.latest_operator_action("resume"),
+                    "latest_ai_degradation": lambda: latest_topic_event_for_scope(
+                        self.owner.runtime.event_store,
+                        topics.AI_DEGRADATION_EVENTS,
+                        self.owner.state_scope,
+                    ),
+                    "latest_ai_shadow_evaluation": lambda: latest_topic_event_for_scope(
+                        self.owner.runtime.event_store,
+                        topics.AI_SHADOW_EVALUATIONS,
+                        self.owner.state_scope,
+                    ),
+                }
+            )
+        if callable(latest_generation_getter) and not dashboard_summary_only:
             queries["latest_baseline_generation"] = lambda: latest_generation_getter(scope=self.owner.state_scope)
-        if callable(latest_ack_getter):
+        if callable(latest_ack_getter) and not dashboard_summary_only:
             queries["latest_exchange_ack_watermark"] = lambda: latest_ack_getter(scope=self.owner.state_scope)
 
         r = parallel_fetch(queries)
@@ -65,13 +78,13 @@ class RecoveryQueryFacade:
         latest_baseline_generation = r.get("latest_baseline_generation")
         latest_exchange_ack_watermark = r.get("latest_exchange_ack_watermark")
         latest_baseline = r["latest_baseline"]
-        latest_rebaseline_action = r["latest_rebaseline_action"]
-        latest_resume_action = r["latest_resume_action"]
-        latest_ai_degradation = r["latest_ai_degradation"]
-        latest_ai_shadow_evaluation = r["latest_ai_shadow_evaluation"]
+        latest_rebaseline_action = r.get("latest_rebaseline_action")
+        latest_resume_action = r.get("latest_resume_action")
+        latest_ai_degradation = r.get("latest_ai_degradation")
+        latest_ai_shadow_evaluation = r.get("latest_ai_shadow_evaluation")
 
         base = self.owner.recovery_posture.finalize_status(latest_reconciliation=latest_reconciliation)
-        if not self.owner._ai_history_visible():
+        if not dashboard_summary_only and not self.owner._ai_history_visible():
             latest_ai_degradation = None
             latest_ai_shadow_evaluation = None
         latest_state_snapshot_payload = (
@@ -81,7 +94,11 @@ class RecoveryQueryFacade:
         )
         if isinstance(latest_state_snapshot_payload, dict):
             details_json = latest_state_snapshot_payload.get("details_json")
-            if isinstance(details_json, dict) and str(details_json.get("source") or "").strip() == "startup_exit_execution_review":
+            if (
+                not dashboard_summary_only
+                and isinstance(details_json, dict)
+                and str(details_json.get("source") or "").strip() == "startup_exit_execution_review"
+            ):
                 review_items = details_json.get("review_items")
                 if isinstance(review_items, list):
                     details_json["review_items"] = self.owner._enrich_exit_execution_review_items(
@@ -114,8 +131,34 @@ class RecoveryQueryFacade:
             base_payload.get("independent_recovery_snapshots") or []
         )
         claimed_submit_recovery_gate = self._claimed_submit_recovery_gate()
+        latest_reconciliation_summary = (
+            None
+            if dashboard_summary_only
+            else self.owner._reconciliation_mismatch_summary(latest_reconciliation)
+        )
+        exit_execution_review_items = (
+            []
+            if dashboard_summary_only
+            else self.owner._exit_execution_review_items()
+        )
+        exit_execution_action_history = (
+            []
+            if dashboard_summary_only
+            else self.owner._exit_execution_action_history()
+        )
+        latest_ai_degradation_payload = (
+            None
+            if dashboard_summary_only
+            else self.owner.payload(latest_ai_degradation)
+        )
+        latest_ai_shadow_evaluation_payload = (
+            None
+            if dashboard_summary_only
+            else self.owner.payload(latest_ai_shadow_evaluation)
+        )
+        ai_runtime = None if dashboard_summary_only else self.owner.ai_runtime()
 
-        return {
+        payload = {
             **base_payload,
             "claimed_submit_recovery_gate": claimed_submit_recovery_gate,
             "last_rebaseline_action": latest_rebaseline_action,
@@ -137,13 +180,21 @@ class RecoveryQueryFacade:
                 if latest_reconciliation is not None
                 else None
             ),
-            "latest_reconciliation_summary": self.owner._reconciliation_mismatch_summary(latest_reconciliation),
-            "exit_execution_review_items": self.owner._exit_execution_review_items(),
-            "exit_execution_action_history": self.owner._exit_execution_action_history(),
-            "latest_ai_degradation": self.owner.payload(latest_ai_degradation),
-            "latest_ai_shadow_evaluation": self.owner.payload(latest_ai_shadow_evaluation),
-            "ai_runtime": self.owner.ai_runtime(),
+            "latest_reconciliation_summary": latest_reconciliation_summary,
+            "exit_execution_review_items": exit_execution_review_items,
+            "exit_execution_action_history": exit_execution_action_history,
+            "latest_ai_degradation": latest_ai_degradation_payload,
+            "latest_ai_shadow_evaluation": latest_ai_shadow_evaluation_payload,
+            "ai_runtime": ai_runtime,
         }
+        if dashboard_summary_only:
+            payload.update(
+                {
+                    "dashboard_summary_only": True,
+                    "truth_source": "recovery_dashboard_summary",
+                }
+            )
+        return payload
 
     def _claimed_submit_recovery_gate(self) -> dict[str, Any]:
         try:
@@ -292,9 +343,28 @@ class RecoveryQueryFacade:
             "latest_account_baseline": recovery["latest_account_baseline"],
         }
 
+    def system_recovery_dashboard(self) -> dict[str, Any]:
+        recovery = self.recovery_view_dashboard()
+        return {
+            "recovery": recovery,
+            "latest_rebaseline_action": recovery["last_rebaseline_action"],
+            "latest_resume_action": recovery["last_resume_action"],
+            "latest_account_baseline": recovery["latest_account_baseline"],
+            "dashboard_summary_only": True,
+            "truth_source": "system_recovery_dashboard_summary",
+        }
+
     def system_mode(self) -> dict[str, Any]:
         cache_key = f"system_mode:{self.owner._scope_cache_fragment()}"
         return self.owner._cached_ttl(cache_key, 35, self.build_system_mode)
+
+    def system_mode_dashboard(self) -> dict[str, Any]:
+        cache_key = f"system_mode_dashboard:{self.owner._scope_cache_fragment()}"
+        return self.owner._cached_ttl(
+            cache_key,
+            15,
+            lambda: self.build_system_mode(recovery=self.recovery_view_dashboard()),
+        )
 
     def build_system_mode(
         self,

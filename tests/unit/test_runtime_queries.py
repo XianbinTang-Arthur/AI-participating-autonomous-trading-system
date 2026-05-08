@@ -140,6 +140,9 @@ class _DashboardHealthOwner:
             "resume_blocked_reasons": [],
         }
 
+    def recovery_view_dashboard(self) -> dict:
+        return self.recovery_view()
+
     def system_mode(self) -> dict:
         raise AssertionError("dashboard health should derive mode from the existing recovery context")
 
@@ -173,6 +176,99 @@ class _DashboardHealthOwner:
     def _persist_blocker_snapshot(self, **_kwargs) -> None:
         self.persist_called = True
         raise AssertionError("dashboard health should not write blocker snapshots")
+
+
+class _RecoveryStatus:
+    def model_dump(self, *, mode: str = "json") -> dict:
+        return {
+            "recovery_state": "normal_operation",
+            "safe_to_trade": True,
+            "resume_eligible": True,
+            "review_required": False,
+            "halt_required": False,
+            "bundle_recovery_required": False,
+            "only_reduce_required": False,
+            "resume_blocked_reasons": [],
+            "rebaseline_available": False,
+            "independent_recovery_snapshots": [],
+        }
+
+
+class _DashboardStateSnapshot:
+    recovery_state = "normal_operation"
+    safe_to_trade = True
+    resume_eligible = True
+    review_required = False
+    halt_required = False
+    bundle_recovery_required = False
+    only_reduce_required = False
+    resume_blocked_reasons_json: list[str] = []
+
+    def model_dump(self, *, mode: str = "json") -> dict:
+        return {
+            "snapshot_id": "snapshot_dashboard",
+            "details_json": {
+                "source": "startup_exit_execution_review",
+                "review_items": [{"parent_intent_id": "parent_dashboard"}],
+            },
+        }
+
+
+class _DashboardRecoveryOwner:
+    def __init__(self) -> None:
+        self.state_scope = SimpleNamespace(
+            product_type="derivatives",
+            margin_mode="cross",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        self.runtime = SimpleNamespace(
+            reconciliation_repo=SimpleNamespace(
+                latest_state_snapshot_for_scope=lambda *, scope: _DashboardStateSnapshot()
+            ),
+            event_store=SimpleNamespace(),
+        )
+        self.recovery_posture = SimpleNamespace(
+            finalize_status=lambda *, latest_reconciliation: _RecoveryStatus()
+        )
+
+    def _scope_cache_fragment(self) -> str:
+        return "derivatives:cross:BTC-USDT-SWAP"
+
+    def _cached_ttl(self, _key: str, _ttl_seconds: int, loader):
+        return loader()
+
+    def _latest_scoped_reconciliation(self):
+        return None
+
+    def latest_account_baseline(self) -> dict:
+        return {"baseline_id": "baseline_dashboard"}
+
+    def _independent_recovery_snapshots_view(self, snapshots):
+        return list(snapshots or [])
+
+    def latest_order(self):
+        return None
+
+    def latest_operator_action(self, _action: str):
+        raise AssertionError("dashboard recovery must not query operator actions")
+
+    def _reconciliation_mismatch_summary(self, _latest_reconciliation):
+        raise AssertionError("dashboard recovery must not build full reconciliation summary")
+
+    def _exit_execution_review_items(self):
+        raise AssertionError("dashboard recovery must not build exit execution review items")
+
+    def _exit_execution_action_history(self):
+        raise AssertionError("dashboard recovery must not build exit execution action history")
+
+    def _enrich_exit_execution_review_items(self, _items):
+        raise AssertionError("dashboard recovery must not enrich startup review items")
+
+    def ai_runtime(self):
+        raise AssertionError("dashboard recovery must not build AI runtime")
+
+    def payload(self, _envelope):
+        raise AssertionError("dashboard recovery must not serialize AI events")
 
 
 class TestRuntimeQueryFacade(unittest.TestCase):
@@ -243,6 +339,25 @@ class TestRuntimeQueryFacade(unittest.TestCase):
         self.assertEqual(payload["mode_contract"]["recovery_state"], "normal_operation")
         self.assertTrue(any(item["blocker"] == "phase1_shadow_recovery_required" for item in payload["blockers"]))
         self.assertFalse(owner.persist_called)
+
+    def test_dashboard_recovery_summary_skips_full_recovery_details(self) -> None:
+        owner = _DashboardRecoveryOwner()
+        facade = RecoveryQueryFacade(owner)
+
+        payload = facade.recovery_view_dashboard()
+
+        self.assertTrue(payload["dashboard_summary_only"])
+        self.assertEqual(payload["truth_source"], "recovery_dashboard_summary")
+        self.assertEqual(payload["recovery_state"], "normal_operation")
+        self.assertEqual(payload["latest_account_baseline"]["baseline_id"], "baseline_dashboard")
+        self.assertEqual(payload["exit_execution_review_items"], [])
+        self.assertEqual(payload["exit_execution_action_history"], [])
+        self.assertEqual(
+            payload["latest_state_snapshot"]["details_json"]["review_items"],
+            [{"parent_intent_id": "parent_dashboard"}],
+        )
+        self.assertIsNone(payload["ai_runtime"])
+        self.assertEqual(payload["claimed_submit_recovery_gate"]["status"], "no_latest_order")
 
     def test_lightweight_run_packet_summary_does_not_call_full_packet_loader(self) -> None:
         owner = _RunPacketSummaryOwner()

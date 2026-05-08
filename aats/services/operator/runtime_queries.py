@@ -323,7 +323,7 @@ class RuntimeQueryFacade:
             r = parallel_fetch({
                 "snapshot": self.owner.runtime.health_service.snapshot,
                 "mode_controller_snapshot": lambda: dict(self.owner.runtime.mode_controller.snapshot()),
-                "recovery": self.owner.recovery_view,
+                "recovery": self.owner.recovery_view_dashboard,
                 "market": self.owner.runtime.market_gateway.status,
                 "account": self.owner.account_service_status,
                 "execution": self.owner.runtime.execution_adapter.readiness,

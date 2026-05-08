@@ -467,11 +467,11 @@ async def _load_dashboard_snapshot_panel(runtime: ApplicationRuntime, snapshot_k
         if panel_key == "health":
             return _system_health_payload_for_runtime(runtime, query)
         if panel_key == "mode":
-            return RuntimeModeState(**query.system_mode()).model_dump(mode="json")
+            return RuntimeModeState(**query.system_mode_dashboard()).model_dump(mode="json")
         if panel_key == "runtime":
             return query.system_runtime()
         if panel_key == "systemRecovery":
-            return query.system_recovery()
+            return query.system_recovery_dashboard()
         if panel_key == "blockerControl":
             return query.blocker_control()
         if panel_key == "blockers":
@@ -863,11 +863,11 @@ def _protected_dashboard_panel_payload(
     if panel_key == "health":
         return _system_health_payload(request, query)
     if panel_key == "mode":
-        return RuntimeModeState(**query.system_mode()).model_dump(mode="json")
+        return RuntimeModeState(**query.system_mode_dashboard()).model_dump(mode="json")
     if panel_key == "runtime":
         return query.system_runtime()
     if panel_key == "systemRecovery":
-        return query.system_recovery()
+        return query.system_recovery_dashboard()
     if panel_key == "blockerControl":
         return query.blocker_control()
     if panel_key == "blockers":

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+import inspect
 import threading
 from types import SimpleNamespace
 
+from aats.api import auth_routes
 from aats.services.blocker_control import BlockerControlService
 from aats.services.operator.query_service import OperatorQueryService
 from aats.services.operator.runtime_queries import RuntimeQueryFacade
@@ -244,3 +246,13 @@ def test_legacy_blockers_reuses_cached_blocker_control_payload() -> None:
     assert payload[0]["blocker"] == "operator_rebaseline_required"
     assert payload[0]["recommended_action"] == "先查看最新对账。"
     assert payload[0]["actions"] == [{"action_id": "inspect-reconciliation"}]
+
+
+def test_dashboard_bundle_uses_summary_recovery_and_mode_panels() -> None:
+    request_loader_source = inspect.getsource(auth_routes._protected_dashboard_panel_payload)
+    snapshot_loader_source = inspect.getsource(auth_routes._load_dashboard_snapshot_panel)
+
+    assert "query.system_mode_dashboard()" in request_loader_source
+    assert "query.system_recovery_dashboard()" in request_loader_source
+    assert "query.system_mode_dashboard()" in snapshot_loader_source
+    assert "query.system_recovery_dashboard()" in snapshot_loader_source

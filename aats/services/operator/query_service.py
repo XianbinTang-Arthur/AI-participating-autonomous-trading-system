@@ -7075,6 +7075,9 @@ class OperatorQueryService:
     def recovery_view(self) -> dict[str, Any]:
         return self.recovery_queries.recovery_view()
 
+    def recovery_view_dashboard(self) -> dict[str, Any]:
+        return self.recovery_queries.recovery_view_dashboard()
+
     def _build_recovery_view(self) -> dict[str, Any]:
         return self.recovery_queries.build_recovery_view()
 
@@ -7082,8 +7085,15 @@ class OperatorQueryService:
         cache_key = f"system_recovery:{self._scope_cache_fragment()}"
         return self._cached_ttl(cache_key, 35, self.recovery_queries.system_recovery)
 
+    def system_recovery_dashboard(self) -> dict[str, Any]:
+        cache_key = f"system_recovery_dashboard:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 15, self.recovery_queries.system_recovery_dashboard)
+
     def system_mode(self) -> dict[str, Any]:
         return self.recovery_queries.system_mode()
+
+    def system_mode_dashboard(self) -> dict[str, Any]:
+        return self.recovery_queries.system_mode_dashboard()
 
     def system_health(self) -> dict[str, Any]:
         cache_key = f"system_health:{self._scope_cache_fragment()}"
