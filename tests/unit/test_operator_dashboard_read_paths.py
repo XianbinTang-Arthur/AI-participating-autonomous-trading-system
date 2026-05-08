@@ -816,6 +816,97 @@ def test_blocker_history_uses_short_ttl_cache() -> None:
     assert calls == [(20, 0)]
 
 
+def test_recent_decisions_dashboard_batches_page_payload_refs() -> None:
+    service = OperatorQueryService.__new__(OperatorQueryService)
+    records = [
+        SimpleNamespace(
+            decision_id="decision_1",
+            decision_context_ref="ctx_1",
+            position_target_ref="target_1",
+            policy_decision_ref="policy_1",
+            risk_decision_ref="risk_1",
+            decision_outcome_ref="outcome_1",
+            strategy_sleeve_intent_refs=["sleeve_1", "sleeve_2"],
+            order_intent_refs=[],
+            fill_event_refs=[],
+            reconciliation_refs=[],
+        ),
+        SimpleNamespace(
+            decision_id="decision_2",
+            decision_context_ref="ctx_2",
+            position_target_ref="target_2",
+            policy_decision_ref="policy_2",
+            risk_decision_ref="risk_2",
+            decision_outcome_ref="outcome_2",
+            strategy_sleeve_intent_refs=["sleeve_3"],
+            order_intent_refs=[],
+            fill_event_refs=[],
+            reconciliation_refs=[],
+        ),
+    ]
+    service.runtime = SimpleNamespace(
+        audit_repo=SimpleNamespace(
+            recent=lambda *, limit: records[:limit],
+        )
+    )
+    captured_refs = []
+    payload_map = {
+        "ctx_1": {"symbol": "BTC-USDT-SWAP", "timeframe": "5m", "as_of_ts": "2026-05-08T01:00:00Z"},
+        "ctx_2": {"symbol": "BTC-USDT-SWAP", "timeframe": "5m", "as_of_ts": "2026-05-08T01:05:00Z"},
+        "target_1": {"position_intent": "hold", "delta_position_qty": "0"},
+        "target_2": {"position_intent": "open_long", "delta_position_qty": "0.01"},
+        "policy_1": {"execution_allowed": False},
+        "policy_2": {"execution_allowed": True},
+        "risk_1": {"approved": False},
+        "risk_2": {"approved": True},
+        "outcome_1": {"final_action": "hold"},
+        "outcome_2": {"final_action": "enter"},
+        "sleeve_1": {"intent": "observe"},
+        "sleeve_2": {"intent": "hold"},
+        "sleeve_3": {"intent": "enter"},
+    }
+
+    def _payloads_by_ref_map(refs):
+        captured_refs.append(list(refs))
+        return {ref: payload_map[ref] for ref in refs if ref in payload_map}
+
+    service.payloads_by_ref_map = _payloads_by_ref_map
+    service._position_target_payload = lambda payload: payload
+    service._risk_decision_payload = lambda payload: payload
+    service._resolved_position_target_payload = lambda **kwargs: kwargs["position_target"]
+    service._no_trade_classification_payload = lambda **_kwargs: {"classification": "test"}
+    service._book_runtime_states_from_payload = lambda _payload: []
+    service._independent_adaptive_summary_from_payload = lambda _payload: None
+    service._independent_transition_exception_summary_from_payload = lambda _payload: None
+    service._effective_diagnostic_metric_flags = lambda _payload: {}
+    service._resolved_overlay_parent_exposure = lambda _payload: None
+    service._resolved_overlay_parent_exposure_summary = lambda _payload: None
+    service._resolved_overlay_parent_signal_fields = lambda _payload: None
+
+    payload = service._build_recent_decisions(limit=2, offset=0, include_total=False)
+
+    assert captured_refs == [
+        [
+            "ctx_1",
+            "target_1",
+            "policy_1",
+            "risk_1",
+            "outcome_1",
+            "sleeve_1",
+            "sleeve_2",
+            "ctx_2",
+            "target_2",
+            "policy_2",
+            "risk_2",
+            "outcome_2",
+            "sleeve_3",
+        ]
+    ]
+    assert [row["decision_id"] for row in payload["decisions"]] == ["decision_1", "decision_2"]
+    assert payload["decisions"][1]["position_intent"] == "open_long"
+    assert payload["has_more"] is False
+
+
 def test_dashboard_bundle_uses_summary_recovery_and_mode_panels() -> None:
     request_loader_source = inspect.getsource(auth_routes._protected_dashboard_panel_payload)
     snapshot_loader_source = inspect.getsource(auth_routes._load_dashboard_snapshot_panel)

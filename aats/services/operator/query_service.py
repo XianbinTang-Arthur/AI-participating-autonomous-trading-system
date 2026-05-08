@@ -10946,13 +10946,34 @@ class OperatorQueryService:
         fetch_limit = limit + offset + (0 if include_total else 1)
         rows = self.runtime.audit_repo.recent(limit=fetch_limit)
         paged_rows = rows[offset : offset + limit]
+        page_refs: list[str] = []
+        for record in paged_rows:
+            page_refs.extend(
+                ref
+                for ref in (
+                    record.decision_context_ref,
+                    record.position_target_ref,
+                    record.policy_decision_ref,
+                    record.risk_decision_ref,
+                    record.decision_outcome_ref,
+                )
+                if ref
+            )
+            page_refs.extend(ref for ref in record.strategy_sleeve_intent_refs if ref)
+        payloads_by_ref = self.payloads_by_ref_map(page_refs)
+
+        def _payload(ref: str | None) -> dict[str, Any] | None:
+            if ref is None:
+                return None
+            return payloads_by_ref.get(ref)
+
         payloads: list[dict[str, Any]] = []
         for record in paged_rows:
-            context = self.payload_by_ref(record.decision_context_ref)
-            target = self._position_target_payload(self.payload_by_ref(record.position_target_ref))
-            policy = self.payload_by_ref(record.policy_decision_ref)
-            risk = self._risk_decision_payload(self.payload_by_ref(record.risk_decision_ref))
-            finalized_outcome = self.payload_by_ref(record.decision_outcome_ref)
+            context = _payload(record.decision_context_ref)
+            target = self._position_target_payload(_payload(record.position_target_ref))
+            policy = _payload(record.policy_decision_ref)
+            risk = self._risk_decision_payload(_payload(record.risk_decision_ref))
+            finalized_outcome = _payload(record.decision_outcome_ref)
             target = self._resolved_position_target_payload(
                 finalized_decision_outcome=finalized_outcome,
                 position_target=target,
@@ -10971,11 +10992,8 @@ class OperatorQueryService:
                 native_outcome = nested_outcome if isinstance(nested_outcome, dict) else None
             strategy_sleeve_intents = [
                 payload
-                for payload in (
-                    self.payload_by_ref(ref)
-                    for ref in record.strategy_sleeve_intent_refs
-                )
-                if payload is not None
+                for ref in record.strategy_sleeve_intent_refs
+                if (payload := _payload(ref)) is not None
             ]
             no_trade_classification = self._no_trade_classification_payload(
                 decision_outcome=native_outcome,
