@@ -626,6 +626,14 @@ class AccountQueryFacade:
         decision_id = str(latest_order_payload.get("decision_id") or "").strip()
         if not decision_id:
             return None
+        latest_state = str(
+            latest_order_payload.get("state") or latest_order_payload.get("status") or ""
+        ).strip().upper()
+        if latest_state:
+            if latest_state in _CREATED_OR_SUBMITTING_STATES:
+                return None
+            if latest_state not in _TERMINAL_NO_FILL_STATES:
+                return None
 
         order_payloads = self._recent_order_payloads_for_decision(decision_id)
         if not order_payloads:

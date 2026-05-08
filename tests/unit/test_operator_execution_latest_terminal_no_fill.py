@@ -154,6 +154,8 @@ def test_execution_latest_does_not_mark_terminal_no_fill_when_decision_has_fill(
     payload = AccountQueryFacade(owner).build_execution_latest()
 
     assert payload["terminal_no_fill_explanation"] is None
+    assert owner.order_row_calls == []
+    assert owner.fill_row_calls == []
 
 
 def test_execution_latest_marks_historical_order_and_fill_outside_current_runtime() -> None:
