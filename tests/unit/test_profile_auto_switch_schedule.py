@@ -71,6 +71,7 @@ class TestProfileAutoSwitchLoop(unittest.IsolatedAsyncioTestCase):
         runtime.logger = MagicMock()
         runtime._seconds_until_next_half_hour_boundary = MagicMock(return_value=0.0)
         runtime._record_background_failure = AsyncMock()
+        runtime._record_background_recovery = AsyncMock()
         return runtime
 
     async def test_loop_invokes_evaluate_now_at_boundary(self) -> None:
