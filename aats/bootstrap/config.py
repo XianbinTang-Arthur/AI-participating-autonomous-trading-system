@@ -514,6 +514,7 @@ class ApplicationRuntime:
     replay_validation_history: list[dict[str, Any]] = field(default_factory=list)
     database_runtime: DatabaseRuntime | None = None
     background_tasks: list[asyncio.Task[Any]] = field(default_factory=list)
+    background_failure_messages: dict[str, str] = field(default_factory=dict)
     execution_outbox_publisher: PostgresExecutionOutboxPublisher | None = None
     funding_fee_repo: FundingFeeRepository | None = None
     sleeve_pnl_projection_service: SleevePnLProjectionService | None = None
@@ -1033,6 +1034,8 @@ class ApplicationRuntime:
                 await self.stream_snapshot_cache.flush_to_hot_state()
             except Exception as exc:
                 await self._record_background_failure(subsystem="stream_cache_flush", exc=exc)
+            else:
+                await self._record_background_recovery(subsystem="stream_cache_flush")
 
     async def _refresh_account_loop(self) -> None:
         while True:
@@ -1043,6 +1046,8 @@ class ApplicationRuntime:
                 await self._evaluate_derivatives_live_guard_after_refresh()
             except Exception as exc:
                 await self._record_background_failure(subsystem="account_refresh", exc=exc)
+            else:
+                await self._record_background_recovery(subsystem="account_refresh")
             await asyncio.sleep(
                 self._jittered_sleep_seconds(
                     float(self.settings.okx_account_refresh_interval_seconds)
@@ -1067,6 +1072,10 @@ class ApplicationRuntime:
         except Exception as exc:
             await self._record_background_failure(
                 subsystem="account_snapshot_cache_publish", exc=exc
+            )
+        else:
+            await self._record_background_recovery(
+                subsystem="account_snapshot_cache_publish"
             )
 
     async def _evaluate_derivatives_live_guard_after_refresh(self) -> None:
@@ -1104,6 +1113,8 @@ class ApplicationRuntime:
                 await self.order_manager.sync_exchange_state()
             except Exception as exc:
                 await self._record_background_failure(subsystem="execution_sync", exc=exc)
+            else:
+                await self._record_background_recovery(subsystem="execution_sync")
             await asyncio.sleep(
                 self._jittered_sleep_seconds(
                     float(self.settings.okx_execution_sync_interval_seconds)
@@ -1125,6 +1136,8 @@ class ApplicationRuntime:
                 await self.reconciliation_service.validate_now(reason="background_refresh")
             except Exception as exc:
                 await self._record_background_failure(subsystem="reconciliation_refresh", exc=exc)
+            else:
+                await self._record_background_recovery(subsystem="reconciliation_refresh")
             await asyncio.sleep(self._jittered_sleep_seconds(interval_seconds))
 
     async def _flush_execution_outbox_loop(self) -> None:
@@ -1133,6 +1146,7 @@ class ApplicationRuntime:
             try:
                 if self.execution_outbox_publisher is not None:
                     await self.execution_outbox_publisher.flush_pending()
+                await self._record_background_recovery(subsystem="execution_outbox_flush")
                 backoff = 1.0
             except Exception as exc:
                 await self._record_background_failure(subsystem="execution_outbox_flush", exc=exc)
@@ -1147,6 +1161,8 @@ class ApplicationRuntime:
                     await self.execution_command_processor.process_pending()
             except Exception as exc:
                 await self._record_background_failure(subsystem="execution_command_flow", exc=exc)
+            else:
+                await self._record_background_recovery(subsystem="execution_command_flow")
             await asyncio.sleep(self._jittered_sleep_seconds(interval_seconds))
 
     async def _monitor_phase1_shadow_loop(self) -> None:
@@ -1169,6 +1185,8 @@ class ApplicationRuntime:
                     await asyncio.to_thread(self.trial_guard_service.evaluate_now)
             except Exception as exc:
                 await self._record_background_failure(subsystem="trial_guard_monitor", exc=exc)
+            else:
+                await self._record_background_recovery(subsystem="trial_guard_monitor")
             await asyncio.sleep(self._jittered_sleep_seconds(interval_seconds))
 
     @staticmethod
@@ -1221,6 +1239,10 @@ class ApplicationRuntime:
                     subsystem="strategy_profile_auto_switch_state", exc=exc
                 )
                 continue
+            else:
+                await self._record_background_recovery(
+                    subsystem="strategy_profile_auto_switch_state"
+                )
             try:
                 await service.evaluate_now(
                     allow_auto_activation=auto_activation_enabled,
@@ -1236,6 +1258,10 @@ class ApplicationRuntime:
             except Exception as exc:
                 await self._record_background_failure(
                     subsystem="strategy_profile_auto_switch", exc=exc
+                )
+            else:
+                await self._record_background_recovery(
+                    subsystem="strategy_profile_auto_switch"
                 )
 
     async def _housekeeping_loop(self) -> None:
@@ -1265,6 +1291,9 @@ class ApplicationRuntime:
                         archive_hot_batches=archive_hot.get("batches", 0),
                         archive_hot_time_ms=archive_hot.get("time_taken_ms", 0),
                     )
+                    await self._record_background_recovery(
+                        subsystem="db_housekeeping"
+                    )
             except Exception as exc:
                 await self._record_background_failure(
                     subsystem="db_housekeeping", exc=exc
@@ -1285,6 +1314,11 @@ class ApplicationRuntime:
         await asyncio.to_thread(self._record_background_failure_sync, subsystem=subsystem, message=message, error_type=error_type)
 
     def _record_background_failure_sync(self, *, subsystem: str, message: str, error_type: str) -> None:
+        state = getattr(self, "background_failure_messages", None)
+        if state is None:
+            state = {}
+            self.background_failure_messages = state
+        state[subsystem] = message
         latest = self.event_store.latest(topics.EXECUTION_ERROR_SUMMARIES)
         if latest is not None:
             payload = latest.payload
@@ -1323,6 +1357,36 @@ class ApplicationRuntime:
                 ),
                 source_component="runtime",
             )
+        )
+
+    async def _record_background_recovery(self, *, subsystem: str) -> None:
+        await asyncio.to_thread(
+            self._record_background_recovery_sync,
+            subsystem=subsystem,
+        )
+
+    def _record_background_recovery_sync(self, *, subsystem: str) -> None:
+        state = getattr(self, "background_failure_messages", None)
+        if not state or subsystem not in state:
+            return
+        state.pop(subsystem, None)
+        self.event_store.append(
+            build_envelope(
+                topic=topics.EXECUTION_ERROR_SUMMARIES,
+                key=subsystem,
+                payload_model=ExecutionErrorSummary(
+                    subsystem=subsystem,
+                    severity="warning",
+                    message=f"{subsystem}_recovered",
+                    observed_at=utc_now(),
+                ),
+                source_component="runtime",
+            )
+        )
+        log_event(
+            self.logger,
+            "background_loop_recovered",
+            subsystem=subsystem,
         )
 
     def _record_phase1_shadow_state(self) -> None:

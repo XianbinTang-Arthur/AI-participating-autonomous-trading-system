@@ -981,6 +981,11 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 OperatorQueryService,
+                "strategy_attribution_dashboard",
+                side_effect=AssertionError("strategyAttribution should read dashboard snapshot"),
+            ),
+            patch.object(
+                OperatorQueryService,
                 "position_lifecycle_attribution",
                 side_effect=AssertionError("positionLifecycleAttribution should read dashboard snapshot"),
             ),
@@ -9553,6 +9558,43 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             )
         )
         runtime.started_at = utc_now()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            execution_errors = client.get("/execution/errors")
+
+        self.assertEqual(execution_errors.status_code, 200)
+        self.assertEqual(execution_errors.json()["errors"], [])
+
+    async def test_execution_errors_hide_background_failure_after_recovery(self) -> None:
+        runtime = await self._runtime()
+        runtime.started_at = utc_now() - timedelta(minutes=1)
+        runtime.event_store.append(
+            build_envelope(
+                topic=topics.EXECUTION_ERROR_SUMMARIES,
+                key="execution_sync",
+                payload_model=ExecutionErrorSummary(
+                    subsystem="execution_sync",
+                    severity="error",
+                    message="execution_sync_failed: idle-in-transaction timeout",
+                    observed_at=utc_now() - timedelta(seconds=30),
+                ),
+                source_component="runtime",
+            )
+        )
+        runtime.event_store.append(
+            build_envelope(
+                topic=topics.EXECUTION_ERROR_SUMMARIES,
+                key="execution_sync",
+                payload_model=ExecutionErrorSummary(
+                    subsystem="execution_sync",
+                    severity="warning",
+                    message="execution_sync_recovered",
+                    observed_at=utc_now() - timedelta(seconds=5),
+                ),
+                source_component="runtime",
+            )
+        )
         app = self._app(runtime)
 
         with TestClient(app) as client:

@@ -262,6 +262,13 @@ class TestTask24SafetyControls(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(processing_failure.payload["subsystem"], "unit_test_loop")
         self.assertEqual(processing_failure.payload["stage"], "background_loop")
 
+        await runtime._record_background_recovery(subsystem="unit_test_loop")
+
+        recovered_summary = runtime.event_store.latest(topics.EXECUTION_ERROR_SUMMARIES, key="unit_test_loop")
+        self.assertIsNotNone(recovered_summary)
+        self.assertEqual(recovered_summary.payload["subsystem"], "unit_test_loop")
+        self.assertEqual(recovered_summary.payload["message"], "unit_test_loop_recovered")
+
 
 async def _return_snapshot(snapshot: ExchangeAccountSnapshot) -> ExchangeAccountSnapshot:
     return snapshot

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine, select, func
 from sqlalchemy.orm import Session, sessionmaker
@@ -391,6 +392,46 @@ class TestArchiveHotEventStore(unittest.TestCase):
         self.assertEqual(report.batches, 2)
         self.assertEqual(_count(sf, EventEnvelopeModel), 5)
         self.assertEqual(_count(sf, EventEnvelopeArchiveModel), 10)
+
+    def test_postgres_batch_uses_cte_upsert_without_large_in_list(self) -> None:
+        captured: dict[str, object] = {}
+
+        class _FakeResult:
+            def one(self):
+                return SimpleNamespace(copied_count=7, deleted_count=9)
+
+        class _FakeSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def execute(self, statement, params):
+                captured["sql"] = str(statement)
+                captured["params"] = dict(params)
+                return _FakeResult()
+
+            def commit(self):
+                captured["committed"] = True
+
+            def rollback(self):
+                captured["rolled_back"] = True
+
+        hk = DatabaseHousekeeping(session_factory=lambda: _FakeSession())  # type: ignore[arg-type]
+        copied, deleted = hk._archive_hot_event_store_postgres_batch(
+            cutoff=datetime.now(timezone.utc) - timedelta(days=14),
+            batch_size=10_000,
+        )
+
+        sql = str(captured["sql"])
+        self.assertEqual((copied, deleted), (7, 9))
+        self.assertIn("WITH candidates AS MATERIALIZED", sql)
+        self.assertIn("ON CONFLICT (event_id) DO NOTHING", sql)
+        self.assertIn("DELETE FROM event_store AS hot", sql)
+        self.assertNotIn("event_id IN", sql)
+        self.assertEqual(captured["params"]["batch_size"], 10_000)
+        self.assertTrue(captured["committed"])
 
     # ──────────────────────────────────────────────────────────────────
     # Case 8: ArchiveReport.as_dict

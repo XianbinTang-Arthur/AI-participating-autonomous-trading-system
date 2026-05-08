@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import delete, insert as sa_insert, select, func
+from sqlalchemy import delete, insert as sa_insert, select, func, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.storage.sqlalchemy_models import (
@@ -254,8 +254,37 @@ class DatabaseHousekeeping:
             )
             return report
 
-        # 实际搬运
         batches_run = 0
+
+        with self._session_factory() as session:
+            dialect_name = session.get_bind().dialect.name
+        if dialect_name == "postgresql":
+            while True:
+                if max_batches is not None and batches_run >= max_batches:
+                    break
+                copied_count, deleted_count = self._archive_hot_event_store_postgres_batch(
+                    cutoff=cutoff,
+                    batch_size=batch_size,
+                )
+                if deleted_count <= 0:
+                    break
+                report.copied_rows += copied_count
+                report.deleted_rows += deleted_count
+                report.batches += 1
+                batches_run += 1
+
+            with self._session_factory() as session:
+                oldest_after = session.scalar(
+                    select(func.min(EventEnvelopeModel.event_timestamp))
+                )
+                report.oldest_ts_after = oldest_after
+
+            report.time_taken_ms = int(
+                (_time.perf_counter_ns() - start_ns) // 1_000_000
+            )
+            return report
+
+        # 实际搬运
         while True:
             if max_batches is not None and batches_run >= max_batches:
                 break
@@ -347,6 +376,109 @@ class DatabaseHousekeeping:
             (_time.perf_counter_ns() - start_ns) // 1_000_000
         )
         return report
+
+    def _archive_hot_event_store_postgres_batch(
+        self,
+        *,
+        cutoff: datetime,
+        batch_size: int,
+    ) -> tuple[int, int]:
+        """Postgres fast path: archive one batch without Python-side row copying.
+
+        The previous dialect-neutral path loaded up to 10k ORM rows, queried
+        archive with a 10k-value IN list, then built 10k archive payload dicts
+        while the session transaction stayed open. Large event payloads can
+        leave the connection idle in an active transaction long enough for
+        Postgres to terminate it. This CTE keeps selection, idempotent insert,
+        and delete inside the database in one short transaction.
+        """
+
+        if batch_size <= 0:
+            raise ValueError("hot_event_batch_size_must_be_positive")
+        statement = text(
+            """
+            WITH candidates AS MATERIALIZED (
+                SELECT
+                    sequence_id,
+                    event_id,
+                    schema_version,
+                    created_at,
+                    event_type,
+                    event_timestamp,
+                    source_component,
+                    topic,
+                    event_key,
+                    decision_id,
+                    symbol,
+                    timeframe,
+                    product_type,
+                    margin_mode,
+                    payload
+                FROM event_store
+                WHERE event_timestamp < :cutoff_ts
+                ORDER BY sequence_id
+                LIMIT :batch_size
+            ),
+            inserted AS (
+                INSERT INTO event_store_archive (
+                    source_sequence_id,
+                    event_id,
+                    schema_version,
+                    created_at,
+                    event_type,
+                    event_timestamp,
+                    source_component,
+                    topic,
+                    event_key,
+                    decision_id,
+                    symbol,
+                    timeframe,
+                    product_type,
+                    margin_mode,
+                    payload
+                )
+                SELECT
+                    sequence_id,
+                    event_id,
+                    schema_version,
+                    created_at,
+                    event_type,
+                    event_timestamp,
+                    source_component,
+                    topic,
+                    event_key,
+                    decision_id,
+                    symbol,
+                    timeframe,
+                    product_type,
+                    margin_mode,
+                    payload
+                FROM candidates
+                ON CONFLICT (event_id) DO NOTHING
+                RETURNING 1
+            ),
+            deleted AS (
+                DELETE FROM event_store AS hot
+                USING candidates
+                WHERE hot.sequence_id = candidates.sequence_id
+                RETURNING 1
+            )
+            SELECT
+                (SELECT count(*) FROM inserted) AS copied_count,
+                (SELECT count(*) FROM deleted) AS deleted_count
+            """
+        )
+        with self._session_factory() as session:
+            try:
+                row = session.execute(
+                    statement,
+                    {"cutoff_ts": cutoff, "batch_size": int(batch_size)},
+                ).one()
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+        return int(row.copied_count or 0), int(row.deleted_count or 0)
 
     # ──────────────────────────────────────────────────────────────────
     # 组合执行

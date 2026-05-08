@@ -278,6 +278,39 @@ class TestDashboardUI(unittest.TestCase):
         self.assertTrue(payload["dashboard_summary_only"])
         self.assertEqual(calls, ["dashboard"])
 
+    def test_dashboard_bundle_dispatches_strategy_attribution_dashboard_panel(self) -> None:
+        calls: list[int] = []
+
+        class Query:
+            def strategy_attribution_report(self, *, limit: int) -> dict[str, object]:
+                raise AssertionError("dashboard bundle should not compute full strategy attribution")
+
+            def strategy_attribution_dashboard(self, *, limit: int) -> dict[str, object]:
+                calls.append(limit)
+                return {"summary": {"fill_count": 1}, "dashboard_summary_only": True}
+
+        payload = _protected_dashboard_panel_payload(
+            request=SimpleNamespace(),
+            query=Query(),
+            panel_key="strategyAttribution",
+            recent_decisions_limit=8,
+            recent_orders_limit=8,
+            recent_fills_limit=8,
+            recent_replay_validations_limit=8,
+            recent_ai_assessments_limit=8,
+            recent_ai_shadow_decisions_limit=8,
+            recent_ai_shadow_evaluations_limit=8,
+            exit_execution_history_limit=20,
+            exit_execution_history_offset=0,
+            exit_execution_history_action=None,
+            exit_execution_history_parent=None,
+            exit_execution_history_actor=None,
+            exit_execution_history_window_hours=None,
+        )
+
+        self.assertTrue(payload["dashboard_summary_only"])
+        self.assertEqual(calls, [200])
+
     def test_dashboard_routes_serve_html_and_assets_when_auth_is_disabled(self) -> None:
         app = FastAPI()
         app.include_router(auth_router)

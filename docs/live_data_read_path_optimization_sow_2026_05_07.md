@@ -97,6 +97,12 @@ Target fixes:
 - Dashboard lifecycle attribution is summary-only for decision trace fields:
   list rows come from fills/funding, while full audit-backed exit-chain
   diagnostics remain behind the explicit lifecycle detail endpoint.
+- Dashboard `strategyAttribution` uses a recent-window summary path that does
+  not rebuild the full sleeve PnL projection or hydrate all fill outcomes; the
+  explicit `/reports/strategy-attribution` endpoint keeps the full report path.
+- `trialReviewSummary` reuses the recovery/blocker/trial-guard context already
+  computed by scaling readiness and embeds the lightweight guarded-live packet
+  summary instead of building the full run packet during dashboard refresh.
 
 ## Logging, Monitoring, Auditing
 

@@ -501,7 +501,7 @@ async def _load_dashboard_snapshot_panel(runtime: ApplicationRuntime, snapshot_k
                 offset=_snapshot_int_param(params, "offset", 0, minimum=0, maximum=5000),
             )
         if panel_key == "strategyAttribution":
-            return query.strategy_attribution_report(
+            return query.strategy_attribution_dashboard(
                 limit=_snapshot_int_param(params, "limit", 200, minimum=1, maximum=1000)
             )
         if panel_key == "positionLifecycleAttribution":
@@ -892,7 +892,7 @@ def _protected_dashboard_panel_payload(
     if panel_key == "strategyRuntime":
         return query.strategy_runtime()
     if panel_key == "strategyAttribution":
-        return query.strategy_attribution_report(limit=200)
+        return query.strategy_attribution_dashboard(limit=200)
     if panel_key == "positionLifecycleAttribution":
         limit = 6 if view == "strategy" else 8
         return query.position_lifecycle_attribution_dashboard(limit=limit)

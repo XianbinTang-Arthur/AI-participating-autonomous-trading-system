@@ -496,6 +496,17 @@ class OperatorQueryService:
             lambda: fill_outcomes_for_scope(self.runtime.fill_outcome_repo, self.state_scope),
         )
 
+    def _scoped_fill_outcomes_recent(self, *, limit: int):
+        normalized_limit = max(int(limit), 1)
+        return self._cached(
+            f"scoped_fill_outcomes_recent:{normalized_limit}",
+            lambda: fill_outcomes_for_scope(
+                self.runtime.fill_outcome_repo,
+                self.state_scope,
+                limit=normalized_limit,
+            ),
+        )
+
     def _scoped_closed_fill_outcomes(self):
         return self._cached(
             "scoped_closed_fill_outcomes",
@@ -1249,6 +1260,20 @@ class OperatorQueryService:
         return self._cached(
             "scoped_sleeve_pnl_records",
             lambda: sleeve_pnl_records_for_scope(repo, self.state_scope),
+        )
+
+    def _scoped_sleeve_pnl_records_recent(self, *, limit: int):
+        repo = getattr(self.runtime, "sleeve_pnl_repo", None)
+        if repo is None:
+            return []
+        normalized_limit = max(int(limit), 1)
+        return self._cached(
+            f"scoped_sleeve_pnl_records_recent:{normalized_limit}",
+            lambda: sleeve_pnl_records_for_scope(
+                repo,
+                self.state_scope,
+                limit=normalized_limit,
+            ),
         )
 
     def _fill_outcome_map(self) -> dict[str, Any]:
@@ -12411,8 +12436,11 @@ class OperatorQueryService:
             forward_validation=forward_validation,
         )
         segments = self.strategy_segment_report(limit=segment_limit)
-        recovery = self.recovery_view()
-        blocker_rows = [item for item in self.blockers() if not item.get("submit_only")]
+        recovery = dict((scaling.get("recovery") or {}) if "recovery" in scaling else self.recovery_view())
+        if "active_blockers" in scaling:
+            blocker_rows = list(scaling.get("active_blockers") or [])
+        else:
+            blocker_rows = [item for item in self.blockers() if not item.get("submit_only")]
         latest_review = self._latest_trial_review_action()
         latest_period = (forward_validation.get("periods") or [None])[0] or {}
         segment_rows = list(segments.get("segments") or [])
@@ -12429,7 +12457,7 @@ class OperatorQueryService:
         scaling_readiness = str(scaling.get("readiness") or "continue_small_capital")
         high_slippage_count = int(latest_period.get("high_slippage_count") or 0)
         slow_submit_to_fill_count = int(latest_period.get("slow_submit_to_fill_count") or 0)
-        trial_guard = scaling.get("trial_guard") or self.trial_guard()
+        trial_guard = dict((scaling.get("trial_guard") or {}) if "trial_guard" in scaling else self.trial_guard())
         hard_stop = scaling.get("trial_guard_hard_stop") or self._trial_guard_hard_stop_payload(trial_guard)
         runtime_constraints = scaling.get("runtime_constraints") or {}
         action_items = self._trial_review_action_items(
@@ -12479,7 +12507,9 @@ class OperatorQueryService:
                     "status": _p.get("status"),
                     "summary": _p.get("summary"),
                     "summary_metrics": _p.get("summary_metrics"),
-                })(self.guarded_live_run_packet()),
+                    "dashboard_summary_only": _p.get("dashboard_summary_only"),
+                    "deferred_sections": _p.get("deferred_sections"),
+                })(self.guarded_live_run_packet_dashboard()),
                 "strategy_segments": {
                     "group_by": segments.get("group_by"),
                     "strongest_segment": strongest_segment,
@@ -13017,6 +13047,9 @@ class OperatorQueryService:
     def strategy_attribution_report(self, *, limit: int = 200) -> dict[str, Any]:
         return self.strategy_queries.strategy_attribution_report(limit=limit)
 
+    def strategy_attribution_dashboard(self, *, limit: int = 200) -> dict[str, Any]:
+        return self.strategy_queries.strategy_attribution_dashboard(limit=limit)
+
     def execution_anomaly_report(self, *, limit: int = 100) -> dict[str, Any]:
         return self.report_queries.execution_anomaly_report(limit=limit)
 
@@ -13025,11 +13058,28 @@ class OperatorQueryService:
         return self._cached_ttl(cache_key, 35, self._build_execution_errors)
 
     def _build_execution_errors(self) -> dict[str, Any]:
+        latest_by_subsystem: dict[str, dict[str, Any]] = {}
+        for item in self.runtime.event_store.recent_by_topic(topics.EXECUTION_ERROR_SUMMARIES, limit=50):
+            payload = item.payload
+            if not self._is_current_runtime_timestamp(payload.get("observed_at")):
+                continue
+            subsystem = str(
+                payload.get("subsystem")
+                or payload.get("order_id")
+                or payload.get("message")
+                or item.key
+                or "execution"
+            )
+            latest_by_subsystem[subsystem] = payload
         persisted = [
-            item.payload
-            for item in self.runtime.event_store.recent_by_topic(topics.EXECUTION_ERROR_SUMMARIES, limit=20)
-            if self._is_current_runtime_timestamp(item.payload.get("observed_at"))
+            payload
+            for payload in latest_by_subsystem.values()
+            if not self._is_recovered_execution_summary(payload)
         ]
+        persisted.sort(
+            key=lambda payload: str(payload.get("observed_at") or payload.get("timestamp") or ""),
+            reverse=True,
+        )
         if persisted:
             return {"errors": persisted}
         errors = []
@@ -13053,6 +13103,11 @@ class OperatorQueryService:
                 }
             )
         return {"errors": errors}
+
+    @staticmethod
+    def _is_recovered_execution_summary(payload: dict[str, Any]) -> bool:
+        message = str(payload.get("message") or "")
+        return message.endswith("_recovered") or "_recovered:" in message
 
     def reconciliation_latest(self) -> dict[str, Any]:
         cache_key = f"reconciliation_latest:{self._scope_cache_fragment()}"

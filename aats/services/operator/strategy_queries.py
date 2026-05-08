@@ -150,16 +150,57 @@ class StrategyQueryFacade:
             lambda: self._build_strategy_attribution_report(limit=normalized_limit),
         )
 
+    def strategy_attribution_dashboard(self, *, limit: int = 200) -> dict[str, Any]:
+        normalized_limit = max(int(limit), 1)
+        cache_key = f"strategy_attribution_dashboard:{self.owner._scope_cache_fragment()}:{normalized_limit}"
+        return self.owner._cached_ttl(
+            cache_key,
+            60,
+            lambda: self._build_strategy_attribution_dashboard(limit=normalized_limit),
+        )
+
     def _build_strategy_attribution_report(self, *, limit: int) -> dict[str, Any]:
         r = parallel_fetch({
             "sleeve_records": lambda: list(self.owner._scoped_sleeve_pnl_records()),
             "outcomes": lambda: list(self.owner._scoped_fill_outcomes()),
             "inventory_summary": self.owner._strategy_sleeve_inventory_summary,
         })
-        sleeve_records = r["sleeve_records"]
+        return self._strategy_attribution_payload(
+            sleeve_records=r["sleeve_records"],
+            outcomes=r["outcomes"],
+            inventory_summary=r["inventory_summary"],
+            limit=limit,
+            truth_source="sleeve_pnl_records_plus_fill_outcomes_plus_decision_audit",
+            dashboard_summary_only=False,
+        )
+
+    def _build_strategy_attribution_dashboard(self, *, limit: int) -> dict[str, Any]:
+        r = parallel_fetch({
+            "sleeve_records": lambda: list(self.owner._scoped_sleeve_pnl_records_recent(limit=limit)),
+            "outcomes": lambda: list(self.owner._scoped_fill_outcomes_recent(limit=limit)),
+            "inventory_summary": self.owner._strategy_sleeve_inventory_summary,
+        })
+        return self._strategy_attribution_payload(
+            sleeve_records=r["sleeve_records"],
+            outcomes=r["outcomes"],
+            inventory_summary=r["inventory_summary"],
+            limit=limit,
+            truth_source="sleeve_pnl_records_recent_plus_fill_outcomes_recent_dashboard_summary",
+            dashboard_summary_only=True,
+        )
+
+    def _strategy_attribution_payload(
+        self,
+        *,
+        sleeve_records: list[Any],
+        outcomes: list[Any],
+        inventory_summary: list[dict[str, Any]],
+        limit: int,
+        truth_source: str,
+        dashboard_summary_only: bool,
+    ) -> dict[str, Any]:
         sleeve_records.sort(key=lambda item: item.event_timestamp or item.created_at, reverse=True)
         sleeve_rows = sleeve_records[:limit]
-        outcomes = r["outcomes"]
         outcomes.sort(key=lambda item: item.ingestion_timestamp or item.created_at, reverse=True)
         rows = [self.owner._execution_quality_row(item) for item in outcomes[:limit]]
 
@@ -210,7 +251,6 @@ class StrategyQueryFacade:
             for code in row.get("risk_rejection_reasons") or []:
                 rejection_counts[str(code)] = rejection_counts.get(str(code), 0) + 1
 
-        inventory_summary = r["inventory_summary"]
         top_inventory_sleeve = inventory_summary[0] if inventory_summary else None
 
         return {
@@ -245,5 +285,6 @@ class StrategyQueryFacade:
                 "rejections": [{"reason_code": key, "count": value} for key, value in sorted(rejection_counts.items(), key=lambda item: (-item[1], item[0]))[:10]],
             },
             "source_fill_count": len(rows),
-            "truth_source": "sleeve_pnl_records_plus_fill_outcomes_plus_decision_audit",
+            "dashboard_summary_only": dashboard_summary_only,
+            "truth_source": truth_source,
         }
