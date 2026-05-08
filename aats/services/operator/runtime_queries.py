@@ -770,6 +770,223 @@ class RuntimeQueryFacade:
             ],
         }
 
+    @staticmethod
+    def _dashboard_submit_blocked_reasons_from_context(
+        *,
+        mode_snapshot: dict[str, Any],
+        execution_readiness: dict[str, Any],
+    ) -> list[str]:
+        return list(
+            dict.fromkeys(
+                list(mode_snapshot.get("submit_blocked_reasons", []) or [])
+                + list(execution_readiness.get("submit_blocked_reasons", []) or [])
+            )
+        )
+
+    def guarded_live_preflight_runtime_summary(
+        self,
+        *,
+        recovery: dict[str, Any],
+        account_status: dict[str, Any],
+        margin_buffer: dict[str, Any],
+        live_guard: dict[str, Any],
+        trial_guard: dict[str, Any],
+        submit_blocked_reasons: list[str],
+        blocker_control: dict[str, Any],
+    ) -> dict[str, Any]:
+        settings = self.owner.runtime.settings
+        if not (
+            getattr(settings, "mode", None) == "guarded_live"
+            and getattr(settings, "trading_product_type", None) == "derivatives"
+        ):
+            return {
+                "generated_at": utc_now(),
+                "status": "not_applicable",
+                "launch_ready": False,
+                "summary": "当前不是合约 guarded_live 运行线，不需要执行这份启盘前摘要。",
+                "counts": {"pass": 0, "warn": 0, "fail": 0},
+                "checks": [],
+                "operator_actions": ["先切到合约 guarded_live 运行线，再执行启盘前检查。"],
+                "dashboard_summary_only": True,
+                "truth_source": "runtime_context_guarded_live_preflight_summary",
+                "deferred_sections": ["full_guarded_live_preflight_check_matrix"],
+            }
+
+        blocker_items = blocker_control.get("blockers")
+        active_blockers = [
+            item
+            for item in (blocker_items if isinstance(blocker_items, list) else [])
+            if isinstance(item, dict) and item.get("affects_execution") is not False
+        ]
+        policy_profile = self.owner.runtime.policy_profile
+        real_money_blocked = bool(
+            getattr(policy_profile, "real_money_submission_structurally_blocked", False)
+        )
+        margin_status = str(margin_buffer.get("status") or "unknown")
+        trial_status = str(trial_guard.get("status") or "unknown")
+
+        checks = [
+            {
+                "check_id": "runtime_contract_dashboard_summary",
+                "category": "runtime_contract",
+                "label": "运行线必须是合约 guarded_live",
+                "status": "pass",
+                "detail": "当前运行线为合约 guarded_live。",
+                "required": True,
+                "observed": {
+                    "mode": getattr(settings, "mode", None),
+                    "trading_product_type": getattr(settings, "trading_product_type", None),
+                },
+            },
+            {
+                "check_id": "real_money_route_ready_dashboard_summary",
+                "category": "execution_route",
+                "label": "真实资金报单路径必须不再处于结构性阻断",
+                "status": "fail" if real_money_blocked else "pass",
+                "detail": (
+                    "当前执行线路仍然被结构性阻断。"
+                    if real_money_blocked
+                    else "当前执行线路没有结构性真实资金阻断。"
+                ),
+                "required": True,
+                "observed": {
+                    "submit_blocked_reasons": submit_blocked_reasons,
+                    "real_money_submission_structurally_blocked": real_money_blocked,
+                },
+            },
+            {
+                "check_id": "account_status_dashboard_summary",
+                "category": "account_readiness",
+                "label": "账户服务必须可用且新鲜",
+                "status": (
+                    "pass"
+                    if account_status.get("connected")
+                    and account_status.get("fresh")
+                    and account_status.get("ready")
+                    else "fail"
+                ),
+                "detail": (
+                    "账户服务状态可用于首屏判断。"
+                    if account_status.get("connected")
+                    and account_status.get("fresh")
+                    and account_status.get("ready")
+                    else "账户服务状态仍未满足首屏启盘判断。"
+                ),
+                "required": True,
+                "observed": {
+                    "connected": account_status.get("connected"),
+                    "fresh": account_status.get("fresh"),
+                    "ready": account_status.get("ready"),
+                    "blockers": account_status.get("blockers"),
+                },
+            },
+            {
+                "check_id": "no_active_execution_blockers_dashboard_summary",
+                "category": "recovery_and_blockers",
+                "label": "当前不能存在活动中的执行阻断",
+                "status": "pass" if not active_blockers else "fail",
+                "detail": (
+                    "当前没有活动中的执行阻断。"
+                    if not active_blockers
+                    else "当前仍有执行阻断，启盘前必须先处理。"
+                ),
+                "required": True,
+                "observed": [item.get("blocker") for item in active_blockers],
+            },
+            {
+                "check_id": "recovery_state_safe_dashboard_summary",
+                "category": "recovery_and_blockers",
+                "label": "恢复状态必须允许安全继续交易",
+                "status": (
+                    "pass"
+                    if recovery.get("safe_to_trade") and not recovery.get("review_required")
+                    else "fail"
+                ),
+                "detail": (
+                    "当前恢复状态允许继续自动交易。"
+                    if recovery.get("safe_to_trade") and not recovery.get("review_required")
+                    else "当前恢复状态仍不允许安全继续交易。"
+                ),
+                "required": True,
+                "observed": {
+                    "recovery_state": recovery.get("recovery_state"),
+                    "review_required": recovery.get("review_required"),
+                    "resume_blocked_reasons": recovery.get("resume_blocked_reasons"),
+                },
+            },
+            {
+                "check_id": "margin_buffer_safe_dashboard_summary",
+                "category": "risk_buffer",
+                "label": "当前保证金缓冲不能处于 critical 或 only-reduce",
+                "status": (
+                    "pass"
+                    if margin_status == "healthy" and not live_guard.get("only_reduce_required")
+                    else "fail"
+                ),
+                "detail": (
+                    "当前保证金缓冲处于健康区间。"
+                    if margin_status == "healthy" and not live_guard.get("only_reduce_required")
+                    else "当前保证金缓冲或 only-reduce 状态不允许启盘。"
+                ),
+                "required": True,
+                "observed": {
+                    "margin_buffer_status": margin_status,
+                    "only_reduce_required": live_guard.get("only_reduce_required"),
+                    "auto_halt_required": live_guard.get("auto_halt_required"),
+                },
+            },
+            {
+                "check_id": "trial_guard_status_dashboard_summary",
+                "category": "trial_guard",
+                "label": "试盘守护不能处于 breached",
+                "status": (
+                    "fail"
+                    if trial_status == "breached"
+                    else "warn"
+                    if trial_status in {"disabled", "not_configured", "warming_up"}
+                    else "pass"
+                ),
+                "detail": (
+                    "当前试盘守护已经进入监控中。"
+                    if trial_status == "monitoring"
+                    else "当前试盘守护已经触发自动停机。"
+                    if trial_status == "breached"
+                    else "当前试盘守护还没有形成稳定样本。"
+                ),
+                "required": False,
+                "observed": {"status": trial_status},
+            },
+        ]
+        fail_count = sum(1 for item in checks if item["status"] == "fail")
+        warn_count = sum(1 for item in checks if item["status"] == "warn")
+        pass_count = sum(1 for item in checks if item["status"] == "pass")
+        required_failures = [
+            item for item in checks if item["required"] and item["status"] == "fail"
+        ]
+        status = "fail" if required_failures else "warning" if warn_count else "ready"
+        summary = {
+            "ready": "当前合约 guarded_live 首屏预检摘要已通过。",
+            "warning": "当前首屏预检摘要没有硬失败，但仍有需要人工确认的告警项。",
+            "fail": "当前首屏预检摘要仍有硬失败项。",
+        }[status]
+        operator_actions = [
+            item["detail"]
+            for item in checks
+            if item["status"] in {"fail", "warn"}
+        ]
+        return {
+            "generated_at": utc_now(),
+            "status": status,
+            "launch_ready": not required_failures,
+            "summary": summary,
+            "counts": {"pass": pass_count, "warn": warn_count, "fail": fail_count},
+            "checks": checks,
+            "operator_actions": list(dict.fromkeys(operator_actions)),
+            "dashboard_summary_only": True,
+            "truth_source": "runtime_context_guarded_live_preflight_summary",
+            "deferred_sections": ["full_guarded_live_preflight_check_matrix"],
+        }
+
     def build_system_runtime(self, *, dashboard_summary_only: bool = False) -> dict[str, Any]:
         # ── 阶段 0：预热 strategy_runtime 的 30s TTL 缓存 ──────────
         # strategy_runtime 内部用 ThreadPoolExecutor(5) 并行发 8 个 DB 查询。
@@ -780,10 +997,7 @@ class RuntimeQueryFacade:
             self.owner.strategy_runtime(limit=5)
 
         # ── 阶段 1：并行获取所有独立子查询 ──────────────────────
-        if dashboard_summary_only:
-            def strategy_runtime_summary_loader() -> dict[str, Any] | None:
-                return self.owner.strategy_runtime_dashboard(limit=5).get("summary")
-        else:
+        if not dashboard_summary_only:
             def strategy_runtime_summary_loader() -> dict[str, Any] | None:
                 return self.owner.strategy_runtime(limit=5).get("summary")
 
@@ -794,22 +1008,19 @@ class RuntimeQueryFacade:
             "account_baseline": self.owner.latest_account_baseline,
             "account_snapshot": self.owner.latest_exchange_snapshot,
             "recovery": self.owner.recovery_view_dashboard if dashboard_summary_only else self.owner.recovery_view,
-            "guarded_live_preflight": (
-                self.owner.guarded_live_preflight_dashboard
-                if dashboard_summary_only
-                else self.owner.guarded_live_preflight
-            ),
             "control_plane_consistency": self._control_plane_consistency,
             "account_status": self.owner.account_service_status,
             "runtime_profile_control": self.owner.runtime_profile_snapshot,
-            "strategy_runtime_summary": strategy_runtime_summary_loader,
             "trial_guard": self.owner.trial_guard,
             "margin_buffer_overview": self.owner.margin_buffer_risk,
             "derivatives_live_guard": self.owner.derivatives_live_guard,
         }
         if dashboard_summary_only:
-            runtime_loaders["submit_blocked_reasons"] = self.owner._submit_blocked_reasons_dashboard
+            runtime_loaders["mode_controller_snapshot"] = lambda: dict(self.owner.runtime.mode_controller.snapshot())
+            runtime_loaders["execution_readiness"] = self.owner.runtime.execution_adapter.readiness
         else:
+            runtime_loaders["guarded_live_preflight"] = self.owner.guarded_live_preflight
+            runtime_loaders["strategy_runtime_summary"] = strategy_runtime_summary_loader
             runtime_loaders["blocker_control"] = self.owner.blocker_control
         r = parallel_fetch(runtime_loaders)
 
@@ -820,16 +1031,36 @@ class RuntimeQueryFacade:
         account_baseline = r["account_baseline"]
         account_snapshot = r["account_snapshot"]
         recovery = r["recovery"]
-        guarded_live_preflight = r["guarded_live_preflight"]
         control_plane_consistency = r["control_plane_consistency"]
         account_status = r["account_status"]
         if dashboard_summary_only:
+            submit_blocked_reasons = self._dashboard_submit_blocked_reasons_from_context(
+                mode_snapshot=r["mode_controller_snapshot"],
+                execution_readiness=r["execution_readiness"],
+            )
             blocker_control = self.owner.blocker_control_service.execution_blocker_summary(
                 recovery=recovery,
-                submit_blocked_reasons=list(r["submit_blocked_reasons"] or []),
+                submit_blocked_reasons=submit_blocked_reasons,
             )
+            guarded_live_preflight = self.guarded_live_preflight_runtime_summary(
+                recovery=recovery,
+                account_status=account_status,
+                margin_buffer=r["margin_buffer_overview"],
+                live_guard=r["derivatives_live_guard"],
+                trial_guard=r["trial_guard"],
+                submit_blocked_reasons=submit_blocked_reasons,
+                blocker_control=blocker_control,
+            )
+            strategy_runtime_summary = {
+                "status": "deferred",
+                "summary": "策略运行摘要已从 runtime 首屏拆出，请读取 strategyRuntime panel。",
+                "truth_source": "/strategy/runtime",
+                "deferred_from_dashboard_summary": True,
+            }
         else:
             blocker_control = r["blocker_control"]
+            guarded_live_preflight = r["guarded_live_preflight"]
+            strategy_runtime_summary = r["strategy_runtime_summary"]
         guarded_live_run_packet_summary = self.guarded_live_run_packet_summary(
             preflight=guarded_live_preflight,
             live_guard=r["derivatives_live_guard"],
@@ -878,7 +1109,7 @@ class RuntimeQueryFacade:
                 else None
             ),
             "runtime_profile_control": r["runtime_profile_control"],
-            "strategy_runtime_summary": r["strategy_runtime_summary"],
+            "strategy_runtime_summary": strategy_runtime_summary,
             "symbols": [self.owner.runtime.settings.default_symbol],
             "enabled_timeframes": list(self.owner.runtime.settings.enabled_decision_timeframes),
             "decision_cadence": {
@@ -965,8 +1196,10 @@ class RuntimeQueryFacade:
             payload["truth_source"] = "system_runtime_dashboard_summary"
             payload["deferred_sections"] = [
                 "full_strategy_runtime",
+                "strategy_runtime_summary",
                 "full_recovery_view",
                 "full_guarded_live_preflight",
+                "full_guarded_live_preflight_check_matrix",
                 "full_blocker_control",
             ]
         return payload

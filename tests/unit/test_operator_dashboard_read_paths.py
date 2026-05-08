@@ -157,12 +157,24 @@ class _RuntimeDashboardOwner:
             event_store=SimpleNamespace(
                 latest=lambda _topic: SimpleNamespace(event_timestamp=now),
             ),
+            mode_controller=SimpleNamespace(
+                snapshot=lambda: {
+                    "submit_blocked_reasons": ["exchange_not_ready"],
+                },
+            ),
+            execution_adapter=SimpleNamespace(
+                readiness=lambda: {
+                    "submit_blocked_reasons": [],
+                },
+            ),
             runtime_profile=_RuntimeDict(profile="derivatives-live"),
             environment_capabilities=_RuntimeDict(okx=True),
             policy_profile=_RuntimeDict(real_money_submission_structurally_blocked=False),
             recovery_policy=_RuntimeDict(policy="standard"),
             runtime_profile_resolution=SimpleNamespace(profile_source="test"),
             settings=SimpleNamespace(
+                mode="guarded_live",
+                trading_product_type="derivatives",
                 startup_profile="derivatives",
                 env_template_profile="derivatives-live",
                 config_profile="derivatives_live",
@@ -240,10 +252,10 @@ class _RuntimeDashboardOwner:
         }
 
     def guarded_live_preflight_dashboard(self):
-        return {"status": "ready", "launch_ready": True}
+        raise AssertionError("dashboard runtime must build preflight from existing runtime context")
 
     def _submit_blocked_reasons_dashboard(self):
-        return ["exchange_not_ready"]
+        raise AssertionError("dashboard runtime must merge submit blockers from existing runtime context")
 
     def account_service_status(self):
         return {"position_mode_contract": {"exchange_position_mode": "long_short_mode"}}
@@ -253,7 +265,7 @@ class _RuntimeDashboardOwner:
 
     def strategy_runtime_dashboard(self, *, limit: int):
         self.strategy_runtime_dashboard_calls += 1
-        return {"summary": {"latest_selected_family": "directional", "limit": limit}}
+        raise AssertionError("dashboard runtime must not build strategyRuntime panel payload")
 
     def trial_guard(self):
         return {"status": "monitoring"}
@@ -282,10 +294,11 @@ def test_system_runtime_dashboard_uses_summary_loaders_without_full_runtime() ->
 
     payload = RuntimeQueryFacade(owner).build_system_runtime(dashboard_summary_only=True)
 
-    assert owner.strategy_runtime_dashboard_calls == 1
+    assert owner.strategy_runtime_dashboard_calls == 0
     assert payload["dashboard_summary_only"] is True
     assert payload["truth_source"] == "system_runtime_dashboard_summary"
-    assert payload["strategy_runtime_summary"]["latest_selected_family"] == "directional"
+    assert payload["strategy_runtime_summary"]["deferred_from_dashboard_summary"] is True
+    assert payload["guarded_live_preflight"]["truth_source"] == "runtime_context_guarded_live_preflight_summary"
     assert payload["guarded_live_run_packet_summary"]["summary_source"] == "runtime_lightweight"
     assert payload["guarded_live_run_packet_summary"]["summary_metrics"]["execution_blocker_count"] == 1
 

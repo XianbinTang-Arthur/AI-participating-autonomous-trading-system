@@ -7,6 +7,7 @@ from typing import Any
 
 from aats.schemas.common import utc_now
 from aats.services.operator.dashboard_snapshot import (
+    DASHBOARD_SNAPSHOT_POLICIES,
     DASHBOARD_SNAPSHOT_PANEL_KEYS,
     DashboardSnapshotPlane,
     DashboardSnapshotPolicy,
@@ -70,6 +71,11 @@ class DashboardSnapshotPlaneTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("guardedLiveRunPacket", DASHBOARD_SNAPSHOT_PANEL_KEYS)
         self.assertIn("rdpWorkbenchOverview", DASHBOARD_SNAPSHOT_PANEL_KEYS)
         self.assertIn("positionLifecycleAttribution", P3_DASHBOARD_SNAPSHOT_PANEL_KEYS)
+
+    def test_p3_heavy_reports_are_on_demand_not_startup_or_scheduled(self) -> None:
+        for panel_key in ("strategyAttribution", "positionLifecycleAttribution", "trialReviewSummary"):
+            self.assertFalse(DASHBOARD_SNAPSHOT_POLICIES[panel_key].startup_prewarm)
+            self.assertFalse(DASHBOARD_SNAPSHOT_POLICIES[panel_key].scheduled_refresh)
 
     async def test_missing_read_returns_default_and_enqueues_refresh(self) -> None:
         loader_called = asyncio.Event()
@@ -236,6 +242,66 @@ class DashboardSnapshotPlaneTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.01)
 
             self.assertEqual(calls, ["runtime", "health", "latestDecision"])
+        finally:
+            await plane.stop()
+
+    async def test_on_demand_policy_skips_startup_and_scheduler_but_read_still_refreshes(self) -> None:
+        calls: list[str] = []
+
+        async def loader(snapshot_key: str) -> dict[str, Any]:
+            calls.append(snapshot_key)
+            return {"snapshot_key": snapshot_key}
+
+        plane = DashboardSnapshotPlane(
+            loader=loader,
+            default_factory=lambda snapshot_key: {"snapshot_key": snapshot_key, "ready": False},
+            policies={
+                "runtime": DashboardSnapshotPolicy(
+                    panel_key="runtime",
+                    ttl_seconds=60.0,
+                    stale_after_seconds=60.0,
+                    hard_expire_seconds=120.0,
+                    timeout_seconds=1.0,
+                    priority="p0",
+                ),
+                "trialReviewSummary": DashboardSnapshotPolicy(
+                    panel_key="trialReviewSummary",
+                    ttl_seconds=60.0,
+                    stale_after_seconds=60.0,
+                    hard_expire_seconds=120.0,
+                    timeout_seconds=1.0,
+                    priority="p3",
+                    startup_prewarm=False,
+                    scheduled_refresh=False,
+                ),
+            },
+            scheduler_interval_seconds=0.01,
+            startup_panel_interval_seconds=0.01,
+            startup_priority_pause_seconds=0.01,
+        )
+        try:
+            await plane.start()
+
+            await _wait_for_panel_snapshot(plane, "runtime", {"snapshot_key": "runtime"})
+            await asyncio.sleep(0.05)
+            self.assertEqual(calls, ["runtime"])
+
+            await plane._enqueue_due_panels()
+            await asyncio.sleep(0.05)
+            self.assertEqual(calls, ["runtime"])
+
+            read = await plane.read_panel("trialReviewSummary")
+            self.assertEqual(
+                read.data,
+                {"snapshot_key": "trialReviewSummary", "ready": False},
+            )
+            self.assertTrue(read.meta["loading"])
+            await _wait_for_panel_snapshot(
+                plane,
+                "trialReviewSummary",
+                {"snapshot_key": "trialReviewSummary"},
+            )
+            self.assertEqual(calls, ["runtime", "trialReviewSummary"])
         finally:
             await plane.stop()
 

@@ -41,6 +41,8 @@ class DashboardSnapshotPolicy:
     hard_expire_seconds: float
     timeout_seconds: float
     priority: str = "p0"
+    startup_prewarm: bool = True
+    scheduled_refresh: bool = True
 
 
 @dataclass(slots=True)
@@ -341,6 +343,8 @@ P3_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
         hard_expire_seconds=900.0,
         timeout_seconds=35.0,
         priority="p3",
+        startup_prewarm=False,
+        scheduled_refresh=False,
     ),
     "positionLifecycleAttribution": DashboardSnapshotPolicy(
         panel_key="positionLifecycleAttribution",
@@ -349,6 +353,8 @@ P3_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
         hard_expire_seconds=900.0,
         timeout_seconds=35.0,
         priority="p3",
+        startup_prewarm=False,
+        scheduled_refresh=False,
     ),
     "trialReviewSummary": DashboardSnapshotPolicy(
         panel_key="trialReviewSummary",
@@ -357,6 +363,8 @@ P3_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
         hard_expire_seconds=900.0,
         timeout_seconds=35.0,
         priority="p3",
+        startup_prewarm=False,
+        scheduled_refresh=False,
     ),
 }
 
@@ -616,6 +624,8 @@ class DashboardSnapshotPlane:
         enqueued_by_priority: dict[str, int] = {}
         for target in self._iter_snapshot_targets():
             policy = self._policies[target.panel_key]
+            if not policy.scheduled_refresh:
+                continue
             snapshot = await self._snapshot(target.snapshot_key)
             reason: str | None = None
             if snapshot is None:
@@ -711,7 +721,11 @@ class DashboardSnapshotPlane:
         return tuple(
             target
             for _, target in sorted(
-                indexed_targets,
+                (
+                    item
+                    for item in indexed_targets
+                    if self._policies[item[1].panel_key].startup_prewarm
+                ),
                 key=lambda item: (
                     priority_order.get(item[1].priority, len(priority_order)),
                     item[0],
