@@ -107,10 +107,9 @@ class _DashboardHealthOwner:
                 }
             ),
             execution_adapter=SimpleNamespace(
-                readiness=lambda: {
-                    "exchange_submit_allowed": True,
-                    "submit_blocked_reasons": [],
-                }
+                readiness=lambda: (_ for _ in ()).throw(
+                    AssertionError("dashboard health should synthesize execution readiness")
+                )
             ),
             market_gateway=SimpleNamespace(status=lambda: {"fresh": True}),
             runtime_profile=SimpleNamespace(to_dict=lambda: {}),
@@ -347,7 +346,12 @@ class TestRuntimeQueryFacade(unittest.TestCase):
         self.assertTrue(payload["dashboard_summary_only"])
         self.assertEqual(payload["truth_source"], "runtime_health_dashboard_summary")
         self.assertIn("latest_portfolio", payload["deferred_sections"])
+        self.assertIn("execution_adapter.readiness", payload["deferred_sections"])
         self.assertEqual(payload["mode_contract"]["recovery_state"], "normal_operation")
+        self.assertEqual(
+            payload["subsystems"]["execution_adapter"]["truth_source"],
+            "mode_controller_plus_account_status_dashboard_summary",
+        )
         self.assertEqual(payload["account_baseline"]["baseline_id"], "baseline_from_recovery")
         self.assertIsNone(payload["subsystems"]["audit_replay"]["audit_record_count"])
         self.assertEqual(

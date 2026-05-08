@@ -449,7 +449,6 @@ class RuntimeQueryFacade:
                 "recovery": self.owner.recovery_view_dashboard,
                 "market": self.owner.runtime.market_gateway.status,
                 "account": self.owner.account_service_status,
-                "execution": self.owner.runtime.execution_adapter.readiness,
                 "phase1_shadow": self.owner.phase1_shadow,
                 "derivatives_live_guard": self.owner.derivatives_live_guard,
                 "latest_reconciliation": self.owner._latest_scoped_reconciliation,
@@ -474,7 +473,13 @@ class RuntimeQueryFacade:
         recovery = r["recovery"]
         market = r["market"]
         account = r["account"]
-        execution = r["execution"]
+        if dashboard_summary_only:
+            execution = self._dashboard_execution_readiness(
+                mode_controller_snapshot=r["mode_controller_snapshot"],
+                account_status=account,
+            )
+        else:
+            execution = r["execution"]
         phase1_shadow = r["phase1_shadow"]
         derivatives_live_guard = r["derivatives_live_guard"]
         latest_reconciliation = r["latest_reconciliation"]
@@ -638,8 +643,32 @@ class RuntimeQueryFacade:
         if dashboard_summary_only:
             payload["dashboard_summary_only"] = True
             payload["truth_source"] = "runtime_health_dashboard_summary"
-            payload["deferred_sections"] = ["latest_portfolio"]
+            payload["deferred_sections"] = ["execution_adapter.readiness", "latest_portfolio"]
         return payload
+
+    def _dashboard_execution_readiness(
+        self,
+        *,
+        mode_controller_snapshot: dict[str, Any],
+        account_status: dict[str, Any],
+    ) -> dict[str, Any]:
+        settings = self.owner.runtime.settings
+        credentials_configured = bool(account_status.get("credentials_configured", account_status.get("ready", True)))
+        account_enabled = bool(account_status.get("enabled", True))
+        exchange_submit_allowed = bool(mode_controller_snapshot.get("exchange_submit_allowed", False))
+        return {
+            "ready": credentials_configured and account_enabled,
+            "backend": self.owner.runtime.execution_adapter.__class__.__name__,
+            "mode": mode_controller_snapshot.get("mode", getattr(settings, "mode", None)),
+            "execution_mode": "dashboard_summary",
+            "live_submit_enabled": getattr(settings, "live_submit_enabled", None),
+            "guarded_execution_dry_run": getattr(settings, "guarded_execution_dry_run", None),
+            "okx_simulated_trading": getattr(settings, "okx_simulated_trading", None),
+            "exchange_submit_allowed": exchange_submit_allowed,
+            "submit_blocked_reasons": list(mode_controller_snapshot.get("submit_blocked_reasons") or []),
+            "account_status": account_status,
+            "truth_source": "mode_controller_plus_account_status_dashboard_summary",
+        }
 
     def system_runtime(self) -> dict[str, Any]:
         return self.build_system_runtime()
