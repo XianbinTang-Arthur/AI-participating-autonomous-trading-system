@@ -11639,6 +11639,10 @@ class OperatorQueryService:
         cache_key = f"execution_latest:{self._scope_cache_fragment()}"
         return self._cached_ttl(cache_key, 35, self.account_queries.execution_latest)
 
+    def execution_latest_dashboard(self) -> dict[str, Any]:
+        cache_key = f"execution_latest_dashboard:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 5, self.account_queries.execution_latest_dashboard)
+
     def _build_execution_latest(self) -> dict[str, Any]:
         return self.account_queries.build_execution_latest()
 

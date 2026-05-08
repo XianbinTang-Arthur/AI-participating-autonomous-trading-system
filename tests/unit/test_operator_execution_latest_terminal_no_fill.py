@@ -20,6 +20,9 @@ class _FakeOwner:
         self.order_row_calls: list[dict] = []
         self.fill_row_calls: list[dict] = []
         self.current_runtime_timestamps = current_runtime_timestamps
+        self.dashboard_recovery_calls = 0
+        self.dashboard_mode_calls = 0
+        self.execution_error_calls = 0
         self.runtime = SimpleNamespace(
             execution_adapter=SimpleNamespace(readiness=lambda: {"ready": True}),
             execution_order_repo=SimpleNamespace(count_orders=lambda: len(orders) if order_count is None else order_count),
@@ -38,8 +41,16 @@ class _FakeOwner:
     def recovery_view(self):
         return {"recovery_state": "normal_operation"}
 
+    def recovery_view_dashboard(self):
+        self.dashboard_recovery_calls += 1
+        return {"recovery_state": "dashboard_normal_operation"}
+
     def system_mode(self):
         return {"execution_route": "derivatives_live"}
+
+    def system_mode_dashboard(self):
+        self.dashboard_mode_calls += 1
+        return {"execution_route": "derivatives_live_dashboard"}
 
     def _execution_record_payload(self, record):
         payload = dict(record)
@@ -48,6 +59,7 @@ class _FakeOwner:
         return payload
 
     def execution_errors(self):
+        self.execution_error_calls += 1
         return {"errors": []}
 
     def _is_current_runtime_timestamp(self, value):
@@ -176,6 +188,35 @@ def test_execution_latest_marks_historical_order_and_fill_outside_current_runtim
 
     assert payload["latest_order_is_current_runtime"] is False
     assert payload["latest_fill_is_current_runtime"] is False
+
+
+def test_execution_latest_dashboard_uses_summary_recovery_and_defers_errors() -> None:
+    owner = _FakeOwner(
+        orders=[
+            {
+                "order_id": "order-dashboard",
+                "client_order_id": "client-dashboard",
+                "decision_id": "decision-dashboard",
+                "state": "BLOCKED",
+                "updated_at": "2026-04-27T09:49:54Z",
+                "product_type": "derivatives",
+                "margin_mode": "cross",
+                "symbol": "BTC-USDT-SWAP",
+            }
+        ]
+    )
+
+    payload = AccountQueryFacade(owner).execution_latest_dashboard()
+
+    assert payload["dashboard_summary_only"] is True
+    assert payload["recent_failures"] == []
+    assert payload["recent_failures_deferred"] is True
+    assert payload["recovery"]["recovery_state"] == "dashboard_normal_operation"
+    assert payload["mode"]["execution_route"] == "derivatives_live_dashboard"
+    assert payload["truth_source"]["summary"] == "execution_latest_dashboard_summary"
+    assert owner.dashboard_recovery_calls == 1
+    assert owner.dashboard_mode_calls == 1
+    assert owner.execution_error_calls == 0
 
 
 def test_phase5_orders_recent_uses_bounded_page_fetch() -> None:

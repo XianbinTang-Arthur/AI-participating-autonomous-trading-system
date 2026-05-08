@@ -562,16 +562,19 @@ class AccountQueryFacade:
         # 会自死锁（内层等外层完成，外层等内层返回 → 60s 超时）。
         return self.build_execution_latest()
 
-    def build_execution_latest(self) -> dict[str, Any]:
+    def execution_latest_dashboard(self) -> dict[str, Any]:
+        return self.build_execution_latest(dashboard_summary_only=True)
+
+    def build_execution_latest(self, *, dashboard_summary_only: bool = False) -> dict[str, Any]:
         latest_order = self.owner.latest_order()
         latest_fill = self.owner.latest_fill()
         latest_order_payload = self.owner._execution_record_payload(latest_order) if latest_order is not None else None
         latest_fill_payload = self.owner._execution_record_payload(latest_fill) if latest_fill is not None else None
         latest_reconciliation = self.owner._latest_scoped_reconciliation()
-        recovery = self.owner.recovery_view()
+        recovery = self.owner.recovery_view_dashboard() if dashboard_summary_only else self.owner.recovery_view()
         terminal_no_fill_explanation = self._latest_terminal_no_fill_explanation(latest_order=latest_order)
-        return {
-            "mode": self.owner.system_mode(),
+        payload = {
+            "mode": self.owner.system_mode_dashboard() if dashboard_summary_only else self.owner.system_mode(),
             "execution": self.owner.runtime.execution_adapter.readiness(),
             "latest_order": latest_order_payload,
             "latest_fill": latest_fill_payload,
@@ -585,7 +588,7 @@ class AccountQueryFacade:
             ),
             "latest_reconciliation": latest_reconciliation.model_dump(mode="json") if latest_reconciliation is not None else None,
             "terminal_no_fill_explanation": terminal_no_fill_explanation,
-            "recent_failures": self.owner.execution_errors()["errors"],
+            "recent_failures": [] if dashboard_summary_only else self.owner.execution_errors()["errors"],
             "recovery": recovery,
             "truth_source": {
                 "orders": "execution_order_repo" if self.owner._phase5_control_plane_enabled() else "execution_repo",
@@ -593,6 +596,12 @@ class AccountQueryFacade:
                 "balances": "ledger_accounts" if self.owner._phase5_control_plane_enabled() else "portfolio_snapshot",
             },
         }
+        if dashboard_summary_only:
+            payload["dashboard_summary_only"] = True
+            payload["recent_failures_deferred"] = True
+            payload["deferred_sections"] = ["recent_failures"]
+            payload["truth_source"]["summary"] = "execution_latest_dashboard_summary"
+        return payload
 
     def _payload_is_current_runtime(
         self,

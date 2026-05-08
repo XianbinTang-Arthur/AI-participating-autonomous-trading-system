@@ -846,6 +846,44 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(panel["data"]["dashboard_summary_only"])
         self.assertEqual(calls, ["dashboard"])
 
+    async def test_dashboard_bundle_falls_back_to_dashboard_execution_latest_summary(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+        calls: list[str] = []
+
+        def fake_execution_latest_dashboard(self) -> dict[str, object]:
+            calls.append("dashboard")
+            return {
+                "latest_order": {"client_order_id": "dashboard-order"},
+                "latest_fill": None,
+                "dashboard_summary_only": True,
+                "recent_failures_deferred": True,
+            }
+
+        with (
+            patch.object(
+                OperatorQueryService,
+                "execution_latest",
+                side_effect=AssertionError("dashboard executionLatest must not load full execution detail"),
+            ),
+            patch.object(OperatorQueryService, "execution_latest_dashboard", fake_execution_latest_dashboard),
+            TestClient(app) as client,
+        ):
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="home",
+                    panels=["executionLatest"],
+                )
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        panel = payload["panels"]["executionLatest"]
+        self.assertIsNone(panel["error"])
+        self.assertEqual(panel["data"]["latest_order"]["client_order_id"], "dashboard-order")
+        self.assertTrue(panel["data"]["dashboard_summary_only"])
+        self.assertEqual(calls, ["dashboard"])
+
     async def test_dashboard_bundle_reads_p2_panels_from_snapshot_plane(self) -> None:
         runtime = await self._runtime()
         app = self._app(runtime)
