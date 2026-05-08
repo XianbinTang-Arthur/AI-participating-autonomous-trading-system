@@ -1,4 +1,4 @@
-﻿import { actionButton, alertQueue, pill, primaryStatusPanel, renderPaginationFooter, responsiveTable, summaryStrip, surfaceCard } from "../components.js";
+﻿import { actionButton, alertQueue, callout, pill, primaryStatusPanel, renderPaginationFooter, responsiveTable, summaryStrip, surfaceCard } from "../components.js";
 import { escapeHtml, formatDuration, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
 import { localizeError, readableState, toneForOrderStatus } from "../terms.js";
 import {
@@ -28,6 +28,8 @@ export function renderExecutionSections(data) {
   const fillsPayload = data.recentFills || {};
   const recentOrders = ordersPayload.orders || [];
   const recentFills = fillsPayload.fills || [];
+  const recentOrdersError = data.errors?.recentOrders || null;
+  const recentFillsError = data.errors?.recentFills || null;
   const errors = data.executionErrors?.errors || [];
   const metrics = data.metrics || {};
   const lifecycleAttribution = data.positionLifecycleAttribution || {};
@@ -79,7 +81,13 @@ export function renderExecutionSections(data) {
       title: "委托记录",
       kicker: "委托状态",
       copy: "按现货和合约分别查看，判断哪类委托在排队、卡住或反复失败。",
-      content: `${renderOrderGroups(recentOrders)}${renderPaginationFooter({
+      content: recentOrdersError
+        ? callout({
+            title: "委托记录读取失败",
+            copy: recentOrdersError,
+            pills: [pill("读取异常", "danger")],
+          })
+        : `${renderOrderGroups(recentOrders)}${renderPaginationFooter({
         shown: Number(ordersPayload?.orders?.length || 0),
         total: ordersPayload?.total_available,
         hasMore: ordersPayload?.has_more,
@@ -93,7 +101,13 @@ export function renderExecutionSections(data) {
       title: "成交记录",
       kicker: "成交状态",
       copy: "确认最近成交是否已经稳定落库，并补充对盈亏和手续费的上下文判断。",
-      content: `${renderFillGroups(recentFills)}${renderPaginationFooter({
+      content: recentFillsError
+        ? callout({
+            title: "成交记录读取失败",
+            copy: recentFillsError,
+            pills: [pill("读取异常", "danger")],
+          })
+        : `${renderFillGroups(recentFills)}${renderPaginationFooter({
         shown: Number(fillsPayload?.fills?.length || 0),
         total: fillsPayload?.total_available,
         hasMore: fillsPayload?.has_more,

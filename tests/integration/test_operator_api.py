@@ -4494,6 +4494,57 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
     async def test_operator_visibility_endpoints_cover_decision_execution_reconciliation_and_audit(self) -> None:
         runtime = await self._runtime()
         now = utc_now()
+        runtime.execution_repo.save_order_state(
+            OrderState(
+                decision_id="visibility_decision",
+                intent_id="visibility_intent",
+                symbol="BTC-USDT",
+                client_order_id="visibility_closing_order",
+                exchange_order_id="visibility_exchange_order",
+                venue="PAPER",
+                status="FILLED",
+                submission_mode="paper_local",
+                exchange_status="filled",
+                submitted_ts=now - timedelta(minutes=6),
+                last_update_ts=now - timedelta(minutes=5),
+                requested_qty=Decimal("1"),
+                filled_qty=Decimal("1"),
+                remaining_qty=Decimal("0"),
+                average_fill_price=Decimal("100"),
+                fees=Decimal("0.05"),
+                product_type="spot",
+                margin_mode="cash",
+                exposure_side="flat",
+                execution_action="exit",
+                position_intent="close_long",
+                submission_payload={},
+            )
+        )
+        runtime.execution_repo.save_fill(
+            FillEvent(
+                fill_id="visibility_closing_fill",
+                decision_id="visibility_decision",
+                intent_id="visibility_intent",
+                client_order_id="visibility_closing_order",
+                exchange_order_id="visibility_exchange_order",
+                symbol="BTC-USDT",
+                venue="PAPER",
+                side="sell",
+                fill_qty=Decimal("1"),
+                fill_price=Decimal("100"),
+                fee_amount=Decimal("0.05"),
+                fee_currency="USDT",
+                liquidity_role="taker",
+                exchange_timestamp=now - timedelta(minutes=5),
+                ingestion_timestamp=now - timedelta(minutes=5),
+                order_status_after_fill="FILLED",
+                product_type="spot",
+                margin_mode="cash",
+                exposure_side="flat",
+                execution_action="exit",
+                position_intent="close_long",
+            )
+        )
         runtime.fill_outcome_repo.save_outcome(
             FillOutcomeRecord(
                 fill_id="visibility_closing_fill",
@@ -4529,6 +4580,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 created_at=now - timedelta(minutes=5),
             )
         )
+        await runtime.decision_engine.run_cycle(runtime.settings.default_symbol, runtime.settings.primary_timeframe)
         app = self._app(runtime)
         with TestClient(app) as client:
             latest_decision = client.get("/decision/latest").json()

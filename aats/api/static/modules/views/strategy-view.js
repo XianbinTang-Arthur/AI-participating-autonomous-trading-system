@@ -29,6 +29,7 @@ export function renderStrategySections(data) {
   const latestDecision = data.latestDecision || {};
   const recentPayload = data.recentDecisions || {};
   const recentDecisions = recentPayload.decisions || [];
+  const recentDecisionsError = data.errors?.recentDecisions || null;
   const executionLatest = data.executionLatest || {};
   const terminalNoFill = executionLatest.terminal_no_fill_explanation || null;
   const strategyRuntime = data.strategyRuntime || {};
@@ -599,7 +600,13 @@ export function renderStrategySections(data) {
       copy: "这里只保留最近决策和快速详情；更老的记录继续按需展开，不再把历史本身放成主工作区。",
       classes: "strategy-compact-card",
       actions: `<div class="stack-actions table-actions--compact">${actionButton("查看完整历史", "inspect-decision-history", "", "ghost")}</div>`,
-      content: `${responsiveTable(
+      content: recentDecisionsError
+        ? callout({
+            title: "决策记录读取失败",
+            copy: recentDecisionsError,
+            pills: [pill("读取异常", "danger")],
+          })
+        : `${responsiveTable(
         decisionTableHeaders(decisionScene),
         recentDecisions.map((item) => [
           `<div><strong>${formatRelativeAge(item.decision_time)}</strong><div class="table-meta">${formatMaybeTimestamp(item.decision_time)}</div></div>`,
