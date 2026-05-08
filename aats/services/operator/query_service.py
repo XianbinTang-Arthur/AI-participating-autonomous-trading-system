@@ -5308,49 +5308,62 @@ class OperatorQueryService:
     def strategy_runtime(self, *, limit: int = 10) -> dict[str, Any]:
         return self.strategy_queries.strategy_runtime(limit=limit)
 
-    def _build_strategy_runtime(self, *, limit: int) -> dict[str, Any]:
+    def strategy_runtime_dashboard(self, *, limit: int = 10) -> dict[str, Any]:
+        return self.strategy_queries.strategy_runtime_dashboard(limit=limit)
+
+    def _build_strategy_runtime(self, *, limit: int, dashboard_summary_only: bool = False) -> dict[str, Any]:
         latest_event = self._latest_strategy_snapshot_event()
         latest_snapshot = self._strategy_snapshot_payload(latest_event)
         if latest_snapshot is not None:
             selected_family = latest_snapshot.get("selected_family")
-        recent_events = list(
-            reversed(
-                self.runtime.event_store.by_topic_scoped(
-                    topics.STRATEGY_COORDINATOR_SNAPSHOTS,
-                    scope=self.state_scope,
-                    limit=limit,
+        if dashboard_summary_only:
+            recent_snapshots = [] if latest_snapshot is None else [latest_snapshot]
+        else:
+            recent_events = list(
+                reversed(
+                    self.runtime.event_store.by_topic_scoped(
+                        topics.STRATEGY_COORDINATOR_SNAPSHOTS,
+                        scope=self.state_scope,
+                        limit=limit,
+                    )
                 )
             )
-        )
-        recent_snapshots = [self._strategy_snapshot_payload(event) for event in recent_events]
+            recent_snapshots = [self._strategy_snapshot_payload(event) for event in recent_events]
         strategy_runtime_repo = getattr(self.runtime, "strategy_runtime_repo", None)
         if strategy_runtime_repo is not None:
             from concurrent.futures import ThreadPoolExecutor
             pt = self.state_scope.product_type
             mm = self.state_scope.margin_mode
             alloc_limit = limit * 4
+            bundle_limit = 1 if dashboard_summary_only else limit
             with ThreadPoolExecutor(max_workers=5, thread_name_prefix="strategy_rt") as pool:
                 # Phase 1: independent queries in parallel
                 f_intents = pool.submit(strategy_runtime_repo.list_sleeve_intents, product_type=pt, margin_mode=mm, limit=alloc_limit)
                 f_allocation = pool.submit(strategy_runtime_repo.latest_allocation_decision, product_type=pt, margin_mode=mm)
-                f_profiles = pool.submit(strategy_runtime_repo.list_budget_profiles, product_type=pt, margin_mode=mm, limit=limit)
-                f_assignments = pool.submit(strategy_runtime_repo.list_budget_assignments, product_type=pt, margin_mode=mm, limit=alloc_limit)
-                f_bundles = pool.submit(strategy_runtime_repo.recent_execution_bundles, product_type=pt, margin_mode=mm, limit=limit)
+                f_profiles = None if dashboard_summary_only else pool.submit(strategy_runtime_repo.list_budget_profiles, product_type=pt, margin_mode=mm, limit=limit)
+                f_assignments = None if dashboard_summary_only else pool.submit(strategy_runtime_repo.list_budget_assignments, product_type=pt, margin_mode=mm, limit=alloc_limit)
+                f_bundles = pool.submit(strategy_runtime_repo.recent_execution_bundles, product_type=pt, margin_mode=mm, limit=bundle_limit)
                 # Wait for allocation first (phase 2 depends on it)
                 latest_allocation = f_allocation.result()
                 # Phase 2: dependent queries in parallel
-                if latest_allocation is not None:
+                f_snapshots = None
+                f_conflicts = None
+                f_netting = None
+                if latest_allocation is not None and not dashboard_summary_only:
                     aid = latest_allocation.allocation_id
                     f_snapshots = pool.submit(strategy_runtime_repo.list_budget_snapshots, allocation_id=aid, limit=alloc_limit)
                     f_conflicts = pool.submit(strategy_runtime_repo.list_conflict_resolutions, allocation_id=aid, limit=alloc_limit)
                     f_netting = pool.submit(strategy_runtime_repo.list_netting_decisions, allocation_id=aid, limit=alloc_limit)
                 # Collect phase 1 results
                 recent_sleeve_intents = [item.model_dump(mode="json") for item in f_intents.result()]
-                recent_budget_profiles = [item.model_dump(mode="json") for item in f_profiles.result()]
-                recent_budget_assignments = [item.model_dump(mode="json") for item in f_assignments.result()]
+                recent_budget_profiles = [] if f_profiles is None else [item.model_dump(mode="json") for item in f_profiles.result()]
+                recent_budget_assignments = [] if f_assignments is None else [item.model_dump(mode="json") for item in f_assignments.result()]
                 recent_bundles = [item.model_dump(mode="json") for item in f_bundles.result()]
             latest_allocation_decision = None if latest_allocation is None else latest_allocation.model_dump(mode="json")
-            if latest_allocation is not None:
+            if latest_allocation is not None and not dashboard_summary_only:
+                assert f_snapshots is not None
+                assert f_conflicts is not None
+                assert f_netting is not None
                 recent_budget_snapshots = [item.model_dump(mode="json") for item in f_snapshots.result()]
                 recent_conflict_resolutions = [item.model_dump(mode="json") for item in f_conflicts.result()]
                 recent_netting_decisions = [item.model_dump(mode="json") for item in f_netting.result()]
@@ -5385,7 +5398,7 @@ class OperatorQueryService:
                     self.runtime.event_store.by_topic_scoped(
                         topics.STRATEGY_EXECUTION_BUNDLES,
                         scope=self.state_scope,
-                        limit=limit,
+                        limit=1 if dashboard_summary_only else limit,
                     )
                 )
             )
@@ -5455,7 +5468,7 @@ class OperatorQueryService:
                 "event_timestamp": latest_target_event.event_timestamp,
                 **parent_signal_fields,
             }
-            if target_family == "independent":
+            if target_family == "independent" and not dashboard_summary_only:
                 latest_target_payload["independent_expected_vs_realized_summary"] = (
                     self._independent_expected_vs_realized_summary(
                         decision_ids={str(target_payload.get("decision_id") or "").strip()},
@@ -5464,7 +5477,7 @@ class OperatorQueryService:
                 )
         sleeve_records = []
         sleeve_repo = getattr(self.runtime, "strategy_sleeve_repo", None)
-        if sleeve_repo is not None and hasattr(sleeve_repo, "list_sleeves"):
+        if not dashboard_summary_only and sleeve_repo is not None and hasattr(sleeve_repo, "list_sleeves"):
             sleeve_records = [
                 sleeve.model_dump(mode="json")
                 for sleeve in sleeve_repo.list_sleeves()
@@ -5625,11 +5638,11 @@ class OperatorQueryService:
             "latest_approved_sleeve_weights": (
                 {} if latest_allocation_decision is None else dict(latest_allocation_decision.get("approved_sleeve_weights") or {})
             ),
-            "latest_budget_profile_count": len(recent_budget_profiles),
-            "latest_budget_assignment_count": len(recent_budget_assignments),
-            "latest_budget_snapshot_count": len(recent_budget_snapshots),
-            "latest_conflict_resolution_count": len(recent_conflict_resolutions),
-            "latest_netting_decision_count": len(recent_netting_decisions),
+            "latest_budget_profile_count": None if dashboard_summary_only else len(recent_budget_profiles),
+            "latest_budget_assignment_count": None if dashboard_summary_only else len(recent_budget_assignments),
+            "latest_budget_snapshot_count": None if dashboard_summary_only else len(recent_budget_snapshots),
+            "latest_conflict_resolution_count": None if dashboard_summary_only else len(recent_conflict_resolutions),
+            "latest_netting_decision_count": None if dashboard_summary_only else len(recent_netting_decisions),
             "latest_portfolio_risk_budget_state": (
                 None if latest_allocation_decision is None else latest_allocation_decision.get("portfolio_risk_budget_state")
             ),
@@ -5690,7 +5703,9 @@ class OperatorQueryService:
                 },
             },
         }
-        independent_expected_vs_realized_summary = self._independent_expected_vs_realized_summary()
+        independent_expected_vs_realized_summary = (
+            None if dashboard_summary_only else self._independent_expected_vs_realized_summary()
+        )
         independent_adaptive_summary = self._independent_adaptive_summary_from_payload(latest_target_payload)
         independent_transition_exception_summary = self._independent_transition_exception_summary_from_payload(
             latest_target_payload
@@ -5717,8 +5732,10 @@ class OperatorQueryService:
         ) = self._smart_arbitrage_runtime_pair_configuration(
             latest_snapshot=latest_snapshot,
         )
-        smart_arbitrage_cost_summary = self._smart_arbitrage_cost_summary(latest_snapshot=latest_snapshot)
-        return {
+        smart_arbitrage_cost_summary = (
+            {} if dashboard_summary_only else self._smart_arbitrage_cost_summary(latest_snapshot=latest_snapshot)
+        )
+        payload = {
             "generated_at": utc_now(),
             "summary": summary,
             "entry_execution_guard": entry_execution_guard,
@@ -5749,6 +5766,17 @@ class OperatorQueryService:
             "smart_arbitrage_cost_summary": smart_arbitrage_cost_summary,
             "truth_source": "strategy_runtime_repo_plus_event_store" if strategy_runtime_repo is not None else "strategy_coordinator_snapshots",
         }
+        if dashboard_summary_only:
+            payload["dashboard_summary_only"] = True
+            payload["deferred_sections"] = [
+                "strategy_sleeves",
+                "recent_budget_snapshots",
+                "recent_conflict_resolutions",
+                "recent_netting_decisions",
+                "independent_expected_vs_realized_summary",
+                "smart_arbitrage_cost_summary",
+            ]
+        return payload
 
     @staticmethod
     def _legacy_automation_state(item: dict[str, Any] | None) -> str:

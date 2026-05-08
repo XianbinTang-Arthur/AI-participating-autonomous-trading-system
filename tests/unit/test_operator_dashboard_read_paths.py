@@ -141,6 +141,43 @@ class _TrialReviewSummaryOwner:
         return value if isinstance(value, Decimal) else Decimal(str(value))
 
 
+class _StrategyRuntimeDashboardFacadeOwner:
+    def __init__(self) -> None:
+        self.cache_key: str | None = None
+        self.ttl_seconds: int | None = None
+        self.build_limit: int | None = None
+        self.dashboard_summary_only: bool | None = None
+
+    def _scope_cache_fragment(self) -> str:
+        return "derivatives:cross:BTC-USDT-SWAP"
+
+    def _cached_ttl(self, key: str, ttl_seconds: int, loader):
+        self.cache_key = key
+        self.ttl_seconds = ttl_seconds
+        return loader()
+
+    def _build_strategy_runtime(self, *, limit: int, dashboard_summary_only: bool = False):
+        self.build_limit = limit
+        self.dashboard_summary_only = dashboard_summary_only
+        return {
+            "dashboard_summary_only": dashboard_summary_only,
+            "limit": limit,
+        }
+
+
+def test_strategy_runtime_dashboard_facade_uses_dashboard_summary_builder() -> None:
+    owner = _StrategyRuntimeDashboardFacadeOwner()
+
+    payload = StrategyQueryFacade(owner).strategy_runtime_dashboard(limit=0)
+
+    assert payload["dashboard_summary_only"] is True
+    assert payload["limit"] == 1
+    assert owner.build_limit == 1
+    assert owner.dashboard_summary_only is True
+    assert owner.ttl_seconds == 30
+    assert owner.cache_key == "strategy_runtime_dashboard:derivatives:cross:BTC-USDT-SWAP:1"
+
+
 def test_strategy_attribution_dashboard_uses_recent_records_without_full_rebuild() -> None:
     owner = _StrategyDashboardOwner()
     payload = StrategyQueryFacade(owner).strategy_attribution_dashboard(limit=5)
@@ -505,3 +542,5 @@ def test_dashboard_bundle_uses_summary_recovery_and_mode_panels() -> None:
     assert "query.account_state_dashboard()" in snapshot_loader_source
     assert "query.guarded_live_preflight_dashboard()" in snapshot_loader_source
     assert "query.reconciliation_latest_dashboard()" in snapshot_loader_source
+    assert "query.strategy_runtime_dashboard()" in request_loader_source
+    assert "query.strategy_runtime_dashboard()" in snapshot_loader_source

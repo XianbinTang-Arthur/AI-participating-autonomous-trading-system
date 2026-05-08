@@ -28,6 +28,18 @@ class StrategyQueryFacade:
             lambda: self.owner._build_strategy_runtime(limit=normalized_limit),
         )
 
+    def strategy_runtime_dashboard(self, *, limit: int = 10) -> dict[str, Any]:
+        normalized_limit = max(int(limit), 1)
+        cache_key = f"strategy_runtime_dashboard:{self.owner._scope_cache_fragment()}:{normalized_limit}"
+        return self.owner._cached_ttl(
+            cache_key,
+            30,
+            lambda: self.owner._build_strategy_runtime(
+                limit=normalized_limit,
+                dashboard_summary_only=True,
+            ),
+        )
+
     def strategy_segment_report(
         self,
         *,
