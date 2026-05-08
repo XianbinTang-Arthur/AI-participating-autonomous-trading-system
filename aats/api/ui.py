@@ -15,7 +15,7 @@ DASHBOARD_SHELL = UI_DIR / "dashboard-shell.html"
 ui_router = APIRouter(include_in_schema=False)
 
 PAGE_NO_STORE_HEADERS = {"Cache-Control": "no-store"}
-STATIC_ASSET_HEADERS = {"Cache-Control": "public, max-age=120"}
+STATIC_ASSET_HEADERS = {"Cache-Control": "no-cache, max-age=0, must-revalidate"}
 LOGIN_AUTH_REQUIRED_URL = "/login?reason=operator_auth_required"
 
 

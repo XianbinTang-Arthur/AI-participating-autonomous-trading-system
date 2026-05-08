@@ -328,6 +328,8 @@ class TestDashboardUI(unittest.TestCase):
                 "ai_config": client.get("/ui/ai-config"),
                 "css": client.get("/ui/app.css"),
                 "js": client.get("/ui/app.js"),
+                "login_js": client.get("/ui/login.js"),
+                "favicon": client.get("/favicon.ico"),
                 "dashboard_refresh_js": client.get("/ui/modules/dashboard-refresh.js"),
                 "flash_js": client.get("/ui/modules/flash.js"),
                 "navigation_state_js": client.get("/ui/modules/navigation-state.js"),
@@ -357,7 +359,40 @@ class TestDashboardUI(unittest.TestCase):
                 self.assertEqual(response.status_code, 303)
                 self.assertEqual(response.headers["location"], "/ui/ai-analysis")
                 continue
+            if key == "favicon":
+                self.assertEqual(response.status_code, 204)
+                continue
             self.assertEqual(response.status_code, 200)
+
+        self.assertEqual(responses["root"].headers["cache-control"], "no-store")
+        self.assertEqual(responses["overview"].headers["cache-control"], "no-store")
+        for key in (
+            "css",
+            "js",
+            "login_js",
+            "favicon",
+            "dashboard_refresh_js",
+            "flash_js",
+            "navigation_state_js",
+            "shell_renderer_js",
+            "store_js",
+            "refresh_interactivity_js",
+            "view_router_js",
+            "risk_actions_js",
+            "execution_actions_js",
+            "admin_actions_js",
+            "ai_view_js",
+            "ai_analysis_js",
+            "ai_config_js",
+            "exit_execution_js",
+            "strategy_js",
+            "risk_js",
+            "reconciliation_controls_js",
+        ):
+            self.assertEqual(
+                responses[key].headers["cache-control"],
+                "no-cache, max-age=0, must-revalidate",
+            )
 
         self.assertEqual(login.status_code, 303)
         self.assertEqual(login.headers["location"], "/ui")
@@ -1582,6 +1617,7 @@ console.log(JSON.stringify({
         self.assertEqual(ai_config.status_code, 303)
         self.assertEqual(ai_config.headers["location"], "/login?reason=operator_auth_required")
         self.assertEqual(login.status_code, 200)
+        self.assertEqual(login.headers["cache-control"], "no-store")
         self.assertIn("loginLead", login.text)
         self.assertIn("login", login.text.lower())
 
