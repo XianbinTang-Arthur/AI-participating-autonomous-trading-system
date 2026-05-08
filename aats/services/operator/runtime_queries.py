@@ -628,6 +628,9 @@ class RuntimeQueryFacade:
     def system_runtime(self) -> dict[str, Any]:
         return self.build_system_runtime()
 
+    def system_runtime_dashboard(self) -> dict[str, Any]:
+        return self.build_system_runtime(dashboard_summary_only=True)
+
     def guarded_live_run_packet_summary(
         self,
         *,
@@ -752,32 +755,48 @@ class RuntimeQueryFacade:
             ],
         }
 
-    def build_system_runtime(self) -> dict[str, Any]:
+    def build_system_runtime(self, *, dashboard_summary_only: bool = False) -> dict[str, Any]:
         # ── 阶段 0：预热 strategy_runtime 的 30s TTL 缓存 ──────────
         # strategy_runtime 内部用 ThreadPoolExecutor(5) 并行发 8 个 DB 查询。
         # 如果放进下面的 parallel_fetch（17 路并发），会与其他 16 个查询同时
         # 竞争 DB 连接池（pool_size=10），导致冷启动从 ~5s 膨胀到 30s+。
         # 先单独计算并填充缓存，parallel_fetch 中的 lambda 直接命中热缓存。
-        self.owner.strategy_runtime(limit=5)
+        if not dashboard_summary_only:
+            self.owner.strategy_runtime(limit=5)
 
         # ── 阶段 1：并行获取所有独立子查询 ──────────────────────
-        r = parallel_fetch({
+        if dashboard_summary_only:
+            def strategy_runtime_summary_loader() -> dict[str, Any] | None:
+                return self.owner.strategy_runtime_dashboard(limit=5).get("summary")
+        else:
+            def strategy_runtime_summary_loader() -> dict[str, Any] | None:
+                return self.owner.strategy_runtime(limit=5).get("summary")
+
+        runtime_loaders = {
             "latest_decision": lambda: self.owner.runtime.event_store.latest(topics.DECISION_CONTEXTS),
             "latest_fill": self.owner.latest_fill,
             "latest_reconciliation": self.owner._latest_scoped_reconciliation,
             "account_baseline": self.owner.latest_account_baseline,
             "account_snapshot": self.owner.latest_exchange_snapshot,
-            "recovery": self.owner.recovery_view,
-            "guarded_live_preflight": self.owner.guarded_live_preflight,
-            "blocker_control": self.owner.blocker_control,
+            "recovery": self.owner.recovery_view_dashboard if dashboard_summary_only else self.owner.recovery_view,
+            "guarded_live_preflight": (
+                self.owner.guarded_live_preflight_dashboard
+                if dashboard_summary_only
+                else self.owner.guarded_live_preflight
+            ),
             "control_plane_consistency": self._control_plane_consistency,
             "account_status": self.owner.account_service_status,
             "runtime_profile_control": self.owner.runtime_profile_snapshot,
-            "strategy_runtime_summary": lambda: self.owner.strategy_runtime(limit=5).get("summary"),
+            "strategy_runtime_summary": strategy_runtime_summary_loader,
             "trial_guard": self.owner.trial_guard,
             "margin_buffer_overview": self.owner.margin_buffer_risk,
             "derivatives_live_guard": self.owner.derivatives_live_guard,
-        })
+        }
+        if dashboard_summary_only:
+            runtime_loaders["submit_blocked_reasons"] = self.owner._submit_blocked_reasons_dashboard
+        else:
+            runtime_loaders["blocker_control"] = self.owner.blocker_control
+        r = parallel_fetch(runtime_loaders)
 
         # ── 阶段 2：依赖性计算（需要上面的结果） ─────────────────
         latest_decision = r["latest_decision"]
@@ -789,13 +808,20 @@ class RuntimeQueryFacade:
         guarded_live_preflight = r["guarded_live_preflight"]
         control_plane_consistency = r["control_plane_consistency"]
         account_status = r["account_status"]
+        if dashboard_summary_only:
+            blocker_control = self.owner.blocker_control_service.execution_blocker_summary(
+                recovery=recovery,
+                submit_blocked_reasons=list(r["submit_blocked_reasons"] or []),
+            )
+        else:
+            blocker_control = r["blocker_control"]
         guarded_live_run_packet_summary = self.guarded_live_run_packet_summary(
             preflight=guarded_live_preflight,
             live_guard=r["derivatives_live_guard"],
             trial_guard=r["trial_guard"],
             margin_buffer=r["margin_buffer_overview"],
             recovery=recovery,
-            blocker_control=r["blocker_control"],
+            blocker_control=blocker_control,
         )
         position_mode_contract = account_status.get("position_mode_contract") or derivatives_position_mode_contract(
             settings=self.owner.runtime.settings,
@@ -804,7 +830,7 @@ class RuntimeQueryFacade:
         now = utc_now()
 
         # ── 阶段 3：组装返回 ──────────────────────────────────
-        return {
+        payload = {
             "runtime_profile": self.owner.runtime.runtime_profile.to_dict(),
             "environment_capabilities": self.owner.runtime.environment_capabilities.to_dict(),
             "policy_profile": self.owner.runtime.policy_profile.to_dict(),
@@ -919,6 +945,16 @@ class RuntimeQueryFacade:
                 "truth_source": "/replay/status",
             },
         }
+        if dashboard_summary_only:
+            payload["dashboard_summary_only"] = True
+            payload["truth_source"] = "system_runtime_dashboard_summary"
+            payload["deferred_sections"] = [
+                "full_strategy_runtime",
+                "full_recovery_view",
+                "full_guarded_live_preflight",
+                "full_blocker_control",
+            ]
+        return payload
 
     def metrics(self) -> dict[str, Any]:
         return self.owner._build_metrics()

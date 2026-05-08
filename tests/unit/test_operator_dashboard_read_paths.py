@@ -141,6 +141,155 @@ class _TrialReviewSummaryOwner:
         return value if isinstance(value, Decimal) else Decimal(str(value))
 
 
+class _RuntimeDict:
+    def __init__(self, **payload) -> None:
+        self.payload = dict(payload)
+
+    def to_dict(self):
+        return dict(self.payload)
+
+
+class _RuntimeDashboardOwner:
+    def __init__(self) -> None:
+        now = datetime(2026, 5, 8, tzinfo=timezone.utc)
+        self.strategy_runtime_dashboard_calls = 0
+        self.runtime = SimpleNamespace(
+            event_store=SimpleNamespace(
+                latest=lambda _topic: SimpleNamespace(event_timestamp=now),
+            ),
+            runtime_profile=_RuntimeDict(profile="derivatives-live"),
+            environment_capabilities=_RuntimeDict(okx=True),
+            policy_profile=_RuntimeDict(real_money_submission_structurally_blocked=False),
+            recovery_policy=_RuntimeDict(policy="standard"),
+            runtime_profile_resolution=SimpleNamespace(profile_source="test"),
+            settings=SimpleNamespace(
+                startup_profile="derivatives",
+                env_template_profile="derivatives-live",
+                config_profile="derivatives_live",
+                default_symbol="BTC-USDT-SWAP",
+                enabled_decision_timeframes=("5m",),
+                decision_min_interval_seconds_15m=60,
+                decision_min_interval_seconds_1h=300,
+                decision_min_price_move_bps=5,
+                decision_min_momentum_delta=0.1,
+                max_decisions_per_minute=4,
+                strategy_family_active="directional",
+                storage_mode="postgres",
+                operator_auth_enabled=True,
+                operator_session_configured=True,
+                operator_read_api_key=None,
+                operator_write_api_key=None,
+                operator_unsafe_write_without_auth=False,
+                operator_control_plane_execution_ledger_enabled=True,
+                financial_convergence_mode_enabled=True,
+                portfolio_ledger_truth_enabled=True,
+            ),
+            database_runtime=object(),
+            operator_repo=SimpleNamespace(count=lambda: 1),
+            started_at=now,
+            recovery_status=SimpleNamespace(
+                baseline_status="ready",
+                baseline_imported=True,
+                baseline_imported_at=now,
+                baseline_source="exchange_snapshot",
+                baseline_requires_operator_review=False,
+                baseline_safe_for_automatic_continuation=True,
+                baseline_balance_count=1,
+                baseline_position_count=1,
+                baseline_open_order_count=0,
+                baseline_fill_count=0,
+                baseline_event_ref="evt_baseline",
+                last_rebaseline_event_ref=None,
+                last_rebaseline_at=None,
+            ),
+        )
+        self.blocker_control_service = SimpleNamespace(
+            execution_blocker_summary=lambda *, recovery, submit_blocked_reasons: {
+                "blockers": [
+                    {
+                        "blocker": reason,
+                        "affects_execution": True,
+                    }
+                    for reason in submit_blocked_reasons
+                ]
+            }
+        )
+
+    def _phase5_control_plane_enabled(self):
+        return True
+
+    def latest_fill(self):
+        return None
+
+    def _latest_scoped_reconciliation(self):
+        return None
+
+    def latest_account_baseline(self):
+        return {"baseline_kind": "exchange"}
+
+    def latest_exchange_snapshot(self):
+        return SimpleNamespace(account_configuration=None, risk_snapshot=None, instruments=[])
+
+    def recovery_view_dashboard(self):
+        return {
+            "recovery_state": "running",
+            "review_required": False,
+            "rebaseline_available": False,
+            "resume_eligible": True,
+            "safe_to_trade": True,
+        }
+
+    def guarded_live_preflight_dashboard(self):
+        return {"status": "ready", "launch_ready": True}
+
+    def _submit_blocked_reasons_dashboard(self):
+        return ["exchange_not_ready"]
+
+    def account_service_status(self):
+        return {"position_mode_contract": {"exchange_position_mode": "long_short_mode"}}
+
+    def runtime_profile_snapshot(self):
+        return {"activation": {}}
+
+    def strategy_runtime_dashboard(self, *, limit: int):
+        self.strategy_runtime_dashboard_calls += 1
+        return {"summary": {"latest_selected_family": "directional", "limit": limit}}
+
+    def trial_guard(self):
+        return {"status": "monitoring"}
+
+    def margin_buffer_risk(self):
+        return {"status": "healthy", "current": {}, "liquidation": {}}
+
+    def derivatives_live_guard(self):
+        return {"auto_halt_required": False, "only_reduce_required": False}
+
+    def strategy_runtime(self, *, limit: int):
+        raise AssertionError("dashboard runtime must not build full strategy runtime")
+
+    def recovery_view(self):
+        raise AssertionError("dashboard runtime must not build full recovery")
+
+    def guarded_live_preflight(self):
+        raise AssertionError("dashboard runtime must not build full preflight")
+
+    def blocker_control(self):
+        raise AssertionError("dashboard runtime must not build full blocker control")
+
+
+def test_system_runtime_dashboard_uses_summary_loaders_without_full_runtime() -> None:
+    owner = _RuntimeDashboardOwner()
+
+    payload = RuntimeQueryFacade(owner).build_system_runtime(dashboard_summary_only=True)
+
+    assert owner.strategy_runtime_dashboard_calls == 1
+    assert payload["dashboard_summary_only"] is True
+    assert payload["truth_source"] == "system_runtime_dashboard_summary"
+    assert payload["strategy_runtime_summary"]["latest_selected_family"] == "directional"
+    assert payload["guarded_live_run_packet_summary"]["summary_source"] == "runtime_lightweight"
+    assert payload["guarded_live_run_packet_summary"]["summary_metrics"]["execution_blocker_count"] == 1
+
+
 class _StrategyRuntimeDashboardFacadeOwner:
     def __init__(self) -> None:
         self.cache_key: str | None = None
@@ -533,11 +682,13 @@ def test_dashboard_bundle_uses_summary_recovery_and_mode_panels() -> None:
     snapshot_loader_source = inspect.getsource(auth_routes._load_dashboard_snapshot_panel)
 
     assert "query.system_mode_dashboard()" in request_loader_source
+    assert "query.system_runtime_dashboard()" in request_loader_source
     assert "query.system_recovery_dashboard()" in request_loader_source
     assert "query.account_state_dashboard()" in request_loader_source
     assert "query.guarded_live_preflight_dashboard()" in request_loader_source
     assert "query.reconciliation_latest_dashboard()" in request_loader_source
     assert "query.system_mode_dashboard()" in snapshot_loader_source
+    assert "query.system_runtime_dashboard()" in snapshot_loader_source
     assert "query.system_recovery_dashboard()" in snapshot_loader_source
     assert "query.account_state_dashboard()" in snapshot_loader_source
     assert "query.guarded_live_preflight_dashboard()" in snapshot_loader_source

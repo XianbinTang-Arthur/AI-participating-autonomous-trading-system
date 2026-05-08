@@ -7462,6 +7462,10 @@ class OperatorQueryService:
         cache_key = f"system_runtime:{self._scope_cache_fragment()}"
         return self._cached_ttl(cache_key, 35, self.runtime_queries.system_runtime)
 
+    def system_runtime_dashboard(self) -> dict[str, Any]:
+        cache_key = f"system_runtime_dashboard:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 15, self.runtime_queries.system_runtime_dashboard)
+
     def blockers(self) -> list[dict[str, Any]]:
         cache_key = f"blockers:{self._scope_cache_fragment()}"
         return self._cached_ttl(cache_key, 35, self.blocker_queries.blockers)
