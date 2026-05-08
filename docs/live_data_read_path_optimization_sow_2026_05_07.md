@@ -126,6 +126,13 @@ Target fixes:
   builders that skip full exit-execution review history, AI recovery history,
   and operator-action hydration. The explicit `/system/recovery` and
   `/system/mode` endpoints keep the full audit/detail semantics.
+- Dashboard `accountState` uses an account-status summary that skips local
+  snapshot margin projection, latest reconciliation, and persisted funding-fee
+  aggregation. The explicit `/account/state` endpoint keeps the full account
+  audit view.
+- Dashboard `guardedLivePreflight` uses the dashboard guarded preflight
+  summary; the explicit `/system/guarded-live-preflight` endpoint keeps the
+  full preflight.
 
 ## Logging, Monitoring, Auditing
 

@@ -106,6 +106,113 @@ class AccountQueryFacade:
         # 会自死锁（内层等外层完成，外层等内层返回 → 60s 超时）。
         return self.build_account_state()
 
+    def account_state_dashboard(self) -> dict[str, Any]:
+        return self.build_account_state_dashboard()
+
+    def build_account_state_dashboard(self) -> dict[str, Any]:
+        r = parallel_fetch(
+            {
+                "status": self.owner.account_service_status,
+                "recovery": self.owner.recovery_view_dashboard,
+                "derivatives_live_guard": self.owner.derivatives_live_guard,
+                "margin_buffer_risk": self.owner.margin_buffer_risk,
+            }
+        )
+        status = r["status"] if isinstance(r.get("status"), dict) else {}
+        recovery = r["recovery"] if isinstance(r.get("recovery"), dict) else {}
+        position_mode_contract = status.get("position_mode_contract") or derivatives_position_mode_contract(
+            settings=self.owner.runtime.settings,
+            snapshot=None,
+        )
+        return {
+            "backend": self.owner.runtime.settings.account_backend,
+            "read_enabled": self.owner.runtime.settings.account_read_enabled,
+            "last_refresh_timestamp": status.get("last_update_ts"),
+            "fresh": status.get("fresh", False),
+            "connected": status.get("connected", False),
+            "ready": status.get("ready", False),
+            "last_error": status.get("last_error"),
+            "private_ws_connected": status.get("private_ws_connected", False),
+            "private_ws_last_message_ts": status.get("private_ws_last_message_ts"),
+            "private_ws_last_error": status.get("private_ws_last_error"),
+            "private_ws_fresh": status.get("private_ws_fresh", False),
+            "maker_fee_rate": status.get("maker_fee_rate"),
+            "taker_fee_rate": status.get("taker_fee_rate"),
+            "fee_rates_source": status.get("fee_rates_source"),
+            "position_mode_contract": position_mode_contract,
+            "configured_derivatives_position_mode": position_mode_contract.get("configured_derivatives_position_mode"),
+            "required_exchange_position_mode": position_mode_contract.get("required_exchange_position_mode"),
+            "exchange_position_mode": position_mode_contract.get("exchange_position_mode"),
+            "exchange_position_mode_label": position_mode_contract.get("exchange_position_mode_label"),
+            "exchange_position_mode_matches_configured": position_mode_contract.get(
+                "exchange_position_mode_matches_configured"
+            ),
+            "position_mode_match_required": position_mode_contract.get("position_mode_match_required"),
+            "account_configuration": status.get("account_configuration"),
+            "fee_schedule": status.get("fee_schedule"),
+            "risk_snapshot": status.get("risk_snapshot"),
+            "system_status_items": status.get("system_status_items", []),
+            "tracked_instrument_rules": [],
+            "recent_bills_count": status.get("recent_bills_count", 0),
+            "last_bills_error": status.get("last_bills_error"),
+            "exchange_funding_fee_summary": None,
+            "persisted_funding_fee_summary": {
+                "available": False,
+                "deferred_from_dashboard_summary": True,
+                "detail_endpoint": "/account/recent-funding-fees",
+            },
+            "local_position_margin_summary": {},
+            "exchange_position_margin_summary": {},
+            "margin_reconciliation": None,
+            "margin_buffer_overview": r["margin_buffer_risk"],
+            "derivatives_live_guard": r["derivatives_live_guard"],
+            "blockers": status.get("blockers", []),
+            "current_blocking_reason": next(iter(status.get("blockers", []) or []), None),
+            "detail": status.get("detail"),
+            "recovery": {
+                "recovery_state": recovery.get("recovery_state"),
+                "review_required": recovery.get("review_required", False),
+                "rebaseline_available": recovery.get("rebaseline_available", False),
+                "resume_eligible": recovery.get("resume_eligible", False),
+                "safe_to_trade": recovery.get("safe_to_trade", False),
+            },
+            "baseline_takeover": {
+                "status": self.owner.runtime.recovery_status.baseline_status,
+                "baseline_imported": self.owner.runtime.recovery_status.baseline_imported,
+                "baseline_imported_at": self.owner.runtime.recovery_status.baseline_imported_at,
+                "baseline_source": self.owner.runtime.recovery_status.baseline_source,
+                "requires_operator_review": self.owner.runtime.recovery_status.baseline_requires_operator_review,
+                "safe_for_automatic_continuation": self.owner.runtime.recovery_status.baseline_safe_for_automatic_continuation,
+                "balance_count": self.owner.runtime.recovery_status.baseline_balance_count,
+                "position_count": self.owner.runtime.recovery_status.baseline_position_count,
+                "open_order_count": self.owner.runtime.recovery_status.baseline_open_order_count,
+                "fill_count": self.owner.runtime.recovery_status.baseline_fill_count,
+                "event_ref": self.owner.runtime.recovery_status.baseline_event_ref,
+            },
+            "control_plane": {
+                "phase5_enabled": self.owner._phase5_control_plane_enabled(),
+                "order_truth_source": (
+                    "execution_order_repo" if self.owner._phase5_control_plane_enabled() else "execution_repo"
+                ),
+                "fill_truth_source": (
+                    "execution_fill_repo_v2" if self.owner._phase5_control_plane_enabled() else "execution_repo"
+                ),
+                "balance_truth_source": (
+                    "ledger_accounts" if self.owner._phase5_control_plane_enabled() else "portfolio_snapshot"
+                ),
+                "legacy_execution_views_authoritative": not self.owner._phase5_control_plane_enabled(),
+            },
+            "dashboard_summary_only": True,
+            "truth_source": "account_status_plus_recovery_dashboard_summary",
+            "deferred_sections": [
+                "local_position_margin_summary",
+                "exchange_position_margin_summary",
+                "margin_reconciliation",
+                "persisted_funding_fee_summary",
+                "tracked_instrument_rules",
+            ],
+        }
+
     def build_account_state(self) -> dict[str, Any]:
         # ── Phase 1：并行获取所有互相独立的子查询 ──
         phase1_queries: dict[str, Any] = {

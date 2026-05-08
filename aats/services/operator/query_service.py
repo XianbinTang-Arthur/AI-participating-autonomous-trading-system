@@ -11504,6 +11504,10 @@ class OperatorQueryService:
         cache_key = f"account_state:{self._scope_cache_fragment()}"
         return self._cached_ttl(cache_key, 35, self.account_queries.account_state)
 
+    def account_state_dashboard(self) -> dict[str, Any]:
+        cache_key = f"account_state_dashboard:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 5, self.account_queries.account_state_dashboard)
+
     def _build_account_state(self) -> dict[str, Any]:
         return self.account_queries.build_account_state()
 

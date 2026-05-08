@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from aats.api import auth_routes
 from aats.services.blocker_control import BlockerControlService
+from aats.services.operator.account_queries import AccountQueryFacade
 from aats.services.operator.query_service import OperatorQueryService
 from aats.services.operator.runtime_queries import RuntimeQueryFacade
 from aats.services.operator.strategy_queries import StrategyQueryFacade
@@ -283,6 +284,71 @@ def test_guarded_live_dashboard_uses_summary_preflight_recovery_and_minimal_bloc
     assert payload["dashboard_summary_only"] is True
 
 
+def test_account_state_dashboard_uses_status_summary_without_full_account_loaders() -> None:
+    service = OperatorQueryService.__new__(OperatorQueryService)
+    service.runtime = SimpleNamespace(
+        settings=SimpleNamespace(
+            account_backend="okx",
+            account_read_enabled=True,
+            trading_product_type="derivatives",
+            derivatives_require_exchange_pos_mode_match=False,
+            derivatives_position_mode="long_short",
+        ),
+        recovery_status=SimpleNamespace(
+            baseline_status="ready",
+            baseline_imported=True,
+            baseline_imported_at="2026-05-08T00:00:00Z",
+            baseline_source="exchange_snapshot",
+            baseline_requires_operator_review=False,
+            baseline_safe_for_automatic_continuation=True,
+            baseline_balance_count=1,
+            baseline_position_count=1,
+            baseline_open_order_count=0,
+            baseline_fill_count=0,
+            baseline_event_ref="evt_1",
+        ),
+    )
+    service.account_queries = AccountQueryFacade(service)
+    service.account_service_status = lambda: {
+        "connected": True,
+        "fresh": True,
+        "ready": True,
+        "last_update_ts": "2026-05-08T00:01:00Z",
+        "blockers": [],
+        "position_mode_contract": {"exchange_position_mode": "long_short_mode"},
+        "account_configuration": {"account_mode": "portfolio"},
+        "risk_snapshot": {"margin_ratio": "12.5"},
+    }
+    service.recovery_view_dashboard = lambda: {
+        "recovery_state": "running",
+        "review_required": False,
+        "rebaseline_available": False,
+        "resume_eligible": True,
+        "safe_to_trade": True,
+    }
+    service.derivatives_live_guard = lambda: {"auto_halt_required": False}
+    service.margin_buffer_risk = lambda: {"status": "healthy"}
+    service._phase5_control_plane_enabled = lambda: False
+    service.recovery_view = lambda: (_ for _ in ()).throw(
+        AssertionError("dashboard account state must not build full recovery")
+    )
+    service._latest_scoped_snapshot = lambda: (_ for _ in ()).throw(
+        AssertionError("dashboard account state must not load local snapshot")
+    )
+    service._latest_scoped_reconciliation = lambda: (_ for _ in ()).throw(
+        AssertionError("dashboard account state must not load latest reconciliation")
+    )
+
+    payload = service.account_queries.build_account_state_dashboard()
+
+    assert payload["fresh"] is True
+    assert payload["ready"] is True
+    assert payload["margin_buffer_overview"] == {"status": "healthy"}
+    assert payload["dashboard_summary_only"] is True
+    assert payload["truth_source"] == "account_status_plus_recovery_dashboard_summary"
+    assert "persisted_funding_fee_summary" in payload["deferred_sections"]
+
+
 def test_legacy_blockers_reuses_cached_blocker_control_payload() -> None:
     class Owner:
         def __init__(self) -> None:
@@ -329,5 +395,9 @@ def test_dashboard_bundle_uses_summary_recovery_and_mode_panels() -> None:
 
     assert "query.system_mode_dashboard()" in request_loader_source
     assert "query.system_recovery_dashboard()" in request_loader_source
+    assert "query.account_state_dashboard()" in request_loader_source
+    assert "query.guarded_live_preflight_dashboard()" in request_loader_source
     assert "query.system_mode_dashboard()" in snapshot_loader_source
     assert "query.system_recovery_dashboard()" in snapshot_loader_source
+    assert "query.account_state_dashboard()" in snapshot_loader_source
+    assert "query.guarded_live_preflight_dashboard()" in snapshot_loader_source

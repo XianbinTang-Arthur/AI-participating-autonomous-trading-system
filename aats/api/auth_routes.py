@@ -483,7 +483,7 @@ async def _load_dashboard_snapshot_panel(runtime: ApplicationRuntime, snapshot_k
         if panel_key == "metrics":
             return query.metrics()
         if panel_key == "accountState":
-            return query.account_state()
+            return query.account_state_dashboard()
         if panel_key == "latestDecision":
             return query.latest_decision_dashboard()
         if panel_key == "strategyRuntime":
@@ -518,7 +518,7 @@ async def _load_dashboard_snapshot_panel(runtime: ApplicationRuntime, snapshot_k
         if panel_key == "trialGuard":
             return query.trial_guard()
         if panel_key == "guardedLivePreflight":
-            return query.guarded_live_preflight()
+            return query.guarded_live_preflight_dashboard()
         if panel_key == "guardedLiveRunPacket":
             return query.guarded_live_run_packet_dashboard()
         if panel_key == "replayStatus":
@@ -889,7 +889,7 @@ def _protected_dashboard_panel_payload(
     if panel_key == "reconciliationLatest":
         return query.reconciliation_latest()
     if panel_key == "accountState":
-        return query.account_state()
+        return query.account_state_dashboard()
     if panel_key == "strategyRuntime":
         return query.strategy_runtime()
     if panel_key == "strategyAttribution":
@@ -914,7 +914,7 @@ def _protected_dashboard_panel_payload(
     if panel_key == "trialGuard":
         return query.trial_guard()
     if panel_key == "guardedLivePreflight":
-        return query.guarded_live_preflight()
+        return query.guarded_live_preflight_dashboard()
     if panel_key == "guardedLiveRunPacket":
         return query.guarded_live_run_packet_dashboard()
     if panel_key == "replayStatus":
