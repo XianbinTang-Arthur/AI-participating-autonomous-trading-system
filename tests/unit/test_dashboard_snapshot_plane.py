@@ -83,6 +83,12 @@ class DashboardSnapshotPlaneTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(DASHBOARD_SNAPSHOT_POLICIES[panel_key].startup_prewarm)
             self.assertFalse(DASHBOARD_SNAPSHOT_POLICIES[panel_key].scheduled_refresh)
 
+    def test_guarded_live_risk_p2_reports_are_on_demand_not_startup_or_scheduled(self) -> None:
+        for panel_key in ("guardedLivePreflight", "guardedLiveRunPacket"):
+            self.assertIn(panel_key, P2_DASHBOARD_SNAPSHOT_PANEL_KEYS)
+            self.assertFalse(DASHBOARD_SNAPSHOT_POLICIES[panel_key].startup_prewarm)
+            self.assertFalse(DASHBOARD_SNAPSHOT_POLICIES[panel_key].scheduled_refresh)
+
     def test_dashboard_snapshot_policy_slo_guardrails(self) -> None:
         for panel_key in P0_DASHBOARD_SNAPSHOT_PANEL_KEYS:
             policy = DASHBOARD_SNAPSHOT_POLICIES[panel_key]
