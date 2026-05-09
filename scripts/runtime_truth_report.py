@@ -34,6 +34,7 @@ DEFAULT_WSL_PROJECT = "~/aats"
 DEFAULT_GATEWAY_CONTAINER = "aats-gateway"
 DEFAULT_MICROSTRUCTURE_CONTAINER = "aats-microstructure-collector"
 DATABASE_TRUTH_PROBE_TIMEOUT_SECONDS = 75
+RDP_MICROSTRUCTURE_PROBE_TIMEOUT_SECONDS = 120
 MICROSTRUCTURE_HEARTBEAT_PATH = "/tmp/aats_microstructure_heartbeat"
 REQUIRED_APP_CONTAINERS = (
     "aats-gateway",
@@ -5168,7 +5169,7 @@ def rdp_microstructure_truth_probe(
 ) -> dict[str, Any]:
     completed = run_command(
         rdp_microstructure_probe_command(distro, gateway_container, context_ts=context_ts),
-        timeout=45,
+        timeout=RDP_MICROSTRUCTURE_PROBE_TIMEOUT_SECONDS,
         stdin=RDP_MICROSTRUCTURE_PROBE,
     )
     if not completed["ok"]:

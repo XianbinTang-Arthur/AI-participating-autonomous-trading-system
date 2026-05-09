@@ -391,6 +391,27 @@ def test_rdp_microstructure_probe_command_does_not_embed_database_url() -> None:
     assert "AATS_ACTIVE_PARAMETER_DB_URL" not in command
 
 
+def test_rdp_microstructure_truth_probe_uses_extended_timeout(monkeypatch) -> None:
+    mod = load_module()
+    captured: dict[str, object] = {}
+
+    def fake_run_command(args, *, timeout=30, stdin=None, cwd=None):
+        captured["args"] = args
+        captured["timeout"] = timeout
+        captured["stdin"] = stdin
+        captured["cwd"] = cwd
+        return {"ok": True, "returncode": 0, "stdout": '{"ok": true}', "stderr": ""}
+
+    monkeypatch.setattr(mod, "run_command", fake_run_command)
+
+    result = mod.rdp_microstructure_truth_probe("Ubuntu", "aats-gateway")
+
+    assert result == {"ok": True}
+    assert captured["timeout"] == mod.RDP_MICROSTRUCTURE_PROBE_TIMEOUT_SECONDS
+    assert captured["timeout"] >= 120
+    assert captured["stdin"] == mod.RDP_MICROSTRUCTURE_PROBE
+
+
 def test_rdp_microstructure_payload_sequence_groups_by_unique_scope() -> None:
     mod = load_module()
 
