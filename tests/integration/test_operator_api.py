@@ -5372,6 +5372,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             default_symbol="BTC-USDT-SWAP",
             allowed_symbols=("BTC-USDT-SWAP",),
         )
+        await self._stop_background_decision_trigger(runtime)
         self.assertIsNotNone(runtime.decision_engine.strategy_profile_service)
         runtime.ai_service.should_attempt_assessment = Mock(return_value=False)
         runtime.ai_service.effective_operating_mode = Mock(return_value="baseline_only")
@@ -7412,8 +7413,8 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         payload = snapshot.json()
         self.assertEqual(payload["active_revision"]["profile_id"], "trend_normal")
         summary = payload["active_revision"]["payload_summary"]
-        self.assertEqual(summary["strategy_entry_allowed_regimes"], ["trend", "breakout", "uncertain"])
-        self.assertEqual(summary["strategy_short_entry_allowed_regimes"], ["trend", "breakout", "uncertain"])
+        self.assertEqual(summary["strategy_entry_allowed_regimes"], ["trend", "breakout", "range", "uncertain"])
+        self.assertEqual(summary["strategy_short_entry_allowed_regimes"], ["trend", "breakout", "range", "uncertain"])
         self.assertEqual(summary["strategy_scale_in_min_signal_edge_bps"], 16.0)
         self.assertEqual(summary["strategy_scale_in_alpha_min"], 0.22)
         self.assertEqual(summary["strategy_scale_in_confidence_min"], 0.68)
@@ -9985,47 +9986,48 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             default_symbol="BTC-USDT-SWAP",
             allowed_symbols=("BTC-USDT-SWAP",),
         )
-        runtime.portfolio_repo.save_snapshot(
-            PortfolioSnapshot(
-                snapshot_ts=utc_now(),
-                balances={"USDT": 75_000.0},
-                positions=[
-                    Position(
-                        symbol="BTC-USDT-SWAP",
-                        position_key="BTC-USDT-SWAP:long",
-                        position_qty=Decimal("0.02"),
-                        position_notional=Decimal("1400"),
-                        avg_entry_price=Decimal("70000"),
-                        unrealized_pnl=Decimal("15"),
-                        product_type="derivatives",
-                        margin_mode="cross",
-                        position_mode="long_short_mode",
-                        pos_side="long",
-                    ),
-                    Position(
-                        symbol="BTC-USDT-SWAP",
-                        position_key="BTC-USDT-SWAP:short",
-                        position_qty=Decimal("-0.01"),
-                        position_notional=Decimal("-700"),
-                        avg_entry_price=Decimal("70500"),
-                        unrealized_pnl=Decimal("-3"),
-                        product_type="derivatives",
-                        margin_mode="cross",
-                        position_mode="long_short_mode",
-                        pos_side="short",
-                    ),
-                ],
-                cost_basis={},
-                realized_pnl=0.0,
-                unrealized_pnl=12.0,
-                total_equity=75_012.0,
-                gross_exposure=2100.0,
-                net_exposure=700.0,
-                risk_budget_usage={},
-                product_type="derivatives",
-                margin_mode="cross",
-            )
+        await self._stop_background_decision_trigger(runtime)
+        snapshot = PortfolioSnapshot(
+            snapshot_ts=utc_now() + timedelta(seconds=1),
+            balances={"USDT": 75_000.0},
+            positions=[
+                Position(
+                    symbol="BTC-USDT-SWAP",
+                    position_key="BTC-USDT-SWAP:long",
+                    position_qty=Decimal("0.02"),
+                    position_notional=Decimal("1400"),
+                    avg_entry_price=Decimal("70000"),
+                    unrealized_pnl=Decimal("15"),
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                ),
+                Position(
+                    symbol="BTC-USDT-SWAP",
+                    position_key="BTC-USDT-SWAP:short",
+                    position_qty=Decimal("-0.01"),
+                    position_notional=Decimal("-700"),
+                    avg_entry_price=Decimal("70500"),
+                    unrealized_pnl=Decimal("-3"),
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    position_mode="long_short_mode",
+                    pos_side="short",
+                ),
+            ],
+            cost_basis={},
+            realized_pnl=0.0,
+            unrealized_pnl=12.0,
+            total_equity=75_012.0,
+            gross_exposure=2100.0,
+            net_exposure=700.0,
+            risk_budget_usage={},
+            product_type="derivatives",
+            margin_mode="cross",
         )
+        runtime.portfolio_repo.save_snapshot(snapshot)
+        runtime.portfolio_snapshot_cache.apply_sync(snapshot)
         app = self._app(runtime)
 
         with TestClient(app) as client:
