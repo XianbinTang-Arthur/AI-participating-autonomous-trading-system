@@ -8988,12 +8988,13 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             )
             recovered_runtime = await build_runtime(settings)
             app = self._app(recovered_runtime)
-            with TestClient(app) as client:
+            with TestClient(app, base_url="https://testserver") as client:
                 providers = client.get("/auth/providers")
                 login = client.post("/auth/login", json={"username": "admin", "password": "correct-pass"})
 
             self.assertEqual(providers.status_code, 200)
             self.assertEqual(providers.json()["stored_user_count"], 1)
+            self.assertTrue(providers.json()["transport_compatible"])
             self.assertFalse(providers.json()["runtime_profile_control_enabled"])
             self.assertEqual(login.status_code, 200)
             self.assertEqual(login.json()["identity"], "admin")
