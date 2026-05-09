@@ -1128,3 +1128,5 @@ def test_dashboard_bundle_uses_summary_recovery_and_mode_panels() -> None:
     assert "query.replay_status_dashboard()" in snapshot_loader_source
     assert "query.strategy_runtime_dashboard()" in request_loader_source
     assert "query.strategy_runtime_dashboard()" in snapshot_loader_source
+    assert "query.profile_control_summary_dashboard()" in request_loader_source
+    assert "query.profile_control_summary_dashboard()" in snapshot_loader_source

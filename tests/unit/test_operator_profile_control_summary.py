@@ -108,6 +108,28 @@ def test_profile_control_summary_snapshot_reuses_latest_control_summary_without_
     assert payload["latest_selection_decision"]["transition_class"] == "stable_keep_active"
 
 
+def test_profile_control_dashboard_snapshot_defers_tuning_context_on_missing_control_summary() -> None:
+    profiles = _StrategyProfiles(
+        latest_optimization={
+            "recommended_profile_id": "balanced",
+            "score_delta_vs_active": 0.0,
+            "winner_selection_policy": {"mode": "registered_profile_only"},
+            "notes": ["latest report missing control summary"],
+        }
+    )
+
+    payload = StrategyProfileQueryFacade(_Owner(profiles)).summary_snapshot_dashboard()
+
+    assert profiles.seed_calls == 1
+    assert profiles.tuning_context_calls == 0
+    assert payload["dashboard_summary_only"] is True
+    assert payload["truth_source"] == "strategy_profile_control_dashboard_summary"
+    assert payload["deferred_sections"] == ["profile_control_tuning_context"]
+    assert payload["control_summary"]["dashboard_summary_only"] is True
+    assert payload["control_summary"]["active_profile_id"] == "balanced"
+    assert payload["control_summary"]["evidence"]["deferred_from_dashboard_summary"] is True
+
+
 def test_profile_control_summary_report_filters_heavy_optimization_payload() -> None:
     service = object.__new__(OperatorQueryService)
     service.strategy_profile_queries = SimpleNamespace(
@@ -134,5 +156,43 @@ def test_profile_control_summary_report_filters_heavy_optimization_payload() -> 
     assert payload["activation"]["active_profile_id"] == "balanced"
     assert payload["active_revision"]["revision_id"] == "rev-balanced"
     assert payload["latest_selection_decision"]["transition_class"] == "stable_keep_active"
+    assert payload["latest_optimization_report"]["recommended_profile_id"] == "balanced"
+    assert "candidates" not in payload["latest_optimization_report"]
+
+
+def test_profile_control_summary_dashboard_report_uses_dashboard_snapshot() -> None:
+    service = object.__new__(OperatorQueryService)
+    service.strategy_profile_queries = SimpleNamespace(
+        snapshot=lambda: pytest.fail("dashboard summary must not use full profile snapshot"),
+        summary_snapshot=lambda: pytest.fail("dashboard summary must not compute full control fallback"),
+        summary_snapshot_dashboard=lambda: {
+            "dashboard_summary_only": True,
+            "truth_source": "strategy_profile_control_dashboard_summary",
+            "deferred_sections": ["profile_control_tuning_context"],
+            "control_summary": {
+                "active_profile_id": "balanced",
+                "evidence": {"deferred_from_dashboard_summary": True},
+                "adaptive_controls": {},
+                "entry_execution_guard": {},
+            },
+            "activation": {"active_profile_id": "balanced"},
+            "active_revision": {"revision_id": "rev-balanced"},
+            "latest_selection_decision": {"transition_class": "stable_keep_active"},
+            "latest_optimization_report": {
+                "recommended_profile_id": "balanced",
+                "score_delta_vs_active": 0.0,
+                "winner_selection_policy": {"mode": "registered_profile_only"},
+                "notes": ["summary"],
+                "candidates": [{"profile_id": "heavy"}],
+            },
+        },
+    )
+
+    payload = service._build_profile_control_summary_dashboard_report()
+
+    assert payload["dashboard_summary_only"] is True
+    assert payload["truth_source"] == "strategy_profile_control_dashboard_summary"
+    assert payload["deferred_sections"] == ["profile_control_tuning_context"]
+    assert payload["control_summary"]["evidence"]["deferred_from_dashboard_summary"] is True
     assert payload["latest_optimization_report"]["recommended_profile_id"] == "balanced"
     assert "candidates" not in payload["latest_optimization_report"]

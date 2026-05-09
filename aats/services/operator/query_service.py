@@ -7316,11 +7316,29 @@ class OperatorQueryService:
         cache_key = f"profile_control_summary:{self._scope_cache_fragment()}"
         return self._cached_ttl(cache_key, 20, self._build_profile_control_summary_report)
 
+    def profile_control_summary_dashboard(self) -> dict[str, Any]:
+        cache_key = f"profile_control_summary_dashboard:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 30, self._build_profile_control_summary_dashboard_report)
+
     def _build_profile_control_summary_report(self) -> dict[str, Any]:
         snapshot = self.strategy_profile_queries.summary_snapshot()
+        return self._profile_control_summary_payload(snapshot)
+
+    def _build_profile_control_summary_dashboard_report(self) -> dict[str, Any]:
+        snapshot = self.strategy_profile_queries.summary_snapshot_dashboard()
+        return self._profile_control_summary_payload(snapshot, dashboard_summary_only=True)
+
+    @staticmethod
+    def _profile_control_summary_payload(
+        snapshot: dict[str, Any],
+        *,
+        dashboard_summary_only: bool = False,
+    ) -> dict[str, Any]:
         latest_optimization = snapshot.get("latest_optimization_report") or {}
+        if not isinstance(latest_optimization, dict):
+            latest_optimization = {}
         latest_selection = snapshot.get("latest_selection_decision") or {}
-        return {
+        payload = {
             "control_summary": snapshot.get("control_summary") or {},
             "activation": snapshot.get("activation") or {},
             "active_revision": snapshot.get("active_revision"),
@@ -7333,6 +7351,11 @@ class OperatorQueryService:
                 "notes": latest_optimization.get("notes") or [],
             },
         }
+        if dashboard_summary_only:
+            payload["dashboard_summary_only"] = True
+            payload["truth_source"] = snapshot.get("truth_source") or "strategy_profile_control_dashboard_summary"
+            payload["deferred_sections"] = snapshot.get("deferred_sections") or []
+        return payload
 
     def activate_strategy_profile(
         self,

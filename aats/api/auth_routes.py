@@ -630,7 +630,7 @@ async def _load_dashboard_snapshot_panel(runtime: ApplicationRuntime, snapshot_k
         if panel_key == "aiShadowLatest":
             return query.ai_shadow_latest()
         if panel_key == "profileControlSummary":
-            return query.profile_control_summary_report()
+            return query.profile_control_summary_dashboard()
         if panel_key.startswith("rdp"):
             request = _dashboard_snapshot_rdp_request(runtime)
             if panel_key == "rdpControl":
@@ -1041,7 +1041,7 @@ def _protected_dashboard_panel_payload(
     if panel_key == "aiShadowLatest":
         return query.ai_shadow_latest()
     if panel_key == "profileControlSummary":
-        return query.profile_control_summary_report()
+        return query.profile_control_summary_dashboard()
     if panel_key == "aiConfigModel":
         return query.ai_config_summary()
     if panel_key == "aiRecent":

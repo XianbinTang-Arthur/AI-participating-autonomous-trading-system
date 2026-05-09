@@ -53,6 +53,44 @@ class StrategyProfileQueryFacade:
             "latest_selection_decision": service._latest_selection_decision_payload(),
         }
 
+    def summary_snapshot_dashboard(self) -> dict[str, Any]:
+        service = self.strategy_profiles
+        service.ensure_seed_profiles()
+        state = service._activation_state()
+        active = service._revision(state.active_revision_id)
+        latest_optimization_report = service._latest_optimization_report_payload() or {}
+        if not isinstance(latest_optimization_report, dict):
+            latest_optimization_report = {}
+        control_summary = latest_optimization_report.get("control_summary")
+        deferred_sections: list[str] = []
+        if not isinstance(control_summary, dict):
+            deferred_sections.append("profile_control_tuning_context")
+            control_summary = self._deferred_dashboard_control_summary(state)
+        return {
+            "dashboard_summary_only": True,
+            "truth_source": "strategy_profile_control_dashboard_summary",
+            "deferred_sections": deferred_sections,
+            "control_summary": control_summary or {},
+            "activation": state.model_dump(mode="json"),
+            "active_revision": service._revision_view(active),
+            "latest_optimization_report": latest_optimization_report,
+            "latest_selection_decision": service._latest_selection_decision_payload(),
+        }
+
+    @staticmethod
+    def _deferred_dashboard_control_summary(state: Any) -> dict[str, Any]:
+        return {
+            "active_profile_id": getattr(state, "active_profile_id", None),
+            "safety_profile_required": None,
+            "evidence": {
+                "deferred_from_dashboard_summary": True,
+            },
+            "adaptive_controls": {},
+            "entry_execution_guard": {},
+            "dashboard_summary_only": True,
+            "deferred_sections": ["profile_control_tuning_context"],
+        }
+
     def optimization_reports(self, *, limit: int, offset: int) -> dict[str, Any]:
         rows = self.owner._recent_strategy_profile_optimization_report_events()
         return self.owner._paginate_rows(

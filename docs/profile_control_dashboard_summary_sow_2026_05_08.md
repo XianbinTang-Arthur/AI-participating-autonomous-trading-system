@@ -36,6 +36,8 @@ No strategy profile lifecycle transition changes. Activation and selection state
 
 `profileControlSummary` should no longer build the full strategy profile snapshot. It should compose a summary from seed/activation state, active revision, latest optimization payload, latest selection payload, and only compute fallback control evidence when the latest optimization report lacks a `control_summary`.
 
+2026-05-09 follow-up: the dashboard/snapshot path now has a stricter boundary. It reuses the latest optimization `control_summary` when present, but if that field is missing it returns an explicit deferred dashboard summary instead of synchronously building tuning context. The full `/reports/profile-control-summary` endpoint keeps the deeper fallback for operator investigation.
+
 ## Logging, Monitoring, Auditing
 
 No new logs are required. Existing `dashboard_snapshot_refresh_success`, `dashboard_snapshot_refresh_timeout`, and `parallel_fetch_slow` logs remain the acceptance signal.
@@ -62,4 +64,4 @@ This SOW documents the dashboard read-path boundary. Full strategy profile snaps
 
 ## Deployment And Acceptance Criteria
 
-Acceptance requires focused unit/integration tests, full unit suite, deployment via `scripts/deploy.sh --profile derivatives-live --skip-commit`, and post-deploy monitoring showing `profileControlSummary` no longer has multi-second refreshes.
+Acceptance requires focused unit/integration tests, full unit suite, deployment via `scripts/deploy.sh --profile derivatives-live --skip-commit`, and post-deploy monitoring showing `profileControlSummary` no longer has multi-second refreshes. The AI analysis dashboard panel is on-demand rather than startup/scheduled prewarm.
