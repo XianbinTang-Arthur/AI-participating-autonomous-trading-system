@@ -309,7 +309,7 @@ class TestDashboardUI(unittest.TestCase):
         )
 
         self.assertTrue(payload["dashboard_summary_only"])
-        self.assertEqual(calls, [200])
+        self.assertEqual(calls, [100])
 
     def test_dashboard_routes_serve_html_and_assets_when_auth_is_disabled(self) -> None:
         app = FastAPI()
@@ -572,7 +572,7 @@ class TestDashboardUI(unittest.TestCase):
         self.assertNotIn("viewBackgroundSpecs", store_text)
         self.assertIn('["positions", "/positions"]', store_text)
         self.assertIn('["strategyRuntime", "/strategy/runtime"]', store_text)
-        self.assertIn('["strategyAttribution", "/reports/strategy-attribution?limit=200"]', store_text)
+        self.assertIn('["strategyAttribution", "/reports/strategy-attribution?limit=100"]', store_text)
         self.assertIn('["positionLifecycleAttribution", "/reports/position-lifecycle-attribution?limit=6"]', store_text)
         self.assertIn('["exitExecutionActionHistoryPage", riskExitExecutionHistoryPath]', store_text)
         self.assertIn('["exitExecutionActionHistoryPage", exitExecutionWorkspaceHistoryPath]', store_text)

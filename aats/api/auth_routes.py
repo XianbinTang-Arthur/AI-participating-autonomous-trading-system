@@ -53,9 +53,12 @@ def _snapshot_variant_key(**params: Any) -> str:
     return urlencode(sorted(normalized))
 
 
+_DASHBOARD_STRATEGY_ATTRIBUTION_LIMIT = 100
+
+
 DASHBOARD_MATERIALIZED_SNAPSHOT_VARIANTS: dict[str, tuple[str, ...]] = {
     "recentDecisions": (_snapshot_variant_key(limit=8, offset=0),),
-    "strategyAttribution": (_snapshot_variant_key(limit=200),),
+    "strategyAttribution": (_snapshot_variant_key(limit=_DASHBOARD_STRATEGY_ATTRIBUTION_LIMIT),),
     "positionLifecycleAttribution": (
         _snapshot_variant_key(limit=6),
         _snapshot_variant_key(limit=8),
@@ -605,7 +608,13 @@ async def _load_dashboard_snapshot_panel(runtime: ApplicationRuntime, snapshot_k
             )
         if panel_key == "strategyAttribution":
             return query.strategy_attribution_dashboard(
-                limit=_snapshot_int_param(params, "limit", 200, minimum=1, maximum=1000)
+                limit=_snapshot_int_param(
+                    params,
+                    "limit",
+                    _DASHBOARD_STRATEGY_ATTRIBUTION_LIMIT,
+                    minimum=1,
+                    maximum=1000,
+                )
             )
         if panel_key == "positionLifecycleAttribution":
             return query.position_lifecycle_attribution_dashboard(
@@ -934,7 +943,7 @@ def _dashboard_bundle_snapshot_variant_key(
     if panel_key == "recentDecisions":
         return _snapshot_variant_key(limit=recent_decisions_limit, offset=0)
     if panel_key == "strategyAttribution":
-        return _snapshot_variant_key(limit=200)
+        return _snapshot_variant_key(limit=_DASHBOARD_STRATEGY_ATTRIBUTION_LIMIT)
     if panel_key == "positionLifecycleAttribution":
         return _snapshot_variant_key(limit=6 if view == "strategy" else 8)
     if panel_key == "trialReviewSummary":
@@ -995,7 +1004,7 @@ def _protected_dashboard_panel_payload(
     if panel_key == "strategyRuntime":
         return query.strategy_runtime_dashboard()
     if panel_key == "strategyAttribution":
-        return query.strategy_attribution_dashboard(limit=200)
+        return query.strategy_attribution_dashboard(limit=_DASHBOARD_STRATEGY_ATTRIBUTION_LIMIT)
     if panel_key == "positionLifecycleAttribution":
         limit = 6 if view == "strategy" else 8
         return query.position_lifecycle_attribution_dashboard(limit=limit)

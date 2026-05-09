@@ -181,7 +181,7 @@ export function viewSpecs(view, state = null) {
     ],
       strategy: [
         ["strategyRuntime", "/strategy/runtime"],
-        ["strategyAttribution", "/reports/strategy-attribution?limit=200"],
+        ["strategyAttribution", "/reports/strategy-attribution?limit=100"],
         ["positionLifecycleAttribution", "/reports/position-lifecycle-attribution?limit=6"],
         ["latestDecision", "/decision/latest"],
         ["recentDecisions", `/decision/recent?limit=${limits.recentDecisions}&offset=0`],

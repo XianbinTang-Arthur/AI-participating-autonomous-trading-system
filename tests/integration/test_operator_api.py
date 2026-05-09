@@ -919,7 +919,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             if key == "recentDecisions":
                 await plane.seed_panel(key, {"snapshot_panel": key}, variant_key="limit=8&offset=0")
             elif key == "strategyAttribution":
-                await plane.seed_panel(key, {"snapshot_panel": key}, variant_key="limit=200")
+                await plane.seed_panel(key, {"snapshot_panel": key}, variant_key="limit=100")
             elif key == "positionLifecycleAttribution":
                 await plane.seed_panel(key, {"snapshot_panel": key}, variant_key="limit=8")
             elif key == "trialReviewSummary":
