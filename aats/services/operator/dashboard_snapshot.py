@@ -292,6 +292,7 @@ P2_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
         hard_expire_seconds=360.0,
         timeout_seconds=15.0,
         priority="p2",
+        scheduled_refresh=False,
     ),
     "rdpWorkbenchOverview": DashboardSnapshotPolicy(
         panel_key="rdpWorkbenchOverview",
@@ -300,6 +301,7 @@ P2_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
         hard_expire_seconds=360.0,
         timeout_seconds=15.0,
         priority="p2",
+        scheduled_refresh=False,
     ),
     "rdpWorkbenchItems": DashboardSnapshotPolicy(
         panel_key="rdpWorkbenchItems",
@@ -308,6 +310,8 @@ P2_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
         hard_expire_seconds=420.0,
         timeout_seconds=20.0,
         priority="p2",
+        startup_prewarm=False,
+        scheduled_refresh=False,
     ),
     "rdpWorkbenchAlerts": DashboardSnapshotPolicy(
         panel_key="rdpWorkbenchAlerts",
@@ -316,6 +320,8 @@ P2_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
         hard_expire_seconds=420.0,
         timeout_seconds=20.0,
         priority="p2",
+        startup_prewarm=False,
+        scheduled_refresh=False,
     ),
     "rdpTuningOverview": DashboardSnapshotPolicy(
         panel_key="rdpTuningOverview",
@@ -324,6 +330,7 @@ P2_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
         hard_expire_seconds=420.0,
         timeout_seconds=20.0,
         priority="p2",
+        scheduled_refresh=False,
     ),
     "rdpTuningProposals": DashboardSnapshotPolicy(
         panel_key="rdpTuningProposals",
@@ -332,6 +339,8 @@ P2_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
         hard_expire_seconds=420.0,
         timeout_seconds=20.0,
         priority="p2",
+        startup_prewarm=False,
+        scheduled_refresh=False,
     ),
     "recentDecisions": DashboardSnapshotPolicy(
         panel_key="recentDecisions",
