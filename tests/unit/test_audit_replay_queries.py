@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest import TestCase
 
+from aats.events import topics
 from aats.schemas.operator import ReplayValidationSummary
 from aats.schemas.common import utc_now
 from aats.services.operator.audit_replay_queries import AuditReplayQueryFacade
@@ -86,6 +87,53 @@ class TestAuditReplayQueries(TestCase):
         self.assertEqual(latest["independent_score_stability_semantics_version"], 2)
         self.assertEqual(status["recent_validations"][0]["independent_state_version"], 2)
         self.assertEqual(status["recent_validations"][0]["independent_score_stability_semantics_version"], 2)
+
+    def test_replay_status_dashboard_defers_archive_and_version_enrichment(self) -> None:
+        validation = {
+            "validated_at": utc_now(),
+            "decision_id": "decision_dashboard_replay",
+            "symbol": "BTC-USDT-SWAP",
+            "replayed_event_count": 1,
+            "stored_snapshot_count": 1,
+            "divergence_count": 0,
+            "healthy": True,
+        }
+        baseline = {"generation_id": "baseline_1", "imported_at": "2026-05-09T00:00:00Z"}
+
+        def _recent_by_topic(topic: str, limit: int = 10):
+            if topic == topics.REPLAY_VALIDATIONS:
+                return [SimpleNamespace(payload=validation)]
+            if topic == topics.ACCOUNT_BASELINES:
+                return [SimpleNamespace(event_id="evt_baseline_1", payload=baseline)]
+            return []
+
+        event_store = SimpleNamespace(
+            recent_by_topic=_recent_by_topic,
+            latest_replay_offset=lambda **_: SimpleNamespace(model_dump=lambda mode="json": {"offset_id": "off_1"}),
+            archive_summary=lambda: (_ for _ in ()).throw(AssertionError("dashboard summary must defer archive_summary")),
+        )
+        owner = SimpleNamespace(
+            runtime=SimpleNamespace(
+                replay_validation_history=[],
+                event_store=event_store,
+            ),
+            state_scope=None,
+            _independent_version_summary=lambda **_: (_ for _ in ()).throw(
+                AssertionError("dashboard summary must not enrich independent versions")
+            ),
+        )
+
+        status = AuditReplayQueryFacade(owner).replay_status_dashboard()
+
+        self.assertTrue(status["healthy"])
+        self.assertTrue(status["dashboard_summary_only"])
+        self.assertEqual(status["truth_source"], "replay_status_dashboard_summary")
+        self.assertEqual(status["event_store_archive"], {"deferred_from_dashboard_summary": True})
+        self.assertIn("event_store_archive", status["deferred_sections"])
+        self.assertEqual(status["last_validation"]["decision_id"], "decision_dashboard_replay")
+        self.assertNotIn("independent_state_version", status["last_validation"])
+        self.assertEqual(status["baseline_switches"][0]["_event_id"], "evt_baseline_1")
+        self.assertEqual(status["latest_replay_offset"], {"offset_id": "off_1"})
 
     def test_replay_summary_prefers_replayed_target_margin_mode(self) -> None:
         owner = SimpleNamespace(

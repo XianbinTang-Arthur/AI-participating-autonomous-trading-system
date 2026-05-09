@@ -624,7 +624,7 @@ async def _load_dashboard_snapshot_panel(runtime: ApplicationRuntime, snapshot_k
         if panel_key == "guardedLiveRunPacket":
             return query.guarded_live_run_packet_dashboard()
         if panel_key == "replayStatus":
-            return query.replay_status()
+            return query.replay_status_dashboard()
         if panel_key == "aiLatest":
             return query.ai_latest()
         if panel_key == "aiShadowLatest":
@@ -1020,7 +1020,7 @@ def _protected_dashboard_panel_payload(
     if panel_key == "guardedLiveRunPacket":
         return query.guarded_live_run_packet_dashboard()
     if panel_key == "replayStatus":
-        return query.replay_status()
+        return query.replay_status_dashboard()
     if panel_key == "replayRecentValidations":
         return query.replay_recent_validations(limit=recent_replay_validations_limit, offset=0)
     if panel_key == "exitExecutionActionHistoryPage":

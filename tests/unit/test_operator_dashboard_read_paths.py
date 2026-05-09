@@ -1117,6 +1117,7 @@ def test_dashboard_bundle_uses_summary_recovery_and_mode_panels() -> None:
     assert "query.execution_latest_dashboard()" in request_loader_source
     assert "query.guarded_live_preflight_dashboard()" in request_loader_source
     assert "query.reconciliation_latest_dashboard()" in request_loader_source
+    assert "query.replay_status_dashboard()" in request_loader_source
     assert "query.system_mode_dashboard()" in snapshot_loader_source
     assert "query.system_runtime_dashboard()" in snapshot_loader_source
     assert "query.system_recovery_dashboard()" in snapshot_loader_source
@@ -1124,5 +1125,6 @@ def test_dashboard_bundle_uses_summary_recovery_and_mode_panels() -> None:
     assert "query.execution_latest_dashboard()" in snapshot_loader_source
     assert "query.guarded_live_preflight_dashboard()" in snapshot_loader_source
     assert "query.reconciliation_latest_dashboard()" in snapshot_loader_source
+    assert "query.replay_status_dashboard()" in snapshot_loader_source
     assert "query.strategy_runtime_dashboard()" in request_loader_source
     assert "query.strategy_runtime_dashboard()" in snapshot_loader_source

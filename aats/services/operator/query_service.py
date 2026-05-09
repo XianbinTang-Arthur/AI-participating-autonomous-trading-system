@@ -13729,6 +13729,10 @@ class OperatorQueryService:
         cache_key = f"replay_status:{self._scope_cache_fragment()}"
         return self._cached_ttl(cache_key, 30, self.audit_replay_queries.replay_status)
 
+    def replay_status_dashboard(self) -> dict[str, Any]:
+        cache_key = f"replay_status_dashboard:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 15, self.audit_replay_queries.replay_status_dashboard)
+
     def replay_validate(self, *, decision_id: str) -> dict[str, Any]:
         return self.audit_replay_queries.replay_validate(decision_id=decision_id)
 

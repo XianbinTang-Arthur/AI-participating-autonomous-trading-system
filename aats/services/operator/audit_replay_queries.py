@@ -72,6 +72,33 @@ class AuditReplayQueryFacade:
             "latest_replay_offset": None if latest_offset is None else latest_offset.model_dump(mode="json"),
         }
 
+    def replay_status_dashboard(self) -> dict[str, Any]:
+        persisted = self.owner.runtime.event_store.recent_by_topic(topics.REPLAY_VALIDATIONS, limit=10)
+        latest = persisted[-1].payload if persisted else (
+            self.owner.runtime.replay_validation_history[-1] if self.owner.runtime.replay_validation_history else None
+        )
+        recent = [dict(item.payload) for item in persisted] if persisted else [
+            dict(item) for item in self.owner.runtime.replay_validation_history[-10:] if isinstance(item, dict)
+        ]
+        latest = dict(latest) if isinstance(latest, dict) else None
+        latest_offset = self.owner.runtime.event_store.latest_replay_offset(
+            projection_key="portfolio_replay",
+            scope=self.owner.state_scope,
+        )
+        divergence_count = None if latest is None else latest.get("divergence_count")
+        return {
+            "supported": True,
+            "healthy": latest is None or int(divergence_count or 0) == 0,
+            "last_validation": latest,
+            "recent_validations": recent,
+            "baseline_switches": self._baseline_switch_history(limit=5),
+            "event_store_archive": {"deferred_from_dashboard_summary": True},
+            "latest_replay_offset": None if latest_offset is None else latest_offset.model_dump(mode="json"),
+            "dashboard_summary_only": True,
+            "truth_source": "replay_status_dashboard_summary",
+            "deferred_sections": ["event_store_archive", "independent_version_enrichment"],
+        }
+
     def replay_validate(self, *, decision_id: str) -> dict[str, Any]:
         engine = ReplayEngine(
             event_store=self.owner.runtime.event_store,
