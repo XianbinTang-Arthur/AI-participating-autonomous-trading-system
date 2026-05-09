@@ -1569,7 +1569,16 @@ class OrderManager:
                 ),
             )
             return None
-        parent = self._save_exit_execution_parent(clear_resume_issue(parent))
+        parent = self.exit_execution_writer.recompute_parent(
+            parent_intent_id=parent.parent_intent_id,
+            transform_parent=clear_resume_issue,
+            recompute_parent=lambda parent_intent, child_refs: recompute_exit_execution_intent(
+                parent_intent=parent_intent,
+                child_refs=child_refs,
+            ),
+            source_component="order_manager",
+            reason_code="retry_limit_lookup_clear_resume_issue",
+        )
         log_event(
             self.logger,
             "serial_exit_split_resume",
