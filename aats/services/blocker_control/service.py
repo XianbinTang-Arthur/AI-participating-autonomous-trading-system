@@ -193,6 +193,20 @@ class BlockerControlService:
         for code in recovery.get("resume_blocked_reasons", []):
             if all(existing != code for existing, _, _ in blockers):
                 blockers.append((code, self._subsystem_for(code), code in self._SUBMIT_ONLY))
+        ai_review_blocked = (
+            bool(ai_runtime.get("degraded"))
+            and not bool(ai_runtime.get("auto_downgrade_active"))
+            and str(ai_runtime.get("effective_operating_mode") or "") != "baseline_only"
+            and str(ai_runtime.get("manual_override_mode") or "") != "baseline_only"
+        )
+        if ai_review_blocked and all(existing != "ai_degraded_requires_manual_review" for existing, _, _ in blockers):
+            blockers.append(
+                (
+                    "ai_degraded_requires_manual_review",
+                    self._subsystem_for("ai_degraded_requires_manual_review"),
+                    False,
+                )
+            )
 
         root_candidate = self._root_cause_code(blockers)
         items: list[BlockerControlItem] = []

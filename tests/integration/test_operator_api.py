@@ -5083,9 +5083,14 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             trading_product_type="derivatives",
             margin_mode="cross",
             strategy_short_bias_enabled=True,
+            strategy_cost_guard_enabled=False,
+            strategy_short_entry_min_signal_edge_bps=0.0,
+            strategy_short_entry_alpha_min=-1.0,
+            strategy_short_entry_confidence_min=0.0,
             default_symbol="BTC-USDT-SWAP",
             allowed_symbols=("BTC-USDT-SWAP",),
         )
+        await self._stop_background_decision_trigger(runtime)
         runtime.ai_service.provider = FakeShadowProvider()
         runtime.ai_service._degraded = False
         runtime.ai_service._consecutive_failures = 0
@@ -5428,6 +5433,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
     async def test_finalized_decision_outcome_collapses_to_hold_when_risk_rejects(self) -> None:
         runtime = await self._runtime()
+        await self._stop_background_decision_trigger(runtime)
 
         def rejected_risk(*, target):
             return RiskDecision(
@@ -5465,6 +5471,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
     async def test_risk_decision_payload_includes_operator_friendly_explanations(self) -> None:
         runtime = await self._runtime()
+        await self._stop_background_decision_trigger(runtime)
 
         def explained_risk(*, target):
             return RiskDecision(
@@ -5510,6 +5517,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
     async def test_finalized_decision_outcome_collapses_to_hold_when_kill_switch_halts_after_risk(self) -> None:
         runtime = await self._runtime()
+        await self._stop_background_decision_trigger(runtime)
         original_risk_evaluate = runtime.risk_engine.evaluate
 
         def halting_risk(*, target):
@@ -5579,9 +5587,14 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             trading_product_type="derivatives",
             margin_mode="cross",
             strategy_short_bias_enabled=True,
+            strategy_cost_guard_enabled=False,
+            strategy_short_entry_min_signal_edge_bps=0.0,
+            strategy_short_entry_alpha_min=-1.0,
+            strategy_short_entry_confidence_min=0.0,
             default_symbol="BTC-USDT-SWAP",
             allowed_symbols=("BTC-USDT-SWAP",),
         )
+        await self._stop_background_decision_trigger(runtime)
         runtime.ai_service.provider = FakeShadowProvider()
         runtime.ai_service._degraded = False
         runtime.ai_service._consecutive_failures = 0
@@ -7572,7 +7585,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         )
         app = self._app(runtime)
 
-        with TestClient(app) as client:
+        with patch.dict("os.environ", {"AATS_ALLOW_UI_OPERATING_MODE_OVERRIDE": "true"}), TestClient(app) as client:
             login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
             select_manual = client.post(
                 "/ai/operating-mode/select",
@@ -7599,10 +7612,10 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(select_configured.status_code, 200)
         self.assertEqual(runtime_after_configured.status_code, 200)
         restored_payload = runtime_after_configured.json()
-        self.assertFalse(restored_payload["manual_override_active"])
-        self.assertIsNone(restored_payload["manual_override_mode"])
+        self.assertTrue(restored_payload["manual_override_active"])
+        self.assertEqual(restored_payload["manual_override_mode"], "ai_decision_maker")
         self.assertEqual(restored_payload["configured_operating_mode"], "ai_decision_maker")
-        self.assertEqual(restored_payload["operating_mode_source"], "configured")
+        self.assertEqual(restored_payload["operating_mode_source"], "manual_selection")
         self.assertIn(
             restored_payload["effective_operating_mode"],
             {"ai_decision_maker", "baseline_only"},

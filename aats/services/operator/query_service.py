@@ -116,6 +116,7 @@ from aats.services.runtime_scope import (
     snapshots_for_scope,
     runtime_state_scope,
     latest_topic_event_for_scope,
+    topic_events_for_scope,
 )
 from aats.services.strategy_engines.smart_arbitrage.pair_registry import load_pair_definitions
 from aats.services.strategy_execution_guard_filters import (
@@ -3777,6 +3778,17 @@ class OperatorQueryService:
                 continue
             payloads.append(payload)
         return payloads, None
+
+    def _decision_topic_payloads_for_scope(self, topic: str, decision_id: str) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        for event in topic_events_for_scope(self.runtime.event_store, topic, self.state_scope):
+            payload = self.payload(event)
+            if not isinstance(payload, dict):
+                continue
+            if self._nonempty_string(payload.get("decision_id")) != decision_id:
+                continue
+            payloads.append(payload)
+        return payloads
 
     def _decision_fill_payloads_from_repo(self, decision_id: str) -> tuple[list[dict[str, Any]], str | None]:
         runtime = getattr(self, "runtime", None)
@@ -10609,6 +10621,12 @@ class OperatorQueryService:
             risk_decision=risk_decision,
         )
         execution_plan = self._execution_plan_payload(self.payload_by_ref(audit.execution_plan_ref))
+        if execution_plan is None:
+            fallback_execution_plans = self._decision_topic_payloads_for_scope(topics.EXECUTION_PLANS, decision_id)
+            if fallback_execution_plans:
+                execution_plan = self._execution_plan_payload(fallback_execution_plans[-1])
+        if not order_intents:
+            order_intents = self._decision_topic_payloads_for_scope(topics.ORDER_INTENTS, decision_id)
         strategy_execution_health = self.strategy_execution_health(
             decision_context.get("symbol") if decision_context is not None else None
         )
