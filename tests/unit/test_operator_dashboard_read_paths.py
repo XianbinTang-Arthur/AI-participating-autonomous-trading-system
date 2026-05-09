@@ -1046,6 +1046,93 @@ def test_recent_decisions_dashboard_batches_page_payload_refs() -> None:
     assert payload["has_more"] is False
 
 
+def test_recent_decisions_dashboard_reuses_page_targets_for_independent_diagnostics() -> None:
+    service = OperatorQueryService.__new__(OperatorQueryService)
+    records = [
+        SimpleNamespace(
+            decision_id="decision_1",
+            decision_context_ref="ctx_1",
+            position_target_ref="target_1",
+            policy_decision_ref=None,
+            risk_decision_ref=None,
+            decision_outcome_ref=None,
+            strategy_sleeve_intent_refs=[],
+            order_intent_refs=[],
+            fill_event_refs=[],
+            reconciliation_refs=[],
+        ),
+        SimpleNamespace(
+            decision_id="decision_2",
+            decision_context_ref="ctx_2",
+            position_target_ref="target_2",
+            policy_decision_ref=None,
+            risk_decision_ref=None,
+            decision_outcome_ref=None,
+            strategy_sleeve_intent_refs=[],
+            order_intent_refs=[],
+            fill_event_refs=[],
+            reconciliation_refs=[],
+        ),
+    ]
+    service.runtime = SimpleNamespace(
+        audit_repo=SimpleNamespace(
+            recent=lambda *, limit: records[:limit],
+        )
+    )
+    target_1 = {"decision_id": "decision_1", "strategy_family": "independent", "position_intent": "hold"}
+    target_2 = {"decision_id": "decision_2", "strategy_family": "independent", "position_intent": "open_long"}
+    payload_map = {
+        "ctx_1": {"symbol": "BTC-USDT-SWAP", "timeframe": "5m", "as_of_ts": "2026-05-09T01:00:00Z"},
+        "ctx_2": {"symbol": "BTC-USDT-SWAP", "timeframe": "5m", "as_of_ts": "2026-05-09T01:05:00Z"},
+        "target_1": target_1,
+        "target_2": target_2,
+    }
+    page_outcomes = [
+        SimpleNamespace(strategy_family="independent", decision_id="decision_1"),
+        SimpleNamespace(strategy_family="independent", decision_id="decision_2"),
+        SimpleNamespace(strategy_family="independent", decision_id="decision_other"),
+        SimpleNamespace(strategy_family="baseline", decision_id="decision_1"),
+    ]
+    scoped_fill_calls = 0
+    captured_summaries: list[dict[str, object]] = []
+
+    service.payloads_by_ref_map = lambda refs: {ref: payload_map[ref] for ref in refs if ref in payload_map}
+    service._position_target_payload = lambda payload: payload
+    service._risk_decision_payload = lambda payload: payload
+    service._resolved_position_target_payload = lambda **kwargs: kwargs["position_target"]
+    service._no_trade_classification_payload = lambda **_kwargs: {"classification": "test"}
+    service._book_runtime_states_from_payload = lambda _payload: []
+    service._independent_adaptive_summary_from_payload = lambda _payload: None
+    service._independent_transition_exception_summary_from_payload = lambda _payload: None
+    service._effective_diagnostic_metric_flags = lambda _payload: {}
+    service._resolved_overlay_parent_exposure = lambda _payload: None
+    service._resolved_overlay_parent_exposure_summary = lambda _payload: None
+    service._resolved_overlay_parent_signal_fields = lambda _payload: None
+
+    def _scoped_fill_outcomes():
+        nonlocal scoped_fill_calls
+        scoped_fill_calls += 1
+        return page_outcomes
+
+    def _summary(**kwargs):
+        captured_summaries.append(kwargs)
+        return {"sample_count": 1}
+
+    service._scoped_fill_outcomes = _scoped_fill_outcomes
+    service._independent_expected_vs_realized_summary = _summary
+
+    payload = service._build_recent_decisions(limit=2, offset=0, include_total=False)
+
+    assert [row["decision_id"] for row in payload["decisions"]] == ["decision_1", "decision_2"]
+    assert scoped_fill_calls == 1
+    assert [item["target_payloads"] for item in captured_summaries] == [[target_1], [target_2]]
+    assert all(
+        item["fill_outcomes"] == [page_outcomes[0], page_outcomes[1]]
+        for item in captured_summaries
+    )
+    assert all(row["independent_expected_vs_realized_summary"] == {"sample_count": 1} for row in payload["decisions"])
+
+
 def test_payloads_by_ref_map_reuses_runtime_payload_cache_and_returns_copies() -> None:
     service = OperatorQueryService.__new__(OperatorQueryService)
     service._payload_ref_cache = OrderedDict()

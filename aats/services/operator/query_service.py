@@ -8370,6 +8370,27 @@ class OperatorQueryService:
         return payloads
 
     @staticmethod
+    def _is_independent_target_payload(payload: dict[str, Any] | None) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        family_summary = payload.get("family_execution_summary")
+        family_name = payload.get("strategy_family")
+        return family_name == "independent" or (
+            isinstance(family_summary, dict) and family_summary.get("family") == "independent"
+        )
+
+    def _independent_fill_outcomes_for_decision_ids(self, decision_ids: set[str]) -> list[Any]:
+        normalized_decision_ids = {str(item or "").strip() for item in decision_ids if str(item or "").strip()}
+        if not normalized_decision_ids:
+            return []
+        return [
+            outcome
+            for outcome in self._scoped_fill_outcomes()
+            if str(getattr(outcome, "strategy_family", "") or "") == "independent"
+            and str(getattr(outcome, "decision_id", "") or "").strip() in normalized_decision_ids
+        ]
+
+    @staticmethod
     def _independent_book_action_bucket(action: Any) -> str | None:
         normalized = str(action or "").strip().lower()
         if not normalized or normalized == "hold":
@@ -8464,8 +8485,15 @@ class OperatorQueryService:
         *,
         decision_ids: set[str] | None = None,
         limit: int = 40,
+        target_payloads: list[dict[str, Any]] | None = None,
+        fill_outcomes: list[Any] | None = None,
     ) -> dict[str, Any] | None:
-        target_payloads = self._recent_independent_target_payloads(limit=limit, decision_ids=decision_ids)
+        if target_payloads is None:
+            target_payloads = self._recent_independent_target_payloads(limit=limit, decision_ids=decision_ids)
+        else:
+            target_payloads = [
+                payload for payload in target_payloads if self._is_independent_target_payload(payload)
+            ][: max(limit, 1)]
         metric_flags = self._independent_diagnostics_flags(payloads=target_payloads)
         if not any(metric_flags.values()):
             return None
@@ -8599,7 +8627,8 @@ class OperatorQueryService:
         fill_rows: list[dict[str, Any]] = []
         book_level_fill_rows: list[dict[str, Any]] = []
         attempt_candidate_rows: list[dict[str, Any]] = []
-        for outcome in self._scoped_fill_outcomes():
+        source_fill_outcomes = fill_outcomes if fill_outcomes is not None else self._scoped_fill_outcomes()
+        for outcome in source_fill_outcomes:
             if str(getattr(outcome, "strategy_family", "") or "") != "independent":
                 continue
             decision_id = str(getattr(outcome, "decision_id", "") or "").strip()
@@ -11017,6 +11046,11 @@ class OperatorQueryService:
         rows = self.runtime.audit_repo.recent(limit=fetch_limit)
         paged_rows = rows[offset : offset + limit]
         page_refs: list[str] = []
+        page_decision_ids = {
+            str(record.decision_id or "").strip()
+            for record in paged_rows
+            if str(record.decision_id or "").strip()
+        }
         for record in paged_rows:
             page_refs.extend(
                 ref
@@ -11038,6 +11072,7 @@ class OperatorQueryService:
             return payloads_by_ref.get(ref)
 
         payloads: list[dict[str, Any]] = []
+        independent_page_fill_outcomes: list[Any] | None = None
         for record in paged_rows:
             context = _payload(record.decision_context_ref)
             target = self._position_target_payload(_payload(record.position_target_ref))
@@ -11051,10 +11086,16 @@ class OperatorQueryService:
                 risk_decision=risk,
             )
             independent_expected_vs_realized_summary = None
-            if isinstance(target, dict) and str(target.get("strategy_family") or "") == "independent":
+            if self._is_independent_target_payload(target):
+                if independent_page_fill_outcomes is None:
+                    independent_page_fill_outcomes = self._independent_fill_outcomes_for_decision_ids(
+                        page_decision_ids
+                    )
                 independent_expected_vs_realized_summary = self._independent_expected_vs_realized_summary(
                     decision_ids={record.decision_id},
                     limit=1,
+                    target_payloads=[target],
+                    fill_outcomes=independent_page_fill_outcomes,
                 )
             native_outcome = finalized_outcome if isinstance(finalized_outcome, dict) else None
             if native_outcome is None and isinstance(target, dict):
