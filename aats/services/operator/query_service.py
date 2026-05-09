@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -134,6 +136,8 @@ _ORDERBOOK_DIFF_PAYLOAD_PERSISTED_STATUS = "local_snapshot_row_sequence_validate
 _LIVE_DASHBOARD_EVENT_LIMIT = 5_000
 _LIVE_DASHBOARD_RECONCILIATION_REF_LIMIT = 1_000
 _PHASE5_SCOPE_FETCH_MULTIPLIER = 4
+_PAYLOAD_REF_CACHE_MAX_ENTRIES = 1_024
+_PAYLOAD_REF_CACHE_MAX_REPR_CHARS = 200_000
 
 
 def _orderbook_payload_missing_evidence_by_side(
@@ -182,6 +186,7 @@ class OperatorQueryService:
     _shared_init_lock = __import__("threading").Lock()
     _shared_stores: dict[int, tuple[dict, "__import__('threading').RLock"]] = {}
     _shared_inflight: dict[int, dict[str, "__import__('threading').Event"]] = {}
+    _shared_payload_ref_caches: dict[int, OrderedDict[str, dict[str, Any]]] = {}
 
     def __init__(self, runtime: ApplicationRuntime) -> None:
         self.runtime = runtime
@@ -198,8 +203,11 @@ class OperatorQueryService:
                 )
             if runtime_id not in OperatorQueryService._shared_inflight:
                 OperatorQueryService._shared_inflight[runtime_id] = {}
+            if runtime_id not in OperatorQueryService._shared_payload_ref_caches:
+                OperatorQueryService._shared_payload_ref_caches[runtime_id] = OrderedDict()
         self._ttl_cache, self._cache_lock = OperatorQueryService._shared_stores[runtime_id]
         self._inflight = OperatorQueryService._shared_inflight[runtime_id]
+        self._payload_ref_cache = OperatorQueryService._shared_payload_ref_caches[runtime_id]
         self.strategy_profiles = StrategyProfileControlService(runtime)
         self.blocker_control_service = BlockerControlService(self)
         self.blocker_action_service = BlockerActionService(self)
@@ -2899,21 +2907,47 @@ class OperatorQueryService:
         unique_refs = list(dict.fromkeys(str(ref).strip() for ref in refs if str(ref).strip()))
         if not unique_refs:
             return {}
+        rows: dict[str, dict[str, Any]] = {}
+        missing_refs: list[str] = []
+        payload_ref_cache = getattr(self, "_payload_ref_cache", None)
+        cache_lock = getattr(self, "_cache_lock", None)
+        if isinstance(payload_ref_cache, OrderedDict) and cache_lock is not None:
+            with cache_lock:
+                for ref in unique_refs:
+                    if ref in payload_ref_cache:
+                        payload_ref_cache.move_to_end(ref)
+                        rows[ref] = deepcopy(payload_ref_cache[ref])
+                    else:
+                        missing_refs.append(ref)
+        else:
+            missing_refs = list(unique_refs)
+        if not missing_refs:
+            return {ref: rows[ref] for ref in unique_refs if ref in rows}
         get_many = getattr(self.runtime.event_store, "get_many", None)
         if callable(get_many):
-            envelopes_by_ref = get_many(unique_refs)
+            envelopes_by_ref = get_many(missing_refs)
         else:
             envelopes_by_ref = {
                 ref: envelope
-                for ref in unique_refs
+                for ref in missing_refs
                 if (envelope := self.runtime.event_store.get(ref)) is not None
             }
-        rows: dict[str, dict[str, Any]] = {}
+        fresh_rows: dict[str, dict[str, Any]] = {}
         for ref, envelope in envelopes_by_ref.items():
             payload = self.payload(envelope)
             if payload is not None:
-                rows[ref] = payload
-        return rows
+                fresh_rows[ref] = deepcopy(payload)
+        if fresh_rows and isinstance(payload_ref_cache, OrderedDict) and cache_lock is not None:
+            with cache_lock:
+                for ref, payload in fresh_rows.items():
+                    if len(repr(payload)) > _PAYLOAD_REF_CACHE_MAX_REPR_CHARS:
+                        continue
+                    payload_ref_cache[ref] = deepcopy(payload)
+                    payload_ref_cache.move_to_end(ref)
+                while len(payload_ref_cache) > _PAYLOAD_REF_CACHE_MAX_ENTRIES:
+                    payload_ref_cache.popitem(last=False)
+        rows.update(fresh_rows)
+        return {ref: rows[ref] for ref in unique_refs if ref in rows}
 
     def payloads_by_refs(self, refs: list[str]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []

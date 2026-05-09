@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from datetime import datetime, timezone
 from decimal import Decimal
 import inspect
@@ -8,6 +9,7 @@ from types import SimpleNamespace
 
 from aats.api import auth_routes
 from aats.services.blocker_control import BlockerControlService
+from aats.services.operator import query_service as query_service_module
 from aats.services.operator.account_queries import AccountQueryFacade
 from aats.services.operator.query_service import OperatorQueryService
 from aats.services.operator.reconciliation_system_queries import ReconciliationSystemQueryFacade
@@ -1042,6 +1044,64 @@ def test_recent_decisions_dashboard_batches_page_payload_refs() -> None:
     assert [row["decision_id"] for row in payload["decisions"]] == ["decision_1", "decision_2"]
     assert payload["decisions"][1]["position_intent"] == "open_long"
     assert payload["has_more"] is False
+
+
+def test_payloads_by_ref_map_reuses_runtime_payload_cache_and_returns_copies() -> None:
+    service = OperatorQueryService.__new__(OperatorQueryService)
+    service._payload_ref_cache = OrderedDict()
+    service._cache_lock = threading.RLock()
+    calls: list[list[str]] = []
+    payloads = {
+        "evt_1": {"value": 1, "nested": {"stable": 1}},
+        "evt_2": {"value": 2, "nested": {"stable": 2}},
+        "evt_3": {"value": 3, "nested": {"stable": 3}},
+    }
+
+    def _get_many(refs: list[str]):
+        calls.append(list(refs))
+        return {
+            ref: SimpleNamespace(event_id=ref, topic="test.topic", payload=payloads[ref])
+            for ref in refs
+            if ref in payloads
+        }
+
+    service.runtime = SimpleNamespace(event_store=SimpleNamespace(get_many=_get_many))
+
+    first = service.payloads_by_ref_map(["evt_1", "evt_2"])
+    first["evt_2"]["nested"]["stable"] = 99
+    second = service.payloads_by_ref_map(["evt_2", "evt_3"])
+
+    assert calls == [["evt_1", "evt_2"], ["evt_3"]]
+    assert second["evt_2"]["nested"]["stable"] == 2
+    assert second["evt_2"]["_event_id"] == "evt_2"
+    assert second["evt_2"]["_topic"] == "test.topic"
+    assert second["evt_3"]["value"] == 3
+
+
+def test_payloads_by_ref_map_bounds_runtime_payload_cache(monkeypatch) -> None:
+    monkeypatch.setattr(query_service_module, "_PAYLOAD_REF_CACHE_MAX_ENTRIES", 2)
+    service = OperatorQueryService.__new__(OperatorQueryService)
+    service._payload_ref_cache = OrderedDict()
+    service._cache_lock = threading.RLock()
+    calls: list[list[str]] = []
+
+    def _get_many(refs: list[str]):
+        calls.append(list(refs))
+        return {
+            ref: SimpleNamespace(event_id=ref, topic="test.topic", payload={"value": ref})
+            for ref in refs
+        }
+
+    service.runtime = SimpleNamespace(event_store=SimpleNamespace(get_many=_get_many))
+
+    service.payloads_by_ref_map(["evt_1", "evt_2"])
+    service.payloads_by_ref_map(["evt_3"])
+    assert list(service._payload_ref_cache.keys()) == ["evt_2", "evt_3"]
+
+    payload = service.payloads_by_ref_map(["evt_1"])
+
+    assert calls == [["evt_1", "evt_2"], ["evt_3"], ["evt_1"]]
+    assert payload["evt_1"]["value"] == "evt_1"
 
 
 def test_dashboard_bundle_uses_summary_recovery_and_mode_panels() -> None:
