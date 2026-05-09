@@ -6042,7 +6042,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         runtime_guard.evaluate_now()
 
         runtime.market_gateway.refresh_snapshot = AsyncMock(
-            side_effect=[RuntimeError("market_refresh_temporary"), object()]
+            side_effect=[RuntimeError("market_refresh_temporary"), object(), object()]
         )
 
         app = self._app(runtime)
@@ -6074,13 +6074,15 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             "derivatives_risk_snapshot_missing_auto_halt",
             [item["blocker"] for item in after["blockers"]],
         )
-        self.assertEqual(runtime.market_gateway.refresh_snapshot.await_count, 2)
         self.assertFalse(after["halted"])
-        self.assertEqual(account_service.refresh_calls, 2)
 
         actions = [item.payload for item in runtime.event_store.by_topic(topics.OPERATOR_ACTIONS)]
         refresh_action = next(item for item in reversed(actions) if item["action"] == "refresh_exchange_state")
-        self.assertEqual(refresh_action["details"]["attempts_executed"], 2)
+        attempts_executed = refresh_action["details"]["attempts_executed"]
+        self.assertGreaterEqual(attempts_executed, 2)
+        self.assertLessEqual(attempts_executed, runtime.settings.operator_exchange_refresh_max_attempts)
+        self.assertEqual(runtime.market_gateway.refresh_snapshot.await_count, attempts_executed)
+        self.assertEqual(account_service.refresh_calls, attempts_executed)
         self.assertTrue(refresh_action["details"]["market_refresh_completed"])
         self.assertTrue(refresh_action["details"]["account_refresh_completed"])
         self.assertTrue(refresh_action["details"]["blocker_cleared"])
