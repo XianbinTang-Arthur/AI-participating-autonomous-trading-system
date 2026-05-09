@@ -9027,6 +9027,27 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         runtime = await self._runtime(
             operator_users=[("admin", "solo-pass")],
         )
+        await self._stop_background_decision_trigger(runtime)
+        now = utc_now()
+        runtime.execution_repo.save_order_state(
+            OrderState(
+                decision_id="decision_operator_cancel_audit",
+                intent_id="intent_operator_cancel_audit",
+                symbol=runtime.settings.default_symbol,
+                client_order_id="order_operator_cancel_audit",
+                venue="PAPER",
+                status="SUBMITTED",
+                submission_mode="paper_local",
+                submitted_ts=now - timedelta(seconds=1),
+                last_update_ts=now,
+                requested_qty=Decimal("1"),
+                filled_qty=Decimal("0"),
+                remaining_qty=Decimal("1"),
+                product_type=runtime.settings.trading_product_type,
+                margin_mode=runtime.settings.margin_mode,
+                submission_payload={},
+            )
+        )
         app = self._app(runtime)
         with TestClient(app) as client:
             mode_change = client.post("/system/mode", json={"mode": "guarded_live"})
@@ -9709,11 +9730,68 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
     async def test_operator_histories_are_persisted_for_blockers_and_replay(self) -> None:
         runtime = await self._runtime()
+        await self._stop_background_decision_trigger(runtime)
+        decision_id = "decision_operator_history_replay"
+        now = utc_now()
+        decision_context = DecisionContext(
+            decision_id=decision_id,
+            symbol=runtime.settings.default_symbol,
+            timeframe="15m",
+            as_of_ts=now,
+            market_snapshot_ref="evt_operator_history_replay_market",
+            feature_snapshot_ref="evt_operator_history_replay_feature",
+            portfolio_snapshot_ref="evt_operator_history_replay_portfolio",
+            health_snapshot_ref="evt_operator_history_replay_health",
+            mode=runtime.settings.mode,
+            current_position_qty=Decimal("0"),
+            product_type=runtime.settings.trading_product_type,
+            margin_mode=runtime.settings.margin_mode,
+            current_exposure_side="flat",
+        )
+        position_target = PositionTarget(
+            decision_id=decision_id,
+            symbol=runtime.settings.default_symbol,
+            current_position_qty=Decimal("0"),
+            target_position_qty=Decimal("0"),
+            delta_position_qty=Decimal("0"),
+            current_notional=Decimal("0"),
+            target_notional=Decimal("0"),
+            rebalance_reason="operator_history_replay_seed",
+            urgency="low",
+            max_slippage_tolerance_bps=20,
+            source_mix={"test": 1.0},
+            decision_expiry_ts=now + timedelta(minutes=5),
+            product_type=runtime.settings.trading_product_type,
+            current_exposure_side="flat",
+            target_exposure_side="flat",
+            position_intent="hold",
+            margin_mode=runtime.settings.margin_mode,
+        )
+        context_event = build_envelope(
+            topic=topics.DECISION_CONTEXTS,
+            key=runtime.settings.default_symbol,
+            payload_model=decision_context,
+            source_component="test",
+        )
+        target_event = build_envelope(
+            topic=topics.POSITION_TARGETS,
+            key=runtime.settings.default_symbol,
+            payload_model=position_target,
+            source_component="test",
+        )
+        runtime.event_store.append(context_event)
+        runtime.event_store.append(target_event)
+        runtime.audit_repo.upsert(
+            DecisionAuditRecord(
+                decision_id=decision_id,
+                decision_context_ref=context_event.event_id,
+                position_target_ref=target_event.event_id,
+            )
+        )
         app = self._app(runtime)
         with TestClient(app) as client:
             client.get("/system/health")
             blockers = client.get("/system/blockers").json()
-            decision_id = client.get("/decision/latest").json()["decision_id"]
             replay_validation = client.post(f"/replay/validate/{decision_id}").json()
             replay_recent = client.get("/replay/recent-validations").json()
 
