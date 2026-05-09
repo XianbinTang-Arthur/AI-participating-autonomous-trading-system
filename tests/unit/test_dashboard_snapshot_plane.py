@@ -78,7 +78,7 @@ class DashboardSnapshotPlaneTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(DASHBOARD_SNAPSHOT_POLICIES[panel_key].scheduled_refresh)
 
     def test_heavy_ai_p2_reports_are_on_demand_not_startup_or_scheduled(self) -> None:
-        for panel_key in ("aiOverview", "aiLatest", "profileControlSummary"):
+        for panel_key in ("aiOverview", "aiLatest", "profileControlSummary", "aiConfigModel"):
             self.assertIn(panel_key, P2_DASHBOARD_SNAPSHOT_PANEL_KEYS)
             self.assertFalse(DASHBOARD_SNAPSHOT_POLICIES[panel_key].startup_prewarm)
             self.assertFalse(DASHBOARD_SNAPSHOT_POLICIES[panel_key].scheduled_refresh)
@@ -116,7 +116,7 @@ class DashboardSnapshotPlaneTest(unittest.IsolatedAsyncioTestCase):
             self.assertLessEqual(policy.timeout_seconds, 5.0, panel_key)
             self.assertTrue(policy.startup_prewarm, panel_key)
             self.assertTrue(policy.scheduled_refresh, panel_key)
-        for panel_key in ("aiOverview", "aiLatest", "profileControlSummary"):
+        for panel_key in ("aiOverview", "aiLatest", "profileControlSummary", "aiConfigModel"):
             policy = DASHBOARD_SNAPSHOT_POLICIES[panel_key]
             self.assertEqual(policy.priority, "p2")
             self.assertLessEqual(policy.timeout_seconds, 10.0, panel_key)

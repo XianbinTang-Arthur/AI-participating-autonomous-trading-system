@@ -282,8 +282,10 @@ P2_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
         ttl_seconds=60.0,
         stale_after_seconds=120.0,
         hard_expire_seconds=360.0,
-        timeout_seconds=15.0,
+        timeout_seconds=10.0,
         priority="p2",
+        startup_prewarm=False,
+        scheduled_refresh=False,
     ),
     "rdpControl": DashboardSnapshotPolicy(
         panel_key="rdpControl",
