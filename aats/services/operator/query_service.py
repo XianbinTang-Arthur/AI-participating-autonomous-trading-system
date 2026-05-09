@@ -7528,6 +7528,9 @@ class OperatorQueryService:
         ).model_dump(mode="json")
 
     def blocker_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        return self.blocker_queries.blocker_history(limit=limit, offset=offset)
+
+    def blocker_history_dashboard(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
         cache_key = f"blocker_history:{self._scope_cache_fragment()}:{limit}:{offset}"
         return self._cached_ttl(
             cache_key,

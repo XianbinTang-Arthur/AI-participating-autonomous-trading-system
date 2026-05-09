@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 _PENDING_RECOMMENDATION_STATUSES = {"draft", "approved"}
 _RDP_CONTROL_SUMMARY_SNAPSHOT_CACHE_TTL_SECONDS = 5.0
+_RDP_CONTROL_SUMMARY_SNAPSHOT_CACHE_MAX_ENTRIES = 16
 _rdp_control_summary_snapshot_cache_lock = Lock()
 _rdp_control_summary_snapshot_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
@@ -71,10 +72,31 @@ def _snapshot_summary_cache_key(root: Path, runtime: Any) -> str:
     return f"{root}|runtime={id(runtime)}"
 
 
+def _sweep_snapshot_summary_cache_locked(now: float) -> None:
+    expired_keys = [
+        key
+        for key, (cached_at, _) in _rdp_control_summary_snapshot_cache.items()
+        if now - cached_at > _RDP_CONTROL_SUMMARY_SNAPSHOT_CACHE_TTL_SECONDS
+    ]
+    for key in expired_keys:
+        _rdp_control_summary_snapshot_cache.pop(key, None)
+
+    overflow = len(_rdp_control_summary_snapshot_cache) - _RDP_CONTROL_SUMMARY_SNAPSHOT_CACHE_MAX_ENTRIES
+    if overflow <= 0:
+        return
+    oldest_keys = sorted(
+        _rdp_control_summary_snapshot_cache,
+        key=lambda key: _rdp_control_summary_snapshot_cache[key][0],
+    )[:overflow]
+    for key in oldest_keys:
+        _rdp_control_summary_snapshot_cache.pop(key, None)
+
+
 def _get_snapshot_summary_cache(root: Path, runtime: Any) -> dict[str, Any] | None:
     cache_key = _snapshot_summary_cache_key(root, runtime)
     now = monotonic()
     with _rdp_control_summary_snapshot_cache_lock:
+        _sweep_snapshot_summary_cache_locked(now)
         entry = _rdp_control_summary_snapshot_cache.get(cache_key)
         if entry is None:
             return None
@@ -88,7 +110,9 @@ def _get_snapshot_summary_cache(root: Path, runtime: Any) -> dict[str, Any] | No
 def _put_snapshot_summary_cache(root: Path, runtime: Any, payload: dict[str, Any]) -> None:
     cache_key = _snapshot_summary_cache_key(root, runtime)
     with _rdp_control_summary_snapshot_cache_lock:
+        _sweep_snapshot_summary_cache_locked(monotonic())
         _rdp_control_summary_snapshot_cache[cache_key] = (monotonic(), copy.deepcopy(payload))
+        _sweep_snapshot_summary_cache_locked(monotonic())
 
 
 def _build_applied_recommendation_ids(active_parameters: dict[str, Any]) -> set[str]:

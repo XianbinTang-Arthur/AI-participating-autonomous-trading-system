@@ -744,6 +744,7 @@ def test_dashboard_health_payload_uses_lightweight_execution_summary_on_metrics_
     assert summary["fills_processed"] == 4
     assert summary["fill_count"] is None
     assert summary["phase1_shadow_order_backlog"] == 1
+    assert "order_count" in summary["deferred_sections"]
     assert "fill_count" in summary["deferred_sections"]
 
 
@@ -788,10 +789,11 @@ def test_dashboard_health_payload_reuses_cached_operator_metrics_without_rebuild
     assert summary["fill_count"] == 12
     assert summary["open_order_count"] == 3
     assert summary["phase1_shadow_status"] == "lagging"
-    assert summary["deferred_sections"] == []
+    assert summary["order_count"] is None
+    assert summary["deferred_sections"] == ["order_count"]
 
 
-def test_blocker_history_uses_short_ttl_cache() -> None:
+def test_direct_blocker_history_does_not_use_short_ttl_cache() -> None:
     service = OperatorQueryService.__new__(OperatorQueryService)
     service._ttl_cache = {}
     service._cache_lock = threading.RLock()
@@ -813,7 +815,60 @@ def test_blocker_history_uses_short_ttl_cache() -> None:
     second = service.blocker_history(limit=20, offset=0)
 
     assert first == second
+    assert calls == [(20, 0), (20, 0)]
+
+
+def test_dashboard_blocker_history_uses_short_ttl_cache() -> None:
+    service = OperatorQueryService.__new__(OperatorQueryService)
+    service._ttl_cache = {}
+    service._cache_lock = threading.RLock()
+    service._inflight = {}
+    service.state_scope = SimpleNamespace(
+        product_type="derivatives",
+        margin_mode="cross",
+        allowed_symbols={"BTC-USDT-SWAP"},
+    )
+    calls = []
+
+    def _history(*, limit: int, offset: int):
+        calls.append((limit, offset))
+        return {"history": [{"blocker": "one"}], "limit": limit, "offset": offset}
+
+    service.blocker_queries = SimpleNamespace(blocker_history=_history)
+
+    first = service.blocker_history_dashboard(limit=20, offset=0)
+    second = service.blocker_history_dashboard(limit=20, offset=0)
+
+    assert first == second
     assert calls == [(20, 0)]
+
+
+def test_dashboard_blockers_panel_prefers_cached_dashboard_history() -> None:
+    class Query:
+        def __init__(self) -> None:
+            self.dashboard_calls = 0
+            self.direct_calls = 0
+
+        def blocker_history_dashboard(self, *, limit: int, offset: int):
+            self.dashboard_calls += 1
+            assert limit == 20
+            assert offset == 0
+            return {"history": [{"blocker": "cached"}]}
+
+        def blocker_history(self, *, limit: int, offset: int):
+            self.direct_calls += 1
+            return {"history": [{"blocker": "fresh"}]}
+
+    query = Query()
+    payload = auth_routes._blockers_panel_payload_from_blocker_control_for_runtime(
+        runtime=SimpleNamespace(kill_switch=SimpleNamespace(halted=False)),
+        query=query,
+        blocker_control={"blockers": [{"blocker": "operator_rebaseline_required"}]},
+    )
+
+    assert payload["recent_history"] == [{"blocker": "cached"}]
+    assert query.dashboard_calls == 1
+    assert query.direct_calls == 0
 
 
 def test_recent_decisions_dashboard_batches_page_payload_refs() -> None:

@@ -385,6 +385,27 @@ class TestRdpControlSummary(TestCase):
         finally:
             rdp_control_summary._rdp_control_summary_snapshot_cache.clear()
 
+    def test_snapshot_control_summary_cache_enforces_max_entries(self) -> None:
+        root = Path("/tmp/aats-rdp-cache-test")
+        runtimes = [object(), object(), object()]
+        ticks = iter(float(value) for value in range(32))
+
+        try:
+            with (
+                patch.object(rdp_control_summary, "_RDP_CONTROL_SUMMARY_SNAPSHOT_CACHE_MAX_ENTRIES", 2),
+                patch.object(rdp_control_summary, "_RDP_CONTROL_SUMMARY_SNAPSHOT_CACHE_TTL_SECONDS", 10_000.0),
+                patch("aats.api.rdp_control_summary.monotonic", side_effect=lambda: next(ticks)),
+            ):
+                for index, runtime in enumerate(runtimes):
+                    rdp_control_summary._put_snapshot_summary_cache(root, runtime, {"index": index})
+
+                self.assertLessEqual(len(rdp_control_summary._rdp_control_summary_snapshot_cache), 2)
+                self.assertIsNone(rdp_control_summary._get_snapshot_summary_cache(root, runtimes[0]))
+                self.assertEqual(rdp_control_summary._get_snapshot_summary_cache(root, runtimes[1]), {"index": 1})
+                self.assertEqual(rdp_control_summary._get_snapshot_summary_cache(root, runtimes[2]), {"index": 2})
+        finally:
+            rdp_control_summary._rdp_control_summary_snapshot_cache.clear()
+
     def test_control_summary_builds_observation_queue_from_full_release_history(self) -> None:
         request = _fake_request()
         full_releases = [

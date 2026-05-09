@@ -266,10 +266,28 @@ def _dashboard_execution_summary_for_runtime(
     phase1_shadow = _health_phase1_shadow_summary(health, operator_metrics)
     phase1_shadow_lag = _phase1_shadow_lag(phase1_shadow)
     cached = operator_metrics is not None
+    order_count = operator_metrics.get("order_count") if cached else None
+    fill_count = operator_metrics.get("fill_count") if cached else None
+    open_order_count = operator_metrics.get("current_open_order_count") if cached else None
+    fills_without_snapshot = operator_metrics.get("fill_without_snapshot_count") if cached else None
+    snapshots_without_reconciliation = (
+        operator_metrics.get("snapshot_without_reconciliation_count") if cached else None
+    )
+    deferred_sections = [
+        name
+        for name, value in (
+            ("order_count", order_count),
+            ("fill_count", fill_count),
+            ("open_order_count", open_order_count),
+            ("fills_without_snapshot", fills_without_snapshot),
+            ("snapshots_without_reconciliation", snapshots_without_reconciliation),
+        )
+        if value is None
+    ]
     return {
-        "order_count": None,
-        "fill_count": operator_metrics.get("fill_count") if cached else None,
-        "open_order_count": operator_metrics.get("current_open_order_count") if cached else None,
+        "order_count": order_count,
+        "fill_count": fill_count,
+        "open_order_count": open_order_count,
         "order_intents_generated": runtime_metrics.get("order_intents_generated", 0),
         "fills_processed": runtime_metrics.get("fills_processed", 0),
         "processing_failures": (
@@ -282,10 +300,8 @@ def _dashboard_execution_summary_for_runtime(
             if cached
             else runtime_metrics.get("portfolio_snapshot_repairs", 0)
         ),
-        "fills_without_snapshot": operator_metrics.get("fill_without_snapshot_count") if cached else None,
-        "snapshots_without_reconciliation": (
-            operator_metrics.get("snapshot_without_reconciliation_count") if cached else None
-        ),
+        "fills_without_snapshot": fills_without_snapshot,
+        "snapshots_without_reconciliation": snapshots_without_reconciliation,
         "phase1_shadow_status": phase1_shadow.get("status"),
         "phase1_shadow_failure_count": (
             operator_metrics.get("phase1_shadow_failure_count")
@@ -318,13 +334,7 @@ def _dashboard_execution_summary_for_runtime(
             else phase1_shadow_lag.get("obligation_backlog")
         ),
         "summary_source": "cached_operator_metrics" if cached else "runtime_metrics_dashboard_summary",
-        "deferred_sections": [] if cached else [
-            "order_count",
-            "fill_count",
-            "open_order_count",
-            "fills_without_snapshot",
-            "snapshots_without_reconciliation",
-        ],
+        "deferred_sections": deferred_sections,
     }
 
 
@@ -366,11 +376,14 @@ def _blockers_panel_payload_from_blocker_control_for_runtime(
             for item in blocker_items
             if isinstance(item, dict)
         ]
+    blocker_history = getattr(query, "blocker_history_dashboard", None)
+    if not callable(blocker_history):
+        blocker_history = query.blocker_history
     return {
         "blocked": bool(blockers),
         "halted": runtime.kill_switch.halted,
         "blockers": blockers,
-        "recent_history": query.blocker_history(limit=20, offset=0)["history"],
+        "recent_history": blocker_history(limit=20, offset=0)["history"],
     }
 
 
