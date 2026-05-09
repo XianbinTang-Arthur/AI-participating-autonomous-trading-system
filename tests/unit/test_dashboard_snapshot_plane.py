@@ -77,6 +77,28 @@ class DashboardSnapshotPlaneTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(DASHBOARD_SNAPSHOT_POLICIES[panel_key].startup_prewarm)
             self.assertFalse(DASHBOARD_SNAPSHOT_POLICIES[panel_key].scheduled_refresh)
 
+    def test_heavy_ai_p2_reports_are_on_demand_not_startup_or_scheduled(self) -> None:
+        for panel_key in ("aiOverview", "aiLatest"):
+            self.assertIn(panel_key, P2_DASHBOARD_SNAPSHOT_PANEL_KEYS)
+            self.assertFalse(DASHBOARD_SNAPSHOT_POLICIES[panel_key].startup_prewarm)
+            self.assertFalse(DASHBOARD_SNAPSHOT_POLICIES[panel_key].scheduled_refresh)
+
+    def test_dashboard_snapshot_policy_slo_guardrails(self) -> None:
+        for panel_key in P0_DASHBOARD_SNAPSHOT_PANEL_KEYS:
+            policy = DASHBOARD_SNAPSHOT_POLICIES[panel_key]
+            self.assertLessEqual(policy.timeout_seconds, 3.0, panel_key)
+            self.assertTrue(policy.startup_prewarm, panel_key)
+            self.assertTrue(policy.scheduled_refresh, panel_key)
+        for panel_key in P1_DASHBOARD_SNAPSHOT_PANEL_KEYS:
+            policy = DASHBOARD_SNAPSHOT_POLICIES[panel_key]
+            self.assertLessEqual(policy.timeout_seconds, 5.0, panel_key)
+            self.assertTrue(policy.startup_prewarm, panel_key)
+            self.assertTrue(policy.scheduled_refresh, panel_key)
+        for panel_key in ("aiOverview", "aiLatest"):
+            policy = DASHBOARD_SNAPSHOT_POLICIES[panel_key]
+            self.assertEqual(policy.priority, "p2")
+            self.assertLessEqual(policy.timeout_seconds, 10.0, panel_key)
+
     async def test_missing_read_returns_default_and_enqueues_refresh(self) -> None:
         loader_called = asyncio.Event()
 

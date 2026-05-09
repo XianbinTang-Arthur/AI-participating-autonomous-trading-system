@@ -242,6 +242,8 @@ P2_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
         hard_expire_seconds=300.0,
         timeout_seconds=10.0,
         priority="p2",
+        startup_prewarm=False,
+        scheduled_refresh=False,
     ),
     "aiLatest": DashboardSnapshotPolicy(
         panel_key="aiLatest",
@@ -250,6 +252,8 @@ P2_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
         hard_expire_seconds=300.0,
         timeout_seconds=10.0,
         priority="p2",
+        startup_prewarm=False,
+        scheduled_refresh=False,
     ),
     "aiShadowLatest": DashboardSnapshotPolicy(
         panel_key="aiShadowLatest",

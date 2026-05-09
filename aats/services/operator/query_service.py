@@ -7542,6 +7542,16 @@ class OperatorQueryService:
         cache_key = f"metrics:{self._scope_cache_fragment()}"
         return self._cached_ttl(cache_key, 35, self.runtime_queries.metrics)
 
+    def metrics_dashboard(self) -> dict[str, Any]:
+        cached = self.metrics_if_cached()
+        if cached is not None:
+            payload = dict(cached)
+            payload.setdefault("dashboard_summary_only", False)
+            payload.setdefault("summary_source", "cached_operator_metrics")
+            payload.setdefault("deferred_sections", [])
+            return payload
+        return self._build_metrics_dashboard()
+
     def metrics_if_cached(self) -> dict[str, Any] | None:
         cache_key = f"metrics:{self._scope_cache_fragment()}"
         payload = self._cached_ttl_peek(cache_key)
@@ -11373,6 +11383,79 @@ class OperatorQueryService:
                 "total_equity": snapshot.total_equity,
             },
             "strategy_execution_health": r["strategy_execution_health"],
+        }
+
+    def _build_metrics_dashboard(self) -> dict[str, Any]:
+        metrics = dict(self.runtime.metrics.snapshot())
+        phase1_shadow = self.phase1_shadow()
+        phase1_lag = phase1_shadow.get("lag") if isinstance(phase1_shadow, dict) else {}
+        phase1_execution_shadow = (
+            phase1_shadow.get("execution_shadow")
+            if isinstance(phase1_shadow, dict)
+            else {}
+        )
+        phase1_ledger_shadow = (
+            phase1_shadow.get("ledger_shadow")
+            if isinstance(phase1_shadow, dict)
+            else {}
+        )
+        snapshot = self._latest_scoped_snapshot()
+        current_open_order_count = len(self._scoped_open_order_states())
+        deferred_sections = [
+            "decision_cycle_count",
+            "order_intent_count",
+            "fill_count",
+            "rejection_count",
+            "portfolio_snapshot_count",
+            "portfolio_snapshot_recent_window_count",
+            "fill_without_snapshot_count",
+            "snapshot_without_reconciliation_count",
+            "recent_execution_errors",
+            "strategy_execution_health",
+        ]
+        return {
+            "decision_cycle_count": None,
+            "order_intent_count": None,
+            "fill_count": None,
+            "rejection_count": None,
+            "reconciliation_mismatch_count": metrics.get("reconciliation_mismatches", 0),
+            "processing_failure_count": metrics.get("processing_failures", 0),
+            "portfolio_snapshot_repair_count": metrics.get("portfolio_snapshot_repairs", 0),
+            "current_open_order_count": current_open_order_count,
+            "portfolio_snapshot_count": None,
+            "portfolio_snapshot_recent_window_count": None,
+            "snapshot_reconciliation_window_limit": _LIVE_DASHBOARD_EVENT_LIMIT,
+            "event_count_window_limit": _LIVE_DASHBOARD_EVENT_LIMIT,
+            "reconciliation_ref_window_limit": _LIVE_DASHBOARD_RECONCILIATION_REF_LIMIT,
+            "fill_without_snapshot_count": None,
+            "snapshot_without_reconciliation_count": None,
+            "phase1_shadow": phase1_shadow,
+            "phase1_shadow_order_backlog": (
+                phase1_lag.get("order_backlog") if isinstance(phase1_lag, dict) else None
+            ),
+            "phase1_shadow_fill_backlog": (
+                phase1_lag.get("fill_backlog") if isinstance(phase1_lag, dict) else None
+            ),
+            "phase1_shadow_obligation_backlog": (
+                phase1_lag.get("obligation_backlog") if isinstance(phase1_lag, dict) else None
+            ),
+            "phase1_shadow_failure_count": (
+                int(phase1_execution_shadow.get("order_failure_count", 0) or 0)
+                + int(phase1_execution_shadow.get("fill_failure_count", 0) or 0)
+                + int(phase1_ledger_shadow.get("sync_failure_count", 0) or 0)
+            ),
+            "phase1_shadow_alert_count": metrics.get("phase1_shadow_alerts", 0),
+            "phase1_shadow_recovery_count": metrics.get("phase1_shadow_recoveries", 0),
+            "recent_execution_errors": [],
+            "exposure_summary": None if snapshot is None else {
+                "gross_exposure": snapshot.gross_exposure,
+                "net_exposure": snapshot.net_exposure,
+                "total_equity": snapshot.total_equity,
+            },
+            "strategy_execution_health": None,
+            "dashboard_summary_only": True,
+            "summary_source": "dashboard_metrics_light",
+            "deferred_sections": deferred_sections,
         }
 
     def _build_phase1_shadow(self) -> dict[str, Any]:

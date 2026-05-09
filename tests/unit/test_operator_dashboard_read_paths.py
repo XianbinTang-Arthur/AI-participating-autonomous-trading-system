@@ -793,6 +793,88 @@ def test_dashboard_health_payload_reuses_cached_operator_metrics_without_rebuild
     assert summary["deferred_sections"] == ["order_count"]
 
 
+def test_dashboard_metrics_uses_lightweight_summary_when_full_metrics_cache_misses() -> None:
+    service = OperatorQueryService.__new__(OperatorQueryService)
+    service._ttl_cache = {}
+    service._cache_lock = threading.RLock()
+    service._inflight = {}
+    service.state_scope = SimpleNamespace(
+        product_type="derivatives",
+        margin_mode="cross",
+        allowed_symbols={"BTC-USDT-SWAP"},
+    )
+    service.runtime = SimpleNamespace(
+        metrics=SimpleNamespace(
+            snapshot=lambda: {
+                "processing_failures": 2,
+                "portfolio_snapshot_repairs": 3,
+                "reconciliation_mismatches": 4,
+                "phase1_shadow_alerts": 5,
+                "phase1_shadow_recoveries": 6,
+            }
+        )
+    )
+    service.runtime_queries = SimpleNamespace(
+        metrics=lambda: (_ for _ in ()).throw(
+            AssertionError("dashboard metrics must not rebuild full metrics")
+        )
+    )
+    service.phase1_shadow = lambda: {
+        "lag": {"order_backlog": 1, "fill_backlog": 2, "obligation_backlog": 3},
+        "execution_shadow": {"order_failure_count": 4, "fill_failure_count": 5},
+        "ledger_shadow": {"sync_failure_count": 6},
+    }
+    service._latest_scoped_snapshot = lambda: SimpleNamespace(
+        gross_exposure=Decimal("12.5"),
+        net_exposure=Decimal("1.5"),
+        total_equity=Decimal("100.0"),
+    )
+    service._scoped_open_order_states = lambda: [object(), object()]
+
+    payload = service.metrics_dashboard()
+
+    assert payload["dashboard_summary_only"] is True
+    assert payload["summary_source"] == "dashboard_metrics_light"
+    assert payload["current_open_order_count"] == 2
+    assert payload["processing_failure_count"] == 2
+    assert payload["portfolio_snapshot_repair_count"] == 3
+    assert payload["reconciliation_mismatch_count"] == 4
+    assert payload["phase1_shadow_failure_count"] == 15
+    assert payload["exposure_summary"]["total_equity"] == Decimal("100.0")
+    assert payload["fill_count"] is None
+    assert "fill_count" in payload["deferred_sections"]
+    assert "strategy_execution_health" in payload["deferred_sections"]
+
+
+def test_dashboard_metrics_reuses_cached_full_metrics_without_downgrading() -> None:
+    service = OperatorQueryService.__new__(OperatorQueryService)
+    service._ttl_cache = {}
+    service._cache_lock = threading.RLock()
+    service._inflight = {}
+    service.state_scope = SimpleNamespace(
+        product_type="derivatives",
+        margin_mode="cross",
+        allowed_symbols={"BTC-USDT-SWAP"},
+    )
+    cache_key = f"metrics:{service._scope_cache_fragment()}"
+    service._ttl_cache[cache_key] = (
+        datetime(2030, 1, 1, tzinfo=timezone.utc),
+        {
+            "fill_count": 12,
+            "current_open_order_count": 1,
+            "strategy_execution_health": {"status": "healthy"},
+        },
+    )
+
+    payload = service.metrics_dashboard()
+
+    assert payload["fill_count"] == 12
+    assert payload["current_open_order_count"] == 1
+    assert payload["dashboard_summary_only"] is False
+    assert payload["summary_source"] == "cached_operator_metrics"
+    assert payload["deferred_sections"] == []
+
+
 def test_direct_blocker_history_does_not_use_short_ttl_cache() -> None:
     service = OperatorQueryService.__new__(OperatorQueryService)
     service._ttl_cache = {}
@@ -966,6 +1048,8 @@ def test_dashboard_bundle_uses_summary_recovery_and_mode_panels() -> None:
     request_loader_source = inspect.getsource(auth_routes._protected_dashboard_panel_payload)
     snapshot_loader_source = inspect.getsource(auth_routes._load_dashboard_snapshot_panel)
 
+    assert "query.metrics_dashboard()" in request_loader_source
+    assert "query.metrics_dashboard()" in snapshot_loader_source
     assert "query.system_mode_dashboard()" in request_loader_source
     assert "query.system_runtime_dashboard()" in request_loader_source
     assert "query.system_recovery_dashboard()" in request_loader_source

@@ -583,7 +583,7 @@ async def _load_dashboard_snapshot_panel(runtime: ApplicationRuntime, snapshot_k
                 blocker_control=query.blocker_control(),
             )
         if panel_key == "metrics":
-            return query.metrics()
+            return query.metrics_dashboard()
         if panel_key == "accountState":
             return query.account_state_dashboard()
         if panel_key == "latestDecision":
@@ -979,7 +979,7 @@ def _protected_dashboard_panel_payload(
             blocker_control=query.blocker_control(),
         )
     if panel_key == "metrics":
-        return query.metrics()
+        return query.metrics_dashboard()
     if panel_key == "portfolio":
         return query.portfolio_latest()
     if panel_key == "positions":
