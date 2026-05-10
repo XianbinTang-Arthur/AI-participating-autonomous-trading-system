@@ -5578,32 +5578,6 @@ class OperatorQueryService:
                 "runtime_supported": self.runtime.settings.trading_product_type == "spot",
                 "execution_compatible": self.runtime.settings.trading_product_type == "spot",
             },
-            "protective": {
-                "enabled": bool(self.runtime.settings.strategy_family_protective_enabled),
-                "runtime_supported": (
-                    self.runtime.settings.trading_product_type == "derivatives"
-                    and self.runtime.settings.margin_mode != "cash"
-                    and self.runtime.settings.derivatives_position_mode == "hedge"
-                ),
-                "execution_compatible": (
-                    self.runtime.settings.trading_product_type == "derivatives"
-                    and self.runtime.settings.margin_mode != "cash"
-                    and self.runtime.settings.derivatives_position_mode == "hedge"
-                ),
-            },
-            "opportunistic": {
-                "enabled": bool(self.runtime.settings.strategy_family_opportunistic_enabled),
-                "runtime_supported": (
-                    self.runtime.settings.trading_product_type == "derivatives"
-                    and self.runtime.settings.margin_mode != "cash"
-                    and self.runtime.settings.derivatives_position_mode == "hedge"
-                ),
-                "execution_compatible": (
-                    self.runtime.settings.trading_product_type == "derivatives"
-                    and self.runtime.settings.margin_mode != "cash"
-                    and self.runtime.settings.derivatives_position_mode == "hedge"
-                ),
-            },
             "independent": {
                 "enabled": bool(self.runtime.settings.strategy_family_independent_enabled),
                 "runtime_supported": (
@@ -6206,34 +6180,15 @@ class OperatorQueryService:
             else []
         )
         overlay_mode = self.runtime.settings.strategy_hedge_overlay_mode
-        rollout_opportunistic = overlay_rollout_status(self.runtime.settings, mode="opportunistic")
         rollout_independent = overlay_rollout_status(self.runtime.settings, mode="independent")
         current_rollout = (
-            rollout_opportunistic
-            if overlay_mode == "opportunistic"
-            else rollout_independent
+            rollout_independent
             if overlay_mode == "independent"
-            else {
-                "runtime_stage": overlay_runtime_stage(self.runtime.settings),
-                "configured_rollout_stage": "live",
-                "runtime_allowed": True,
-                "blocking_reasons": [],
-                "summary": "保护性对冲不受本轮灰度阶段限制，可继续作为最终兜底路径。",
-            }
+            else overlay_rollout_status(self.runtime.settings, mode=str(overlay_mode))
         )
         overlay_mode_enabled = (
-            (
-                overlay_mode == "protective"
-                and self.runtime.settings.strategy_hedge_protective_enabled
-            )
-            or (
-                overlay_mode == "opportunistic"
-                and self.runtime.settings.strategy_hedge_opportunistic_enabled
-            )
-            or (
-                overlay_mode == "independent"
-                and self.runtime.settings.strategy_hedge_independent_enabled
-            )
+            overlay_mode == "independent"
+            and self.runtime.settings.strategy_hedge_independent_enabled
         )
         overlay_mode_ready = overlay_mode_enabled and bool(current_rollout.get("runtime_allowed", True))
         configured_parameters: dict[str, Any] = {
@@ -6272,27 +6227,6 @@ class OperatorQueryService:
                 and self.runtime.settings.derivatives_position_mode == "hedge"
                 and overlay_mode_ready
             ),
-            "hedge_protective_enabled": self.runtime.settings.strategy_hedge_protective_enabled,
-            "hedge_open_threshold": self.runtime.settings.strategy_hedge_open_threshold,
-            "hedge_close_threshold": self.runtime.settings.strategy_hedge_close_threshold,
-            "hedge_max_ratio": self.runtime.settings.strategy_hedge_max_ratio,
-            "hedge_min_hold_seconds": self.runtime.settings.strategy_hedge_min_hold_seconds,
-            "hedge_rebalance_cooldown_seconds": self.runtime.settings.strategy_hedge_rebalance_cooldown_seconds,
-            "hedge_opportunistic_enabled": self.runtime.settings.strategy_hedge_opportunistic_enabled,
-            "hedge_opportunistic_rollout_stage": self.runtime.settings.strategy_hedge_opportunistic_rollout_stage,
-            "hedge_opportunistic_open_threshold": self.runtime.settings.strategy_hedge_opportunistic_open_threshold,
-            "hedge_opportunistic_close_threshold": self.runtime.settings.strategy_hedge_opportunistic_close_threshold,
-            "hedge_opportunistic_max_ratio": self.runtime.settings.strategy_hedge_opportunistic_max_ratio,
-            "hedge_opportunistic_min_hold_seconds": self.runtime.settings.strategy_hedge_opportunistic_min_hold_seconds,
-            "hedge_opportunistic_rebalance_cooldown_seconds": self.runtime.settings.strategy_hedge_opportunistic_rebalance_cooldown_seconds,
-            "hedge_opportunistic_max_fee_drag_ratio": self.runtime.settings.strategy_hedge_opportunistic_max_fee_drag_ratio,
-            "hedge_opportunistic_max_churn_ratio": self.runtime.settings.strategy_hedge_opportunistic_max_churn_ratio,
-            "hedge_opportunistic_min_safe_net_edge_bps": self.runtime.settings.strategy_hedge_opportunistic_min_safe_net_edge_bps,
-            "hedge_opportunistic_expected_slippage_buffer_bps": self.runtime.settings.strategy_hedge_opportunistic_expected_slippage_buffer_bps,
-            "hedge_opportunistic_expected_execution_buffer_bps": self.runtime.settings.strategy_hedge_opportunistic_expected_execution_buffer_bps,
-            "hedge_opportunistic_weak_edge_execution_mode": self.runtime.settings.strategy_hedge_opportunistic_weak_edge_execution_mode,
-            "hedge_opportunistic_max_acceptable_cost_bps": self.runtime.settings.strategy_hedge_opportunistic_max_acceptable_cost_bps,
-            "hedge_opportunistic_passive_first_enabled": self.runtime.settings.strategy_hedge_opportunistic_passive_first_enabled,
             "hedge_independent_enabled": self.runtime.settings.strategy_hedge_independent_enabled,
             "hedge_independent_rollout_stage": self.runtime.settings.strategy_hedge_independent_rollout_stage,
             "hedge_independent_long_entry_threshold": self.runtime.settings.strategy_hedge_independent_long_entry_threshold,
@@ -6354,7 +6288,6 @@ class OperatorQueryService:
                 "rollback_sequence": overlay_global_rollback_sequence(),
                 "runbook_path": "docs/derivatives_overlay_rollout_runbook.md",
                 "sample_report_template_path": "docs/derivatives_overlay_sample_report_template.md",
-                "opportunistic": rollout_opportunistic,
                 "independent": rollout_independent,
             },
         }

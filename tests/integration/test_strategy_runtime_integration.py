@@ -659,13 +659,7 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["recent_budget_assignments"])
         self.assertTrue(payload["recent_budget_snapshots"])
         self.assertIsInstance(payload["recent_netting_decisions"], list)
-        self.assertTrue(payload["recent_conflict_resolutions"])
-        self.assertEqual(
-            payload["recent_conflict_resolutions"][0]["resolution_action"],
-            "non_hedge_families_reduced_to_protect_smart_arbitrage",
-        )
-        self.assertIn("protected_notional", payload["recent_conflict_resolutions"][0])
-        self.assertIn("reduced_notional", payload["recent_conflict_resolutions"][0])
+        self.assertIsInstance(payload["recent_conflict_resolutions"], list)
         self.assertNotIn("spot_grid", payload["configured_parameters"])
         self.assertNotIn("dca", payload["configured_parameters"])
         self.assertIn("pair_definitions", payload["configured_parameters"]["smart_arbitrage"])
@@ -836,7 +830,8 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         payload = strategy_runtime.json()
         self.assertTrue(payload["configured_parameters"]["directional"]["hedge_overlay_enabled"])
         self.assertTrue(payload["configured_parameters"]["directional"]["hedge_overlay_runtime_supported"])
-        self.assertTrue(payload["configured_parameters"]["directional"]["hedge_overlay_effective_enabled"])
+        self.assertEqual(payload["configured_parameters"]["directional"]["hedge_overlay_mode"], "independent")
+        self.assertFalse(payload["configured_parameters"]["directional"]["hedge_overlay_effective_enabled"])
         applied_target = payload["latest_applied_target"]
         self.assertIn("hedge_overlay_decision", applied_target)
         self.assertTrue(applied_target["strategy_execution_legs"])
@@ -856,141 +851,11 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
             payload["smart_arbitrage_cost_summary"]["calibration"],
         )
 
-    async def test_derivatives_opportunistic_overlay_runtime_exposes_effective_mode_and_leg_semantics(self) -> None:
-        settings = self._settings(
-            trading_product_type="derivatives",
-            margin_mode="cross",
-            default_symbol="BTC-USDT-SWAP",
-            allowed_symbols=("BTC-USDT-SWAP",),
-            strategy_short_bias_enabled=True,
-            derivatives_position_mode="hedge",
-            strategy_hedge_overlay_enabled=True,
-            strategy_hedge_overlay_mode="opportunistic",
-            strategy_hedge_opportunistic_enabled=True,
-            strategy_hedge_opportunistic_min_safe_net_edge_bps=3.0,
-            strategy_hedge_opportunistic_expected_slippage_buffer_bps=1.0,
-            strategy_hedge_opportunistic_expected_execution_buffer_bps=2.0,
-            strategy_hedge_opportunistic_weak_edge_execution_mode="report_only",
-            strategy_hedge_opportunistic_max_acceptable_cost_bps=7.5,
-            strategy_hedge_opportunistic_passive_first_enabled=True,
-            strategy_cost_guard_enabled=False,
-            strategy_entry_min_signal_edge_bps=0.0,
-            strategy_entry_alpha_min=0.0,
-            strategy_entry_confidence_min=0.0,
-            strategy_reversal_min_signal_edge_bps=50.0,
-            strategy_reversal_alpha_min=0.60,
-            strategy_reversal_confidence_min=0.95,
-            strategy_short_reversal_min_signal_edge_bps=50.0,
-            strategy_short_reversal_alpha_min=0.60,
-            strategy_short_reversal_confidence_min=0.95,
-            strategy_edge_noise_buffer_bps=0.0,
-        )
-        runtime = await build_runtime(settings)
-        decision_id = "dec_opportunistic_overlay"
-        runtime.event_store.append(
-            build_envelope(
-                topic=topics.POSITION_TARGETS,
-                key=settings.default_symbol,
-                payload_model=PositionTarget(
-                    decision_id=decision_id,
-                    symbol=settings.default_symbol,
-                    current_position_qty=Decimal("0.05"),
-                    target_position_qty=Decimal("0.0325"),
-                    delta_position_qty=Decimal("-0.0175"),
-                    current_notional=Decimal("3500"),
-                    target_notional=Decimal("2275"),
-                    rebalance_reason="opportunistic_overlay_test",
-                    urgency="medium",
-                    max_slippage_tolerance_bps=20,
-                    source_mix={"baseline": 1.0},
-                    decision_expiry_ts=datetime.now(timezone.utc) + timedelta(minutes=5),
-                    product_type="derivatives",
-                    current_exposure_side="long",
-                    target_exposure_side="long",
-                    position_intent="reduce_long",
-                    target_leverage=1.0,
-                    margin_mode="cross",
-                    strategy_family="directional",
-                    strategy_execution_mode="opportunistic_overlay",
-                    strategy_reason_codes=["opportunistic_overlay_active"],
-                    strategy_execution_legs=[
-                        StrategyLegIntent(
-                            symbol=settings.default_symbol,
-                            product_type="derivatives",
-                            side="sell",
-                            position_mode="long_short_mode",
-                            pos_side="short",
-                            action="open",
-                            family="directional",
-                            role="hedge",
-                            margin_mode="cross",
-                            target_leverage=1.0,
-                            current_position_qty=Decimal("0"),
-                            target_position_qty=Decimal("0.0175"),
-                            delta_position_qty=Decimal("0.0175"),
-                            reference_price=Decimal("70000.5"),
-                            execution_compatible=True,
-                            execution_mode="opportunistic_overlay",
-                            overlay_mode="opportunistic",
-                            hedge_ratio=Decimal("0.35"),
-                            trigger_reason_codes=["opportunistic_overlay_signal_above_open_threshold"],
-                            note="Directional opportunistic overlay 生成的机会腿。",
-                        )
-                    ],
-                    hedge_overlay_decision=HedgeOverlayDecision(
-                        enabled=True,
-                        runtime_supported=True,
-                        configured_mode="opportunistic",
-                        effective_mode="opportunistic",
-                        overlay_source="opportunistic",
-                        active=True,
-                        state="opening",
-                        main_leg_signal="long",
-                        hedge_leg_signal="short",
-                        main_leg_current_qty=Decimal("0.05"),
-                        hedge_leg_current_qty=Decimal("0"),
-                        main_leg_target_qty=Decimal("0.05"),
-                        hedge_leg_target_qty=Decimal("0.0175"),
-                        hedge_ratio=Decimal("0.35"),
-                        max_ratio=Decimal("0.35"),
-                        pressure_score=0.82,
-                        open_threshold=0.62,
-                        close_threshold=0.46,
-                        open_condition="opportunistic_score_threshold_crossed",
-                        fee_drag_ratio=0.04,
-                        churn_ratio=0.08,
-                        reason_codes=["opportunistic_overlay_signal_above_open_threshold"],
-                    ),
-                ),
-                source_component="test",
-            )
-        )
-
-        app = self._app(runtime)
-        with TestClient(app) as client:
-            strategy_runtime = client.get("/strategy/runtime")
-
-        self.assertEqual(strategy_runtime.status_code, 200)
-        payload = strategy_runtime.json()
-        self.assertEqual(payload["configured_parameters"]["directional"]["hedge_overlay_mode"], "opportunistic")
-        self.assertTrue(payload["configured_parameters"]["directional"]["hedge_opportunistic_enabled"])
-        self.assertTrue(payload["configured_parameters"]["directional"]["hedge_overlay_mode_ready"])
-        self.assertTrue(payload["configured_parameters"]["directional"]["hedge_overlay_effective_enabled"])
-        self.assertEqual(payload["configured_parameters"]["directional"]["hedge_opportunistic_min_safe_net_edge_bps"], 3.0)
-        self.assertEqual(payload["configured_parameters"]["directional"]["hedge_opportunistic_expected_slippage_buffer_bps"], 1.0)
-        self.assertEqual(payload["configured_parameters"]["directional"]["hedge_opportunistic_expected_execution_buffer_bps"], 2.0)
-        self.assertEqual(payload["configured_parameters"]["directional"]["hedge_opportunistic_weak_edge_execution_mode"], "report_only")
-        self.assertEqual(payload["configured_parameters"]["directional"]["hedge_opportunistic_max_acceptable_cost_bps"], 7.5)
-        self.assertTrue(payload["configured_parameters"]["directional"]["hedge_opportunistic_passive_first_enabled"])
-        applied_target = payload["latest_applied_target"]
-        self.assertEqual(applied_target["hedge_overlay_decision"]["effective_mode"], "opportunistic")
-        self.assertEqual(applied_target["hedge_overlay_decision"]["overlay_source"], "opportunistic")
-        self.assertEqual(applied_target["hedge_overlay_decision"]["state"], "opening")
-        self.assertEqual(applied_target["strategy_execution_legs"][0]["position_mode"], "long_short_mode")
-        self.assertEqual(applied_target["strategy_execution_legs"][0]["pos_side"], "short")
-        self.assertEqual(applied_target["strategy_execution_legs"][0]["action"], "open")
-        self.assertEqual(applied_target["strategy_execution_legs"][0]["execution_mode"], "opportunistic_overlay")
-        self.assertEqual(applied_target["strategy_execution_legs"][0]["overlay_mode"], "opportunistic")
+    async def test_derivatives_retired_overlay_modes_are_rejected_before_runtime_build(self) -> None:
+        for mode in ("protective", "opportunistic"):
+            with self.subTest(mode=mode):
+                with self.assertRaises(ValueError):
+                    self._settings(strategy_hedge_overlay_mode=mode)
 
     async def test_managed_derivatives_live_profile_selects_directional_family(self) -> None:
         values = load_managed_profile_values("derivatives_live")
@@ -1024,14 +889,9 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(settings.strategy_family_independent_enabled)
         self.assertFalse(settings.strategy_family_independent_shadow_mode_enabled)
         self.assertFalse(settings.strategy_family_independent_live_execution_enabled)
-        self.assertFalse(settings.strategy_family_protective_shadow_mode_enabled)
-        self.assertFalse(settings.strategy_family_opportunistic_shadow_mode_enabled)
         self.assertFalse(settings.smart_arbitrage_enabled)
         self.assertFalse(settings.strategy_hedge_overlay_enabled)
-        self.assertEqual(settings.strategy_hedge_overlay_mode, "protective")
-        self.assertFalse(settings.strategy_hedge_protective_enabled)
-        self.assertFalse(settings.strategy_hedge_opportunistic_enabled)
-        self.assertEqual(settings.strategy_hedge_opportunistic_rollout_stage, "dry_run")
+        self.assertEqual(settings.strategy_hedge_overlay_mode, "independent")
         self.assertFalse(settings.strategy_hedge_independent_enabled)
         self.assertEqual(settings.strategy_hedge_independent_rollout_stage, "dry_run")
         self.assertEqual(settings.strategy_hedge_independent_long_entry_threshold, 0.25)
@@ -1263,7 +1123,8 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         payload = strategy_runtime.json()
         directional = payload["configured_parameters"]["directional"]
         self.assertEqual(directional["hedge_overlay_mode"], "independent")
-        self.assertTrue(directional["hedge_protective_enabled"])
+        self.assertNotIn("hedge_protective_enabled", directional)
+        self.assertNotIn("hedge_opportunistic_enabled", directional)
         self.assertTrue(directional["hedge_independent_enabled"])
         self.assertTrue(directional["hedge_overlay_mode_ready"])
         self.assertTrue(directional["hedge_overlay_effective_enabled"])
@@ -1341,8 +1202,6 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
             derivatives_position_mode="hedge",
             strategy_hedge_overlay_enabled=True,
             strategy_hedge_overlay_mode="independent",
-            strategy_hedge_opportunistic_enabled=True,
-            strategy_hedge_opportunistic_rollout_stage="live",
             strategy_hedge_independent_enabled=True,
             strategy_hedge_independent_rollout_stage="dry_run",
             guarded_execution_dry_run=False,
@@ -1366,8 +1225,8 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
             "independent_overlay_rollout_stage_blocks_live_runtime",
             rollout["current_mode_blocking_reasons"],
         )
-        self.assertEqual(rollout["opportunistic"]["configured_rollout_stage"], "live")
-        self.assertTrue(rollout["opportunistic"]["runtime_allowed"])
+        self.assertNotIn("opportunistic", rollout)
+        self.assertNotIn("protective", rollout)
         self.assertEqual(rollout["independent"]["configured_rollout_stage"], "dry_run")
         self.assertFalse(rollout["independent"]["runtime_allowed"])
         self.assertTrue(rollout["rollback_sequence"])
@@ -1634,82 +1493,10 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy_runtime.status_code, 200)
         payload = strategy_runtime.json()
         candidates = {item["family"]: item for item in payload["latest_snapshot"]["candidates"]}
-        self.assertEqual(candidates["protective"]["state"], "disabled")
-        self.assertEqual(candidates["opportunistic"]["state"], "disabled")
+        self.assertNotIn("protective", candidates)
+        self.assertNotIn("opportunistic", candidates)
         self.assertEqual(candidates["independent"]["state"], "disabled")
-        self.assertIn("strategy_family_protective_disabled", candidates["protective"]["reason_codes"])
-        self.assertIn("strategy_family_opportunistic_disabled", candidates["opportunistic"]["reason_codes"])
         self.assertIn("strategy_family_independent_disabled", candidates["independent"]["reason_codes"])
-
-    async def test_strategy_runtime_snapshot_surfaces_real_protective_family_candidate_when_enabled(self) -> None:
-        settings = self._settings(
-            trading_product_type="derivatives",
-            margin_mode="cross",
-            derivatives_position_mode="hedge",
-            default_symbol="BTC-USDT-SWAP",
-            allowed_symbols=("BTC-USDT-SWAP",),
-            strategy_family_active="directional",
-            strategy_family_auto_selection_enabled=False,
-            strategy_hedge_overlay_enabled=True,
-            strategy_hedge_overlay_mode="protective",
-            strategy_hedge_protective_enabled=True,
-            strategy_family_protective_enabled=True,
-        )
-        runtime = await build_runtime(settings)
-        await runtime.market_gateway.run_local_publisher(
-            symbol=settings.default_symbol,
-            iterations=2,
-            interval_seconds=0.0,
-        )
-        await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
-
-        app = self._app(runtime)
-        with TestClient(app) as client:
-            strategy_runtime = client.get("/strategy/runtime")
-
-        self.assertEqual(strategy_runtime.status_code, 200)
-        payload = strategy_runtime.json()
-        candidate = next(item for item in payload["latest_snapshot"]["candidates"] if item["family"] == "protective")
-        self.assertNotEqual(candidate["state"], "disabled")
-        self.assertEqual(candidate["execution_mode"], "protective_overlay")
-        self.assertNotIn("strategy_family_protective_disabled", candidate["reason_codes"])
-        self.assertNotIn("strategy_family_protective_placeholder_not_migrated", candidate["reason_codes"])
-        self.assertFalse(bool(candidate["metrics"].get("skeleton_mode")))
-
-    async def test_strategy_runtime_snapshot_surfaces_real_opportunistic_family_candidate_when_enabled(self) -> None:
-        settings = self._settings(
-            trading_product_type="derivatives",
-            margin_mode="cross",
-            derivatives_position_mode="hedge",
-            default_symbol="BTC-USDT-SWAP",
-            allowed_symbols=("BTC-USDT-SWAP",),
-            strategy_family_active="directional",
-            strategy_family_auto_selection_enabled=False,
-            strategy_hedge_overlay_enabled=True,
-            strategy_hedge_overlay_mode="opportunistic",
-            strategy_hedge_opportunistic_enabled=True,
-            strategy_family_opportunistic_enabled=True,
-        )
-        runtime = await build_runtime(settings)
-        await runtime.market_gateway.run_local_publisher(
-            symbol=settings.default_symbol,
-            iterations=2,
-            interval_seconds=0.0,
-        )
-        await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
-
-        app = self._app(runtime)
-        with TestClient(app) as client:
-            strategy_runtime = client.get("/strategy/runtime")
-
-        self.assertEqual(strategy_runtime.status_code, 200)
-        payload = strategy_runtime.json()
-        candidate = next(item for item in payload["latest_snapshot"]["candidates"] if item["family"] == "opportunistic")
-        self.assertNotEqual(candidate["state"], "disabled")
-        self.assertEqual(candidate["execution_mode"], "opportunistic_overlay")
-        self.assertNotIn("strategy_family_opportunistic_disabled", candidate["reason_codes"])
-        self.assertNotIn("strategy_family_opportunistic_placeholder_not_migrated", candidate["reason_codes"])
-        self.assertFalse(bool(candidate["metrics"].get("skeleton_mode")))
 
     async def test_strategy_runtime_snapshot_surfaces_real_independent_family_candidate_when_enabled(self) -> None:
         settings = self._settings(

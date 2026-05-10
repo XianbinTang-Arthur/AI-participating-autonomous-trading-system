@@ -5627,6 +5627,7 @@ async def build_runtime(
         recovery_policy=runtime_layering.recovery_policy,
         bus=bus,
         event_store=storage.event_store,
+        stream_snapshot_cache=slices.stream_snapshot_cache,
         hot_state_store=hot_state_store,
         market_gateway=market_gateway,
         feature_engine=feature_engine,

@@ -321,17 +321,11 @@ class TestAATSSettings(unittest.TestCase):
         self.assertEqual(settings.strategy_entry_allowed_regimes, ("trend", "breakout"))
         self.assertEqual(settings.strategy_short_entry_allowed_regimes, ("trend", "breakout"))
 
-    def test_opportunistic_overlay_thresholds_reject_inverted_range(self) -> None:
-        with self.assertRaisesRegex(
-            ValueError,
-            "strategy_hedge_opportunistic_close_threshold_must_not_exceed_open_threshold",
-        ):
-            AATSSettings.model_validate(
-                {
-                    "strategy_hedge_opportunistic_open_threshold": 0.40,
-                    "strategy_hedge_opportunistic_close_threshold": 0.50,
-                }
-            )
+    def test_retired_overlay_modes_are_not_valid_runtime_settings(self) -> None:
+        for mode in ("protective", "opportunistic"):
+            with self.subTest(mode=mode):
+                with self.assertRaises(ValueError):
+                    AATSSettings.model_validate({"strategy_hedge_overlay_mode": mode})
 
     def test_independent_overlay_thresholds_reject_entry_above_scale_in(self) -> None:
         with self.assertRaisesRegex(
@@ -454,10 +448,10 @@ class TestAATSSettings(unittest.TestCase):
 
         self.assertEqual(settings.strategy_hedge_independent_rollout_stage, "live")
 
-    def test_protective_overlay_independent_switch_defaults_to_true(self) -> None:
+    def test_overlay_mode_defaults_to_independent(self) -> None:
         settings = AATSSettings.model_validate({})
 
-        self.assertTrue(settings.strategy_hedge_protective_enabled)
+        self.assertEqual(settings.strategy_hedge_overlay_mode, "independent")
 
     def test_independent_diagnostics_emit_flags_default_to_true(self) -> None:
         settings = AATSSettings.model_validate({})

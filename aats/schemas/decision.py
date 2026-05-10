@@ -386,7 +386,7 @@ class PositionSizingBreakdown(SchemaBase):
     budgeted_notional: Decimal = Decimal("0")
 
 
-HedgeOverlayMode = Literal["protective", "opportunistic", "independent"]
+HedgeOverlayMode = Literal["independent", "protective", "opportunistic"]
 HedgeOverlayState = Literal["disabled", "inactive", "opening", "holding", "closing", "blocked"]
 StrategyExecutionSummaryMode = Literal["none", "single_leg", "multi_leg"]
 
@@ -422,7 +422,7 @@ class StrategyExecutionSummary(SchemaBase):
 class HedgeOverlayDecision(SchemaBase):
     enabled: bool = False
     runtime_supported: bool = False
-    configured_mode: HedgeOverlayMode = "protective"
+    configured_mode: HedgeOverlayMode = "independent"
     effective_mode: HedgeOverlayMode | None = None
     overlay_source: str | None = None
     active: bool = False

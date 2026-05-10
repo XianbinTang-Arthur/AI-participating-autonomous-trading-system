@@ -44,11 +44,6 @@ from aats.services.strategy_engines.independent.gates import (
     required_safe_net_edge_bps as _required_safe_net_edge_bps_v2,
     trial_guard_active as _independent_trial_guard_active_v2,
 )
-from aats.services.strategy_engines.families.protective_family import (
-    _candidate_state_from_overlay_state,
-    _placeholder_family_candidate,
-    protective_runtime_supported,
-)
 from aats.services.strategy_engines.families.independent_models import IndependentBookRuntimeState
 from aats.services.strategy_engines.independent.lifecycle import (
     close_reason_code as _independent_close_reason_code_v2,
@@ -127,7 +122,7 @@ def independent_candidate_from_directional_target(
     baseline = evaluation_context.baseline
     directional_target = evaluation_context.directional_target
     ai_assessment = evaluation_context.ai_assessment
-    runtime_supported = protective_runtime_supported(settings=settings, context=context)
+    runtime_supported = _independent_runtime_supported(settings=settings, context=context)
     configured_mode = settings.strategy_hedge_overlay_mode
     metrics = {
         "family_registry_enabled": True,
@@ -531,6 +526,62 @@ def independent_candidate_from_directional_target(
         },
         legs=list(result.legs),
     )
+
+
+def _independent_runtime_supported(*, settings: AATSSettings, context: DecisionContext) -> bool:
+    return (
+        context.product_type == "derivatives"
+        and settings.margin_mode != "cash"
+        and settings.derivatives_position_mode == "hedge"
+    )
+
+
+def _placeholder_family_candidate(
+    *,
+    family: StrategyFamily,
+    context: StrategyEvaluationContext,
+    headline: str,
+    placeholder_reason: str,
+    skeleton_mode: bool = True,
+) -> StrategyCandidate:
+    control = context.family_runtime_controls.get(family, StrategyFamilyRuntimeControl())
+    if not control.enabled:
+        state = "disabled"
+        reason_codes = list(dict.fromkeys([f"strategy_family_{family}_disabled", placeholder_reason]))
+        control_summary = f"{family} 家族已注册但未启用。"
+    else:
+        state = "inactive"
+        reason_codes = [placeholder_reason]
+        control_summary = f"{family} 家族骨架已接入，当前仅参与 snapshot/audit。"
+    return StrategyCandidate(
+        family=family,
+        state=state,
+        enabled=control.enabled,
+        selectable=False,
+        execution_compatible=False,
+        route_action="hold_current",
+        headline=headline,
+        reason_codes=reason_codes,
+        control_summary=control_summary,
+        metrics={
+            "family_registry_enabled": True,
+            "shadow_mode_enabled": control.shadow_mode_enabled,
+            "live_execution_enabled": control.live_execution_enabled,
+            "skeleton_mode": skeleton_mode,
+        },
+    )
+
+
+def _candidate_state_from_overlay_state(state: str) -> str:
+    mapping = {
+        "opening": "opening",
+        "holding": "active",
+        "closing": "unwinding",
+        "blocked": "blocked",
+        "inactive": "inactive",
+        "disabled": "disabled",
+    }
+    return mapping.get(str(state), "inactive")
 
 
 def _independent_active_books_present(result: IndependentFamilyEvaluation) -> bool:

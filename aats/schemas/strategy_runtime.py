@@ -11,15 +11,18 @@ from aats.schemas.execution import LegOrderAction, PositionMode, PositionSide
 from aats.schemas.system import MarginModelType, ProductType
 
 
-StrategyFamily = Literal[
+ActiveStrategyFamily = Literal[
     "directional",
     "smart_arbitrage",
     "spot_grid",
     "dca",
-    "protective",
-    "opportunistic",
     "independent",
 ]
+RetiredStrategyFamily = Literal[
+    "protective",
+    "opportunistic",
+]
+StrategyFamily = ActiveStrategyFamily | RetiredStrategyFamily
 StrategyFamilyAction = Literal[
     "hold_family",
     "blocked",

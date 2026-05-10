@@ -864,8 +864,8 @@ class TestOrderManagerExecutionErrorHistory(unittest.IsolatedAsyncioTestCase):
                     "guarded_execution_dry_run": False,
                     "okx_simulated_trading": False,
                     "strategy_hedge_overlay_enabled": True,
-                    "strategy_hedge_opportunistic_enabled": True,
-                    "strategy_hedge_opportunistic_rollout_stage": "live",
+                    "strategy_hedge_independent_enabled": True,
+                    "strategy_hedge_independent_rollout_stage": "live",
                 }
             ),
             bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
@@ -894,7 +894,7 @@ class TestOrderManagerExecutionErrorHistory(unittest.IsolatedAsyncioTestCase):
                 position_mode="long_short_mode",
                 target_leverage=2.0,
                 exposure_side="short",
-                strategy_execution_mode="opportunistic_overlay",
+                strategy_execution_mode="independent_books",
             )
         )
 
@@ -904,7 +904,7 @@ class TestOrderManagerExecutionErrorHistory(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(persisted.submission_mode, "guarded_simulated_submit")
         self.assertEqual(adapter.submit_calls, 1)
 
-    async def test_leg_overlay_direct_submit_blocks_when_protective_mode_is_disabled(self) -> None:
+    async def test_leg_overlay_direct_submit_blocks_retired_protective_mode(self) -> None:
         repo = InMemoryExecutionRepository()
         adapter = _CountingAdapter()
         manager = OrderManager(
@@ -916,7 +916,6 @@ class TestOrderManagerExecutionErrorHistory(unittest.IsolatedAsyncioTestCase):
                     "guarded_execution_dry_run": False,
                     "okx_simulated_trading": False,
                     "strategy_hedge_overlay_enabled": True,
-                    "strategy_hedge_protective_enabled": False,
                 }
             ),
             bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
@@ -953,7 +952,7 @@ class TestOrderManagerExecutionErrorHistory(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(persisted)
         self.assertEqual(persisted.status, "BLOCKED")
         self.assertEqual(persisted.submission_mode, "leg_overlay_rollout_blocked")
-        self.assertIn("strategy_hedge_protective_disabled", persisted.execution_error)
+        self.assertIn("protective_overlay_retired", persisted.execution_error)
         self.assertEqual(adapter.submit_calls, 0)
 
     async def test_normalized_leg_order_intent_still_applies_leg_risk_blockers(self) -> None:

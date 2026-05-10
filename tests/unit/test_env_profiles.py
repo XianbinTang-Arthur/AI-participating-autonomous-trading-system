@@ -404,35 +404,14 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_low_edge_threshold_bps"] == 4.0
         assert values["strategy_low_edge_streak_limit"] == 4
         assert values["strategy_low_edge_cooldown_seconds"] == 900.0
-        assert values["strategy_hedge_overlay_mode"] == "protective"
-        expected_protective_enabled = profile != "derivatives_live"
-        assert values["strategy_hedge_protective_enabled"] is expected_protective_enabled
-        expected_opportunistic_enabled = False
-        expected_opportunistic_rollout = "dry_run"
-        assert values["strategy_hedge_opportunistic_enabled"] is expected_opportunistic_enabled
-        assert values["strategy_hedge_opportunistic_rollout_stage"] == expected_opportunistic_rollout
-        assert values["strategy_hedge_opportunistic_open_threshold"] == 0.62
-        assert values["strategy_hedge_opportunistic_close_threshold"] == 0.46
-        assert values["strategy_hedge_opportunistic_max_ratio"] == 0.35
-        assert values["strategy_hedge_opportunistic_min_hold_seconds"] == 180.0
-        assert values["strategy_hedge_opportunistic_rebalance_cooldown_seconds"] == 90.0
-        assert values["strategy_hedge_opportunistic_max_fee_drag_ratio"] == 0.18
-        assert values["strategy_hedge_opportunistic_max_churn_ratio"] == 0.22
-        assert values["strategy_hedge_opportunistic_min_safe_net_edge_bps"] == 3.0
-        assert values["strategy_hedge_opportunistic_expected_slippage_buffer_bps"] == 1.0
-        assert values["strategy_hedge_opportunistic_expected_execution_buffer_bps"] == 2.0
-        assert values["strategy_hedge_opportunistic_weak_edge_execution_mode"] == "report_only"
-        assert values["strategy_hedge_opportunistic_max_acceptable_cost_bps"] == 7.5
-        assert values["strategy_hedge_opportunistic_passive_first_enabled"] is True
+        assert values["strategy_hedge_overlay_mode"] == "independent"
+        assert "strategy_hedge_protective_enabled" not in values
+        assert "strategy_hedge_opportunistic_enabled" not in values
         expected_independent_enabled = False
         expected_independent_rollout = "dry_run"
         expected_independent_family_enabled = False
-        assert values["strategy_family_protective_enabled"] is False
-        assert values["strategy_family_protective_shadow_mode_enabled"] is False
-        assert values["strategy_family_protective_live_execution_enabled"] is False
-        assert values["strategy_family_opportunistic_enabled"] is False
-        assert values["strategy_family_opportunistic_shadow_mode_enabled"] is False
-        assert values["strategy_family_opportunistic_live_execution_enabled"] is False
+        assert "strategy_family_protective_enabled" not in values
+        assert "strategy_family_opportunistic_enabled" not in values
         assert values["strategy_hedge_independent_enabled"] is expected_independent_enabled
         assert values["strategy_hedge_independent_rollout_stage"] == expected_independent_rollout
         assert values["strategy_family_independent_enabled"] is expected_independent_family_enabled
@@ -521,15 +500,11 @@ def test_derivatives_live_managed_profile_is_pinned_for_directional_live() -> No
     assert values["strategy_family_independent_enabled"] is False
     assert values["strategy_family_independent_shadow_mode_enabled"] is False
     assert values["strategy_family_independent_live_execution_enabled"] is False
-    assert values["strategy_family_protective_enabled"] is False
-    assert values["strategy_family_protective_shadow_mode_enabled"] is False
-    assert values["strategy_family_protective_live_execution_enabled"] is False
-    assert values["strategy_family_opportunistic_enabled"] is False
-    assert values["strategy_family_opportunistic_shadow_mode_enabled"] is False
-    assert values["strategy_family_opportunistic_live_execution_enabled"] is False
+    assert "strategy_family_protective_enabled" not in values
+    assert "strategy_family_opportunistic_enabled" not in values
     assert values["smart_arbitrage_enabled"] is False
     assert values["strategy_hedge_overlay_enabled"] is False
-    assert values["strategy_hedge_overlay_mode"] == "protective"
+    assert values["strategy_hedge_overlay_mode"] == "independent"
     assert values["strategy_entry_alpha_min"] == 0.10
     # 2026-04-19 下调 0.55→0.50 与 calibration 对齐
     assert values["strategy_entry_confidence_min"] == 0.50

@@ -23,8 +23,6 @@ class PortfolioAllocatorV2Phase2:
     _FAMILY_PRIORITY: tuple[StrategyFamily, ...] = (
         "smart_arbitrage",
         "independent",
-        "protective",
-        "opportunistic",
         "spot_grid",
         "dca",
         "directional",
@@ -67,8 +65,6 @@ class PortfolioAllocatorV2Phase2:
         if base_target.product_type == "derivatives":
             smart_arbitrage_intent = intents_by_family.get("smart_arbitrage")
             independent_intent = intents_by_family.get("independent")
-            protective_intent = intents_by_family.get("protective")
-            opportunistic_intent = intents_by_family.get("opportunistic")
             directional_intent = intents_by_family.get("directional")
             smart_arbitrage_active = smart_arbitrage_intent is not None and self._intent_is_actionable(
                 smart_arbitrage_intent,
@@ -78,19 +74,9 @@ class PortfolioAllocatorV2Phase2:
                 independent_intent,
                 include_active_inventory=True,
             )
-            protective_active = protective_intent is not None and self._intent_is_actionable(
-                protective_intent,
-                include_active_inventory=True,
-            )
-            opportunistic_active = opportunistic_intent is not None and self._intent_is_actionable(
-                opportunistic_intent,
-                include_active_inventory=True,
-            )
             directional_active = directional_intent is not None and self._intent_has_delta(directional_intent)
             overlay_cutover_intent = self._derivatives_overlay_cutover_intent(
                 independent_intent=independent_intent if independent_active else None,
-                protective_intent=protective_intent if protective_active else None,
-                opportunistic_intent=opportunistic_intent if opportunistic_active else None,
             )
             if smart_arbitrage_active and smart_arbitrage_intent is not None:
                 approved.append(smart_arbitrage_intent)
@@ -104,14 +90,6 @@ class PortfolioAllocatorV2Phase2:
                     blocked_reason_codes.append("allocator_independent_blocked_by_active_smart_arbitrage")
                     blocked_inputs.append(independent_intent)
                     blocked_reason_codes_for_conflict.append("allocator_independent_blocked_by_active_smart_arbitrage")
-                if protective_active and protective_intent is not None:
-                    blocked_reason_codes.append("allocator_protective_blocked_by_active_smart_arbitrage")
-                    blocked_inputs.append(protective_intent)
-                    blocked_reason_codes_for_conflict.append("allocator_protective_blocked_by_active_smart_arbitrage")
-                if opportunistic_active and opportunistic_intent is not None:
-                    blocked_reason_codes.append("allocator_opportunistic_blocked_by_active_smart_arbitrage")
-                    blocked_inputs.append(opportunistic_intent)
-                    blocked_reason_codes_for_conflict.append("allocator_opportunistic_blocked_by_active_smart_arbitrage")
                 if blocked_inputs:
                     conflict_resolutions.append(
                         self._conflict_resolution(
@@ -691,21 +669,10 @@ class PortfolioAllocatorV2Phase2:
         self,
         *,
         independent_intent: StrategySleeveIntent | None,
-        protective_intent: StrategySleeveIntent | None,
-        opportunistic_intent: StrategySleeveIntent | None,
     ) -> StrategySleeveIntent | None:
         configured_mode = str(getattr(self.settings, "strategy_hedge_overlay_mode", "") or "").strip().lower()
-        by_family = {
-            "independent": independent_intent,
-            "protective": protective_intent,
-            "opportunistic": opportunistic_intent,
-        }
-        preferred = by_family.get(configured_mode)
-        if preferred is not None:
-            return preferred
-        for family in ("independent", "protective", "opportunistic"):
-            if by_family[family] is not None:
-                return by_family[family]
+        if configured_mode == "independent":
+            return independent_intent
         return None
 
     def _primary_intent(

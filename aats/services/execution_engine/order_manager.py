@@ -2674,10 +2674,8 @@ class OrderManager:
         blockers: list[str] = []
         if not self.settings.strategy_hedge_overlay_enabled:
             blockers.append("strategy_hedge_overlay_disabled")
-        if overlay_mode == "protective" and not self.settings.strategy_hedge_protective_enabled:
-            blockers.append("strategy_hedge_protective_disabled")
-        if overlay_mode == "opportunistic" and not self.settings.strategy_hedge_opportunistic_enabled:
-            blockers.append("strategy_hedge_opportunistic_disabled")
+        if overlay_mode in {"protective", "opportunistic"}:
+            blockers.append(f"{overlay_mode}_overlay_retired")
         if overlay_mode == "independent" and not self.settings.strategy_hedge_independent_enabled:
             blockers.append("strategy_hedge_independent_disabled")
         if blockers:

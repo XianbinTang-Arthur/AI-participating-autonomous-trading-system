@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -40,227 +41,11 @@ class TestMainlineTradingChain(unittest.IsolatedAsyncioTestCase):
         )
         await self._assert_complete_mainline_chain(runtime=runtime, iterations=6)
 
-    async def test_protective_overlay_mainline_chain_persists_bundle_and_executes_leg_orders(self) -> None:
-        runtime = await build_runtime(self._derivatives_overlay_settings(mode="protective"))
-        self._seed_overlay_cycle_inputs(
-            runtime,
-            snapshot=self._portfolio_snapshot(
-                symbol=runtime.settings.default_symbol,
-                positions=[
-                    Position(
-                        symbol=runtime.settings.default_symbol,
-                        position_key=f"{runtime.settings.default_symbol}:long",
-                        position_qty=Decimal("0.05"),
-                        position_notional=Decimal("4000"),
-                        avg_entry_price=Decimal("80000"),
-                        unrealized_pnl=Decimal("0"),
-                        product_type="derivatives",
-                        exposure_side="long",
-                        target_leverage=2.0,
-                        margin_mode="cross",
-                        position_mode="long_short_mode",
-                        pos_side="long",
-                    )
-                ],
-            ),
-        )
-
-        with (
-            patch.object(
-                runtime.decision_engine.target_engine,
-                "build",
-                side_effect=lambda context, *_args, **_kwargs: self._overlay_target(context, mode="protective"),
-            ),
-            patch.object(
-                runtime.decision_engine.strategy_coordinator.family_registry._engines["protective"],
-                "evaluate",
-                side_effect=lambda evaluation_context: [
-                    self._overlay_family_candidate_from_target(
-                        evaluation_context.directional_target,
-                        family="protective",
-                    )
-                ],
-            ),
-        ):
-            target = await runtime.decision_engine.run_cycle(
-                runtime.settings.default_symbol,
-                runtime.settings.primary_timeframe,
-            )
-
-        self._assert_overlay_execution_chain(
-            runtime=runtime,
-            target=target,
-            expected_leg_modes={"protective_overlay"},
-            expected_leg_count=1,
-        )
-        self.assertEqual(target.strategy_family, "protective")
-        self.assertEqual(target.strategy_family_action, "protect")
-        assert target.decision_outcome is not None
-        self.assertEqual(target.decision_outcome.selected_strategy_family, "protective")
-        self.assertEqual(target.decision_outcome.selected_strategy_family_action, "protect")
-        self.assertEqual(target.decision_outcome.final_action, "enter")
-
-    async def test_protective_family_cutover_runs_without_legacy_target_overlay_path(self) -> None:
-        runtime = await build_runtime(self._derivatives_overlay_settings(mode="protective"))
-        self._seed_overlay_cycle_inputs(
-            runtime,
-            snapshot=self._portfolio_snapshot(
-                symbol=runtime.settings.default_symbol,
-                positions=[
-                    Position(
-                        symbol=runtime.settings.default_symbol,
-                        position_key=f"{runtime.settings.default_symbol}:long",
-                        position_qty=Decimal("0.05"),
-                        position_notional=Decimal("4000"),
-                        avg_entry_price=Decimal("80000"),
-                        unrealized_pnl=Decimal("0"),
-                        product_type="derivatives",
-                        exposure_side="long",
-                        target_leverage=2.0,
-                        margin_mode="cross",
-                        position_mode="long_short_mode",
-                        pos_side="long",
-                    )
-                ],
-            ),
-        )
-        captured: dict[str, PositionTarget] = {}
-        original_build = runtime.decision_engine.target_engine.build
-
-        def _capture_build(*args, **kwargs) -> PositionTarget:
-            result = original_build(*args, **kwargs)
-            captured["base_target"] = result
-            return result
-
-        with (
-            patch.object(runtime.decision_engine.target_engine, "build", side_effect=_capture_build),
-            patch(
-                "aats.services.strategy_engines.families.protective_family._protective_pressure_score",
-                return_value=0.84,
-            ),
-            patch.object(
-                runtime.risk_engine,
-                "evaluate_leg_order",
-                side_effect=lambda leg_intent: self._approved_leg_risk_decision(
-                    decision_id=leg_intent.decision_id,
-                    projected_qty=Decimal("-0.02"),
-                ),
-            ),
-            patch.object(
-                runtime.order_manager,
-                "leg_risk_evaluator",
-                new=lambda leg_intent: self._approved_leg_risk_decision(
-                    decision_id=leg_intent.decision_id,
-                    projected_qty=Decimal("-0.02"),
-                ),
-            ),
-        ):
-            target = await runtime.decision_engine.run_cycle(
-                runtime.settings.default_symbol,
-                runtime.settings.primary_timeframe,
-            )
-
-        base_target = captured["base_target"]
-        self.assertIsNone(base_target.hedge_overlay_decision)
-        self.assertEqual(len(base_target.strategy_execution_legs), 1)
-        self.assertEqual(base_target.strategy_execution_legs[0].family, "directional")
-        self.assertEqual(base_target.strategy_execution_legs[0].execution_mode, "directional_main_leg")
-        self.assertEqual(target.strategy_family, "protective")
-        self.assertEqual(target.strategy_family_action, "protect")
-        self.assertEqual(target.strategy_execution_mode, "protective_overlay")
-        self.assertEqual(len(target.strategy_execution_legs), 1)
-        self.assertEqual(target.strategy_execution_legs[0].family, "protective")
-        self.assertIsNotNone(target.hedge_overlay_decision)
-        assert target.hedge_overlay_decision is not None
-        self.assertEqual(target.hedge_overlay_decision.effective_mode, "protective")
-        self.assertEqual(target.hedge_overlay_decision.overlay_source, "protective")
-        self._assert_overlay_execution_chain(
-            runtime=runtime,
-            target=target,
-            expected_leg_modes={"protective_overlay"},
-            expected_leg_count=1,
-        )
-
-    async def test_opportunistic_family_cutover_runs_without_legacy_target_overlay_path(self) -> None:
-        runtime = await build_runtime(self._derivatives_overlay_settings(mode="opportunistic"))
-        self._seed_overlay_cycle_inputs(
-            runtime,
-            snapshot=self._portfolio_snapshot(
-                symbol=runtime.settings.default_symbol,
-                positions=[
-                    Position(
-                        symbol=runtime.settings.default_symbol,
-                        position_key=f"{runtime.settings.default_symbol}:long",
-                        position_qty=Decimal("0.05"),
-                        position_notional=Decimal("4000"),
-                        avg_entry_price=Decimal("80000"),
-                        unrealized_pnl=Decimal("0"),
-                        product_type="derivatives",
-                        exposure_side="long",
-                        target_leverage=2.0,
-                        margin_mode="cross",
-                        position_mode="long_short_mode",
-                        pos_side="long",
-                    )
-                ],
-            ),
-        )
-        captured: dict[str, PositionTarget] = {}
-        original_build = runtime.decision_engine.target_engine.build
-
-        def _capture_build(*args, **kwargs) -> PositionTarget:
-            result = original_build(*args, **kwargs)
-            captured["base_target"] = result
-            return result
-
-        with (
-            patch.object(runtime.decision_engine.target_engine, "build", side_effect=_capture_build),
-            patch(
-                "aats.services.strategy_engines.families.opportunistic_family.opportunistic_overlay_score",
-                return_value=0.84,
-            ),
-            patch.object(
-                runtime.risk_engine,
-                "evaluate_leg_order",
-                side_effect=lambda leg_intent: self._approved_leg_risk_decision(
-                    decision_id=leg_intent.decision_id,
-                    projected_qty=Decimal("-0.02"),
-                ),
-            ),
-            patch.object(
-                runtime.order_manager,
-                "leg_risk_evaluator",
-                new=lambda leg_intent: self._approved_leg_risk_decision(
-                    decision_id=leg_intent.decision_id,
-                    projected_qty=Decimal("-0.02"),
-                ),
-            ),
-        ):
-            target = await runtime.decision_engine.run_cycle(
-                runtime.settings.default_symbol,
-                runtime.settings.primary_timeframe,
-            )
-
-        base_target = captured["base_target"]
-        self.assertIsNone(base_target.hedge_overlay_decision)
-        self.assertEqual(len(base_target.strategy_execution_legs), 1)
-        self.assertEqual(base_target.strategy_execution_legs[0].family, "directional")
-        self.assertEqual(base_target.strategy_execution_legs[0].execution_mode, "directional_main_leg")
-        self.assertEqual(target.strategy_family, "opportunistic")
-        self.assertEqual(target.strategy_family_action, "open_opportunity_leg")
-        self.assertEqual(target.strategy_execution_mode, "opportunistic_overlay")
-        self.assertEqual(len(target.strategy_execution_legs), 1)
-        self.assertEqual(target.strategy_execution_legs[0].family, "opportunistic")
-        self.assertIsNotNone(target.hedge_overlay_decision)
-        assert target.hedge_overlay_decision is not None
-        self.assertEqual(target.hedge_overlay_decision.effective_mode, "opportunistic")
-        self.assertEqual(target.hedge_overlay_decision.overlay_source, "opportunistic")
-        self._assert_overlay_execution_chain(
-            runtime=runtime,
-            target=target,
-            expected_leg_modes={"opportunistic_overlay"},
-            expected_leg_count=1,
-        )
+    async def test_retired_overlay_modes_are_rejected_before_mainline_runtime_build(self) -> None:
+        for mode in ("protective", "opportunistic"):
+            with self.subTest(mode=mode):
+                with self.assertRaises(ValueError):
+                    self._derivatives_overlay_settings(mode=mode)
 
     async def test_independent_family_cutover_runs_without_legacy_target_overlay_path(self) -> None:
         runtime = await build_runtime(self._derivatives_overlay_settings(mode="independent"))
@@ -351,126 +136,6 @@ class TestMainlineTradingChain(unittest.IsolatedAsyncioTestCase):
             expected_leg_modes={"independent_long_book"},
             expected_leg_count=1,
         )
-
-    async def test_opportunistic_overlay_mainline_chain_persists_bundle_and_executes_leg_orders(self) -> None:
-        runtime = await build_runtime(self._derivatives_overlay_settings(mode="opportunistic"))
-        self._seed_overlay_cycle_inputs(
-            runtime,
-            snapshot=self._portfolio_snapshot(
-                symbol=runtime.settings.default_symbol,
-                positions=[
-                    Position(
-                        symbol=runtime.settings.default_symbol,
-                        position_key=f"{runtime.settings.default_symbol}:long",
-                        position_qty=Decimal("0.05"),
-                        position_notional=Decimal("4000"),
-                        avg_entry_price=Decimal("80000"),
-                        unrealized_pnl=Decimal("0"),
-                        product_type="derivatives",
-                        exposure_side="long",
-                        target_leverage=2.0,
-                        margin_mode="cross",
-                        position_mode="long_short_mode",
-                        pos_side="long",
-                    )
-                ],
-            ),
-        )
-
-        with (
-            patch.object(
-                runtime.decision_engine.target_engine,
-                "build",
-                side_effect=lambda context, *_args, **_kwargs: self._overlay_target(context, mode="opportunistic"),
-            ),
-            patch.object(
-                runtime.decision_engine.strategy_coordinator.family_registry._engines["opportunistic"],
-                "evaluate",
-                side_effect=lambda evaluation_context: [
-                    self._overlay_family_candidate_from_target(
-                        evaluation_context.directional_target,
-                        family="opportunistic",
-                    )
-                ],
-            ),
-        ):
-            target = await runtime.decision_engine.run_cycle(
-                runtime.settings.default_symbol,
-                runtime.settings.primary_timeframe,
-            )
-
-        self._assert_overlay_execution_chain(
-            runtime=runtime,
-            target=target,
-            expected_leg_modes={"opportunistic_overlay"},
-            expected_leg_count=1,
-        )
-        self.assertEqual(target.strategy_family, "opportunistic")
-        self.assertEqual(target.strategy_family_action, "open_opportunity_leg")
-        assert target.decision_outcome is not None
-        self.assertEqual(target.decision_outcome.selected_strategy_family, "opportunistic")
-        self.assertEqual(target.decision_outcome.selected_strategy_family_action, "open_opportunity_leg")
-        self.assertEqual(target.decision_outcome.final_action, "enter")
-
-    async def test_directional_overlay_cycle_preserves_execution_metadata_after_coordinator_selection(self) -> None:
-        runtime = await build_runtime(self._derivatives_overlay_settings(mode="protective"))
-        self._seed_overlay_cycle_inputs(
-            runtime,
-            snapshot=self._portfolio_snapshot(
-                symbol=runtime.settings.default_symbol,
-                positions=[
-                    Position(
-                        symbol=runtime.settings.default_symbol,
-                        position_key=f"{runtime.settings.default_symbol}:long",
-                        position_qty=Decimal("0.05"),
-                        position_notional=Decimal("4000"),
-                        avg_entry_price=Decimal("80000"),
-                        unrealized_pnl=Decimal("0"),
-                        product_type="derivatives",
-                        exposure_side="long",
-                        target_leverage=2.0,
-                        margin_mode="cross",
-                        position_mode="long_short_mode",
-                        pos_side="long",
-                    )
-                ],
-            ),
-        )
-
-        with (
-            patch.object(
-                runtime.decision_engine.target_engine,
-                "build",
-                side_effect=lambda context, *_args, **_kwargs: self._overlay_target(context, mode="protective"),
-            ),
-            patch.object(
-                runtime.decision_engine.strategy_coordinator.family_registry._engines["protective"],
-                "evaluate",
-                side_effect=lambda evaluation_context: [
-                    self._overlay_family_candidate_from_target(
-                        evaluation_context.directional_target,
-                        family="protective",
-                    )
-                ],
-            ),
-        ):
-            target = await runtime.decision_engine.run_cycle(
-                runtime.settings.default_symbol,
-                runtime.settings.primary_timeframe,
-            )
-
-        self.assertEqual(target.strategy_family, "protective")
-        self.assertEqual(target.strategy_family_action, "protect")
-        self.assertEqual(target.strategy_execution_mode, "protective_overlay")
-        self.assertEqual(target.strategy_state_phase, "active")
-        self.assertIn(
-            "protective_overlay_signal_above_open_threshold",
-            target.strategy_reason_codes,
-        )
-        self.assertEqual(len(target.strategy_execution_legs), 1)
-        self.assertEqual(target.strategy_execution_legs[0].execution_mode, "protective_overlay")
-        assert target.decision_outcome is not None
-        self.assertEqual(target.decision_outcome.final_direction, "short")
 
     async def test_independent_overlay_mainline_chain_persists_bundle_and_executes_leg_orders(self) -> None:
         runtime = await build_runtime(self._derivatives_overlay_settings(mode="independent"))
@@ -909,14 +574,51 @@ class TestMainlineTradingChain(unittest.IsolatedAsyncioTestCase):
         )
 
     async def _assert_complete_mainline_chain(self, *, runtime, iterations: int) -> None:
-        await runtime.market_gateway.run_local_publisher(
+        snapshots = await runtime.market_gateway.run_local_publisher(
             symbol=runtime.settings.default_symbol,
             iterations=iterations,
             interval_seconds=0.0,
         )
 
-        self.assertEqual(runtime.event_store.count(topic=topics.MARKET_SNAPSHOTS), iterations)
-        self.assertEqual(runtime.event_store.count(topic=topics.FEATURE_SNAPSHOTS), iterations)
+        self.assertEqual(len(snapshots), iterations)
+        if runtime.stream_snapshot_cache is None:
+            self.assertEqual(runtime.event_store.count(topic=topics.MARKET_SNAPSHOTS), iterations)
+            self.assertEqual(runtime.event_store.count(topic=topics.FEATURE_SNAPSHOTS), iterations)
+        else:
+            market_snapshots = runtime.stream_snapshot_cache.recent_by_key(
+                topics.MARKET_SNAPSHOTS,
+                runtime.settings.default_symbol,
+                iterations,
+            )
+            feature_snapshots = runtime.stream_snapshot_cache.recent_by_key(
+                topics.FEATURE_SNAPSHOTS,
+                runtime.settings.default_symbol,
+                iterations,
+            )
+            self.assertEqual(len(market_snapshots), iterations)
+            self.assertEqual(len(feature_snapshots), iterations)
+
+        if runtime.audit_service is not None:
+            await runtime.audit_service._flush_once()
+
+        for _ in range(40):
+            records = [
+                record
+                for record in runtime.audit_repo.all()
+                if record.decision_context_ref is not None
+            ]
+            if any(
+                record.policy_decision_ref
+                and record.position_target_ref
+                and record.risk_decision_ref
+                and record.fill_event_refs
+                and record.reconciliation_refs
+                for record in records
+            ):
+                break
+            await asyncio.sleep(0.05)
+            if runtime.audit_service is not None:
+                await runtime.audit_service._flush_once()
 
         decision_ids = sorted(
             {
@@ -1053,9 +755,6 @@ class TestMainlineTradingChain(unittest.IsolatedAsyncioTestCase):
             "strategy_short_bias_enabled": True,
             "strategy_hedge_overlay_enabled": True,
             "strategy_hedge_overlay_mode": mode,
-            "strategy_hedge_protective_enabled": mode == "protective",
-            "strategy_hedge_opportunistic_enabled": mode == "opportunistic",
-            "strategy_hedge_opportunistic_rollout_stage": "live",
             "strategy_hedge_independent_enabled": mode == "independent",
             "strategy_hedge_independent_rollout_stage": "live",
             "strategy_hedge_independent_long_entry_threshold": 0.20,
@@ -1066,10 +765,6 @@ class TestMainlineTradingChain(unittest.IsolatedAsyncioTestCase):
             "strategy_hedge_independent_short_scale_in_threshold": 0.30,
             "strategy_hedge_independent_min_safe_net_edge_bps": 3.0,
             "strategy_hedge_independent_min_confirm_ticks": 1,
-            "strategy_family_protective_enabled": mode == "protective",
-            "strategy_family_protective_live_execution_enabled": mode == "protective",
-            "strategy_family_opportunistic_enabled": mode == "opportunistic",
-            "strategy_family_opportunistic_live_execution_enabled": mode == "opportunistic",
             "strategy_family_independent_enabled": mode == "independent",
             "strategy_family_independent_live_execution_enabled": mode == "independent",
             "strategy_cost_guard_enabled": False,

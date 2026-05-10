@@ -315,8 +315,8 @@ _RDP_CORE_RESEARCH_PARAMS_BY_FAMILY: dict[str, frozenset[str]] = {
         # 由 DirectionalReplayAdapter 在回测内部使用，不经生产端。
         "min_hold_seconds",
     }),
-    # 其他 family（smart_arbitrage / spot_grid / dca / protective /
-    # opportunistic）当前未纳入 RDP pipeline，required 留空。
+    # 其他 family（smart_arbitrage / spot_grid / dca）当前未纳入 RDP pipeline，
+    # required 留空。
 }
 
 # ── 兼容别名 ────────────────────────────────────────────────────

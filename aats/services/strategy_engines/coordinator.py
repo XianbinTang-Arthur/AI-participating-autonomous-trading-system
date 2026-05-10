@@ -50,14 +50,11 @@ from aats.services.strategy_engines.families import (
     DirectionalFamilyAdapter,
     ExistingCandidateFamilyAdapter,
     IndependentFamilyEngine,
-    OpportunisticFamilyEngine,
-    ProtectiveFamilyEngine,
     StrategyFamilyRegistry,
 )
 from aats.services.strategy_engines.smart_arbitrage import SmartArbitrageStrategyEngine
 from aats.services.strategy_engines.overlay_parent_exposure import (
     OverlayParentExposureLifecycle,
-    resolve_overlay_parent_exposure_lifecycle,
 )
 from aats.services.strategy_engines.smart_arbitrage.pair_registry import load_pair_definitions
 from aats.services.strategy_engines.spot_grid import SpotGridStrategyEngine
@@ -77,8 +74,6 @@ class StrategyCoordinatorService:
         "smart_arbitrage",
         "spot_grid",
         "dca",
-        "protective",
-        "opportunistic",
         "independent",
     )
     _SELECTION_PRIORITY_ORDER: tuple[StrategyFamily, ...] = (
@@ -86,8 +81,6 @@ class StrategyCoordinatorService:
         "spot_grid",
         "dca",
         "directional",
-        "protective",
-        "opportunistic",
         "independent",
     )
 
@@ -172,8 +165,6 @@ class StrategyCoordinatorService:
                 evaluator=self.dca_engine.evaluate,
             )
         )
-        self.family_registry.register(ProtectiveFamilyEngine(settings=self.settings))
-        self.family_registry.register(OpportunisticFamilyEngine(settings=self.settings))
         self.family_registry.register(IndependentFamilyEngine(settings=self.settings))
 
     def _family_runtime_controls(self) -> dict[StrategyFamily, StrategyFamilyRuntimeControl]:
@@ -197,16 +188,6 @@ class StrategyCoordinatorService:
                 enabled=bool(self.settings.dca_enabled),
                 shadow_mode_enabled=False,
                 live_execution_enabled=True,
-            ),
-            "protective": StrategyFamilyRuntimeControl(
-                enabled=bool(self.settings.strategy_family_protective_enabled),
-                shadow_mode_enabled=bool(self.settings.strategy_family_protective_shadow_mode_enabled),
-                live_execution_enabled=bool(self.settings.strategy_family_protective_live_execution_enabled),
-            ),
-            "opportunistic": StrategyFamilyRuntimeControl(
-                enabled=bool(self.settings.strategy_family_opportunistic_enabled),
-                shadow_mode_enabled=bool(self.settings.strategy_family_opportunistic_shadow_mode_enabled),
-                live_execution_enabled=bool(self.settings.strategy_family_opportunistic_live_execution_enabled),
             ),
             "independent": StrategyFamilyRuntimeControl(
                 enabled=bool(self.settings.strategy_family_independent_enabled),
@@ -446,7 +427,7 @@ class StrategyCoordinatorService:
             target_qty = base_target.target_position_qty
             urgency = base_target.urgency
             applied_route_action = "protective_fallback"
-            reason_codes.append("strategy_family_protective_fallback_retained")
+            reason_codes.append("directional_protective_fallback_retained")
         elif snapshot.selected_family == "directional" and strategy_execution_legs:
             target_qty = base_target.target_position_qty
             urgency = "high" if any(leg.role == "hedge" for leg in strategy_execution_legs) else base_target.urgency
@@ -745,7 +726,7 @@ class StrategyCoordinatorService:
                 target_sleeve_qty = _sa_metric("target_sleeve_position_qty", "target_sleeve_derivatives_qty")
                 account_current_qty = _sa_metric("current_account_position_qty", "current_account_derivatives_qty")
                 account_target_qty = _sa_metric("target_account_position_qty", "target_account_derivatives_qty")
-                if family in {"protective", "opportunistic", "independent"}:
+                if family == "independent":
                     candidate_target_qty = to_decimal(candidate.target_position_qty or Decimal("0"))
                     candidate_delta_qty = to_decimal(candidate.delta_position_qty or Decimal("0"))
                     candidate_current_qty = candidate_target_qty - candidate_delta_qty
@@ -1098,16 +1079,7 @@ class StrategyCoordinatorService:
         context: DecisionContext,
         directional_target: PositionTarget,
     ) -> dict[StrategyFamily, OverlayParentExposureLifecycle]:
-        overlay_parent_exposure = resolve_overlay_parent_exposure_lifecycle(
-            settings=self.settings,
-            context=context,
-            directional_target=directional_target,
-            parent_family="directional",
-        )
-        return {
-            "protective": overlay_parent_exposure,
-            "opportunistic": overlay_parent_exposure,
-        }
+        return {}
 
     def _market_history_requests(
         self,
@@ -1176,24 +1148,6 @@ class StrategyCoordinatorService:
                 latest_portfolio_snapshot_source="not_required",
                 latest_account_snapshot_source="not_required",
             ),
-            "protective": StrategyMarketHistoryRequest(
-                family="protective",
-                symbols=(primary_symbol,),
-                sampling_source="not_required",
-                lookback_snapshots=1,
-                latest_snapshot_source="not_required",
-                latest_portfolio_snapshot_source="not_required",
-                latest_account_snapshot_source="not_required",
-            ),
-            "opportunistic": StrategyMarketHistoryRequest(
-                family="opportunistic",
-                symbols=(primary_symbol,),
-                sampling_source="not_required",
-                lookback_snapshots=1,
-                latest_snapshot_source="not_required",
-                latest_portfolio_snapshot_source="not_required",
-                latest_account_snapshot_source="not_required",
-            ),
             "independent": StrategyMarketHistoryRequest(
                 family="independent",
                 symbols=(primary_symbol,),
@@ -1211,8 +1165,6 @@ class StrategyCoordinatorService:
             "smart_arbitrage": [],
             "spot_grid": [],
             "dca": [],
-            "protective": [],
-            "opportunistic": [],
             "independent": [],
         }
         # Use per-key query to avoid global-window starvation: in a
@@ -1361,7 +1313,7 @@ class StrategyCoordinatorService:
         candidates_by_family: dict[StrategyFamily, StrategyCandidate],
     ) -> StrategyCandidate | None:
         overlay_mode = str(self.settings.strategy_hedge_overlay_mode or "").strip()
-        if overlay_mode not in {"protective", "opportunistic", "independent"}:
+        if overlay_mode != "independent":
             return None
         candidate = candidates_by_family.get(overlay_mode)
         if candidate is None:
@@ -1397,8 +1349,6 @@ class StrategyCoordinatorService:
             ]
         )
         overlay_source = {
-            "protective": "protective",
-            "opportunistic": "opportunistic",
             "independent": "independent_books",
         }[effective_mode]
         active = applied_route_action in {"override_target", "hold_current"} and (
@@ -1461,7 +1411,7 @@ class StrategyCoordinatorService:
 
     def _configured_overlay_candidate(self, *, snapshot: StrategyCoordinatorSnapshot) -> StrategyCandidate | None:
         overlay_mode = str(self.settings.strategy_hedge_overlay_mode or "").strip()
-        if overlay_mode not in {"protective", "opportunistic", "independent"}:
+        if overlay_mode != "independent":
             return None
         return next((candidate for candidate in snapshot.candidates if candidate.family == overlay_mode), None)
 

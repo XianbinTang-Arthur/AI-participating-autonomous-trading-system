@@ -6,7 +6,7 @@
 ## 1. 样本信息
 
 - 样本类型：回放 / dry-run
-- Overlay 模式：opportunistic / independent
+- Overlay 模式：independent
 - 运行日期：
 - 交易对：
 - 运行阶段：replay_only / dry_run / live
@@ -46,7 +46,6 @@
 
 - 是否需要立刻回滚：
 - 若回滚，执行顺序：
-  - 关闭 `strategy_hedge_opportunistic_enabled`
   - 关闭 `strategy_hedge_independent_enabled`
-  - 保留 `protective`
-  - 必要时把 `strategy_hedge_overlay_mode` 切回 `protective`
+  - 确认 `strategy_hedge_overlay_enabled=false`
+  - 回到 directional 主策略路径并观察执行面

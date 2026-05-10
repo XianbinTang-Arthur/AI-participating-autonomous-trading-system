@@ -28,7 +28,7 @@ EnvTemplateProfile = Literal["spot", "derivatives", "spot_live", "derivatives_li
 MarginMode = Literal["cash", "cross", "isolated"]
 DerivativesPositionMode = Literal["net", "hedge"]
 DerivativesHedgeTransitionMode = Literal["close_then_open", "overlap_then_reduce", "independent_books"]
-StrategyHedgeOverlayMode = Literal["protective", "opportunistic", "independent"]
+StrategyHedgeOverlayMode = Literal["independent"]
 StrategyHedgeOverlayRolloutStage = Literal["replay_only", "dry_run", "live"]
 IndependentWeakEdgeExecutionMode = Literal["block", "report_only"]
 IndependentExecutionPolicyMode = Literal[
@@ -63,8 +63,6 @@ StrategyFamily = Literal[
     "smart_arbitrage",
     "spot_grid",
     "dca",
-    "protective",
-    "opportunistic",
     "independent",
 ]
 SmartArbitrageNegativeBasisMode = Literal["disabled", "advisory_only", "inventory_backed", "margin_backed"]
@@ -393,14 +391,8 @@ class AATSSettings(BaseSettings):
     strategy_profile_score_divergence_other_penalty: float = -1.0
     strategy_family_active: StrategyFamily = "directional"
     strategy_family_auto_selection_enabled: bool = True
-    strategy_family_protective_enabled: bool = False
-    strategy_family_opportunistic_enabled: bool = False
     strategy_family_independent_enabled: bool = False
-    strategy_family_protective_shadow_mode_enabled: bool = False
-    strategy_family_opportunistic_shadow_mode_enabled: bool = False
     strategy_family_independent_shadow_mode_enabled: bool = False
-    strategy_family_protective_live_execution_enabled: bool = False
-    strategy_family_opportunistic_live_execution_enabled: bool = False
     strategy_family_independent_live_execution_enabled: bool = False
     strategy_sleeve_auto_execution_enabled: bool = True
     strategy_sleeve_auto_min_budget_multiplier: float = 0.35
@@ -614,28 +606,7 @@ class AATSSettings(BaseSettings):
     strategy_short_reversal_alpha_min: float = 0.18
     strategy_short_reversal_confidence_min: float = 0.55
     strategy_hedge_overlay_enabled: bool = False
-    strategy_hedge_protective_enabled: bool = True
-    strategy_hedge_overlay_mode: StrategyHedgeOverlayMode = "protective"
-    strategy_hedge_open_threshold: float = 0.58
-    strategy_hedge_close_threshold: float = 0.42
-    strategy_hedge_max_ratio: float = 0.50
-    strategy_hedge_min_hold_seconds: float = 300.0
-    strategy_hedge_rebalance_cooldown_seconds: float = 120.0
-    strategy_hedge_opportunistic_enabled: bool = False
-    strategy_hedge_opportunistic_rollout_stage: StrategyHedgeOverlayRolloutStage = "dry_run"
-    strategy_hedge_opportunistic_open_threshold: float = 0.62
-    strategy_hedge_opportunistic_close_threshold: float = 0.46
-    strategy_hedge_opportunistic_max_ratio: float = 0.35
-    strategy_hedge_opportunistic_min_hold_seconds: float = 180.0
-    strategy_hedge_opportunistic_rebalance_cooldown_seconds: float = 90.0
-    strategy_hedge_opportunistic_max_fee_drag_ratio: float = 0.18
-    strategy_hedge_opportunistic_max_churn_ratio: float = 0.22
-    strategy_hedge_opportunistic_min_safe_net_edge_bps: float = 0.0
-    strategy_hedge_opportunistic_expected_slippage_buffer_bps: float = 0.0
-    strategy_hedge_opportunistic_expected_execution_buffer_bps: float = 0.0
-    strategy_hedge_opportunistic_weak_edge_execution_mode: IndependentWeakEdgeExecutionMode = "block"
-    strategy_hedge_opportunistic_max_acceptable_cost_bps: float = 0.0
-    strategy_hedge_opportunistic_passive_first_enabled: bool = False
+    strategy_hedge_overlay_mode: StrategyHedgeOverlayMode = "independent"
     strategy_hedge_independent_enabled: bool = False
     strategy_hedge_independent_rollout_stage: StrategyHedgeOverlayRolloutStage = "dry_run"
     strategy_hedge_independent_long_entry_threshold: float = 0.66
@@ -903,38 +874,6 @@ class AATSSettings(BaseSettings):
                 raise ValueError("derivatives_hedge_position_mode_requires_derivatives_product_type")
             if self.margin_mode == "cash":
                 raise ValueError("derivatives_hedge_position_mode_requires_margin_runtime")
-        if not 0.0 <= float(self.strategy_hedge_close_threshold) <= 1.0:
-            raise ValueError("strategy_hedge_close_threshold_must_be_between_zero_and_one")
-        if not 0.0 <= float(self.strategy_hedge_open_threshold) <= 1.0:
-            raise ValueError("strategy_hedge_open_threshold_must_be_between_zero_and_one")
-        if float(self.strategy_hedge_close_threshold) - float(self.strategy_hedge_open_threshold) > 1e-9:
-            raise ValueError("strategy_hedge_close_threshold_must_not_exceed_open_threshold")
-        if not 0.0 <= float(self.strategy_hedge_max_ratio) <= 1.0:
-            raise ValueError("strategy_hedge_max_ratio_must_be_between_zero_and_one")
-        if not 0.0 <= float(self.strategy_hedge_opportunistic_close_threshold) <= 1.0:
-            raise ValueError("strategy_hedge_opportunistic_close_threshold_must_be_between_zero_and_one")
-        if not 0.0 <= float(self.strategy_hedge_opportunistic_open_threshold) <= 1.0:
-            raise ValueError("strategy_hedge_opportunistic_open_threshold_must_be_between_zero_and_one")
-        if (
-            float(self.strategy_hedge_opportunistic_close_threshold)
-            - float(self.strategy_hedge_opportunistic_open_threshold)
-            > 1e-9
-        ):
-            raise ValueError("strategy_hedge_opportunistic_close_threshold_must_not_exceed_open_threshold")
-        if not 0.0 <= float(self.strategy_hedge_opportunistic_max_ratio) <= 1.0:
-            raise ValueError("strategy_hedge_opportunistic_max_ratio_must_be_between_zero_and_one")
-        if not 0.0 <= float(self.strategy_hedge_opportunistic_max_fee_drag_ratio) <= 1.0:
-            raise ValueError("strategy_hedge_opportunistic_max_fee_drag_ratio_must_be_between_zero_and_one")
-        if not 0.0 <= float(self.strategy_hedge_opportunistic_max_churn_ratio) <= 1.0:
-            raise ValueError("strategy_hedge_opportunistic_max_churn_ratio_must_be_between_zero_and_one")
-        if float(self.strategy_hedge_opportunistic_min_safe_net_edge_bps) < 0.0:
-            raise ValueError("strategy_hedge_opportunistic_min_safe_net_edge_bps_must_be_non_negative")
-        if float(self.strategy_hedge_opportunistic_expected_slippage_buffer_bps) < 0.0:
-            raise ValueError("strategy_hedge_opportunistic_expected_slippage_buffer_bps_must_be_non_negative")
-        if float(self.strategy_hedge_opportunistic_expected_execution_buffer_bps) < 0.0:
-            raise ValueError("strategy_hedge_opportunistic_expected_execution_buffer_bps_must_be_non_negative")
-        if float(self.strategy_hedge_opportunistic_max_acceptable_cost_bps) < 0.0:
-            raise ValueError("strategy_hedge_opportunistic_max_acceptable_cost_bps_must_be_non_negative")
         if not 0.0 <= float(self.strategy_hedge_independent_long_entry_threshold) <= 1.0:
             raise ValueError("strategy_hedge_independent_long_entry_threshold_must_be_between_zero_and_one")
         if not 0.0 <= float(self.strategy_hedge_independent_short_entry_threshold) <= 1.0:

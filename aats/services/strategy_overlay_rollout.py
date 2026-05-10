@@ -19,8 +19,6 @@ _ROLLOUT_STAGE_LABELS: dict[StrategyHedgeOverlayRolloutStage, str] = {
     "live": "实盘",
 }
 _MODE_LABELS: dict[StrategyHedgeOverlayMode, str] = {
-    "protective": "protective",
-    "opportunistic": "机会型 overlay",
     "independent": "独立双书",
 }
 
@@ -37,16 +35,14 @@ def overlay_runtime_stage(settings: AATSSettings) -> StrategyHedgeOverlayRollout
 
 def overlay_configured_rollout_stage(
     settings: AATSSettings,
-    mode: StrategyHedgeOverlayMode,
+    mode: str,
 ) -> StrategyHedgeOverlayRolloutStage:
-    if mode == "opportunistic":
-        return settings.strategy_hedge_opportunistic_rollout_stage
     if mode == "independent":
         return settings.strategy_hedge_independent_rollout_stage
-    return "live"
+    return "replay_only"
 
 
-def overlay_mode_from_execution_mode(execution_mode: str | None) -> StrategyHedgeOverlayMode | None:
+def overlay_mode_from_execution_mode(execution_mode: str | None) -> str | None:
     normalized = str(execution_mode or "").strip().lower()
     if normalized == "protective_overlay":
         return "protective"
@@ -59,35 +55,42 @@ def overlay_mode_from_execution_mode(execution_mode: str | None) -> StrategyHedg
 
 def overlay_global_rollback_sequence() -> list[str]:
     return [
-        "先关闭 strategy_hedge_opportunistic_enabled",
-        "再关闭 strategy_hedge_independent_enabled",
-        "保留 protective 作为最后兜底",
-        "如需彻底回退，再把 strategy_hedge_overlay_mode 切回 protective",
+        "关闭 strategy_hedge_independent_enabled",
+        "确认 strategy_hedge_overlay_enabled=false",
+        "回到 directional 主策略路径并观察执行面",
     ]
 
 
 def overlay_rollout_status(
     settings: AATSSettings,
     *,
-    mode: StrategyHedgeOverlayMode,
+    mode: str,
 ) -> dict[str, Any]:
     runtime_stage = overlay_runtime_stage(settings)
+    if mode != "independent":
+        return {
+            "mode": mode,
+            "runtime_stage": runtime_stage,
+            "configured_rollout_stage": "replay_only",
+            "runtime_allowed": False,
+            "blocking_reasons": [f"{mode}_overlay_retired"],
+            "summary": f"{mode} overlay 已退役，运行时不再允许启用。",
+            "recommended_evidence": [],
+            "rollback_sequence": overlay_global_rollback_sequence(),
+        }
     configured_stage = overlay_configured_rollout_stage(settings, mode)
     blockers: list[str] = []
 
-    if mode != "protective":
-        if configured_stage == "replay_only":
-            blockers.append(f"{mode}_overlay_rollout_replay_only")
-        elif _ROLLOUT_STAGE_ORDER[runtime_stage] > _ROLLOUT_STAGE_ORDER[configured_stage]:
-            blockers.append(f"{mode}_overlay_rollout_stage_blocks_{runtime_stage}_runtime")
+    if configured_stage == "replay_only":
+        blockers.append(f"{mode}_overlay_rollout_replay_only")
+    elif _ROLLOUT_STAGE_ORDER[runtime_stage] > _ROLLOUT_STAGE_ORDER[configured_stage]:
+        blockers.append(f"{mode}_overlay_rollout_stage_blocks_{runtime_stage}_runtime")
 
     runtime_allowed = not blockers
     mode_label = _MODE_LABELS[mode]
     configured_stage_label = _ROLLOUT_STAGE_LABELS[configured_stage]
     runtime_stage_label = _ROLLOUT_STAGE_LABELS[runtime_stage]
-    if mode == "protective":
-        summary = "保护性对冲不受本轮灰度阶段限制，可继续作为最终兜底路径。"
-    elif configured_stage == "replay_only":
+    if configured_stage == "replay_only":
         summary = f"{mode_label} 当前只允许回放验证，运行时不会真正放开。"
     elif runtime_allowed and configured_stage == "live":
         summary = f"{mode_label} 已放开到实盘；仍建议先看回放和 dry-run 样本再开启。"
@@ -96,11 +99,7 @@ def overlay_rollout_status(
     else:
         summary = f"{mode_label} 当前只放开到 {configured_stage_label}；这条{runtime_stage_label}运行线不会启用。"
 
-    recommended_evidence = (
-        ["至少 2 组历史回放样本", "至少 1 组 dry-run 观察样本"]
-        if mode == "independent"
-        else ["至少 2 组历史回放样本", "至少 1 组 dry-run 观察样本", "再决定是否进入实盘"]
-    )
+    recommended_evidence = ["至少 2 组历史回放样本", "至少 1 组 dry-run 观察样本"]
     return {
         "mode": mode,
         "runtime_stage": runtime_stage,

@@ -1156,75 +1156,27 @@ function directionalShortConfigRows(config = {}) {
     ],
     [
       "strategy_hedge_overlay_enabled / strategy_hedge_overlay_mode",
-      `${config?.hedge_overlay_enabled ? "true" : "false"} / ${escapeHtml(readableState(config?.hedge_overlay_mode || "protective"))}`,
+      `${config?.hedge_overlay_enabled ? "true" : "false"} / ${escapeHtml(readableState(config?.hedge_overlay_mode || "independent"))}`,
       "overlay 总开关",
       config?.hedge_overlay_runtime_supported
         ? (
             config?.hedge_overlay_mode_ready === false
               ? "当前是合约 hedge mode，但所选 overlay 模式还没有单独启用；这轮只保留配置展示。"
               : "当前是合约 hedge mode，directional 可以在主腿之外额外挂上一条 overlay 腿。"
-          )
+        )
         : "当前运行线不是合约 hedge mode，这组 overlay 配置不会真正生效。",
     ],
     [
-      "strategy_hedge_opportunistic_rollout_stage / strategy_hedge_independent_rollout_stage",
-      `${escapeHtml(readableState(config?.hedge_opportunistic_rollout_stage || "replay_only"))} / ${escapeHtml(readableState(config?.hedge_independent_rollout_stage || "replay_only"))}`,
+      "strategy_hedge_independent_rollout_stage",
+      `${escapeHtml(readableState(config?.hedge_independent_rollout_stage || "replay_only"))}`,
       "灰度阶段",
-      "机会型 overlay 按 replay_only / dry-run / live 分层放开；independent 当前阶段只允许到 dry-run，不允许直接进实盘。",
+      "independent 按 replay_only / dry-run / live 分层放开，不允许绕过灰度直接进实盘。",
     ],
     [
       "overlay rollout",
       directionalOverlayRolloutSummary(config),
       "当前运行线",
       directionalOverlayRolloutMeta(config),
-    ],
-    [
-      "strategy_hedge_protective_enabled",
-      config?.hedge_protective_enabled ? "true" : "false",
-      "protective 单独开关",
-      "只有这个开关打开，且 overlay mode 选中 protective 时，系统才会真正评估保护腿。",
-    ],
-    [
-      "strategy_hedge_open_threshold / strategy_hedge_close_threshold",
-      `${formatNumber(config?.hedge_open_threshold, 2, "待确认")} / ${formatNumber(config?.hedge_close_threshold, 2, "待确认")}`,
-      "protective 打开 / 收回",
-      "压力分数超过 open 阈值才开保护腿；回落到 close 阈值下方后，系统才会考虑把保护腿收回。",
-    ],
-    [
-      "strategy_hedge_max_ratio / strategy_hedge_min_hold_seconds / strategy_hedge_rebalance_cooldown_seconds",
-      `${formatRatio(config?.hedge_max_ratio)} / ${formatDuration(config?.hedge_min_hold_seconds, "待确认")} / ${formatDuration(config?.hedge_rebalance_cooldown_seconds, "待确认")}`,
-      "protective 比例 / 最小持有 / 重平衡冷却",
-      "max ratio 控制保护腿最多覆盖主腿多少；最小持有和重平衡冷却用于避免保护腿刚开就被频繁来回改动。",
-    ],
-    [
-      "strategy_hedge_opportunistic_enabled",
-      config?.hedge_opportunistic_enabled ? "true" : "false",
-      "机会腿单独开关",
-      "只有这个开关打开，且 overlay mode 选中 opportunistic 时，系统才会真正评估机会腿。",
-    ],
-    [
-      "strategy_hedge_opportunistic_open_threshold / strategy_hedge_opportunistic_close_threshold",
-      `${formatNumber(config?.hedge_opportunistic_open_threshold, 2, "待确认")} / ${formatNumber(config?.hedge_opportunistic_close_threshold, 2, "待确认")}`,
-      "opportunistic 打开 / 收回",
-      "机会分数超过 open 阈值才开机会腿；回落到 close 阈值下方后，系统才会考虑把机会腿收回。",
-    ],
-    [
-      "strategy_hedge_opportunistic_max_ratio / strategy_hedge_opportunistic_min_hold_seconds / strategy_hedge_opportunistic_rebalance_cooldown_seconds",
-      `${formatRatio(config?.hedge_opportunistic_max_ratio)} / ${formatDuration(config?.hedge_opportunistic_min_hold_seconds, "待确认")} / ${formatDuration(config?.hedge_opportunistic_rebalance_cooldown_seconds, "待确认")}`,
-      "机会腿比例 / 最小持有 / 重平衡冷却",
-      `机会腿仍受独立比例、最小持有和冷却约束；同时还会额外受费耗上限 ${formatRatio(config?.hedge_opportunistic_max_fee_drag_ratio)} / churn 上限 ${formatRatio(config?.hedge_opportunistic_max_churn_ratio)} 约束。`,
-    ],
-    [
-      "strategy_hedge_opportunistic_min_safe_net_edge_bps / strategy_hedge_opportunistic_expected_slippage_buffer_bps / strategy_hedge_opportunistic_expected_execution_buffer_bps",
-      `${formatNumber(config?.hedge_opportunistic_min_safe_net_edge_bps, 2, "待确认")} / ${formatNumber(config?.hedge_opportunistic_expected_slippage_buffer_bps, 2, "待确认")} / ${formatNumber(config?.hedge_opportunistic_expected_execution_buffer_bps, 2, "待确认")}`,
-      "机会腿净边际安全垫 / 滑点缓冲 / 执行缓冲",
-      "机会腿现在也会先检查预期净边际是否覆盖安全净边际、预估滑点与执行缓冲，而不是只看机会分本身。",
-    ],
-    [
-      "strategy_hedge_opportunistic_weak_edge_execution_mode / strategy_hedge_opportunistic_max_acceptable_cost_bps / strategy_hedge_opportunistic_passive_first_enabled",
-      `${String(config?.hedge_opportunistic_weak_edge_execution_mode || "待确认")} / ${formatNumber(config?.hedge_opportunistic_max_acceptable_cost_bps, 2, "待确认")} / ${config?.hedge_opportunistic_passive_first_enabled ? "true" : "false"}`,
-      "机会腿弱边际执行 / 成本上限 / 被动优先",
-      "当机会腿边际偏弱时，系统会根据这组约束决定是直接阻止、仅保留报告，还是要求 planner 优先走更保守的被动执行。",
     ],
     [
       "strategy_hedge_independent_enabled",
@@ -1340,7 +1292,7 @@ function directionalHedgeOverlayStatus(config = {}, target = {}, decisionScene =
     return mode === "independent" ? "独立双书已启用，但这轮被拦住" : "已启用，但这轮被拦住";
   }
   if (overlay?.state === "inactive") return "已启用，当前未介入";
-  return `已启用（${escapeHtml(readableState(config?.hedge_overlay_mode || "protective"))}）`;
+  return `已启用（${escapeHtml(readableState(config?.hedge_overlay_mode || "independent"))}）`;
 }
 
 function directionalHedgeOverlayMeta(config = {}, target = {}, decisionScene = "spot") {
@@ -1371,13 +1323,10 @@ function directionalHedgeOverlayMeta(config = {}, target = {}, decisionScene = "
     const closeReasonLabel = overlay?.close_reason ? readableState(overlay.close_reason) : "";
     return `long open ${formatNumber(config?.hedge_independent_long_entry_threshold, 2, "待确认")} / short open ${formatNumber(config?.hedge_independent_short_entry_threshold, 2, "待确认")} / long close ${formatNumber(config?.hedge_independent_long_close_threshold, 2, "待确认")} / short close ${formatNumber(config?.hedge_independent_short_close_threshold, 2, "待确认")} / stale ${formatDuration(config?.hedge_independent_max_thesis_age_seconds, "待确认")} / de-risk ${formatNumber(config?.hedge_independent_de_risk_net_edge_bps, 2, "待确认")} bps / failed ${formatNumber(config?.hedge_independent_failed_thesis_net_edge_bps, 2, "待确认")} bps / passive-first ${config?.hedge_independent_passive_first_enabled ? "true" : "false"}${closeReasonLabel ? ` | ${closeReasonLabel}` : ""}${expectancySummary ? ` | ${expectancySummary}` : ""}${overlayReasonSummary ? ` | ${overlayReasonSummary}` : ""}`;
   }
-  if (mode === "opportunistic") {
-    return `open ${formatNumber(config?.hedge_opportunistic_open_threshold, 2, "待确认")} / close ${formatNumber(config?.hedge_opportunistic_close_threshold, 2, "待确认")} / safe net ${formatNumber(config?.hedge_opportunistic_min_safe_net_edge_bps, 2, "待确认")} bps / max cost ${formatNumber(config?.hedge_opportunistic_max_acceptable_cost_bps, 2, "待确认")} bps / weak-edge ${escapeHtml(readableState(config?.hedge_opportunistic_weak_edge_execution_mode || "待确认"))} / passive-first ${config?.hedge_opportunistic_passive_first_enabled ? "true" : "false"}${expectancySummary ? ` | ${expectancySummary}` : ""}${overlayReasonSummary ? ` | ${overlayReasonSummary}` : ""}`;
-  }
   if (overlayReasonSummary) {
     return overlayReasonSummary;
   }
-  return `open ${formatNumber(config?.hedge_open_threshold, 2, "待确认")} / close ${formatNumber(config?.hedge_close_threshold, 2, "待确认")} / max ${formatRatio(config?.hedge_max_ratio)}`;
+  return `${directionalOverlayLabel(config, overlay)} 已退役，当前运行时不再生成该 overlay。`;
 }
 
 function directionalHedgeOverlayTone(config = {}, target = {}, decisionScene = "spot") {
@@ -1445,7 +1394,7 @@ function directionalHedgeOverlayDetailMeta(overlay = {}, config = {}, target = {
     const rollout = directionalOverlayCurrentRollout(config, overlay);
     return [
       rollout?.summary || "当前阶段未放开",
-      `回滚顺序 ${(config?.hedge_rollout?.rollback_sequence || []).join(" -> ") || "先关各模式开关，再切回 protective"}`,
+      `回滚顺序 ${(config?.hedge_rollout?.rollback_sequence || []).join(" -> ") || "关闭 independent 并回到 directional"}`,
     ].join(" | ");
   }
   if (!overlay || Object.keys(overlay).length === 0) {
@@ -1493,13 +1442,13 @@ function directionalHedgeOverlayDetailMeta(overlay = {}, config = {}, target = {
 }
 
 function directionalOverlayMode(config = {}, overlay = {}) {
-  return overlay?.effective_mode || overlay?.configured_mode || config?.hedge_overlay_mode || "protective";
+  return overlay?.effective_mode || overlay?.configured_mode || config?.hedge_overlay_mode || "independent";
 }
 
 function directionalOverlayEnabledInMode(config = {}, overlay = {}) {
   if (config?.hedge_overlay_enabled_in_mode === true) return true;
   if (config?.hedge_overlay_enabled_in_mode === false) return false;
-  return directionalOverlayMode(config, overlay) === "protective";
+  return directionalOverlayMode(config, overlay) === "independent" && config?.hedge_independent_enabled === true;
 }
 
 function directionalOverlayModeReady(config = {}, overlay = {}) {
@@ -1510,41 +1459,37 @@ function directionalOverlayModeReady(config = {}, overlay = {}) {
 
 function directionalOverlayLabel(config = {}, overlay = {}) {
   const mode = directionalOverlayMode(config, overlay);
-  if (mode === "opportunistic") return "机会型对冲";
   if (mode === "independent") return "独立双书";
-  return "保护性对冲";
+  return "已退役 overlay";
 }
 
 function directionalOverlayLegLabel(config = {}, overlay = {}) {
   const mode = directionalOverlayMode(config, overlay);
-  if (mode === "opportunistic") return "机会腿";
   if (mode === "independent") return "双书腿";
-  return "保护腿";
+  return "退役腿";
 }
 
 function directionalOverlayScoreLabel(config = {}, overlay = {}) {
   const mode = directionalOverlayMode(config, overlay);
-  if (mode === "opportunistic") return "机会分";
   if (mode === "independent") return "双书分";
-  return "压力";
+  return "退役分";
 }
 
 function directionalOverlayCurrentRollout(config = {}, overlay = {}) {
   const rollout = config?.hedge_rollout || {};
   const mode = directionalOverlayMode(config, overlay);
-  if (mode === "opportunistic") return rollout?.opportunistic || {};
   if (mode === "independent") return rollout?.independent || {};
   return {
-    configured_rollout_stage: "live",
-    runtime_allowed: true,
-    blocking_reasons: [],
-    summary: "保护性对冲不受本轮灰度阶段限制。",
+    configured_rollout_stage: "replay_only",
+    runtime_allowed: false,
+    blocking_reasons: [`${mode}_overlay_retired`],
+    summary: `${mode} overlay 已退役。`,
   };
 }
 
 function directionalOverlayRolloutSummary(config = {}) {
   const rollout = config?.hedge_rollout || {};
-  const currentMode = config?.hedge_overlay_mode || "protective";
+  const currentMode = config?.hedge_overlay_mode || "independent";
   const currentAllowed = rollout?.current_mode_allowed !== false;
   return [
     `当前运行线 ${readableState(rollout?.runtime_stage || "dry_run")}`,
@@ -1554,13 +1499,13 @@ function directionalOverlayRolloutSummary(config = {}) {
 
 function directionalOverlayRolloutMeta(config = {}) {
   const rollout = config?.hedge_rollout || {};
-  const currentMode = config?.hedge_overlay_mode || "protective";
+  const currentMode = config?.hedge_overlay_mode || "independent";
   const current = directionalOverlayCurrentRollout(config, { effective_mode: currentMode });
   const blockers = Array.isArray(current?.blocking_reasons) ? current.blocking_reasons : [];
   return [
     current?.summary || "当前没有额外的 rollout 说明。",
     blockers.length ? `阻断 ${blockers.map(localizeError).join(" / ")}` : "当前模式没有额外灰度阻断。",
-    `回滚顺序 ${(rollout?.rollback_sequence || []).join(" -> ") || "先关各模式开关，再切回 protective"}`,
+    `回滚顺序 ${(rollout?.rollback_sequence || []).join(" -> ") || "关闭 independent 并回到 directional"}`,
   ].join(" | ");
 }
 
