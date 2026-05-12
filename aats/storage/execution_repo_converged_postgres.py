@@ -437,6 +437,12 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
                     order_payload[key] = payload.get(key)
             order_payload.setdefault("execution_attempt_id", row.get("execution_attempt_id"))
             return OrderState.model_validate(order_payload)
+        if ConvergedPostgresExecutionRepository._looks_like_order_state_payload(payload):
+            for key in SNAPSHOT_REF_KEYS:
+                if payload.get(key) in {None, ""}:
+                    payload[key] = row.get(key)
+            payload.setdefault("execution_attempt_id", row.get("execution_attempt_id"))
+            return OrderState.model_validate(payload)
         return OrderState(
             decision_id=str(row.get("decision_id") or ""),
             execution_attempt_id=row.get("execution_attempt_id"),
@@ -490,6 +496,21 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             feature_snapshot_ref=payload.get("feature_snapshot_ref"),
             portfolio_snapshot_ref=payload.get("portfolio_snapshot_ref"),
             health_snapshot_ref=payload.get("health_snapshot_ref"),
+        )
+
+    @staticmethod
+    def _looks_like_order_state_payload(payload: dict) -> bool:
+        required_keys = {
+            "decision_id",
+            "intent_id",
+            "symbol",
+            "client_order_id",
+            "status",
+            "requested_qty",
+            "remaining_qty",
+        }
+        return required_keys.issubset(payload.keys()) and (
+            "filled_qty" in payload or "exchange_status" in payload
         )
 
     def _refresh_synthetic_order_state_from_fills(self, session: Session, *, order_id: str) -> None:

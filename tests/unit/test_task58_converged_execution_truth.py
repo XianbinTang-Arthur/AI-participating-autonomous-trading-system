@@ -145,6 +145,50 @@ class TestConvergedExecutionIntentCompatibility(unittest.TestCase):
         self.assertEqual(intent.side, "sell")
         self.assertEqual(intent.position_intent, "reverse_to_short")
 
+    def test_converged_repo_hydrates_top_level_order_state_payload_fill_truth(self) -> None:
+        filled_state = _order_state(client_order_id="cl_task58_legacy_top_level", status="FILLED").model_copy(
+            update={
+                "exchange_order_id": "ord_task58_legacy_top_level",
+                "exchange_status": "filled",
+                "exchange_status_history": ["filled"],
+                "filled_qty": Decimal("0.010000000000000000"),
+                "remaining_qty": Decimal("0"),
+                "average_fill_price": Decimal("100.000000000000000000"),
+                "fees": Decimal("0.05"),
+            }
+        )
+        row = {
+            "order_id": filled_state.client_order_id,
+            "decision_id": filled_state.decision_id,
+            "execution_attempt_id": filled_state.execution_attempt_id,
+            "intent_id": filled_state.intent_id,
+            "client_order_id": filled_state.client_order_id,
+            "venue_order_id": filled_state.exchange_order_id,
+            "symbol": filled_state.symbol,
+            "state": "FILLED",
+            "requested_qty": Decimal("0.010000000000000000"),
+            "reduce_only": True,
+            "close_only": True,
+            "td_mode": "cross",
+            "position_mode": "long_short_mode",
+            "pos_side": "long",
+            "product_type": "derivatives",
+            "margin_mode": "cross",
+            "raw_payload": filled_state.model_dump(mode="json"),
+        }
+
+        hydrated = ConvergedPostgresExecutionRepository._hydrate_order_state(row)
+
+        self.assertEqual(hydrated.status, "FILLED")
+        self.assertEqual(hydrated.filled_qty, Decimal("0.010000000000000000"))
+        self.assertEqual(hydrated.remaining_qty, Decimal("0"))
+        self.assertEqual(hydrated.average_fill_price, Decimal("100.000000000000000000"))
+        self.assertEqual(hydrated.fees, Decimal("0.05"))
+        self.assertEqual(hydrated.exchange_order_id, "ord_task58_legacy_top_level")
+        self.assertEqual(hydrated.td_mode, "cross")
+        self.assertEqual(hydrated.product_type, "derivatives")
+        self.assertEqual(hydrated.margin_mode, "cross")
+
 
 @unittest.skipUnless(os.getenv("AATS_DATABASE_URL"), "AATS_DATABASE_URL is required for PostgreSQL-backed tests")
 class TestTask58ConvergedExecutionTruth(unittest.IsolatedAsyncioTestCase):
