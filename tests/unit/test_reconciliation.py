@@ -1011,6 +1011,96 @@ class TestReconciliationComparator(unittest.TestCase):
         self.assertTrue(report.mismatch_reasons)
         self.assertEqual(report.recommended_operator_action, "investigate_state_divergence")
 
+    def test_compare_downgrades_old_local_fill_missing_on_exchange_to_info(self) -> None:
+        comparator = StateComparator()
+        now = utc_now()
+        historical_ts = now - timedelta(hours=96)
+        report = comparator.compare(
+            decision_id="decision_hist_local_fill",
+            portfolio_snapshot_ref="evt_portfolio_hist_local_fill",
+            order_states=[
+                OrderState(
+                    decision_id="decision_hist_local_fill",
+                    intent_id="intent_hist_local_fill",
+                    symbol="BTC-USDT",
+                    client_order_id="clord_hist_local_fill",
+                    venue="OKX",
+                    exchange_order_id="ord_hist_local_fill",
+                    status="FILLED",
+                    exchange_status="filled",
+                    submitted_ts=historical_ts,
+                    last_update_ts=historical_ts,
+                    last_exchange_update_ts=historical_ts,
+                    requested_qty=0.0004,
+                    filled_qty=0.0004,
+                    remaining_qty=0,
+                    average_fill_price=100.0,
+                    fees=0.01,
+                )
+            ],
+            fills=[
+                FillEvent(
+                    fill_id="trade_hist_local_fill",
+                    decision_id="decision_hist_local_fill",
+                    intent_id="intent_hist_local_fill",
+                    client_order_id="clord_hist_local_fill",
+                    exchange_order_id="ord_hist_local_fill",
+                    symbol="BTC-USDT",
+                    venue="OKX",
+                    side="buy",
+                    fill_qty=0.0004,
+                    fill_price=100.0,
+                    fee_amount=0.01,
+                    liquidity_role="taker",
+                    exchange_timestamp=historical_ts,
+                    ingestion_timestamp=historical_ts,
+                )
+            ],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=10_000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 10_000.0},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=10_000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+            exchange_snapshot=ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=now,
+                balances=[ExchangeBalance(currency="USDT", total=10_000.0, available=10_000.0, frozen=0.0)],
+                positions=[],
+                open_orders=[],
+                fills=[],
+                instruments=[],
+            ),
+            exchange_comparison_enabled=True,
+            compare_exchange_portfolio=False,
+        )
+
+        self.assertEqual(report.severity, "INFO")
+        self.assertFalse(report.halt_required)
+        self.assertFalse(report.review_required)
+        self.assertEqual(report.recommended_operator_action, "observe_only")
+        self.assertEqual(report.findings[0].finding_type, "historic_orphan_fill")
+        self.assertEqual(report.findings[0].severity_class, "info")
+        self.assertFalse(report.findings[0].blocks_resume)
+
     def test_compare_ignores_blocked_local_order_for_exchange_open_order_diff(self) -> None:
         comparator = StateComparator()
         now = utc_now()

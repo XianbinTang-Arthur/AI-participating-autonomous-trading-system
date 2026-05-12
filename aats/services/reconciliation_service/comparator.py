@@ -1149,6 +1149,8 @@ class StateComparator:
             return "REVIEW_REQUIRED"
         if only_reduce_required:
             return "SOFT_MISMATCH"
+        if findings and not mismatch_categories and all(finding.severity_class == "info" for finding in findings):
+            return "INFO"
         if not mismatch_categories and not findings:
             return "CLEAN"
         return "SOFT_MISMATCH"
