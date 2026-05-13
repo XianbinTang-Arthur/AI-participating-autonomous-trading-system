@@ -328,38 +328,64 @@ class PostgresReconciliationRepository:
         DISTINCT。NULL ref 被过滤（业务上 snapshot_ref=NULL 的对账不参与
         "snapshot_without_reconciliation" 聚合）。
         """
+        with self.session_factory() as session:
+            portfolio_snapshot_ref = self._portfolio_snapshot_ref_expression(session)
+            base_query = (
+                select(portfolio_snapshot_ref.label("portfolio_snapshot_ref"))
+                .where(ReconciliationReportModel.product_type == scope.product_type)
+                .where(ReconciliationReportModel.margin_mode == scope.margin_mode)
+                .where(portfolio_snapshot_ref.isnot(None))
+                .where(portfolio_snapshot_ref != "")
+            )
+            if limit is not None:
+                normalized_limit = max(int(limit), 0)
+                if normalized_limit <= 0:
+                    return set()
+                recent_refs = (
+                    base_query.order_by(
+                        desc(ReconciliationReportModel.as_of_ts),
+                        desc(ReconciliationReportModel.reconciliation_id),
+                    )
+                    .limit(normalized_limit)
+                    .subquery()
+                )
+                query = select(recent_refs.c.portfolio_snapshot_ref).distinct()
+            else:
+                query = base_query.distinct()
+            return set(session.scalars(query).all())
+
+    def has_portfolio_snapshot_ref_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+        portfolio_snapshot_ref: str,
+    ) -> bool:
+        ref = str(portfolio_snapshot_ref or "").strip()
+        if not ref:
+            return False
+        with self.session_factory() as session:
+            portfolio_snapshot_ref_column = self._portfolio_snapshot_ref_expression(session)
+            query = (
+                select(literal_column("1"))
+                .select_from(ReconciliationReportModel)
+                .where(ReconciliationReportModel.product_type == scope.product_type)
+                .where(ReconciliationReportModel.margin_mode == scope.margin_mode)
+                .where(portfolio_snapshot_ref_column == ref)
+                .limit(1)
+            )
+            return session.scalar(query) is not None
+
+    @staticmethod
+    def _portfolio_snapshot_ref_expression(session: Session):
+        dialect_name = session.get_bind().dialect.name
+        if dialect_name == "sqlite":
+            return ReconciliationReportModel.payload["portfolio_snapshot_ref"].as_string()
         # Keep the JSON key literal so PostgreSQL can match the live expression
         # index on ``payload ->> 'portfolio_snapshot_ref'``. SQLAlchemy's JSON
         # accessor parameterizes the key, which led PG to prefer the plain
         # as_of_ts index and repeatedly read heap payload pages on dashboard
         # refresh.
-        portfolio_snapshot_ref = literal_column(
-            "(reconciliation_reports.payload ->> 'portfolio_snapshot_ref')"
-        )
-        base_query = (
-            select(portfolio_snapshot_ref.label("portfolio_snapshot_ref"))
-            .where(ReconciliationReportModel.product_type == scope.product_type)
-            .where(ReconciliationReportModel.margin_mode == scope.margin_mode)
-            .where(portfolio_snapshot_ref.isnot(None))
-            .where(portfolio_snapshot_ref != "")
-        )
-        if limit is not None:
-            normalized_limit = max(int(limit), 0)
-            if normalized_limit <= 0:
-                return set()
-            recent_refs = (
-                base_query.order_by(
-                    desc(ReconciliationReportModel.as_of_ts),
-                    desc(ReconciliationReportModel.reconciliation_id),
-                )
-                .limit(normalized_limit)
-                .subquery()
-            )
-            query = select(recent_refs.c.portfolio_snapshot_ref).distinct()
-        else:
-            query = base_query.distinct()
-        with self.session_factory() as session:
-            return set(session.scalars(query).all())
+        return literal_column("(reconciliation_reports.payload ->> 'portfolio_snapshot_ref')")
 
     @staticmethod
     def _to_report(row: ReconciliationReportModel) -> ReconciliationReport:

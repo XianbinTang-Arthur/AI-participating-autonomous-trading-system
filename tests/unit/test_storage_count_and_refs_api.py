@@ -546,6 +546,74 @@ class TestReconciliationRepoPortfolioSnapshotRefs(unittest.TestCase):
 
         self.assertEqual(refs, {"new_1", "new_2"})
 
+    def test_inmemory_has_portfolio_snapshot_ref_filters_scope(self) -> None:
+        repo = InMemoryReconciliationRepository()
+        repo.save_report(_reconciliation_report(
+            reconciliation_id="recon_spot",
+            product_type="spot",
+            margin_mode="cash",
+            portfolio_snapshot_ref="snap_shared",
+        ))
+        repo.save_report(_reconciliation_report(
+            reconciliation_id="recon_deriv",
+            product_type="derivatives",
+            margin_mode="cross",
+            portfolio_snapshot_ref="snap_deriv",
+        ))
+
+        self.assertTrue(
+            repo.has_portfolio_snapshot_ref_for_scope(
+                scope=_spot_scope(),
+                portfolio_snapshot_ref="snap_shared",
+            )
+        )
+        self.assertFalse(
+            repo.has_portfolio_snapshot_ref_for_scope(
+                scope=_derivatives_scope(),
+                portfolio_snapshot_ref="snap_shared",
+            )
+        )
+        self.assertFalse(
+            repo.has_portfolio_snapshot_ref_for_scope(
+                scope=_spot_scope(),
+                portfolio_snapshot_ref="",
+            )
+        )
+
+    def test_postgres_has_portfolio_snapshot_ref_uses_scoped_exists(self) -> None:
+        repo = PostgresReconciliationRepository(_session_factory())
+        repo.save_report(_reconciliation_report(
+            reconciliation_id="recon_spot",
+            product_type="spot",
+            margin_mode="cash",
+            portfolio_snapshot_ref="snap_shared",
+        ))
+        repo.save_report(_reconciliation_report(
+            reconciliation_id="recon_deriv",
+            product_type="derivatives",
+            margin_mode="cross",
+            portfolio_snapshot_ref="snap_deriv",
+        ))
+
+        self.assertTrue(
+            repo.has_portfolio_snapshot_ref_for_scope(
+                scope=_spot_scope(),
+                portfolio_snapshot_ref="snap_shared",
+            )
+        )
+        self.assertFalse(
+            repo.has_portfolio_snapshot_ref_for_scope(
+                scope=_derivatives_scope(),
+                portfolio_snapshot_ref="snap_shared",
+            )
+        )
+        self.assertFalse(
+            repo.has_portfolio_snapshot_ref_for_scope(
+                scope=_spot_scope(),
+                portfolio_snapshot_ref="missing",
+            )
+        )
+
 
 class TestPostgresScopedLimitSemantics(unittest.TestCase):
     def test_portfolio_history_for_scope_limit_returns_latest_rows_in_chronological_order(self) -> None:

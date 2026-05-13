@@ -155,3 +155,18 @@ class InMemoryReconciliationRepository:
             for report in reports
             if report.portfolio_snapshot_ref
         }
+
+    def has_portfolio_snapshot_ref_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+        portfolio_snapshot_ref: str,
+    ) -> bool:
+        ref = str(portfolio_snapshot_ref or "").strip()
+        if not ref:
+            return False
+        return any(
+            report.portfolio_snapshot_ref == ref
+            and reconciliation_report_matches_scope(report, scope)
+            for report in self._reports
+        )

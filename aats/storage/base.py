@@ -466,6 +466,15 @@ class ReconciliationRepository(Protocol):
         """
         ...
 
+    def has_portfolio_snapshot_ref_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+        portfolio_snapshot_ref: str,
+    ) -> bool:
+        """Return whether a scoped report already references a portfolio snapshot."""
+        ...
+
 
 class ExitExecutionRepository(Protocol):
     def save_exit_execution_intent(self, intent: ExitExecutionIntent) -> ExitExecutionIntent:

@@ -191,8 +191,8 @@ services:
 
   # ---------------------------------------------------------------------------
   # execution — 订阅 order intents，与 OKX 交互下单，维护 portfolio + reconciliation
-  # 实测稳态 ~200M；outbox flush / reconciliation refresh / OKX private WS
-  # 峰值不超过 400M，1024M（与 common 齐平）留足余量。
+  # 稳态通常低于 1GiB；启动恢复、对账刷新、历史表增长和 OKX private WS
+  # 可能短时堆高内存。3GiB 给 live recovery 留出 fail-closed 后恢复余量。
   # ---------------------------------------------------------------------------
   aats-execution:
     <<: *aats-build
@@ -207,7 +207,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1536M
+          memory: 3072M
     healthcheck:
       test: ["CMD-SHELL", "test -f /tmp/aats_execution_heartbeat && test $$(($$(date +%s) - $$(stat -c %Y /tmp/aats_execution_heartbeat))) -lt 30"]
       interval: 15s

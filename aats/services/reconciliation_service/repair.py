@@ -697,6 +697,17 @@ class ReconciliationService:
         return accepted_ids
 
     def _report_exists_for_portfolio_snapshot_ref(self, portfolio_snapshot_ref: str) -> bool:
+        has_ref = getattr(self.reconciliation_repo, "has_portfolio_snapshot_ref_for_scope", None)
+        if callable(has_ref):
+            return bool(
+                has_ref(
+                    scope=self.runtime_scope,
+                    portfolio_snapshot_ref=portfolio_snapshot_ref,
+                )
+            )
+        refs_for_scope = getattr(self.reconciliation_repo, "portfolio_snapshot_refs_for_scope", None)
+        if callable(refs_for_scope):
+            return portfolio_snapshot_ref in refs_for_scope(scope=self.runtime_scope)
         return any(
             report.portfolio_snapshot_ref == portfolio_snapshot_ref
             for report in self.reconciliation_repo.history_for_scope(scope=self.runtime_scope)
