@@ -2888,6 +2888,25 @@ class OrderManager:
             return execution_shadow_repo.get_order_by_client_order_id(client_order_id)
         return None
 
+    @staticmethod
+    def _is_missing_payload_value(value) -> bool:
+        return value is None or value == ""
+
+    @staticmethod
+    def _looks_like_order_state_payload(payload: dict) -> bool:
+        required_keys = {
+            "decision_id",
+            "intent_id",
+            "symbol",
+            "client_order_id",
+            "status",
+            "requested_qty",
+            "remaining_qty",
+        }
+        return required_keys.issubset(payload.keys()) and (
+            "filled_qty" in payload or "exchange_status" in payload
+        )
+
     def _hydrate_order_state_from_execution_row(self, row: dict) -> OrderState:
         def _aware(value):
             if value is None:
@@ -2895,6 +2914,10 @@ class OrderManager:
             if getattr(value, "tzinfo", None) is None:
                 return value.replace(tzinfo=timezone.utc)
             return value
+
+        def _set_missing(payload: dict, key: str, value) -> None:
+            if self._is_missing_payload_value(payload.get(key)) and not self._is_missing_payload_value(value):
+                payload[key] = value
 
         raw_payload = dict(row.get("raw_payload") or {})
         order_payload = raw_payload.get("order_state")
@@ -2948,6 +2971,69 @@ class OrderManager:
             payload.setdefault("portfolio_snapshot_ref", raw_payload.get("portfolio_snapshot_ref"))
             payload.setdefault("health_snapshot_ref", raw_payload.get("health_snapshot_ref"))
             payload.setdefault("submission_payload", submission_payload)
+            if payload.get("pos_side") in {"", None}:
+                payload["pos_side"] = row.get("pos_side") or submission_payload.get("posSide") or None
+            return OrderState.model_validate(payload)
+        if self._looks_like_order_state_payload(raw_payload):
+            payload = dict(raw_payload)
+            submission_payload = payload.get("submission_payload")
+            if not isinstance(submission_payload, dict):
+                submission_payload = {}
+            row_state = str(row.get("state") or payload.get("status") or "CREATED")
+            payload["status"] = row_state
+            _set_missing(payload, "decision_id", row.get("decision_id"))
+            _set_missing(
+                payload,
+                "execution_chain_id",
+                raw_payload.get("execution_chain_id") or submission_payload.get("executionChainId"),
+            )
+            _set_missing(
+                payload,
+                "execution_attempt_id",
+                raw_payload.get("execution_attempt_id")
+                or row.get("execution_attempt_id")
+                or submission_payload.get("executionAttemptId"),
+            )
+            _set_missing(payload, "intent_id", row.get("intent_id"))
+            _set_missing(payload, "symbol", row.get("symbol"))
+            _set_missing(payload, "client_order_id", row.get("client_order_id") or row.get("order_id"))
+            if not self._is_missing_payload_value(row.get("venue_order_id")):
+                payload["exchange_order_id"] = row.get("venue_order_id")
+            _set_missing(payload, "venue", "OKX" if self.adapter.readiness().get("backend") == "okx" else "PAPER")
+            _set_missing(payload, "submission_mode", raw_payload.get("source_system") or "phase2_execution_order_repo")
+            _set_missing(payload, "requested_qty", row.get("requested_qty"))
+            _set_missing(payload, "remaining_qty", row.get("requested_qty"))
+            _set_missing(payload, "filled_qty", Decimal("0"))
+            _set_missing(payload, "fees", Decimal("0"))
+            created_at = _aware(row.get("created_at")) or utc_now()
+            updated_at = _aware(row.get("updated_at")) or created_at
+            _set_missing(payload, "submitted_ts", created_at if row_state != "CREATED" else None)
+            _set_missing(payload, "last_update_ts", updated_at)
+            _set_missing(payload, "last_exchange_update_ts", _aware(row.get("last_exchange_ts")))
+            _set_missing(payload, "product_type", row.get("product_type"))
+            _set_missing(payload, "margin_mode", row.get("margin_mode"))
+            _set_missing(payload, "target_leverage", raw_payload.get("target_leverage", 1.0))
+            _set_missing(payload, "reduce_only", row.get("reduce_only", False))
+            _set_missing(payload, "close_only", row.get("close_only", False))
+            _set_missing(payload, "td_mode", row.get("td_mode") or submission_payload.get("tdMode") or row.get("margin_mode"))
+            _set_missing(payload, "position_mode", row.get("position_mode"))
+            _set_missing(payload, "pos_side", row.get("pos_side") or submission_payload.get("posSide"))
+            _set_missing(payload, "reduce_only_reason", row.get("reduce_only_reason"))
+            _set_missing(payload, "close_only_reason", row.get("close_only_reason"))
+            _set_missing(payload, "instrument_family", row.get("instrument_family"))
+            _set_missing(payload, "settle_currency", row.get("settle_currency"))
+            _set_missing(payload, "position_intent", row.get("position_intent") or "open_long")
+            _set_missing(payload, "execution_action", row.get("execution_action"))
+            _set_missing(payload, "strategy_family", row.get("strategy_family"))
+            _set_missing(payload, "strategy_sleeve_id", row.get("strategy_sleeve_id"))
+            _set_missing(payload, "allocation_id", row.get("allocation_id"))
+            _set_missing(payload, "strategy_bundle_id", row.get("strategy_bundle_id"))
+            _set_missing(payload, "strategy_leg_role", row.get("strategy_leg_role"))
+            _set_missing(payload, "market_snapshot_ref", raw_payload.get("market_snapshot_ref"))
+            _set_missing(payload, "feature_snapshot_ref", raw_payload.get("feature_snapshot_ref"))
+            _set_missing(payload, "portfolio_snapshot_ref", raw_payload.get("portfolio_snapshot_ref"))
+            _set_missing(payload, "health_snapshot_ref", raw_payload.get("health_snapshot_ref"))
+            payload["submission_payload"] = submission_payload
             if payload.get("pos_side") in {"", None}:
                 payload["pos_side"] = row.get("pos_side") or submission_payload.get("posSide") or None
             return OrderState.model_validate(payload)

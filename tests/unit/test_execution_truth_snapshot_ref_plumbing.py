@@ -15,6 +15,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 
 from aats.schemas.execution import (
@@ -947,6 +948,63 @@ class TestOrderManagerHydrateRowPreservesRefs(unittest.TestCase):
         self.assertEqual(state.portfolio_snapshot_ref, "port_snap_ghi")
         self.assertEqual(state.health_snapshot_ref, "health_snap_jkl")
 
+    def test_hydrate_filled_top_level_order_state_payload_preserves_fill_truth(self) -> None:
+        manager = self._make_manager()
+        filled_state = _make_order_state(
+            client_order_id="cl_snapref_filled_top_level",
+            status="FILLED",
+            requested_qty=Decimal("0.01"),
+            filled_qty=Decimal("0.01"),
+            remaining_qty=Decimal("0"),
+            average_fill_price=Decimal("100.25"),
+            fees=Decimal("0.05"),
+            exchange_order_id="ord_snapref_filled_top_level",
+            exchange_status="filled",
+            product_type="derivatives",
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="long_short_mode",
+            pos_side="long",
+            reduce_only=True,
+            close_only=True,
+            **_REFS,
+        )
+        row = {
+            "decision_id": filled_state.decision_id,
+            "execution_attempt_id": "attempt_snapref_filled_top_level",
+            "intent_id": filled_state.intent_id,
+            "symbol": filled_state.symbol,
+            "client_order_id": filled_state.client_order_id,
+            "venue_order_id": filled_state.exchange_order_id,
+            "state": "FILLED",
+            "requested_qty": Decimal("0.01"),
+            "reduce_only": True,
+            "close_only": True,
+            "td_mode": "cross",
+            "position_mode": "long_short_mode",
+            "pos_side": "long",
+            "product_type": "derivatives",
+            "margin_mode": "cross",
+            "created_at": datetime(2026, 5, 12, tzinfo=timezone.utc),
+            "updated_at": datetime(2026, 5, 12, 0, 1, tzinfo=timezone.utc),
+            "raw_payload": filled_state.model_dump(mode="json"),
+        }
+
+        state = manager._hydrate_order_state_from_execution_row(row)
+
+        self.assertEqual(state.status, "FILLED")
+        self.assertEqual(state.filled_qty, Decimal("0.01"))
+        self.assertEqual(state.remaining_qty, Decimal("0"))
+        self.assertEqual(state.average_fill_price, Decimal("100.25"))
+        self.assertEqual(state.fees, Decimal("0.05"))
+        self.assertEqual(state.exchange_order_id, "ord_snapref_filled_top_level")
+        self.assertEqual(state.product_type, "derivatives")
+        self.assertEqual(state.margin_mode, "cross")
+        self.assertEqual(state.market_snapshot_ref, "mkt_snap_abc")
+        self.assertEqual(state.feature_snapshot_ref, "feat_snap_def")
+        self.assertEqual(state.portfolio_snapshot_ref, "port_snap_ghi")
+        self.assertEqual(state.health_snapshot_ref, "health_snap_jkl")
+
     def test_hydrate_without_refs_yields_none(self) -> None:
         manager = self._make_manager()
         row = {
@@ -975,6 +1033,101 @@ class TestOrderManagerHydrateRowPreservesRefs(unittest.TestCase):
         }
         state = manager._hydrate_order_state_from_execution_row(row)
         self.assertIsNone(state.market_snapshot_ref)
+
+
+class TestExecutionOrderRepoColumnSync(unittest.TestCase):
+    def test_update_order_state_in_session_syncs_top_level_order_state_payload_columns(self) -> None:
+        from aats.storage.execution_order_repo_postgres import PostgresExecutionOrderRepository
+
+        row = SimpleNamespace(
+            state="SUBMITTED",
+            state_version=7,
+            venue_order_id=None,
+            last_exchange_ts=None,
+            updated_at=None,
+            execution_attempt_id="attempt_old",
+            reduce_only=False,
+            close_only=False,
+            td_mode="cash",
+            position_mode=None,
+            pos_side=None,
+            reduce_only_reason=None,
+            close_only_reason=None,
+            instrument_family=None,
+            settle_currency=None,
+            strategy_family=None,
+            strategy_sleeve_id=None,
+            allocation_id=None,
+            strategy_bundle_id=None,
+            strategy_leg_role=None,
+            raw_payload={},
+        )
+
+        class _Session:
+            def get(self, _model, order_id):
+                self.order_id = order_id
+                return row
+
+        updated_at = datetime(2026, 5, 12, tzinfo=timezone.utc)
+        raw_payload = {
+            "decision_id": "decision_snapref",
+            "execution_attempt_id": "attempt_new",
+            "intent_id": "intent_snapref",
+            "symbol": "BTC-USDT-SWAP",
+            "client_order_id": "cl_snapref",
+            "status": "FILLED",
+            "requested_qty": "0.01",
+            "filled_qty": "0.01",
+            "remaining_qty": "0",
+            "reduce_only": True,
+            "close_only": True,
+            "td_mode": "cross",
+            "position_mode": "long_short_mode",
+            "pos_side": "short",
+            "reduce_only_reason": "operator_reduce_only",
+            "close_only_reason": "operator_close_only",
+            "instrument_family": "SWAP",
+            "settle_currency": "USDT",
+            "strategy_family": "independent",
+            "strategy_sleeve_id": "sleeve_snapref",
+            "allocation_id": "allocation_snapref",
+            "strategy_bundle_id": "bundle_snapref",
+            "strategy_leg_role": "primary",
+        }
+        session = _Session()
+        repo = PostgresExecutionOrderRepository(session_factory=lambda: None)  # type: ignore[arg-type]
+
+        repo.update_order_state_in_session(
+            session,
+            order_id="order_snapref",
+            expected_state_version=7,
+            next_state="FILLED",
+            venue_order_id="ord_snapref",
+            last_exchange_ts=updated_at,
+            updated_at=updated_at,
+            raw_payload=raw_payload,
+        )
+
+        self.assertEqual(session.order_id, "order_snapref")
+        self.assertEqual(row.state, "FILLED")
+        self.assertEqual(row.state_version, 8)
+        self.assertEqual(row.venue_order_id, "ord_snapref")
+        self.assertEqual(row.execution_attempt_id, "attempt_new")
+        self.assertTrue(row.reduce_only)
+        self.assertTrue(row.close_only)
+        self.assertEqual(row.td_mode, "cross")
+        self.assertEqual(row.position_mode, "long_short_mode")
+        self.assertEqual(row.pos_side, "short")
+        self.assertEqual(row.reduce_only_reason, "operator_reduce_only")
+        self.assertEqual(row.close_only_reason, "operator_close_only")
+        self.assertEqual(row.instrument_family, "SWAP")
+        self.assertEqual(row.settle_currency, "USDT")
+        self.assertEqual(row.strategy_family, "independent")
+        self.assertEqual(row.strategy_sleeve_id, "sleeve_snapref")
+        self.assertEqual(row.allocation_id, "allocation_snapref")
+        self.assertEqual(row.strategy_bundle_id, "bundle_snapref")
+        self.assertEqual(row.strategy_leg_role, "primary")
+        self.assertEqual(row.raw_payload["filled_qty"], "0.01")
 
 
 class TestConvergedRepoHydrateOrderStateFallbackPreservesRefs(unittest.TestCase):

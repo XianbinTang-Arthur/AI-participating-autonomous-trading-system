@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import asc, func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -12,6 +13,48 @@ from aats.storage.sqlalchemy_models import ExecutionOrderModel, ExecutionOrderSt
 
 
 _TERMINAL_ORDER_STATES = ("FILLED", "CANCELED", "REJECTED", "FAILED", "BLOCKED", "DRY_RUN", "EXPIRED")
+
+
+def _is_missing_payload_value(value: Any) -> bool:
+    return value is None or value == ""
+
+
+def _looks_like_order_state_payload(payload: dict[str, Any]) -> bool:
+    required_keys = {
+        "decision_id",
+        "intent_id",
+        "symbol",
+        "client_order_id",
+        "status",
+        "requested_qty",
+        "remaining_qty",
+    }
+    return required_keys.issubset(payload.keys()) and (
+        "filled_qty" in payload or "exchange_status" in payload
+    )
+
+
+def _order_state_payload_from_raw_payload(raw_payload: dict[str, Any]) -> dict[str, Any] | None:
+    nested = raw_payload.get("order_state")
+    if isinstance(nested, dict):
+        return nested
+    if _looks_like_order_state_payload(raw_payload):
+        return raw_payload
+    return None
+
+
+def _payload_bool(payload: dict[str, Any], key: str, current: bool) -> bool:
+    value = payload.get(key)
+    if _is_missing_payload_value(value):
+        return current
+    return bool(value)
+
+
+def _payload_text(payload: dict[str, Any], key: str, current: str | None) -> str | None:
+    value = payload.get(key)
+    if _is_missing_payload_value(value):
+        return current
+    return str(value)
 
 
 class PostgresExecutionOrderRepository:
@@ -192,68 +235,29 @@ class PostgresExecutionOrderRepository:
         row.venue_order_id = venue_order_id or row.venue_order_id
         row.last_exchange_ts = last_exchange_ts
         row.updated_at = updated_at
-        order_payload = raw_payload.get("order_state") if isinstance(raw_payload, dict) else None
+        raw_payload_dict = dict(raw_payload or {}) if isinstance(raw_payload, dict) else {}
+        order_payload = _order_state_payload_from_raw_payload(raw_payload_dict)
         if isinstance(order_payload, dict):
             row.execution_attempt_id = (
                 str(order_payload.get("execution_attempt_id"))
                 if order_payload.get("execution_attempt_id") not in {None, ""}
                 else row.execution_attempt_id
             )
-            row.reduce_only = bool(order_payload.get("reduce_only", row.reduce_only))
-            row.close_only = bool(order_payload.get("close_only", row.close_only))
-            row.td_mode = str(order_payload.get("td_mode")) if order_payload.get("td_mode") not in {None, ""} else row.td_mode
-            row.position_mode = (
-                str(order_payload.get("position_mode"))
-                if order_payload.get("position_mode") not in {None, ""}
-                else row.position_mode
-            )
-            row.pos_side = str(order_payload.get("pos_side")) if order_payload.get("pos_side") not in {None, ""} else row.pos_side
-            row.reduce_only_reason = (
-                str(order_payload.get("reduce_only_reason"))
-                if order_payload.get("reduce_only_reason") not in {None, ""}
-                else row.reduce_only_reason
-            )
-            row.close_only_reason = (
-                str(order_payload.get("close_only_reason"))
-                if order_payload.get("close_only_reason") not in {None, ""}
-                else row.close_only_reason
-            )
-            row.instrument_family = (
-                str(order_payload.get("instrument_family"))
-                if order_payload.get("instrument_family") not in {None, ""}
-                else row.instrument_family
-            )
-            row.settle_currency = (
-                str(order_payload.get("settle_currency"))
-                if order_payload.get("settle_currency") not in {None, ""}
-                else row.settle_currency
-            )
-            row.strategy_family = (
-                str(order_payload.get("strategy_family"))
-                if order_payload.get("strategy_family") not in {None, ""}
-                else row.strategy_family
-            )
-            row.strategy_sleeve_id = (
-                str(order_payload.get("strategy_sleeve_id"))
-                if order_payload.get("strategy_sleeve_id") not in {None, ""}
-                else row.strategy_sleeve_id
-            )
-            row.allocation_id = (
-                str(order_payload.get("allocation_id"))
-                if order_payload.get("allocation_id") not in {None, ""}
-                else row.allocation_id
-            )
-            row.strategy_bundle_id = (
-                str(order_payload.get("strategy_bundle_id"))
-                if order_payload.get("strategy_bundle_id") not in {None, ""}
-                else row.strategy_bundle_id
-            )
-            row.strategy_leg_role = (
-                str(order_payload.get("strategy_leg_role"))
-                if order_payload.get("strategy_leg_role") not in {None, ""}
-                else row.strategy_leg_role
-            )
-        row.raw_payload = dump_payload_exact(raw_payload)
+            row.reduce_only = _payload_bool(order_payload, "reduce_only", row.reduce_only)
+            row.close_only = _payload_bool(order_payload, "close_only", row.close_only)
+            row.td_mode = _payload_text(order_payload, "td_mode", row.td_mode)
+            row.position_mode = _payload_text(order_payload, "position_mode", row.position_mode)
+            row.pos_side = _payload_text(order_payload, "pos_side", row.pos_side)
+            row.reduce_only_reason = _payload_text(order_payload, "reduce_only_reason", row.reduce_only_reason)
+            row.close_only_reason = _payload_text(order_payload, "close_only_reason", row.close_only_reason)
+            row.instrument_family = _payload_text(order_payload, "instrument_family", row.instrument_family)
+            row.settle_currency = _payload_text(order_payload, "settle_currency", row.settle_currency)
+            row.strategy_family = _payload_text(order_payload, "strategy_family", row.strategy_family)
+            row.strategy_sleeve_id = _payload_text(order_payload, "strategy_sleeve_id", row.strategy_sleeve_id)
+            row.allocation_id = _payload_text(order_payload, "allocation_id", row.allocation_id)
+            row.strategy_bundle_id = _payload_text(order_payload, "strategy_bundle_id", row.strategy_bundle_id)
+            row.strategy_leg_role = _payload_text(order_payload, "strategy_leg_role", row.strategy_leg_role)
+        row.raw_payload = dump_payload_exact(raw_payload_dict)
 
     def open_orders(self) -> list[dict]:
         with self.session_factory() as session:
