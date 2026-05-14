@@ -79,7 +79,7 @@ export function renderOverviewView(data) {
               ${actionButton("策略", "navigate-view", "strategy", "ghost")}
               ${actionButton("执行", "navigate-view", "execution", "ghost")}
               ${actionButton("风控", "navigate-view", "risk", "ghost")}
-              ${actionButton("AI分析", "navigate-view", "aiAnalysis", "ghost")}
+              ${actionButton("AI 分析", "navigate-view", "aiAnalysis", "ghost")}
             </div>
           `,
           content: `

@@ -1,4 +1,5 @@
 import { actionButton, kvList, summaryStrip, surfaceCard, timeline } from "./components.js";
+import { dynamicClientActionButton } from "./action-contract.js";
 import { escapeHtml, formatMaybeTimestamp, formatRelativeAge, rawJson } from "./formatters.js";
 import { localizeError } from "./terms.js";
 
@@ -135,9 +136,9 @@ function renderShadowActions(shadowBlocker, uiHints) {
     const disabledReason = isApi ? permissionMessage || action.disabled_reason : action.disabled_reason;
     const disabled = Boolean((isApi && permissionMessage) || action.enabled === false);
     if (action.kind === "client") {
-      return actionButton(
+      return dynamicClientActionButton(
         action.label,
-        action.client_action || "refresh-dashboard",
+        action.client_action,
         action.value || "",
         action.tone || "ghost",
         {

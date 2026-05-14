@@ -1,4 +1,5 @@
 ﻿import { actionButton, callout, kvList, pill, renderPaginationFooter, responsiveTable, statGrid, summaryStrip, surfaceCard } from "../components.js";
+import { dynamicClientActionButton } from "../action-contract.js";
 import { localizeList, summarizeLocalizedList } from "../copy.js";
 import { escapeHtml, formatDuration, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
 import {
@@ -2987,9 +2988,9 @@ function renderTrialVerdictActions(workbenchActions, fallback) {
 }
 
 function renderWorkbenchActionButton(item) {
-  return actionButton(
+  return dynamicClientActionButton(
     item?.label || "执行动作",
-    item?.client_action || "refresh-dashboard",
+    item?.client_action,
     item?.value || "",
     item?.tone || "ghost"
   );

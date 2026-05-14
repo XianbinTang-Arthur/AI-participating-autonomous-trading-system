@@ -4075,6 +4075,7 @@ console.log(JSON.stringify({
     && transportBlocked.includes('前往登录页'),
   adminShowsPermissionCopy: adminBlocked.includes('当前账号没有管理员权限')
     && adminBlocked.includes('请切换到管理员账号后重试。')
+    && adminBlocked.includes('切换账号')
     && !adminBlocked.includes('前往登录页'),
 }));
 """
@@ -4083,6 +4084,165 @@ console.log(JSON.stringify({
         stdout = result.stdout or ""
         self.assertIn('"transportShowsHttps":true', stdout)
         self.assertIn('"adminShowsPermissionCopy":true', stdout)
+
+    def test_shell_and_overview_use_canonical_action_copy(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        shell = (repo_root / "aats/api/static/dashboard-shell.html").read_text(encoding="utf-8")
+        overview = (repo_root / "aats/api/static/modules/views/overview-view.js").read_text(encoding="utf-8")
+
+        self.assertIn("恢复自动运行", shell)
+        self.assertIn("暂停自动运行", shell)
+        self.assertNotIn(">恢复运行<", shell)
+        self.assertNotIn(">暂停运行<", shell)
+        self.assertIn('"AI 分析"', overview)
+        self.assertNotIn('"AI分析"', overview)
+
+    def test_admin_view_disables_buttons_that_backend_will_reject(self) -> None:
+        script = """
+import { renderAdminView } from './aats/api/static/modules/views/admin-view.js';
+
+const now = '2026-05-14T12:00:00Z';
+const base = {
+  session: { authenticated: true, identity: 'admin', role: 'admin', auth_source: 'session' },
+  authProviders: { auth_enabled: true, session_enabled: true, database_backed: true },
+  errors: {},
+};
+
+const lastAdminHtml = renderAdminView({
+  ...base,
+  operatorUsers: {
+    enabled_user_count: 1,
+    enabled_admin_count: 1,
+    users: [{ username: 'admin', role: 'admin', enabled: true, protected_last_admin: true, created_at: now, updated_at: now }],
+  },
+});
+
+const selfHtml = renderAdminView({
+  ...base,
+  operatorUsers: {
+    enabled_user_count: 2,
+    enabled_admin_count: 2,
+    users: [
+      { username: 'admin', role: 'admin', enabled: true, protected_last_admin: false, created_at: now, updated_at: now },
+      { username: 'backup', role: 'admin', enabled: true, protected_last_admin: false, created_at: now, updated_at: now },
+    ],
+  },
+});
+
+function disabled(html, action, value) {
+  return new RegExp(`data-action="${action}" data-value="${value}"[^>]*disabled`).test(html);
+}
+
+console.log(JSON.stringify({
+  lastAdminToggleDisabled: disabled(lastAdminHtml, 'toggle-user', 'admin'),
+  lastAdminRoleDisabled: disabled(lastAdminHtml, 'change-user-role', 'admin'),
+  lastAdminDeleteDisabled: disabled(lastAdminHtml, 'delete-user', 'admin'),
+  selfToggleDisabled: disabled(selfHtml, 'toggle-user', 'admin'),
+  selfDeleteDisabled: disabled(selfHtml, 'delete-user', 'admin'),
+  selfRoleStillAvailable: /data-action="change-user-role" data-value="admin"(?![^>]*disabled)/.test(selfHtml),
+  createFormRequired: lastAdminHtml.includes('id="operatorCreateUsername" type="text" placeholder="例如 trader01" required')
+    && lastAdminHtml.includes('id="operatorCreatePassword" type="password" placeholder="请输入初始密码" required')
+    && lastAdminHtml.includes('id="changeRoleForm" class="field-grid" data-action="confirm-change-user-role"')
+    && lastAdminHtml.includes('id="resetPasswordForm" class="field-grid" data-action="confirm-reset-user-password"'),
+}));
+"""
+        result = _run_node_module(script, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"lastAdminToggleDisabled":true', stdout)
+        self.assertIn('"lastAdminRoleDisabled":true', stdout)
+        self.assertIn('"lastAdminDeleteDisabled":true', stdout)
+        self.assertIn('"selfToggleDisabled":true', stdout)
+        self.assertIn('"selfDeleteDisabled":true', stdout)
+        self.assertIn('"selfRoleStillAvailable":true', stdout)
+        self.assertIn('"createFormRequired":true', stdout)
+
+    def test_dynamic_client_actions_fail_closed_instead_of_refreshing(self) -> None:
+        paths = [
+            "aats/api/static/modules/views/strategy-view.js",
+            "aats/api/static/modules/views/risk-view.js",
+            "aats/api/static/modules/views/ai-view.js",
+            "aats/api/static/modules/shadow-drawer.js",
+        ]
+        for path in paths:
+            text = (Path(__file__).resolve().parents[2] / path).read_text(encoding="utf-8")
+            self.assertNotIn('client_action || "refresh-dashboard"', text)
+            self.assertNotIn('textOrFallback(action.client_action, "refresh-dashboard")', text)
+
+        script = """
+import { dynamicClientActionButton } from './aats/api/static/modules/action-contract.js';
+
+const missing = dynamicClientActionButton('后端动作', '', '', 'ghost');
+const unknown = dynamicClientActionButton('后端动作', 'typo-action', '', 'ghost');
+const known = dynamicClientActionButton('刷新', 'refresh-dashboard', '', 'ghost');
+
+console.log(JSON.stringify({
+  missingDisabled: missing.includes('disabled') && missing.includes('后端未声明可执行动作'),
+  unknownDisabled: unknown.includes('disabled') && unknown.includes('前端暂不支持此动作：typo-action'),
+  knownEnabled: known.includes('data-action="refresh-dashboard"') && !known.includes('disabled'),
+}));
+"""
+        result = _run_node_module(script, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"missingDisabled":true', stdout)
+        self.assertIn('"unknownDisabled":true', stdout)
+        self.assertIn('"knownEnabled":true', stdout)
+
+    def test_rdp_unknown_ui_action_and_stale_release_history_fail_closed(self) -> None:
+        script = """
+import { renderRdpView } from './aats/api/static/modules/views/rdp-view.js';
+
+const html = renderRdpView({
+  session: { role: 'admin', identity: 'admin' },
+  authProviders: { auth_enabled: true },
+  errors: {},
+  uiState: {},
+  uiHints: { pendingPanels: {} },
+  rdpWorkbenchOverview: {
+    status: 'ready',
+    primary_action: { label: '未知动作', ui_action: 'rdp-new-action', value: 'x', enabled: true },
+    secondary_actions: [],
+  },
+  rdpWorkbenchItems: { items: [] },
+  rdpWorkbenchAlerts: { integrity_alerts: [] },
+  rdpTuningOverview: { status: 'ready' },
+  rdpTuningProposals: { proposals: [] },
+  rdpControl: {
+    health: { status: 'ready' },
+    overview: {},
+    recommendations: [],
+    observation_queue: [{
+      release_id: 'rel-1',
+      family: 'independent',
+      timeframe: '15m',
+      parameter_set_id: 'ps-1',
+      previous_parameter_set_id: 'ps-0',
+      observation_status: 'rollback_recommended',
+      apply_result: 'success',
+      is_current_active_release: true,
+      observation: { status: 'rollback_recommended' },
+      effectiveness: {},
+    }],
+    release_history_status: { stale: true, source: 'json_snapshot', stale_reason: 'db_unavailable' },
+  },
+});
+
+console.log(JSON.stringify({
+  unknownActionDisabled: /data-action="unsupported-rdp-action"[^>]*disabled/.test(html)
+    && html.includes('前端暂不支持此动作：rdp-new-action'),
+  rollbackDisabledWhenStale: /data-action="rdp-rollback-parameters"[^>]*disabled/.test(html)
+    && html.includes('发布历史数据当前为副本，请刷新确认真源后再执行回滚。'),
+  observationDisabledWhenStale: /data-action="rdp-run-observation"[^>]*disabled/.test(html)
+    && html.includes('发布历史数据当前为副本，请刷新确认真源后再运行观察。'),
+}));
+"""
+        result = _run_node_module(script, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"unknownActionDisabled":true', stdout)
+        self.assertIn('"rollbackDisabledWhenStale":true', stdout)
+        self.assertIn('"observationDisabledWhenStale":true', stdout)
 
     def test_rdp_action_handlers_use_default_observation_windows_without_prompt(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

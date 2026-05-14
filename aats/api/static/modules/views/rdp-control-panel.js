@@ -7,6 +7,7 @@ import {
   summaryStrip,
   surfaceCard,
 } from "../components.js";
+import { isKnownRdpUiAction, unsupportedClientActionTitle } from "../action-contract.js";
 import { escapeHtml } from "../formatters.js";
 import { localizeError, readableState } from "../terms.js";
 
@@ -275,19 +276,25 @@ function renderWorkItem({
   `;
 }
 
-function buildObservationAction(item, canAdmin, tone = "secondary") {
+function buildObservationAction(item, canAdmin, tone = "secondary", releaseHistoryStale = false) {
   return actionButton("运行观察", "rdp-run-observation", item.release_id, tone, {
-    disabled: !canAdmin,
-    title: !canAdmin ? "当前账号只有查看权限" : "按当前观察窗口重新评估这次发布",
+    disabled: !canAdmin || releaseHistoryStale,
+    title: !canAdmin
+      ? "当前账号只有查看权限"
+      : releaseHistoryStale
+        ? "发布历史数据当前为副本，请刷新确认真源后再运行观察。"
+        : "按当前观察窗口重新评估这次发布",
     dataAttrs: { hours: item.observation_window_hours || 24 },
   });
 }
 
-function buildRollbackAction(item, canAdmin, tone = "warning") {
+function buildRollbackAction(item, canAdmin, tone = "warning", releaseHistoryStale = false) {
   return actionButton("执行回滚", "rdp-rollback-parameters", `${item.family}/${item.timeframe}`, tone, {
-    disabled: !canAdmin || !item?.is_current_active_release || item?.apply_result !== "success",
+    disabled: !canAdmin || releaseHistoryStale || !item?.is_current_active_release || item?.apply_result !== "success",
     title: !canAdmin
       ? "当前账号只有查看权限"
+      : releaseHistoryStale
+        ? "发布历史数据当前为副本，请刷新确认真源后再执行回滚。"
       : !item?.is_current_active_release
         ? "当前已经不是这次 release 在生效，禁止直接回滚"
         : item?.apply_result !== "success"
@@ -296,7 +303,7 @@ function buildRollbackAction(item, canAdmin, tone = "warning") {
   });
 }
 
-function buildObservationCard(item, canAdmin) {
+function buildObservationCard(item, canAdmin, releaseHistoryStale = false) {
   const observation = item.observation || {};
   const effectiveness = item.effectiveness || {};
   const rollbackFirst = item.observation_status === "rollback_recommended";
@@ -319,12 +326,12 @@ function buildObservationCard(item, canAdmin) {
     ],
     actions: rollbackFirst
       ? [
-        buildRollbackAction(item, canAdmin),
-        buildObservationAction(item, canAdmin, "ghost"),
+        buildRollbackAction(item, canAdmin, "warning", releaseHistoryStale),
+        buildObservationAction(item, canAdmin, "ghost", releaseHistoryStale),
       ].join("")
       : [
-        buildObservationAction(item, canAdmin),
-        buildRollbackAction(item, canAdmin, "ghost"),
+        buildObservationAction(item, canAdmin, "secondary", releaseHistoryStale),
+        buildRollbackAction(item, canAdmin, "ghost", releaseHistoryStale),
       ].join(""),
   });
 }
@@ -350,14 +357,18 @@ function toneForUiAction(uiAction = "", fallback = "secondary") {
 }
 
 function renderActionDescriptor(action = {}, canAdmin, tone = "secondary") {
-  const enabled = Boolean(action.enabled);
+  const uiAction = String(action.ui_action || "").trim();
+  const unsupported = !isKnownRdpUiAction(uiAction);
+  const enabled = Boolean(action.enabled) && !unsupported;
   const title = !canAdmin
     ? "当前账号只有查看权限"
-    : (!enabled ? localizeError(action.disabled_reason || "当前不可执行") : undefined);
-  const effectiveTone = toneForUiAction(action.ui_action, tone);
+    : unsupported
+      ? unsupportedClientActionTitle(uiAction)
+      : (!enabled ? localizeError(action.disabled_reason || "当前不可执行") : undefined);
+  const effectiveTone = toneForUiAction(uiAction, tone);
   return actionButton(
     action.label || "执行",
-    action.ui_action || "",
+    unsupported ? "unsupported-rdp-action" : uiAction,
     action.value || "",
     effectiveTone,
     {
@@ -680,9 +691,11 @@ function renderObservationRailCard({
 }) {
   const observationQueue = rdpControl.observation_queue || [];
   const items = observationQueue.slice(0, 4);
-  const staleNotice = renderReleaseHistoryStaleNotice(rdpControl.release_history_status || {});
+  const releaseHistoryStatus = rdpControl.release_history_status || {};
+  const releaseHistoryStale = releaseHistoryStatus.stale === true;
+  const staleNotice = renderReleaseHistoryStaleNotice(releaseHistoryStatus);
   const queueBody = items.length
-    ? `<div class="rdp-worklist">${items.map((item) => buildObservationCard(item, canAdmin)).join("")}</div>`
+    ? `<div class="rdp-worklist">${items.map((item) => buildObservationCard(item, canAdmin, releaseHistoryStale)).join("")}</div>`
     : notice("当前没有观察中的发布或回滚建议。", "info");
   return surfaceCard({
     title: "观察与回滚",

@@ -11,6 +11,7 @@ import {
   summaryStrip,
   surfaceCard,
 } from "../components.js";
+import { dynamicClientActionButton } from "../action-contract.js";
 import { localizeList, textOrFallback } from "../copy.js";
 // #36 修复：exit-execution 工作台 helper 已集中到 ../exit-execution-helpers.js，
 // 本文件保留的 review-only 函数（renderExitExecutionReviewList 等）会向它借
@@ -1147,9 +1148,9 @@ function renderBlockerActions(actions = [], blocker = "", uiHints = {}) {
     const disabledReason = isApi ? permissionMessage || action.disabled_reason : action.disabled_reason;
     const disabled = Boolean((isApi && permissionMessage) || action.enabled === false);
     if (action.kind === "client") {
-      return [actionButton(
+      return [dynamicClientActionButton(
         action.label,
-        textOrFallback(action.client_action, "refresh-dashboard"),
+        action.client_action,
         textOrFallback(action.value, ""),
         action.tone || "ghost",
         {

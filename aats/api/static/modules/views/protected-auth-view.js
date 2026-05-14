@@ -42,6 +42,9 @@ export function renderProtectedAuthBlockedView({
         : errorCode === "operator_write_access_required" || errorCode === "operator_write_auth_required"
           ? "请切换到具有写入权限的账号后重试。"
           : "请重新登录后再刷新当前页面。";
+  const actionLabel = errorCode === "operator_admin_access_required" || errorCode === "operator_write_access_required"
+    ? "切换账号"
+    : "前往登录页";
 
   return surfaceCard({
     title: `${viewLabel} 当前不可访问`,
@@ -51,9 +54,7 @@ export function renderProtectedAuthBlockedView({
     content: [
       callout({ title: headline, copy, pills }),
       `<p class="meta-copy">${nextStep}</p>`,
-      (errorCode === "operator_admin_access_required" || errorCode === "operator_write_access_required")
-        ? ""
-        : `<div class="stack-actions"><a class="secondary-button" href="/login">前往登录页</a></div>`,
+      `<div class="stack-actions"><a class="secondary-button" href="/login">${actionLabel}</a></div>`,
     ].join(""),
   });
 }

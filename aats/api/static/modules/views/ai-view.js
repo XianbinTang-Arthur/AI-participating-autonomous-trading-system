@@ -1,4 +1,5 @@
 ﻿import { actionButton, actorTags, callout, kvList, pill, renderPaginationFooter, responsiveTable, statGrid, summaryStrip, surfaceCard } from "../components.js";
+import { dynamicClientActionButton } from "../action-contract.js";
 import { hasMeaningfulValue, localizeList, meaningfulEntries, splitCodeList, summarizeLocalizedList, textOrFallback } from "../copy.js";
 import { formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned } from "../formatters.js";
 import { localizeError, readableState } from "../terms.js";
@@ -1169,9 +1170,9 @@ function renderReviewActions(blocker) {
     <div class="stack-actions">
       ${actions.map((action) => {
         if (action.kind === "client") {
-          return actionButton(
+          return dynamicClientActionButton(
             action.label,
-            action.client_action || "refresh-dashboard",
+            action.client_action,
             action.value || "",
             action.tone || "ghost",
             {

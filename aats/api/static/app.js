@@ -334,10 +334,13 @@ function bindEvents() {
     const form = event.target;
     if (!(form instanceof HTMLFormElement)) return;
     const formAction = form.dataset?.action || "";
+    if (!formAction) return;
+    event.preventDefault();
     if (formAction === "submit-create-operator") {
-      event.preventDefault();
       void adminActions.createOperatorUser();
+      return;
     }
+    void dispatchAction(formAction, form.dataset?.value || "", form);
   });
 
   document.addEventListener("input", handleExitExecutionHistoryFilterEvent);

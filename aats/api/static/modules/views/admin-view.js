@@ -101,7 +101,7 @@ export function renderAdminView(data) {
                 `<div>${pill(user.enabled ? "已启用" : "已停用", user.enabled ? "positive" : "warning")}${user.protected_last_admin ? '<div class="table-meta">当前最后一个启用中的管理员</div>' : ""}</div>`,
                 formatMaybeTimestamp(user.last_login_at),
                 formatMaybeTimestamp(user.updated_at || user.created_at),
-                renderUserActions(user, canAdmin),
+                renderUserActions(user, canAdmin, session),
               ]),
               "当前暂无控制台账号。",
               users.map((user) => ({
@@ -120,7 +120,7 @@ export function renderAdminView(data) {
                   { label: "账号标识", value: middleEllipsis(user.user_id) },
                 ],
                 detailLabel: "展开账号详情",
-                action: renderUserActions(user, canAdmin),
+                action: renderUserActions(user, canAdmin, session),
               }))
             )}
           `,
@@ -152,15 +152,15 @@ function renderCreateForm(canAdmin) {
       <div class="panel-grid">
         <div class="span-3">
           <label class="field-label" for="operatorCreateUsername">用户名</label>
-          <input id="operatorCreateUsername" type="text" placeholder="例如 trader01" ${canAdmin ? "" : "disabled"}>
+          <input id="operatorCreateUsername" type="text" placeholder="例如 trader01" ${canAdmin ? "required" : "disabled"} autocomplete="username">
         </div>
         <div class="span-3">
           <label class="field-label" for="operatorCreatePassword">初始密码</label>
-          <input id="operatorCreatePassword" type="password" placeholder="请输入初始密码" ${canAdmin ? "" : "disabled"}>
+          <input id="operatorCreatePassword" type="password" placeholder="请输入初始密码" ${canAdmin ? "required" : "disabled"} autocomplete="new-password">
         </div>
         <div class="span-3">
           <label class="field-label" for="operatorCreateRole">角色</label>
-          <select id="operatorCreateRole" ${canAdmin ? "" : "disabled"}>
+          <select id="operatorCreateRole" ${canAdmin ? "required" : "disabled"}>
             <option value="viewer">只读用户</option>
             <option value="operator">操作员</option>
             <option value="admin">管理员</option>
@@ -168,7 +168,7 @@ function renderCreateForm(canAdmin) {
         </div>
         <div class="span-3">
           <label class="field-label" for="operatorCreateEnabled">启用状态</label>
-          <select id="operatorCreateEnabled" ${canAdmin ? "" : "disabled"}>
+          <select id="operatorCreateEnabled" ${canAdmin ? "required" : "disabled"}>
             <option value="true">立即启用</option>
             <option value="false">先停用</option>
           </select>
@@ -185,7 +185,7 @@ function renderChangeRoleForm(canAdmin) {
   // #29 同系列修复：原本这里用 windowRef.prompt() 采集新角色，改为统一的下拉表单。
   // 每行“改角色”按钮会把目标用户名预填到 #changeRoleUsername，再由此表单发起 PATCH。
   return `
-    <form id="changeRoleForm" class="field-grid">
+    <form id="changeRoleForm" class="field-grid" data-action="confirm-change-user-role">
       <div class="panel-head">
         <div>
           <h3>修改账号角色</h3>
@@ -196,18 +196,18 @@ function renderChangeRoleForm(canAdmin) {
       <div class="panel-grid">
         <div class="span-4">
           <label class="field-label" for="changeRoleUsername">目标用户名</label>
-          <input id="changeRoleUsername" type="text" placeholder="点击账号行“改角色”后自动填充" ${canAdmin ? "" : "disabled"} readonly>
+          <input id="changeRoleUsername" type="text" placeholder="点击账号行“改角色”后自动填充" ${canAdmin ? "required" : "disabled"} readonly>
         </div>
         <div class="span-4">
           <label class="field-label" for="changeRoleValue">新角色</label>
-          <select id="changeRoleValue" ${canAdmin ? "" : "disabled"}>
+          <select id="changeRoleValue" ${canAdmin ? "required" : "disabled"}>
             <option value="viewer">只读用户</option>
             <option value="operator">操作员</option>
             <option value="admin">管理员</option>
           </select>
         </div>
         <div class="span-4 stack-actions">
-          <button id="changeRoleConfirmButton" class="primary-button" type="button" data-action="confirm-change-user-role" ${canAdmin ? "" : "disabled"}>确认修改角色</button>
+          <button id="changeRoleConfirmButton" class="primary-button" type="submit" ${canAdmin ? "" : "disabled"}>确认修改角色</button>
         </div>
       </div>
     </form>
@@ -218,7 +218,7 @@ function renderResetPasswordForm(canAdmin) {
   // #29 核心修复：原本 resetOperatorPassword 通过 windowRef.prompt() 弹窗采集明文密码，
   // 密码在 prompt 输入框里不会被掩码，对审计/敏感部署不合适。改为专用 <input type="password">。
   return `
-    <form id="resetPasswordForm" class="field-grid">
+    <form id="resetPasswordForm" class="field-grid" data-action="confirm-reset-user-password">
       <div class="panel-head">
         <div>
           <h3>重置账号密码</h3>
@@ -229,28 +229,42 @@ function renderResetPasswordForm(canAdmin) {
       <div class="panel-grid">
         <div class="span-4">
           <label class="field-label" for="resetPasswordUsername">目标用户名</label>
-          <input id="resetPasswordUsername" type="text" placeholder="点击账号行“重置密码”后自动填充" ${canAdmin ? "" : "disabled"} readonly>
+          <input id="resetPasswordUsername" type="text" placeholder="点击账号行“重置密码”后自动填充" ${canAdmin ? "required" : "disabled"} readonly>
         </div>
         <div class="span-4">
           <label class="field-label" for="resetPasswordValue">新密码</label>
-          <input id="resetPasswordValue" type="password" autocomplete="new-password" placeholder="请输入新密码" ${canAdmin ? "" : "disabled"}>
+          <input id="resetPasswordValue" type="password" autocomplete="new-password" placeholder="请输入新密码" ${canAdmin ? "required" : "disabled"}>
         </div>
         <div class="span-4 stack-actions">
-          <button id="resetPasswordConfirmButton" class="primary-button" type="button" data-action="confirm-reset-user-password" ${canAdmin ? "" : "disabled"}>确认重置密码</button>
+          <button id="resetPasswordConfirmButton" class="primary-button" type="submit" ${canAdmin ? "" : "disabled"}>确认重置密码</button>
         </div>
       </div>
     </form>
   `;
 }
 
-function renderUserActions(user, canAdmin) {
+function renderUserActions(user, canAdmin, session = {}) {
   if (!canAdmin) return '<span class="table-meta">无管理权限</span>';
+  const username = user.username || "";
+  const isSessionUser = session.auth_source === "session" && username && username === session.identity;
+  const lastAdminReason = user.protected_last_admin ? "系统至少需要保留一个启用中的管理员。" : "";
+  const selfDisableReason = isSessionUser && user.enabled ? "不能停用当前登录的管理员账号。" : "";
+  const selfDeleteReason = isSessionUser ? "不能删除当前登录的管理员账号。" : "";
+  const toggleDisabledReason = lastAdminReason || selfDisableReason;
+  const roleDisabledReason = lastAdminReason;
+  const deleteDisabledReason = lastAdminReason || selfDeleteReason;
   return `
     <div class="table-actions table-actions--compact">
-      <button class="${user.enabled ? "warning-button" : "secondary-button"}" data-action="toggle-user" data-value="${escapeHtml(user.username)}">${user.enabled ? "停用" : "启用"}</button>
-      <button class="table-button" data-action="change-user-role" data-value="${escapeHtml(user.username)}">改角色</button>
-      <button class="table-button" data-action="reset-user-password" data-value="${escapeHtml(user.username)}">重置密码</button>
-      <button class="danger-button" data-action="delete-user" data-value="${escapeHtml(user.username)}">删除</button>
+      ${adminActionButton(user.enabled ? "停用" : "启用", "toggle-user", username, user.enabled ? "warning-button" : "secondary-button", toggleDisabledReason)}
+      ${adminActionButton("改角色", "change-user-role", username, "table-button", roleDisabledReason)}
+      ${adminActionButton("重置密码", "reset-user-password", username, "table-button")}
+      ${adminActionButton("删除", "delete-user", username, "danger-button", deleteDisabledReason)}
     </div>
   `;
+}
+
+function adminActionButton(label, action, value, className, disabledReason = "") {
+  const disabled = disabledReason ? " disabled" : "";
+  const title = disabledReason ? ` title="${escapeHtml(disabledReason)}"` : "";
+  return `<button class="${escapeHtml(className)}" data-action="${escapeHtml(action)}" data-value="${escapeHtml(value)}"${title}${disabled}>${escapeHtml(label)}</button>`;
 }
