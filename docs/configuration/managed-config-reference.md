@@ -164,7 +164,7 @@ live 环境还应确认 active parameter version、gate history、reconciliation
   - `smart_arbitrage_basis_entry_bps`
   - `smart_arbitrage_basis_exit_bps`
   - `smart_arbitrage_estimated_cost_bps`
-  - `smart_arbitrage_quote_budget_per_trade`
+  - `smart_arbitrage_quote_budget_per_trade`（配置上限；实际开仓还会受实时可用权益约束）
   - `smart_arbitrage_max_pair_notional`
   - `smart_arbitrage_hedge_target_leverage`
 

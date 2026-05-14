@@ -74,6 +74,7 @@ def _context(symbol: str, *, current_position_qty: str, product_type: str = "spo
         product_type=product_type,  # type: ignore[arg-type]
         current_exposure_side="flat" if quantity == 0 else ("long" if quantity > 0 else "short"),
         current_open_orders=[],
+        available_trading_equity=Decimal("10000"),
     )
 
 
@@ -330,6 +331,75 @@ class TestTask112MainlineFormulaFollowup(TestCase):
 
         self.assertEqual(candidate.state, "inactive")
         self.assertIn("dca_interval_not_elapsed", candidate.reason_codes)
+
+    def test_dca_clamps_tranche_to_realtime_available_quote_budget(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "spot",
+                "margin_mode": "cash",
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT",),
+                "dca_enabled": True,
+                "dca_interval_seconds": 0.0,
+                "dca_quote_budget_per_cycle": 100.0,
+                "max_abs_position_qty": 2.0,
+            }
+        )
+        engine = DcaStrategyEngine(settings=settings)
+        context = _context("BTC-USDT", current_position_qty="0").model_copy(
+            update={"available_trading_equity": Decimal("25")}
+        )
+        engine_input = StrategyEngineInput(
+            context=context,
+            baseline=_baseline("BTC-USDT"),
+            directional_target=_target(symbol="BTC-USDT", current_qty="0", target_qty="0"),
+            latest_snapshot=None,
+            latest_account_snapshot=None,
+            latest_market_snapshot=_market_snapshot("BTC-USDT", "100"),
+            recent_market_snapshots={"BTC-USDT": []},
+            recent_targets_by_family={"dca": []},
+        )
+
+        candidate = engine.evaluate(engine_input)
+
+        self.assertEqual(candidate.metrics["configured_quote_budget"], Decimal("100.0"))
+        self.assertEqual(candidate.metrics["available_quote_budget"], Decimal("25"))
+        self.assertEqual(candidate.metrics["quote_budget"], Decimal("25"))
+        self.assertEqual(candidate.delta_position_qty, Decimal("0.25"))
+
+    def test_dca_fails_closed_when_realtime_available_quote_budget_is_unavailable(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "spot",
+                "margin_mode": "cash",
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT",),
+                "dca_enabled": True,
+                "dca_interval_seconds": 0.0,
+                "dca_quote_budget_per_cycle": 100.0,
+                "max_abs_position_qty": 2.0,
+            }
+        )
+        engine = DcaStrategyEngine(settings=settings)
+        context = _context("BTC-USDT", current_position_qty="0").model_copy(
+            update={"available_trading_equity": Decimal("0")}
+        )
+        engine_input = StrategyEngineInput(
+            context=context,
+            baseline=_baseline("BTC-USDT"),
+            directional_target=_target(symbol="BTC-USDT", current_qty="0", target_qty="0"),
+            latest_snapshot=None,
+            latest_account_snapshot=None,
+            latest_market_snapshot=_market_snapshot("BTC-USDT", "100"),
+            recent_market_snapshots={"BTC-USDT": []},
+            recent_targets_by_family={"dca": []},
+        )
+
+        candidate = engine.evaluate(engine_input)
+
+        self.assertEqual(candidate.state, "inactive")
+        self.assertIn("dca_available_quote_budget_unavailable", candidate.reason_codes)
+        self.assertIsNone(candidate.delta_position_qty)
 
     def test_symbol_health_does_not_treat_hedge_leg_open_as_closed_trade(self) -> None:
         settings = AATSSettings.model_validate(

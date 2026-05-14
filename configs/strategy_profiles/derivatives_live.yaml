@@ -151,8 +151,6 @@ smart_arbitrage_basis_entry_bps: 40.0
 smart_arbitrage_basis_exit_bps: 6.0
 # [常用可调] smart_arbitrage_estimated_cost_bps：套利预估综合成本。可选值：0.0 ~ 100.0；推荐值：10.0。
 smart_arbitrage_estimated_cost_bps: 34.0
-# [常用可调] smart_arbitrage_quote_budget_per_trade：每次套利分配的 quote 预算。可选值：正数；推荐值：200.0。
-smart_arbitrage_quote_budget_per_trade: 300.0
 # [常用可调] smart_arbitrage_max_pair_notional：单组套利最大名义金额。可选值：正数；推荐值：2000.0。
 smart_arbitrage_max_pair_notional: 2000.0
 # [进阶可调] smart_arbitrage_hedge_target_leverage：智能套利合约对冲腿目标杠杆。只作用于套利对冲腿，不再复用 directional 的 default_target_leverage。可选值：1.0 ~ max_target_leverage；推荐值：3.0。

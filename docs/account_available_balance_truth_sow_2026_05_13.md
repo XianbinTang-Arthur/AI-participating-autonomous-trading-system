@@ -6,6 +6,8 @@
 
 目标是消除 exchange-coupled 运行域中把配置本金当作账户可用余额的路径。实时账户可用余额必须来自 OKX account snapshot，配置本金只允许服务本地 paper/demo 初始化；real-market paper 即使读取 OKX 账户状态，也仍保留本地纸面账本种子。本文不调整策略阈值、名义上限、仓位模式或订单状态机。
 
+策略里的 quote budget 字段只能表达“单次/单组配置上限”，不能作为账户可用余额来源。实际新开仓 sizing 必须继续受 `DecisionContext.available_trading_equity` 约束；该字段在 exchange-coupled runtime 中来自 OKX 账户快照。
+
 ## Module responsibilities and domain model
 
 - `OKXAccountService`: 提供账户余额、风险、持仓、挂单的 exchange snapshot。
@@ -58,6 +60,7 @@ exchange-coupled 模式下账户可用余额缺失或强制账户状态刷新失
 - DerivativesLiveGuardService 在 OKX 状态不 ready 后不再读取旧 snapshot，并发布不可用/只减仓 guard 状态；
 - exchange-coupled 且 startup bootstrap 关闭时，fill gap replay 仍不使用配置本金；
 - 账户状态强制刷新绕过主快照缓存但保留低频元数据缓存。
+- smart_arbitrage / dca 的固定 quote budget 只作为上限，实际新开仓数量会被实时可用权益裁剪；实时可用权益缺失时 fail closed。
 
 ## Migration, rollback, compatibility
 

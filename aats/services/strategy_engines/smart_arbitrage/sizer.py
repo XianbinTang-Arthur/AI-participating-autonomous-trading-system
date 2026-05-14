@@ -13,12 +13,18 @@ def entry_pair_qty(
     spot_price: Decimal,
     capability: ArbitrageExecutionCapability,
     execution_mode: str,
+    available_quote_budget: Decimal | None = None,
 ) -> Decimal:
     if spot_price <= EPSILON_DECIMAL_12:
         return Decimal("0")
     quote_budget = to_decimal(settings.smart_arbitrage_quote_budget_per_trade)
     notional_cap = to_decimal(settings.smart_arbitrage_max_pair_notional)
     positive_limits = [value for value in (quote_budget, notional_cap) if value > EPSILON_DECIMAL_12]
+    if available_quote_budget is not None:
+        available_quote_budget = max(to_decimal(available_quote_budget), Decimal("0"))
+        if available_quote_budget <= EPSILON_DECIMAL_12:
+            return Decimal("0")
+        positive_limits.append(available_quote_budget)
     effective_notional = min(positive_limits) if positive_limits else Decimal("0")
     if effective_notional <= EPSILON_DECIMAL_12:
         return Decimal("0")

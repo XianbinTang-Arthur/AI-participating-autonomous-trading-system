@@ -56,8 +56,8 @@ def env_field(
 
 COMMON_RUNTIME_FIELDS: tuple[EnvSectionSpec, ...] = (
     EnvSectionSpec(
-        title="交易标的与账户规模",
-        intro="这里放你最常改、且和账户资金/交易标的直接相关的 override。",
+        title="交易标的",
+        intro="这里放你最常改、且和交易标的直接相关的 override。账户可用余额由实时账户快照提供，不在 .env 模板里填写本金。",
         fields=(
             env_field(
                 "AATS_DEFAULT_SYMBOL",
@@ -72,13 +72,6 @@ COMMON_RUNTIME_FIELDS: tuple[EnvSectionSpec, ...] = (
                 comment="允许交易的标的列表。单标的运行建议只保留一个。",
                 allowed_values="JSON 数组；推荐单标的只保留一个",
                 recommended_value="[\"BTC-USDT\"]",
-            ),
-            env_field(
-                "AATS_INITIAL_USDT_BALANCE",
-                tag="常用可调",
-                comment="本地组合初始 USDT 口径。实盘建议填你准备给这套系统使用的资金规模。",
-                allowed_values="正数",
-                recommended_value="100.0",
             ),
         ),
     ),
@@ -415,7 +408,6 @@ def _example_values_for_profile(profile: "ManagedEnvProfile") -> dict[str, str]:
             {
                 "AATS_DEFAULT_SYMBOL": "BTC-USDT",
                 "AATS_ALLOWED_SYMBOLS": "[\"BTC-USDT\"]",
-                "AATS_INITIAL_USDT_BALANCE": "750000",
                 "AATS_DATABASE_URL": "postgresql+psycopg://postgres:123456@localhost:5432/aats_spot",
                 "AATS_DATABASE_RUNTIME_LOCK_KEY": "42420011",
                 "AATS_API_PORT": "8000",
@@ -432,7 +424,6 @@ def _example_values_for_profile(profile: "ManagedEnvProfile") -> dict[str, str]:
             {
                 "AATS_DEFAULT_SYMBOL": "BTC-USDT",
                 "AATS_ALLOWED_SYMBOLS": "[\"BTC-USDT\"]",
-                "AATS_INITIAL_USDT_BALANCE": "100",
                 "AATS_DATABASE_URL": "postgresql+psycopg://postgres:123456@localhost:5432/aats_live_spot",
                 "AATS_DATABASE_RUNTIME_LOCK_KEY": "42420011",
                 "AATS_API_PORT": "8010",
@@ -449,7 +440,6 @@ def _example_values_for_profile(profile: "ManagedEnvProfile") -> dict[str, str]:
             {
                 "AATS_DEFAULT_SYMBOL": "BTC-USDT-SWAP",
                 "AATS_ALLOWED_SYMBOLS": "[\"BTC-USDT-SWAP\"]",
-                "AATS_INITIAL_USDT_BALANCE": "750000",
                 "AATS_DATABASE_URL": "postgresql+psycopg://postgres:123456@localhost:5432/aats_derivatives",
                 "AATS_DATABASE_RUNTIME_LOCK_KEY": "42420021",
                 "AATS_API_PORT": "8001",
@@ -473,7 +463,6 @@ def _example_values_for_profile(profile: "ManagedEnvProfile") -> dict[str, str]:
             {
                 "AATS_DEFAULT_SYMBOL": "BTC-USDT-SWAP",
                 "AATS_ALLOWED_SYMBOLS": "[\"BTC-USDT-SWAP\"]",
-                "AATS_INITIAL_USDT_BALANCE": "100",
                 "AATS_DATABASE_URL": "postgresql+psycopg://postgres:123456@localhost:5432/aats_live_derivatives",
                 "AATS_DATABASE_RUNTIME_LOCK_KEY": "42420021",
                 "AATS_API_PORT": "8011",
@@ -626,7 +615,7 @@ def _render_reference() -> str:
         "  - `smart_arbitrage_basis_entry_bps`",
         "  - `smart_arbitrage_basis_exit_bps`",
         "  - `smart_arbitrage_estimated_cost_bps`",
-        "  - `smart_arbitrage_quote_budget_per_trade`",
+        "  - `smart_arbitrage_quote_budget_per_trade`（配置上限；实际开仓还会受实时可用权益约束）",
         "  - `smart_arbitrage_max_pair_notional`",
         "  - `smart_arbitrage_hedge_target_leverage`",
         "",

@@ -287,6 +287,7 @@ class SmartArbitrageStrategyEngine:
             pair=pair,
             account_spot_qty=account_cash_spot_qty,
         )
+        available_quote_budget = self._available_quote_budget(engine_input)
         directional_target_qty = to_decimal(engine_input.directional_target.target_position_qty)
         protective_directional_exit = (
             pair_state.current_direction == "flat"
@@ -324,6 +325,7 @@ class SmartArbitrageStrategyEngine:
                 pair_state=pair_state,
                 capability=capability,
                 spot_price=spot_price,
+                available_quote_budget=available_quote_budget,
                 reference_ts=engine_input.context.as_of_ts,
                 hedge_margin_mode=hedge_margin_mode,
             )
@@ -353,6 +355,7 @@ class SmartArbitrageStrategyEngine:
         pair_state,
         capability,
         spot_price: Decimal,
+        available_quote_budget: Decimal,
         reference_ts,
         hedge_margin_mode: str,
     ) -> ArbitrageOpportunity:
@@ -391,6 +394,7 @@ class SmartArbitrageStrategyEngine:
                 route_action="advisory_only",
                 cost_breakdown=cost_breakdown,
             )
+        blocking_reasons: list[str] = []
         if pair_state.current_direction == "positive_carry":
             execution_mode = "spot_carry"
             existing_mode_not_allowed = not self._pair_supports_execution_mode(pair=pair, execution_mode=execution_mode)
@@ -472,6 +476,7 @@ class SmartArbitrageStrategyEngine:
                 spot_price=spot_price,
                 capability=capability,
                 execution_mode=execution_mode,
+                available_quote_budget=available_quote_budget,
             )
             target_spot_qty = desired_pair_qty
             target_hedge_qty = -desired_pair_qty
@@ -479,6 +484,14 @@ class SmartArbitrageStrategyEngine:
             opportunity_kind = "positive_basis"
             route_action = "override_target"
             reason_codes = ["smart_arbitrage_positive_basis"]
+            if desired_pair_qty <= EPSILON_DECIMAL_12:
+                state_phase = "blocked"
+                route_action = "advisory_only"
+                blocking_reason = self._entry_budget_blocking_reason(
+                    available_quote_budget=available_quote_budget,
+                )
+                reason_codes = [*reason_codes, blocking_reason]
+                blocking_reasons = [blocking_reason]
             urgency = "medium"
             direction = "positive_basis"
         elif negative_basis_active:
@@ -489,6 +502,7 @@ class SmartArbitrageStrategyEngine:
                 exit_threshold=exit_threshold,
                 capability=capability,
                 spot_price=spot_price,
+                available_quote_budget=available_quote_budget,
                 reference_ts=reference_ts,
                 hedge_margin_mode=hedge_margin_mode,
             )
@@ -547,6 +561,7 @@ class SmartArbitrageStrategyEngine:
             route_action = "advisory_only"
             opening_block_reason = self._drag_blocking_reason(cost_breakdown=cost_breakdown)
             reason_codes = list(dict.fromkeys([*reason_codes, opening_block_reason]))
+            blocking_reasons = list(dict.fromkeys([*blocking_reasons, opening_block_reason]))
         score = float(
             max(cost_breakdown.executable_edge_bps, Decimal("0"))
             / max(entry_threshold or Decimal("1"), Decimal("1"))
@@ -570,7 +585,7 @@ class SmartArbitrageStrategyEngine:
             confidence=confidence,
             urgency=urgency,  # type: ignore[arg-type]
             reason_codes=reason_codes,
-            blocking_reasons=[] if opening_block_reason is None else [opening_block_reason],
+            blocking_reasons=blocking_reasons,
             route_action=route_action,
             cost_breakdown=cost_breakdown,
         )
@@ -584,6 +599,7 @@ class SmartArbitrageStrategyEngine:
         exit_threshold: Decimal,
         capability,
         spot_price: Decimal,
+        available_quote_budget: Decimal,
         reference_ts,
         hedge_margin_mode: str,
     ) -> ArbitrageOpportunity:
@@ -619,6 +635,7 @@ class SmartArbitrageStrategyEngine:
                 spot_price=spot_price,
                 capability=capability,
                 execution_mode=execution_mode,
+                available_quote_budget=available_quote_budget,
             )
             target_spot_qty = -desired_pair_qty
             target_hedge_qty = desired_pair_qty
@@ -632,7 +649,12 @@ class SmartArbitrageStrategyEngine:
             if desired_pair_qty <= EPSILON_DECIMAL_12 or supported_ratio + EPSILON_DECIMAL_12 < minimum_ratio:
                 state_phase = "blocked"
                 if not inventory_blocking_reasons:
-                    inventory_blocking_reasons = ["smart_arbitrage_inventory_backed_insufficient"]
+                    inventory_blocking_reasons = [
+                        self._entry_budget_blocking_reason(
+                            available_quote_budget=available_quote_budget,
+                            fallback="smart_arbitrage_inventory_backed_insufficient",
+                        )
+                    ]
                 reason_codes = ["smart_arbitrage_negative_basis", *inventory_blocking_reasons]
                 blocking_reasons = list(dict.fromkeys(inventory_blocking_reasons))
             else:
@@ -661,6 +683,7 @@ class SmartArbitrageStrategyEngine:
                 spot_price=spot_price,
                 capability=capability,
                 execution_mode=execution_mode,
+                available_quote_budget=available_quote_budget,
             )
             target_spot_qty = -desired_pair_qty
             target_hedge_qty = desired_pair_qty
@@ -672,7 +695,12 @@ class SmartArbitrageStrategyEngine:
             ):
                 state_phase = "blocked"
                 if not margin_blocking_reasons:
-                    margin_blocking_reasons = ["smart_arbitrage_margin_short_disabled"]
+                    margin_blocking_reasons = [
+                        self._entry_budget_blocking_reason(
+                            available_quote_budget=available_quote_budget,
+                            fallback="smart_arbitrage_margin_short_disabled",
+                        )
+                    ]
                 reason_codes = ["smart_arbitrage_negative_basis", *margin_blocking_reasons]
                 blocking_reasons = list(dict.fromkeys(margin_blocking_reasons))
             else:
@@ -732,6 +760,20 @@ class SmartArbitrageStrategyEngine:
             route_action=route_action,  # type: ignore[arg-type]
             cost_breakdown=cost_breakdown,
         )
+
+    @staticmethod
+    def _available_quote_budget(engine_input: StrategyEngineInput) -> Decimal:
+        return max(to_decimal(engine_input.context.available_trading_equity), Decimal("0"))
+
+    @staticmethod
+    def _entry_budget_blocking_reason(
+        *,
+        available_quote_budget: Decimal,
+        fallback: str = "smart_arbitrage_entry_budget_unavailable",
+    ) -> str:
+        if available_quote_budget <= EPSILON_DECIMAL_12:
+            return "smart_arbitrage_available_quote_budget_unavailable"
+        return fallback
 
     def _candidate_from_opportunity(
         self,

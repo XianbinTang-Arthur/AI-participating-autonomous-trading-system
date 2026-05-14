@@ -919,7 +919,7 @@ function renderSmartArbitrageConfigCard(config = {}, tradeCosts = {}, familyStat
         {
           label: "每次预算 / 单组上限",
           value: `${formatQuoteAmount(config?.quote_budget_per_trade)} / ${formatQuoteAmount(config?.max_pair_notional)}`,
-          meta: `实际初始名义金额取两者较小值：${formatQuoteAmount(smartArbitrageEffectiveBudget(config), "暂未生效")}`,
+          meta: `配置上限取两者较小值：${formatQuoteAmount(smartArbitrageEffectiveBudget(config), "暂未生效")}；实际开仓还会受实时可用余额约束`,
           tone: "info",
         },
         {
@@ -1742,12 +1742,12 @@ function smartArbitrageCommonConfigRows(config = {}, tradeCosts = {}) {
     ),
     smartArbitrageConfigRow(
       "smart_arbitrage_quote_budget_per_trade",
-      "每次套利预算",
+      "每次套利预算上限",
       formatQuoteAmount(config?.quote_budget_per_trade),
-      "和单组名义上限一起决定每次新开套利对的初始规模。",
+      "这是每次新开套利对的配置上限，实际规模还会被 OKX 实时可用权益和单组名义上限裁剪。",
       Number(config?.quote_budget_per_trade) > Number(config?.max_pair_notional)
         ? "当前预算高于单组上限，实际会被单组上限裁剪。"
-        : "预算越大，单次开仓的资金占用越高。"
+        : "预算上限越大，单次开仓允许占用的资金上限越高。"
     ),
     smartArbitrageConfigRow(
       "smart_arbitrage_max_pair_notional",
@@ -2320,7 +2320,7 @@ function smartArbitrageEffectiveScopeLabel(config = {}, familyStatus = {}) {
 function smartArbitrageEffectiveScopeMeta(config = {}, familyStatus = {}) {
   if (config?.enabled !== true) return "需要先打开策略总开关，前端候选和执行计划才会开始刷新。";
   const effectiveBudget = smartArbitrageEffectiveBudget(config);
-  const budgetText = effectiveBudget == null ? "当前预算待确认" : `当前单次开仓按 ${formatQuoteAmount(effectiveBudget)} 作为初始名义金额上限`;
+  const budgetText = effectiveBudget == null ? "当前预算待确认" : `当前单次开仓按 ${formatQuoteAmount(effectiveBudget)} 作为配置名义金额上限，仍需实时可用余额通过`;
   const parallelText = Math.max(Number(config?.max_concurrent_pairs) || 1, 1) > 1
     ? "当前允许多 pair，但只会并行挑选不共享 symbol scope 的组合"
     : "当前一次只会主控 1 组套利对";

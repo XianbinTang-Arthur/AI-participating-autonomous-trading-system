@@ -39,8 +39,7 @@ position_mode:        hedge
 ### 风险上限配置（来自容器 env）
 | 字段 | 值 | 含义 |
 |------|------|------|
-| `AATS_INITIAL_USDT_BALANCE` | 300 | 账本记录初始本金 |
-| 实际 `available_equity` | **$393.73** | 真实权益（=300 + 93 盈/fund？等核） |
+| 实际 `available_equity` | **$393.73** | 真实权益（来自交易所账户快照） |
 | `AATS_MAX_ABS_POSITION_QTY` | 0.1 BTC | 硬上限仓位（约 $7,500 notional） |
 | `AATS_MAX_NOTIONAL_PER_SYMBOL` | $10,000 | 硬上限名义 |
 | `AATS_MAX_OPEN_ORDERS` | 5 | 同时在场订单数 |

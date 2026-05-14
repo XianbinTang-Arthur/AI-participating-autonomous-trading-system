@@ -105,7 +105,13 @@ def _portfolio_snapshot(
     )
 
 
-def _decision_context(*, symbol: str, product_type: str, current_position_qty: str) -> DecisionContext:
+def _decision_context(
+    *,
+    symbol: str,
+    product_type: str,
+    current_position_qty: str,
+    available_trading_equity: str = "10000",
+) -> DecisionContext:
     now = utc_now()
     quantity = Decimal(current_position_qty)
     return DecisionContext(
@@ -122,6 +128,7 @@ def _decision_context(*, symbol: str, product_type: str, current_position_qty: s
         current_open_orders=[],
         product_type=product_type,
         current_exposure_side="flat" if quantity == 0 else ("long" if quantity > 0 else "short"),
+        available_trading_equity=Decimal(available_trading_equity),
     )
 
 

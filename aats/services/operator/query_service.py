@@ -6327,6 +6327,7 @@ class OperatorQueryService:
             "estimated_cost_bps": self.runtime.settings.smart_arbitrage_estimated_cost_bps,
             "uses_global_trade_costs": True,
             "quote_budget_per_trade": self.runtime.settings.smart_arbitrage_quote_budget_per_trade,
+            "quote_budget_semantics": "configured_cap_clamped_by_realtime_available_equity",
             "max_pair_notional": self.runtime.settings.smart_arbitrage_max_pair_notional,
             "cost_model_enabled": self.runtime.settings.smart_arbitrage_cost_model_enabled,
             "funding_cost_enabled": self.runtime.settings.smart_arbitrage_funding_cost_enabled,

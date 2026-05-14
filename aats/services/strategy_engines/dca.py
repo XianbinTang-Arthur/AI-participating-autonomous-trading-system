@@ -141,7 +141,31 @@ class DcaStrategyEngine:
                         "required_price": required_price,
                     },
                 )
-        quote_budget = Decimal(str(max(self.settings.dca_quote_budget_per_cycle, 0.0)))
+        configured_quote_budget = Decimal(str(max(self.settings.dca_quote_budget_per_cycle, 0.0)))
+        available_quote_budget = max(to_decimal(engine_input.context.available_trading_equity), Decimal("0"))
+        if available_quote_budget <= EPSILON_DECIMAL_12:
+            return StrategyCandidate(
+                family="dca",
+                state="inactive",
+                enabled=True,
+                selectable=False,
+                execution_compatible=True,
+                route_action="hold_current",
+                headline="Realtime available quote balance is unavailable for DCA.",
+                recommended_symbol=engine_input.context.symbol,
+                reason_codes=["dca_available_quote_budget_unavailable"],
+                blocking_reasons=["dca_available_quote_budget_unavailable"],
+                metrics={
+                    "configured_quote_budget": configured_quote_budget,
+                    "available_quote_budget": available_quote_budget,
+                    "current_price": price,
+                },
+            )
+        quote_budget = (
+            min(configured_quote_budget, available_quote_budget)
+            if configured_quote_budget > EPSILON_DECIMAL_12
+            else Decimal("0")
+        )
         tranche_qty = (quote_budget / price) if price > EPSILON_DECIMAL_12 else Decimal("0")
         if tranche_qty <= Decimal("1e-8"):
             return StrategyCandidate(
@@ -154,7 +178,12 @@ class DcaStrategyEngine:
                 headline="Configured DCA tranche is too small.",
                 recommended_symbol=engine_input.context.symbol,
                 reason_codes=["dca_tranche_too_small"],
-                metrics={"quote_budget": quote_budget, "current_price": price},
+                metrics={
+                    "configured_quote_budget": configured_quote_budget,
+                    "available_quote_budget": available_quote_budget,
+                    "quote_budget": quote_budget,
+                    "current_price": price,
+                },
             )
         target_qty = min(sleeve_current_qty + tranche_qty, max_position_qty)
         sleeve_delta_qty = target_qty - sleeve_current_qty
@@ -184,6 +213,8 @@ class DcaStrategyEngine:
             reason_codes=["dca_interval_elapsed", "dca_budget_ready"],
             metrics={
                 "quote_budget": quote_budget,
+                "configured_quote_budget": configured_quote_budget,
+                "available_quote_budget": available_quote_budget,
                 "current_price": price,
                 "tranche_qty": tranche_qty,
                 "current_account_position_qty": account_current_qty,

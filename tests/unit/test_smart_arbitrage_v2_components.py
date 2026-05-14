@@ -17,6 +17,7 @@ from aats.services.strategy_engines.smart_arbitrage.schemas import (
     ArbitrageOpportunity,
     ArbitragePairDefinition,
 )
+from aats.services.strategy_engines.smart_arbitrage.sizer import entry_pair_qty
 from aats.services.strategy_engines.smart_arbitrage.state_machine import resolve_pair_state
 
 
@@ -119,6 +120,46 @@ class TestSmartArbitrageV2Components(unittest.TestCase):
         self.assertTrue(margin_capability.spot_margin_short_supported)
         self.assertTrue(margin_capability.margin_short_execution_ready)
         self.assertEqual(margin_capability.spot_margin_mode, "cross")
+
+    def test_entry_pair_qty_clamps_to_realtime_available_quote_budget(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "smart_arbitrage_quote_budget_per_trade": 100.0,
+                "smart_arbitrage_max_pair_notional": 500.0,
+            }
+        )
+        pair = ArbitragePairDefinition(pair_id="btc_pair", spot_symbol="BTC-USDT", hedge_symbol="BTC-USDT-SWAP")
+        capability = resolve_execution_capability(settings=settings, pair=pair, account_spot_qty=Decimal("0"))
+
+        qty = entry_pair_qty(
+            settings=settings,
+            spot_price=Decimal("50"),
+            capability=capability,
+            execution_mode="spot_carry",
+            available_quote_budget=Decimal("30"),
+        )
+
+        self.assertEqual(qty, Decimal("0.6"))
+
+    def test_entry_pair_qty_fails_closed_when_realtime_available_quote_budget_is_unavailable(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "smart_arbitrage_quote_budget_per_trade": 100.0,
+                "smart_arbitrage_max_pair_notional": 500.0,
+            }
+        )
+        pair = ArbitragePairDefinition(pair_id="btc_pair", spot_symbol="BTC-USDT", hedge_symbol="BTC-USDT-SWAP")
+        capability = resolve_execution_capability(settings=settings, pair=pair, account_spot_qty=Decimal("0"))
+
+        qty = entry_pair_qty(
+            settings=settings,
+            spot_price=Decimal("50"),
+            capability=capability,
+            execution_mode="spot_carry",
+            available_quote_budget=Decimal("0"),
+        )
+
+        self.assertEqual(qty, Decimal("0"))
 
     def test_state_machine_marks_reverse_carry_recovery(self) -> None:
         state = resolve_pair_state(

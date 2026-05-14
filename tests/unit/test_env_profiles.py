@@ -370,6 +370,22 @@ def test_generated_managed_config_artifacts_exist_and_match_profile_layout() -> 
     assert "strategy_profiles" in configs_readme.read_text(encoding="utf-8")
 
 
+def test_managed_config_generator_does_not_reintroduce_initial_usdt_balance() -> None:
+    from scripts.generate_managed_config_artifacts import (
+        COMMON_RUNTIME_FIELDS,
+        _example_values_for_profile,
+        _render_env,
+    )
+
+    for section in COMMON_RUNTIME_FIELDS:
+        for field in section.fields:
+            assert field.key != "AATS_INITIAL_USDT_BALANCE"
+    for profile in MANAGED_PROFILE_DEFINITIONS:
+        values = _example_values_for_profile(profile)
+        assert "AATS_INITIAL_USDT_BALANCE" not in values
+        assert "AATS_INITIAL_USDT_BALANCE" not in _render_env(profile, values)
+
+
 def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     for profile in ("derivatives", "derivatives_live"):
