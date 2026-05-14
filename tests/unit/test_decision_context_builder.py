@@ -8,7 +8,7 @@ from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.execution import FillEvent
-from aats.schemas.exchange import ExchangeAccountRiskSnapshot, ExchangeAccountSnapshot
+from aats.schemas.exchange import ExchangeAccountRiskSnapshot, ExchangeAccountSnapshot, ExchangeBalance
 from aats.schemas.features import FeatureSnapshot
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.portfolio import PortfolioSnapshot, Position
@@ -24,6 +24,23 @@ from aats.storage.portfolio_repo import InMemoryPortfolioRepository
 class _FakeHealthService:
     def snapshot(self):  # pragma: no cover - not used by these tests
         raise AssertionError("health snapshot should not be requested in this unit test")
+
+
+class _StatusAccountService:
+    def __init__(self, *, snapshot: ExchangeAccountSnapshot, status: dict) -> None:
+        self._snapshot = snapshot
+        self._status = status
+
+    def latest_snapshot(self) -> ExchangeAccountSnapshot:
+        return self._snapshot
+
+    def status(self) -> dict:
+        return dict(self._status)
+
+
+class _RaisingStatusAccountService(_StatusAccountService):
+    def status(self) -> dict:
+        raise RuntimeError("account_status_down")
 
 
 class TestDecisionContextBuilder(unittest.TestCase):
@@ -116,6 +133,234 @@ class TestDecisionContextBuilder(unittest.TestCase):
         )
 
         self.assertEqual(resolved, Decimal("390"))
+
+    def test_exchange_required_available_trading_equity_prefers_okx_balance_available(self) -> None:
+        account_snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=datetime.now(timezone.utc),
+            balances=[
+                ExchangeBalance(
+                    currency="USDT",
+                    total=Decimal("420"),
+                    available=Decimal("390"),
+                    frozen=Decimal("30"),
+                )
+            ],
+            risk_snapshot=ExchangeAccountRiskSnapshot(),
+        )
+        portfolio_snapshot = PortfolioSnapshot(
+            snapshot_ts=datetime.now(timezone.utc),
+            balances={"USDT": Decimal("10000")},
+            positions=[],
+            cost_basis={},
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            total_equity=Decimal("10000"),
+            gross_exposure=Decimal("0"),
+            net_exposure=Decimal("0"),
+            risk_budget_usage={},
+        )
+
+        resolved = DecisionContextBuilder._available_trading_equity(
+            account_snapshot=account_snapshot,
+            portfolio_snapshot=portfolio_snapshot,
+            require_exchange_available=True,
+        )
+
+        self.assertEqual(resolved, Decimal("390"))
+
+    def test_exchange_required_available_trading_equity_uses_symbol_quote_currency_only(self) -> None:
+        account_snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=datetime.now(timezone.utc),
+            balances=[
+                ExchangeBalance(
+                    currency="USDT",
+                    total=Decimal("420"),
+                    available=Decimal("390"),
+                    frozen=Decimal("30"),
+                ),
+                ExchangeBalance(
+                    currency="USDC",
+                    total=Decimal("900"),
+                    available=Decimal("900"),
+                    frozen=Decimal("0"),
+                ),
+            ],
+            risk_snapshot=ExchangeAccountRiskSnapshot(),
+        )
+
+        resolved = DecisionContextBuilder._available_trading_equity(
+            account_snapshot=account_snapshot,
+            portfolio_snapshot=None,
+            require_exchange_available=True,
+            symbol="BTC-USDT-SWAP",
+        )
+
+        self.assertEqual(resolved, Decimal("390"))
+
+    def test_exchange_required_available_trading_equity_does_not_fall_back_to_portfolio(self) -> None:
+        account_snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=datetime.now(timezone.utc),
+            risk_snapshot=ExchangeAccountRiskSnapshot(total_equity=Decimal("450")),
+        )
+        portfolio_snapshot = PortfolioSnapshot(
+            snapshot_ts=datetime.now(timezone.utc),
+            balances={"USDT": Decimal("10000")},
+            positions=[],
+            cost_basis={},
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            total_equity=Decimal("10000"),
+            gross_exposure=Decimal("0"),
+            net_exposure=Decimal("0"),
+            risk_budget_usage={},
+        )
+
+        with self.assertLogs("aats.decision_engine.context_builder", level="CRITICAL") as ctx:
+            resolved = DecisionContextBuilder._available_trading_equity(
+                account_snapshot=account_snapshot,
+                portfolio_snapshot=portfolio_snapshot,
+                require_exchange_available=True,
+            )
+
+        self.assertEqual(resolved, Decimal("0"))
+        self.assertTrue(
+            any(
+                "available_trading_equity_all_fallbacks_exhausted" in record.getMessage()
+                for record in ctx.records
+            )
+        )
+
+    def test_exchange_required_account_snapshot_ignores_stale_latest_when_status_not_ready(self) -> None:
+        snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=datetime.now(timezone.utc),
+            balances=[
+                ExchangeBalance(
+                    currency="USDT",
+                    total=Decimal("1000"),
+                    available=Decimal("1000"),
+                    frozen=Decimal("0"),
+                )
+            ],
+        )
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        builder = DecisionContextBuilder(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            execution_repo=InMemoryExecutionRepository(),
+            mode_controller=RuntimeModeController(settings=settings, kill_switch=KillSwitch()),
+            health_service=_FakeHealthService(),
+            account_service=_StatusAccountService(
+                snapshot=snapshot,
+                status={"ready": False, "last_error": "balance_down"},
+            ),
+        )
+
+        self.assertIsNone(builder._account_snapshot())
+
+    def test_account_snapshot_status_error_is_not_treated_as_fresh_exchange_state(self) -> None:
+        snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=datetime.now(timezone.utc),
+            balances=[
+                ExchangeBalance(
+                    currency="USDT",
+                    total=Decimal("1000"),
+                    available=Decimal("1000"),
+                    frozen=Decimal("0"),
+                )
+            ],
+        )
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        builder = DecisionContextBuilder(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            execution_repo=InMemoryExecutionRepository(),
+            mode_controller=RuntimeModeController(settings=settings, kill_switch=KillSwitch()),
+            health_service=_FakeHealthService(),
+            account_service=_RaisingStatusAccountService(snapshot=snapshot, status={}),
+        )
+
+        self.assertIsNone(builder._account_snapshot())
+
+    def test_real_market_paper_can_fall_back_to_local_portfolio_when_okx_status_not_ready(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "paper_live",
+                "market_data_backend": "okx",
+                "execution_backend": "paper",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        builder = DecisionContextBuilder(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            execution_repo=InMemoryExecutionRepository(),
+            mode_controller=RuntimeModeController(settings=settings, kill_switch=KillSwitch()),
+            health_service=_FakeHealthService(),
+            account_service=_StatusAccountService(
+                snapshot=ExchangeAccountSnapshot(
+                    account_source="okx",
+                    fetched_at=datetime.now(timezone.utc),
+                    balances=[
+                        ExchangeBalance(
+                            currency="USDT",
+                            total=Decimal("1000"),
+                            available=Decimal("1000"),
+                            frozen=Decimal("0"),
+                        )
+                    ],
+                ),
+                status={"ready": False, "last_error": "balance_down"},
+            ),
+        )
+        portfolio_snapshot = PortfolioSnapshot(
+            snapshot_ts=datetime.now(timezone.utc),
+            balances={"USDT": Decimal("10000")},
+            positions=[],
+            cost_basis={},
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            total_equity=Decimal("10000"),
+            gross_exposure=Decimal("0"),
+            net_exposure=Decimal("0"),
+            risk_budget_usage={},
+        )
+
+        self.assertFalse(builder._exchange_available_balance_required())
+        self.assertIsNone(builder._account_snapshot())
+        resolved = DecisionContextBuilder._available_trading_equity(
+            account_snapshot=builder._account_snapshot(),
+            portfolio_snapshot=portfolio_snapshot,
+            require_exchange_available=builder._exchange_available_balance_required(),
+        )
+
+        self.assertEqual(resolved, Decimal("10000"))
 
     def test_available_trading_equity_returns_zero_when_no_data(self) -> None:
         """When both account and portfolio snapshots are None, return zero."""

@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
+from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance
 from aats.services.execution_engine.okx_account import OKXAccountService, datetime_from_ms
 
 
@@ -599,6 +600,14 @@ class _CountingAuxClient(_FakeOKXClient):
         return {"code": "0", "data": []}
 
 
+class _BalanceFailsAfterFirstClient(_CountingAuxClient):
+    async def get_balance(self):
+        self.balance_calls += 1
+        if self.balance_calls > 1:
+            raise RuntimeError("balance_down")
+        return await _FakeOKXClient.get_balance(self)
+
+
 class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
     async def test_spot_refresh_uses_balances_without_calling_positions_endpoint(self) -> None:
         settings = AATSSettings.model_validate(
@@ -871,6 +880,107 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.account_risk_calls, 2)
         self.assertEqual(client.system_status_calls, 2)
         self.assertEqual(client.bills_calls, 2)
+
+    async def test_force_account_state_refresh_keeps_low_frequency_auxiliary_caches(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "okx_account_refresh_interval_seconds": 300,
+                "okx_instruments_refresh_interval_seconds": 300,
+                "okx_account_config_refresh_interval_seconds": 300,
+                "okx_trade_fee_refresh_interval_seconds": 300,
+                "okx_account_position_risk_refresh_interval_seconds": 300,
+                "okx_system_status_refresh_interval_seconds": 300,
+                "okx_bills_refresh_interval_seconds": 300,
+            }
+        )
+        client = _CountingAuxClient()
+        service = OKXAccountService(settings=settings, client=client)
+
+        await service.refresh()
+        await service.refresh(force_account_state=True)
+
+        self.assertEqual(client.balance_calls, 2)
+        self.assertEqual(client.open_order_calls, 2)
+        self.assertEqual(client.fill_calls, 2)
+        self.assertEqual(client.instrument_calls, 1)
+        self.assertEqual(client.account_config_calls, 1)
+        self.assertEqual(client.trade_fee_call_count, 1)
+        self.assertEqual(client.account_risk_calls, 2)
+        self.assertEqual(client.system_status_calls, 1)
+        self.assertEqual(client.bills_calls, 1)
+
+    async def test_force_account_state_refresh_failure_returns_none_instead_of_stale_snapshot(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "okx_account_refresh_interval_seconds": 300,
+            }
+        )
+        client = _BalanceFailsAfterFirstClient()
+        service = OKXAccountService(settings=settings, client=client)
+
+        first = await service.refresh()
+        second = await service.refresh(force_account_state=True)
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+        self.assertIs(service.latest_snapshot(), first)
+        self.assertFalse(service.status()["ready"])
+        self.assertIn("okx_account_state_refresh_failed:balance", service.status()["last_error"])
+
+    async def test_force_refresh_core_state_failure_returns_none_instead_of_stale_snapshot(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "okx_account_refresh_interval_seconds": 300,
+            }
+        )
+        client = _BalanceFailsAfterFirstClient()
+        service = OKXAccountService(settings=settings, client=client)
+
+        first = await service.refresh()
+        second = await service.refresh(force=True)
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+        self.assertIs(service.latest_snapshot(), first)
+        self.assertFalse(service.status()["ready"])
+        self.assertIn("okx_account_state_refresh_failed:balance", service.status()["last_error"])
+
+    async def test_force_refresh_credentials_missing_returns_none_instead_of_stale_snapshot(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+            }
+        )
+        service = OKXAccountService(settings=settings, client=_FakeOKXClient())
+        stale = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=Decimal("1000"), available=Decimal("1000"))],
+        )
+        service._latest_snapshot = stale
+
+        self.assertIs(await service.refresh(), stale)
+        self.assertIsNone(await service.refresh(force=True))
+        self.assertIsNone(await service.refresh(force_account_state=True))
+        self.assertIs(service.latest_snapshot(), stale)
+        self.assertFalse(service.status()["ready"])
+        self.assertEqual(service.status()["last_error"], "credentials_missing")
 
     async def test_refresh_parses_nested_okx_risk_payload_shape(self) -> None:
         settings = AATSSettings.model_validate(
@@ -1749,6 +1859,21 @@ class _RateLimitedSystemStatusClient(_CountingAuxClient):
         return await super().get_system_status()
 
 
+class _RateLimitedAccountRiskClient(_CountingAuxClient):
+    async def get_account_position_risk(self):
+        self.account_risk_calls += 1
+        from aats.services.execution_engine.okx_rest import OKXRequestError
+
+        raise OKXRequestError(
+            path="/api/v5/account/account-position-risk",
+            code="50011",
+            msg="Requests too frequent.",
+            status_code=429,
+            classification="rate_limited",
+            retryable=True,
+        )
+
+
 class TestOKXRateLimitedBackoff(unittest.IsolatedAsyncioTestCase):
     async def test_rate_limited_pushes_cache_fetched_at_forward(self) -> None:
         settings = AATSSettings.model_validate(
@@ -1809,6 +1934,31 @@ class TestOKXRateLimitedBackoff(unittest.IsolatedAsyncioTestCase):
             client.system_status_calls,
             1,
             "无历史缓存场景下也应进入 backoff, 不能让 429 持续打到 OKX",
+        )
+
+    async def test_force_account_state_refresh_honors_account_risk_rate_limit_backoff(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "okx_account_refresh_interval_seconds": 0,
+                "okx_account_position_risk_refresh_interval_seconds": 60,
+            }
+        )
+        client = _RateLimitedAccountRiskClient()
+        service = OKXAccountService(settings=settings, client=client)
+
+        await service.refresh()
+        await service.refresh(force_account_state=True)
+        await service.refresh(force_account_state=True)
+
+        self.assertEqual(
+            client.account_risk_calls,
+            1,
+            "force_account_state 也必须尊重 account_position_risk 的 rate-limit backoff",
         )
 
 

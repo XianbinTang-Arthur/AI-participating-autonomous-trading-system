@@ -1619,6 +1619,15 @@ class RiskEngine:
         return max(1.0, min(leverage, self.policy_profile.max_target_leverage))
 
     def _snapshot(self) -> ExchangeAccountSnapshot | None:
+        if self.environment_capabilities.account_state_source_kind == "exchange":
+            status_loader = getattr(self.account_service, "status", None)
+            if callable(status_loader):
+                try:
+                    status = status_loader()
+                except Exception:
+                    return None
+                if status.get("last_error") or not bool(status.get("ready", False)):
+                    return None
         snapshot_getter = getattr(self.account_service, "latest_snapshot", None)
         return snapshot_getter() if callable(snapshot_getter) else None
 
@@ -1661,14 +1670,18 @@ class RiskEngine:
     ) -> Decimal:
         if snapshot is not None and snapshot.risk_snapshot is not None:
             risk_snapshot = snapshot.risk_snapshot
-            for value in (
-                risk_snapshot.available_equity,
-                risk_snapshot.adjusted_equity,
-                risk_snapshot.total_equity,
-            ):
-                if value is not None and to_decimal(value) > Decimal("0"):
-                    return to_decimal(value)
-        return self._available_balance(settle_currency)
+            value = risk_snapshot.available_equity
+            if value is not None and to_decimal(value) > Decimal("0"):
+                local_reserved = sum(
+                    remaining_obligation_amount(obligation)
+                    for obligation in self._active_local_obligations()
+                    if settle_currency is not None and obligation.reserve_currency == settle_currency
+                )
+                return max(to_decimal(value) - local_reserved, Decimal("0"))
+        exchange_available = self._available_balance(settle_currency, snapshot=snapshot)
+        if exchange_available > Decimal("0"):
+            return exchange_available
+        return Decimal("0")
 
     def _equity_base(
         self,
@@ -1686,7 +1699,7 @@ class RiskEngine:
             ):
                 if value is not None and to_decimal(value) > Decimal("0"):
                     return to_decimal(value)
-        return available_equity if available_equity > Decimal("0") else self._available_balance(settle_currency)
+        return available_equity if available_equity > Decimal("0") else self._available_balance(settle_currency, snapshot=snapshot)
 
     def _current_open_order_count(self, symbol: str) -> int:
         return self.account_service.open_order_count(symbol=symbol) + sum(

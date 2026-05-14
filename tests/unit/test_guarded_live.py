@@ -113,6 +113,21 @@ class FakeAccountService:
         )
 
 
+class FakeUnreadyAccountService(FakeAccountService):
+    def status(self):
+        status = super().status()
+        status.update(
+            {
+                "connected": False,
+                "fresh": False,
+                "last_error": "balance_down",
+                "ready": False,
+                "blockers": ["account_refresh_failed"],
+            }
+        )
+        return status
+
+
 class FakeExecutionProvider:
     def readiness(self):
         return {"ready": True, "connected": True, "fresh": True, "blockers": [], "detail": "ok"}
@@ -435,6 +450,51 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
         self.assertLess(decision.execution_aggressiveness_multiplier, Decimal("1"))
         self.assertIn("risk_budget_multiplier_applied", decision.constraints_applied)
         self.assertIn("execution_aggressiveness_contracted", decision.constraints_applied)
+
+    def test_risk_engine_ignores_stale_snapshot_when_account_status_not_ready(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "live_submit_enabled": True,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        kill_switch = KillSwitch()
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        account_service = FakeUnreadyAccountService(symbol="BTC-USDT-SWAP", usdt_available=100_000.0)
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=mode_controller,
+            kill_switch=kill_switch,
+            market_provider=FakeHealthyMarketProvider(),  # type: ignore[arg-type]
+            account_provider=account_service,  # type: ignore[arg-type]
+            execution_provider=FakeExecutionProvider(),  # type: ignore[arg-type]
+            reconciliation_repo=FakeHealthyReconciliationRepo(),  # type: ignore[arg-type]
+        )
+        risk = RiskEngine(
+            settings=settings,
+            account_service=account_service,  # type: ignore[arg-type]
+            health_service=health_service,
+            trigger_policy=DecisionTriggerPolicy(settings=settings),
+            price_provider=lambda _symbol: Decimal("30000"),
+            mode_controller=mode_controller,
+            obligation_repo=InMemoryExecutionObligationRepository(),
+        )
+
+        self.assertIsNone(risk._snapshot())
+        self.assertEqual(
+            risk._available_derivatives_equity(
+                snapshot=risk._snapshot(),
+                settle_currency="USDT",
+            ),
+            Decimal("0"),
+        )
 
     def test_leg_risk_engine_inherits_adaptive_budget_and_execution_contraction(self) -> None:
         settings = AATSSettings.model_validate(

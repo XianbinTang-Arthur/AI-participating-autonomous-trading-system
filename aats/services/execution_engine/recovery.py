@@ -27,6 +27,7 @@ from aats.services.governance_engine.runtime_layers import RecoveryPolicy
 from aats.services.portfolio_service.position_keys import position_key_for_snapshot_position
 from aats.services.portfolio_service.decimals import to_decimal
 from aats.services.portfolio_service.fill_projection_writer import save_fill_outcome_direct_legacy_only
+from aats.services.portfolio_service.initial_balance import effective_portfolio_initial_usdt_balance
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.portfolio_service.snapshot_writer import save_snapshot_direct_legacy_only
@@ -75,6 +76,7 @@ class ExecutionRecoveryService:
         kill_switch: KillSwitch,
         bootstrap_portfolio_from_exchange: bool,
         reconciliation_stale_after_seconds: float,
+        exchange_coupled: bool | None = None,
         recovery_policy: RecoveryPolicy | None = None,
         fill_outcome_repo: FillOutcomeRepository | None = None,
         event_store: object | None = None,
@@ -94,6 +96,7 @@ class ExecutionRecoveryService:
         self.price_provider = price_provider
         self.kill_switch = kill_switch
         self.bootstrap_portfolio_from_exchange = bootstrap_portfolio_from_exchange
+        self.exchange_coupled = bool(exchange_coupled) if exchange_coupled is not None else bootstrap_portfolio_from_exchange
         self.reconciliation_stale_after_seconds = reconciliation_stale_after_seconds
         self.fill_outcome_repo = fill_outcome_repo
         self.event_store = event_store
@@ -986,7 +989,10 @@ class ExecutionRecoveryService:
         compensated_count = 0
         failed_count = 0
         replay_state = PortfolioState(
-            initial_usdt_balance=self.settings.initial_usdt_balance,
+            initial_usdt_balance=effective_portfolio_initial_usdt_balance(
+                self.settings,
+                exchange_coupled=self.exchange_coupled,
+            ),
             default_product_type=self.runtime_scope.product_type,
             default_margin_mode=self.runtime_scope.margin_mode,
         )

@@ -83,7 +83,43 @@ class DerivativesLiveGuardService:
             )
             return dict(self.last_snapshot)
 
-        account_status = dict(self.account_service.status())
+        try:
+            account_status = dict(self.account_service.status())
+        except Exception as exc:
+            account_status = {
+                "connected": False,
+                "fresh": False,
+                "ready": False,
+                "last_error": f"account_status_unavailable:{exc.__class__.__name__}",
+                "detail": "account_status_unavailable",
+                "blockers": ["account_status_unavailable"],
+            }
+        if account_status.get("last_error") or not bool(account_status.get("ready", False)):
+            blockers = [
+                str(item).strip()
+                for item in (account_status.get("blockers") or [])
+                if str(item).strip()
+            ]
+            blockers.append("account_state_unready")
+            self.last_snapshot = self._base_snapshot(
+                status="unavailable",
+                connected=bool(account_status.get("connected", False)),
+                fresh=bool(account_status.get("fresh", False)),
+                ready=False,
+                blockers=list(dict.fromkeys(blockers)),
+                summary="当前交易所账户状态不可用，合约实盘保护不能使用旧账户快照判断保证金和仓位状态。",
+                detail=(
+                    text_or_none(account_status.get("last_error"))
+                    or text_or_none(account_status.get("detail"))
+                    or "account_state_unready"
+                ),
+                only_reduce_required=True,
+                only_reduce_reasons=["account_state_unready"],
+                risk_snapshot_available=False,
+                risk_snapshot_stage="unavailable",
+            )
+            return dict(self.last_snapshot)
+
         snapshot = self.account_service.latest_snapshot()
         if snapshot is None:
             self.last_snapshot = self._base_snapshot(

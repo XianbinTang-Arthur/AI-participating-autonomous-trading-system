@@ -4,9 +4,11 @@ import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from aats.bootstrap.settings import AATSSettings
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance, InstrumentMetadata
 from aats.schemas.execution import FillEvent
 from aats.services.accounting import UnsupportedFeeCurrencyError
+from aats.services.portfolio_service.initial_balance import effective_portfolio_initial_usdt_balance
 from aats.services.portfolio_service.positions import PortfolioState
 
 
@@ -54,6 +56,44 @@ def build_fill(
 
 
 class TestPortfolioState(unittest.TestCase):
+    def test_effective_initial_balance_uses_config_for_local_runtime(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "initial_usdt_balance": 1234.5,
+            }
+        )
+
+        self.assertEqual(effective_portfolio_initial_usdt_balance(settings), Decimal("1234.5"))
+
+    def test_effective_initial_balance_ignores_config_for_okx_account_runtime(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "bootstrap_portfolio_from_exchange": True,
+                "initial_usdt_balance": 1234.5,
+            }
+        )
+
+        self.assertEqual(effective_portfolio_initial_usdt_balance(settings), Decimal("0"))
+
+    def test_effective_initial_balance_keeps_config_for_local_paper_okx_read_runtime(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "bootstrap_portfolio_from_exchange": False,
+                "initial_usdt_balance": 1234.5,
+            }
+        )
+
+        self.assertEqual(
+            effective_portfolio_initial_usdt_balance(settings, exchange_coupled=False),
+            Decimal("1234.5"),
+        )
+
     def test_long_position_add_reduce_and_close_tracks_average_cost_and_realized_pnl(self) -> None:
         state = PortfolioState(initial_usdt_balance=10_000.0)
 

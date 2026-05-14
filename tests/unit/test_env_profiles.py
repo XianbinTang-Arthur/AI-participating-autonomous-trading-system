@@ -238,7 +238,6 @@ def test_managed_profile_local_env_templates_are_minimal_utf8_overrides() -> Non
     common_required_keys = {
         "AATS_DEFAULT_SYMBOL",
         "AATS_ALLOWED_SYMBOLS",
-        "AATS_INITIAL_USDT_BALANCE",
         # AATS_DATABASE_URL 已由 9918e48 移除，改为 AATS_DB_NAME +
         # docker-compose 内部组装（参见 deploy/wsl2-dev/docker-compose.aats.yml）。
         "AATS_DATABASE_RUNTIME_LOCK_KEY",
@@ -355,6 +354,7 @@ def test_generated_managed_config_artifacts_exist_and_match_profile_layout() -> 
         example_env = repo_root / "configs" / "templates" / f".env.{profile}.example"
         assert example_env.exists(), example_env
         values = _load_env_file(example_env)
+        assert "AATS_INITIAL_USDT_BALANCE" not in values
         for key in MANAGED_PROFILE_DERIVED_ENV_KEYS:
             assert key not in values, key
 

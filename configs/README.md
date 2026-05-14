@@ -20,7 +20,7 @@
 5. 根目录 `.env.*` 环境变量 override。
 6. CLI 参数。
 
-原则：运行身份、凭证、数据库、端口、资金规模和 live 安全开关放 `.env.*`；策略细节和可研究参数放 `strategy_profiles/*.yaml` 或 RDP active parameters。
+原则：运行身份、凭证、数据库、端口和 live 安全开关放 `.env.*`；策略细节和可研究参数放 `strategy_profiles/*.yaml` 或 RDP active parameters。OKX 账户可用余额不通过配置填写，必须来自交易所账户快照。
 
 ## 2. 托管 profile
 
@@ -53,7 +53,7 @@
 | API/日志 | `AATS_API_PORT`、`AATS_LOG_DIR` | 实例隔离 |
 | 交易所凭证 | `AATS_OKX_API_KEY`、`AATS_OKX_API_SECRET`、`AATS_OKX_API_PASSPHRASE` | secret |
 | Operator 会话 | `AATS_OPERATOR_SESSION_SECRET`、`AATS_OPERATOR_SESSION_COOKIE_NAME` | secret / 浏览器隔离 |
-| 资金规模 | `AATS_INITIAL_USDT_BALANCE`、`AATS_DEFAULT_ORDER_QTY` | 环境相关 |
+| 本地演练规模 | `AATS_DEFAULT_ORDER_QTY`；`AATS_INITIAL_USDT_BALANCE` 仅限 local paper/demo 与 real-market paper 本地账本 | 避免 exchange-coupled 余额由配置值驱动 |
 | live 安全 | `AATS_OPERATOR_AUTH_ENABLED`、`AATS_OPERATOR_UNSAFE_WRITE_WITHOUT_AUTH`、`AATS_LIVE_SUBMIT_ENABLED` | 生产安全 |
 | 合约风控 | `AATS_MAX_TARGET_LEVERAGE`、`AATS_MAX_MARGIN_USAGE_FRACTION`、`AATS_LIQUIDATION_BUFFER_FRACTION` | 账户级限制 |
 | recovery | `AATS_EXECUTION_UNKNOWN_SUBMIT_REVIEW_AFTER_SECONDS`、`AATS_EXECUTION_UNKNOWN_CANCEL_REVIEW_AFTER_SECONDS` | 运行恢复策略 |

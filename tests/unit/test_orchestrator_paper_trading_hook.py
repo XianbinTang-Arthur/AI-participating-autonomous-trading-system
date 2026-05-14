@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import unittest
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
 from aats.services.decision_engine.orchestrator import DecisionOrchestrator
 
@@ -33,6 +35,15 @@ def _make_target():
     t.current_position_qty = Decimal("0")
     t.strategy_family = "independent"
     return t
+
+
+class _CountingAccountService:
+    def __init__(self) -> None:
+        self.refresh_kwargs: list[dict[str, object]] = []
+
+    async def refresh(self, **kwargs):
+        self.refresh_kwargs.append(dict(kwargs))
+        return None
 
 
 class TestPaperTradingHookSkipPaths(unittest.IsolatedAsyncioTestCase):
@@ -61,6 +72,55 @@ class TestPaperTradingHookSkipPaths(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, [])
         # enabled() 被 check，evaluate_candidates 不应被调
         svc.evaluate_candidates.assert_not_called()
+
+
+class TestDecisionAccountRefreshScope(unittest.IsolatedAsyncioTestCase):
+    async def test_real_market_paper_does_not_force_account_refresh_before_decision(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "paper_live",
+                "market_data_backend": "okx",
+                "execution_backend": "paper",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+            }
+        )
+        account_service = _CountingAccountService()
+        orch = DecisionOrchestrator.__new__(DecisionOrchestrator)
+        orch.context_builder = SimpleNamespace(
+            settings=settings,
+            account_service=account_service,
+            mode_controller=SimpleNamespace(
+                environment_capabilities=SimpleNamespace(exchange_coupled=False)
+            ),
+        )
+
+        await orch._refresh_account_state_for_decision()
+
+        self.assertEqual(account_service.refresh_kwargs, [])
+
+    async def test_exchange_coupled_decision_forces_account_state_refresh(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+            }
+        )
+        account_service = _CountingAccountService()
+        orch = DecisionOrchestrator.__new__(DecisionOrchestrator)
+        orch.context_builder = SimpleNamespace(
+            settings=settings,
+            account_service=account_service,
+            mode_controller=SimpleNamespace(
+                environment_capabilities=SimpleNamespace(exchange_coupled=True)
+            ),
+        )
+
+        await orch._refresh_account_state_for_decision()
+
+        self.assertEqual(account_service.refresh_kwargs, [{"force_account_state": True}])
 
 
 class TestPaperTradingHookErrorHandling(unittest.IsolatedAsyncioTestCase):

@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 from aats.events import topics
 from aats.schemas.common import utc_now
 from aats.schemas.operator import ReplayValidationSummary
+from aats.services.portfolio_service.initial_balance import effective_portfolio_initial_usdt_balance
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.reconciliation_service.replay import ReplayEngine, ReplayResult
 
@@ -100,10 +101,18 @@ class AuditReplayQueryFacade:
         }
 
     def replay_validate(self, *, decision_id: str) -> dict[str, Any]:
+        exchange_coupled = getattr(
+            getattr(self.owner.runtime, "environment_capabilities", None),
+            "exchange_coupled",
+            None,
+        )
         engine = ReplayEngine(
             event_store=self.owner.runtime.event_store,
             reconstruction_service=PortfolioReconstructionService(
-                initial_usdt_balance=self.owner.runtime.settings.initial_usdt_balance,
+                initial_usdt_balance=effective_portfolio_initial_usdt_balance(
+                    self.owner.runtime.settings,
+                    exchange_coupled=exchange_coupled,
+                ),
                 snapshot_builder=self.owner.runtime.portfolio_service.snapshot_builder,
             ),
             audit_repo=self.owner.runtime.audit_repo,

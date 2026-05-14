@@ -15,10 +15,12 @@ from aats.schemas.market import MarketSnapshot
 from aats.schemas.execution import FillEvent
 from aats.schemas.portfolio import InstrumentPositionState, PortfolioSnapshot
 from aats.schemas.system import HealthSnapshot
+from aats.services.accounting import resolve_symbol_currencies
 from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.mode import RuntimeModeController
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
+from aats.services.portfolio_service.initial_balance import exchange_account_balance_required
 from aats.services.portfolio_service.instrument_states import (
     instrument_position_state_for_symbol,
     instrument_position_states_from_snapshot_positions,
@@ -424,6 +426,8 @@ class DecisionContextBuilder:
             available_trading_equity=self._available_trading_equity(
                 account_snapshot=account_snapshot,
                 portfolio_snapshot=portfolio_snapshot,
+                require_exchange_available=self._exchange_available_balance_required(),
+                symbol=market_snapshot.symbol,
             ),
             market_snapshot=market_snapshot,
         )
@@ -453,17 +457,34 @@ class DecisionContextBuilder:
         return list(records.values())
 
     def _account_snapshot(self) -> ExchangeAccountSnapshot | None:
+        if exchange_account_balance_required(self.settings):
+            status_loader = getattr(self.account_service, "status", None)
+            if callable(status_loader):
+                try:
+                    status = status_loader()
+                except Exception:
+                    return None
+                if status.get("last_error") or not bool(status.get("ready", False)):
+                    return None
         loader = getattr(self.account_service, "latest_snapshot", None)
         if not callable(loader):
             return None
         snapshot = loader()
         return snapshot if isinstance(snapshot, ExchangeAccountSnapshot) else None
 
+    def _exchange_available_balance_required(self) -> bool:
+        capabilities = getattr(self.mode_controller, "environment_capabilities", None)
+        return exchange_account_balance_required(self.settings) and bool(
+            getattr(capabilities, "exchange_coupled", False)
+        )
+
     @staticmethod
     def _available_trading_equity(
         *,
         account_snapshot: ExchangeAccountSnapshot | None,
         portfolio_snapshot: PortfolioSnapshot | None,
+        require_exchange_available: bool = False,
+        symbol: str | None = None,
     ) -> Decimal:
         """Resolve the best available equity for position sizing.
 
@@ -471,10 +492,9 @@ class DecisionContextBuilder:
         1. ``risk_snapshot.available_equity`` — OKX ``availEq`` (ideal, but OKX
            does not return it in the ``account-position-risk`` endpoint for all
            account modes).
-        2. ``risk_snapshot.total_equity`` — OKX ``totalEq`` or summed stable-coin
-           balance equity from the same endpoint.
-        3. ``portfolio_snapshot.total_equity`` — locally-tracked equity from
-           the portfolio service.
+        2. OKX balance ``available`` for stable collateral currencies.
+        3. Non-exchange runtimes only: risk total equity or local portfolio
+           snapshot equity.
         """
         risk = (
             account_snapshot.risk_snapshot
@@ -486,16 +506,27 @@ class DecisionContextBuilder:
             avail = to_decimal(risk.available_equity or 0)
             if avail > EPSILON_DECIMAL_12:
                 return avail
-        # 2. Fallback: exchange-reported total equity
-        if risk is not None:
-            total = to_decimal(risk.total_equity or 0)
-            if total > EPSILON_DECIMAL_12:
-                return total
-        # 3. Fallback: portfolio snapshot equity
-        if portfolio_snapshot is not None:
-            portfolio_eq = to_decimal(portfolio_snapshot.total_equity or 0)
-            if portfolio_eq > EPSILON_DECIMAL_12:
-                return portfolio_eq
+        # 2. Fallback: exchange-reported available balances from the same
+        # account snapshot. This stays exchange-sourced while avoiding a stale
+        # local portfolio/config seed.
+        exchange_available = DecisionContextBuilder._stable_available_balance(
+            account_snapshot,
+            symbol=symbol,
+        )
+        if exchange_available > EPSILON_DECIMAL_12:
+            return exchange_available
+        if not require_exchange_available:
+            # 3. Local/paper fallback only. Exchange-coupled runtimes must not
+            # size from locally configured or projected equity when available
+            # exchange collateral is missing.
+            if risk is not None:
+                total = to_decimal(risk.total_equity or 0)
+                if total > EPSILON_DECIMAL_12:
+                    return total
+            if portfolio_snapshot is not None:
+                portfolio_eq = to_decimal(portfolio_snapshot.total_equity or 0)
+                if portfolio_eq > EPSILON_DECIMAL_12:
+                    return portfolio_eq
         # R4-D4：三级回退全部为空/非正时必须喊出来。
         # 返回 0 会污染 resolve_balance_aware_reference_qty 的
         # 余额感知下限逻辑（balance * ratio → 0），
@@ -518,6 +549,49 @@ class DecisionContextBuilder:
             else None,
         )
         return Decimal("0")
+
+    @staticmethod
+    def _stable_available_balance(
+        account_snapshot: ExchangeAccountSnapshot | None,
+        *,
+        symbol: str | None = None,
+    ) -> Decimal:
+        if account_snapshot is None:
+            return Decimal("0")
+        stable_currencies = DecisionContextBuilder._collateral_currencies_for_symbol(
+            account_snapshot=account_snapshot,
+            symbol=symbol,
+        )
+        return sum(
+            (
+                to_decimal(balance.available)
+                for balance in account_snapshot.balances
+                if str(balance.currency).upper() in stable_currencies
+            ),
+            start=Decimal("0"),
+        )
+
+    @staticmethod
+    def _collateral_currencies_for_symbol(
+        *,
+        account_snapshot: ExchangeAccountSnapshot,
+        symbol: str | None,
+    ) -> set[str]:
+        if symbol not in {None, ""}:
+            normalized_symbol = str(symbol)
+            for instrument in account_snapshot.instruments:
+                if normalized_symbol not in {instrument.symbol, instrument.instrument_id}:
+                    continue
+                settle_currency = str(instrument.settle_currency or "").strip().upper()
+                if settle_currency:
+                    return {settle_currency}
+                quote_currency = str(instrument.quote_currency or "").strip().upper()
+                if quote_currency:
+                    return {quote_currency}
+            _base_currency, quote_currency = resolve_symbol_currencies(normalized_symbol)
+            if quote_currency:
+                return {quote_currency.upper()}
+        return {"USDT", "USDC", "USD"}
 
     @staticmethod
     def _position_state(

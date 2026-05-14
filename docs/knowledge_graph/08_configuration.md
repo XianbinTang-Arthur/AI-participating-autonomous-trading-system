@@ -87,7 +87,7 @@ configs/
 | `derivatives_position_mode` | hedge | env |
 | `max_open_orders` | 5 | env |
 | `default_order_qty` | 0.001 | env |
-| `initial_usdt_balance` | 300 | env（账本用，不是真实权益） |
+| `initial_usdt_balance` | paper only | 仅 local paper/demo 与 real-market paper 本地账本初始化；OKX 实盘忽略 |
 | `auto_halt_margin_fraction` | 0.75 | env |
 | `only_reduce_trigger_fraction` | 0.65 | env |
 | `auto_halt_liquidation_gap_fraction` | 0.10 | env |
@@ -139,8 +139,8 @@ configs/
   `max_target_leverage` 必须 = 1；运行时切 product_type 前要同时改 leverage
 - **YAML profile 覆盖不是合并** — profile 的字段直接覆盖 env，所以 yaml 写了
   的字段 env 改无效（需要重复写）
-- **`AATS_INITIAL_USDT_BALANCE=300`** — 账本启动值，不代表真实权益（真实从
-  OKX 拉）
+- **`AATS_INITIAL_USDT_BALANCE`** — 仅 local paper/demo 与 real-market paper
+  可作为本地账本启动值；OKX account-read 实盘可用余额必须来自交易所账户快照和本地 obligation
 
 ---
 

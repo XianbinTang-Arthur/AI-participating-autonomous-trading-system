@@ -142,6 +142,7 @@ from aats.services.strategy_engines.overlay_parent_exposure import overlay_paren
 from aats.services.strategy_engines.sleeve_pnl_projection import SleevePnLProjectionService
 from aats.schemas.portfolio import FillOutcomeRecord, PortfolioBalanceDelta
 from aats.services.portfolio_service.decimals import to_decimal
+from aats.services.portfolio_service.initial_balance import effective_portfolio_initial_usdt_balance
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.positions import PortfolioService, PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
@@ -2835,8 +2836,8 @@ def _build_position_target_handler(
                 reason=str(ks_status.get("reason") or "kill_switch_halted"),
             )
             return
-        if runtime_layering.environment_capabilities.account_state_source_kind == "exchange":
-            await account_service.refresh()
+        if runtime_layering.environment_capabilities.exchange_coupled:
+            await account_service.refresh(force_account_state=True)
 
         if target.strategy_execution_legs:
             leg_results: list[dict[str, Any]] = []
@@ -4346,7 +4347,9 @@ def _build_execution_slice(
     slices.obligation_service = ExecutionObligationService(
         settings=runtime_settings,
         obligation_repo=storage.obligation_repo,
-        account_snapshot_loader=lambda: slices.account_service.refresh(),
+        account_snapshot_loader=lambda: slices.account_service.refresh(
+            force_account_state=runtime_layering.environment_capabilities.exchange_coupled
+        ),
         price_provider=slices.market_gateway.latest_price,
         fee_resolver=slices.fee_resolver,
         # Stage 6 Slice 6.5：注入跨进程 obligation 缓存。construction 顺序保证：
@@ -4502,6 +4505,7 @@ def _build_execution_slice(
 def _build_portfolio_slice(
     *,
     runtime_settings: AATSSettings,
+    runtime_layering: RuntimeLayering,
     state_scope: Any,
     storage: StorageBackends,
     slices: _RuntimeSlices,
@@ -4525,8 +4529,12 @@ def _build_portfolio_slice(
     """
     if not _slice_active("portfolio", effective_process_role=effective_process_role):
         return
+    portfolio_initial_usdt_balance = effective_portfolio_initial_usdt_balance(
+        runtime_settings,
+        exchange_coupled=runtime_layering.environment_capabilities.exchange_coupled,
+    )
     slices.portfolio_state = PortfolioState(
-        initial_usdt_balance=runtime_settings.initial_usdt_balance,
+        initial_usdt_balance=portfolio_initial_usdt_balance,
         default_product_type=runtime_settings.trading_product_type,
         default_margin_mode=runtime_settings.margin_mode,
     )
@@ -4569,7 +4577,7 @@ def _build_portfolio_slice(
             sleeve_pnl_projection_service=slices.sleeve_pnl_projection_service,
             portfolio_outbox_publisher=slices.portfolio_outbox_publisher,
             state_scope=state_scope,
-            initial_usdt_balance=runtime_settings.initial_usdt_balance,
+            initial_usdt_balance=portfolio_initial_usdt_balance,
             metrics=slices.metrics,
         )
     else:
@@ -4637,6 +4645,10 @@ def _build_reconciliation_slice(
     """
     if not _slice_active("reconciliation", effective_process_role=effective_process_role):
         return
+    reconstruction_initial_usdt_balance = effective_portfolio_initial_usdt_balance(
+        runtime_settings,
+        exchange_coupled=runtime_layering.environment_capabilities.exchange_coupled,
+    )
     slices.reconciliation_service = ReconciliationService(
         settings=runtime_settings,
         bus=slices.bus,
@@ -4648,7 +4660,7 @@ def _build_reconciliation_slice(
         portfolio_repo=storage.portfolio_repo,
         event_store=storage.event_store,
         reconstruction_service=PortfolioReconstructionService(
-            initial_usdt_balance=runtime_settings.initial_usdt_balance,
+            initial_usdt_balance=reconstruction_initial_usdt_balance,
             snapshot_builder=slices.snapshot_builder,
         ),
         price_provider=slices.market_gateway.latest_price,
@@ -4668,12 +4680,13 @@ def _build_reconciliation_slice(
         reconciliation_repo=storage.reconciliation_repo,
         strategy_runtime_repo=storage.strategy_runtime_repo,
         reconstruction_service=PortfolioReconstructionService(
-            initial_usdt_balance=runtime_settings.initial_usdt_balance,
+            initial_usdt_balance=reconstruction_initial_usdt_balance,
             snapshot_builder=slices.snapshot_builder,
         ),
         price_provider=slices.market_gateway.latest_price,
         kill_switch=slices.kill_switch,
         bootstrap_portfolio_from_exchange=slices.bootstrap_from_exchange,
+        exchange_coupled=runtime_layering.environment_capabilities.exchange_coupled,
         reconciliation_stale_after_seconds=runtime_settings.reconciliation_stale_after_seconds,
         recovery_policy=runtime_layering.recovery_policy,
         fill_outcome_repo=storage.fill_outcome_repo,
@@ -5410,6 +5423,7 @@ async def build_runtime(
     )
     _build_portfolio_slice(
         runtime_settings=runtime_settings,
+        runtime_layering=runtime_layering,
         state_scope=state_scope,
         storage=storage,
         slices=slices,

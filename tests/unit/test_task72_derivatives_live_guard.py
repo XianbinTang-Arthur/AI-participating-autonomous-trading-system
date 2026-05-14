@@ -52,6 +52,26 @@ class _StubAccountService:
         return None
 
 
+class _UnreadyAccountService(_StubAccountService):
+    def __init__(self, snapshot: ExchangeAccountSnapshot) -> None:
+        super().__init__(snapshot)
+        self.latest_snapshot_calls = 0
+
+    def latest_snapshot(self):
+        self.latest_snapshot_calls += 1
+        return self._snapshot
+
+    def status(self):
+        return {
+            "connected": True,
+            "fresh": False,
+            "ready": False,
+            "last_error": "okx_account_refresh_failed",
+            "blockers": ["account_state_stale"],
+            "detail": "okx_account_refresh_failed",
+        }
+
+
 class _HealthyMarketProvider:
     def status(self):
         return {"ready": True, "connected": True, "fresh": True, "blockers": [], "detail": "ok"}
@@ -284,6 +304,38 @@ class TestTask72DerivativesLiveGuard(unittest.TestCase):
         self.assertEqual(payload["status"], "healthy")
         self.assertFalse(payload["auto_halt_required"])
         self.assertIsNotNone(payload["current_initial_margin_usage_fraction"])
+
+    def test_live_guard_rejects_stale_snapshot_when_account_status_not_ready(self) -> None:
+        settings = self._settings()
+        account_service = _UnreadyAccountService(
+            _snapshot(
+                initial_margin="320",
+                adjusted_equity="1000",
+                mark_price="70000",
+                liquidation_price="42000",
+            )
+        )
+        service = DerivativesLiveGuardService(
+            settings=settings,
+            kill_switch=KillSwitch(),
+            account_service=account_service,
+            event_store=InMemoryEventStore(),
+            metrics=MetricsRegistry(),
+        )
+
+        payload = service.evaluate_now()
+
+        self.assertEqual(payload["status"], "unavailable")
+        self.assertFalse(payload["ready"])
+        self.assertFalse(payload["fresh"])
+        self.assertFalse(payload["risk_snapshot_available"])
+        self.assertEqual(payload["risk_snapshot_stage"], "unavailable")
+        self.assertTrue(payload["only_reduce_required"])
+        self.assertIn("account_state_unready", payload["only_reduce_reasons"])
+        self.assertIn("account_state_stale", payload["blockers"])
+        self.assertIn("account_state_unready", payload["blockers"])
+        self.assertIsNone(payload["current_initial_margin_usage_fraction"])
+        self.assertEqual(account_service.latest_snapshot_calls, 0)
 
     def test_live_guard_auto_halts_when_risk_snapshot_missing_for_too_long(self) -> None:
         settings = self._settings()

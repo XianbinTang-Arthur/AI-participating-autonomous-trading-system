@@ -127,16 +127,23 @@ class OKXAccountService:
         self._latest_recent_bills: list[dict[str, Any]] = []
         self._last_bills_error: str | None = None
         self._aux_payload_cache: dict[str, tuple[datetime, dict[str, Any]]] = {}
+        self._aux_payload_backoff_until: dict[str, datetime] = {}
 
-    async def refresh(self, *, force: bool = False) -> ExchangeAccountSnapshot | None:
+    async def refresh(
+        self,
+        *,
+        force: bool = False,
+        force_account_state: bool = False,
+    ) -> ExchangeAccountSnapshot | None:
         if not self.settings.account_read_enabled or self.settings.account_backend != "okx":
             return self._latest_snapshot
         if not self.settings.okx_credentials_configured:
             self._last_refresh_error = "credentials_missing"
-            return self._latest_snapshot
+            return None if force or force_account_state else self._latest_snapshot
 
         async with self._lock:
-            if not force and self._latest_snapshot is not None:
+            state_force = force or force_account_state
+            if not state_force and self._latest_snapshot is not None:
                 age_seconds = (utc_now() - self._latest_snapshot.fetched_at).total_seconds()
                 if age_seconds < self.settings.okx_account_refresh_interval_seconds:
                     return self._latest_snapshot
@@ -156,6 +163,11 @@ class OKXAccountService:
                 for _r in _gather_results_1:
                     if isinstance(_r, Exception):
                         self.logger.warning("gather task failed: %s", _r)
+                if state_force:
+                    self._raise_account_state_refresh_error(
+                        context="balance",
+                        result=_gather_results_1[0],
+                    )
                 balance_payload = _gather_results_1[0] if not isinstance(_gather_results_1[0], Exception) else {}
                 instruments_payload = _gather_results_1[1] if not isinstance(_gather_results_1[1], Exception) else {}
                 instruments = self._parse_instruments(instruments_payload)
@@ -178,6 +190,19 @@ class OKXAccountService:
                 for _r in _gather_results_2:
                     if isinstance(_r, Exception):
                         self.logger.warning("gather task failed: %s", _r)
+                if state_force:
+                    self._raise_account_state_refresh_error(
+                        context="open_orders",
+                        result=_gather_results_2[0],
+                    )
+                    self._raise_account_state_refresh_error(
+                        context="fills",
+                        result=_gather_results_2[1],
+                    )
+                    self._raise_account_state_refresh_error(
+                        context="positions",
+                        result=_gather_results_2[2],
+                    )
                 open_orders_payloads = _gather_results_2[0] if not isinstance(_gather_results_2[0], Exception) else []
                 fills_payloads = _gather_results_2[1] if not isinstance(_gather_results_2[1], Exception) else []
                 positions_payload = _gather_results_2[2] if not isinstance(_gather_results_2[2], Exception) else {}
@@ -221,7 +246,7 @@ class OKXAccountService:
                     self._cached_aux_payload_optional(
                         "account_position_risk",
                         refresh_interval_seconds=self.settings.okx_account_position_risk_refresh_interval_seconds,
-                        force=force,
+                        force=state_force,
                         fetcher=lambda: self._optional_client_call("get_account_position_risk"),
                         fallback=self._raw_snapshot_value("account_position_risk", default={"code": "0", "data": []}),
                     ),
@@ -347,7 +372,22 @@ class OKXAccountService:
                 )
                 if self._latest_snapshot is None:
                     raise
+                if state_force:
+                    return None
                 return self._latest_snapshot
+
+    @staticmethod
+    def _raise_account_state_refresh_error(
+        *,
+        context: str,
+        result: Any,
+    ) -> None:
+        if isinstance(result, Exception):
+            raise RuntimeError(f"okx_account_state_refresh_failed:{context}") from result
+        if isinstance(result, list):
+            for item in result:
+                if isinstance(item, Exception):
+                    raise RuntimeError(f"okx_account_state_refresh_failed:{context}") from item
 
     async def _positions_payload(self) -> dict[str, Any]:
         if self.settings.trading_product_type != "derivatives":
@@ -365,12 +405,19 @@ class OKXAccountService:
         force: bool = False,
         fetcher,
     ) -> dict[str, Any]:
+        now = utc_now()
         cached = self._aux_payload_cache.get(cache_key)
+        backoff_until = self._aux_payload_backoff_until.get(cache_key)
+        if cached is not None and backoff_until is not None:
+            if now < backoff_until:
+                return cached[1]
+            self._aux_payload_backoff_until.pop(cache_key, None)
         if cached is not None and not force:
             fetched_at, payload = cached
-            if (utc_now() - fetched_at).total_seconds() < refresh_interval_seconds:
+            if (now - fetched_at).total_seconds() < refresh_interval_seconds:
                 return payload
         payload = await fetcher()
+        self._aux_payload_backoff_until.pop(cache_key, None)
         self._aux_payload_cache[cache_key] = (utc_now(), payload)
         return payload
 
@@ -410,7 +457,9 @@ class OKXAccountService:
                     cached_payload = {"code": "0", "data": []}
                 # new_fetched_at = now + (backoff - refresh_interval) 让
                 # _cached_aux_payload 在 (now + backoff) 之前把缓存视为新鲜.
-                new_fetched_at = utc_now() + timedelta(
+                now = utc_now()
+                self._aux_payload_backoff_until[cache_key] = now + timedelta(seconds=backoff_seconds)
+                new_fetched_at = now + timedelta(
                     seconds=backoff_seconds - refresh_interval_seconds
                 )
                 self._aux_payload_cache[cache_key] = (new_fetched_at, cached_payload)

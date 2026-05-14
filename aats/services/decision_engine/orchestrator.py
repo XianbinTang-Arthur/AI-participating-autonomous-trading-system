@@ -164,6 +164,7 @@ class DecisionOrchestrator:
         feature_snapshot_hint: EventEnvelope | None = None,
         market_snapshot_hint: MarketSnapshot | None = None,
     ) -> PositionTarget:
+        await self._refresh_account_state_for_decision()
         health_snapshot = await asyncio.to_thread(
             self.context_builder.build_health_snapshot,
             decision_id=decision_id,
@@ -393,6 +394,23 @@ class DecisionOrchestrator:
             ),
         )
         return target
+
+    async def _refresh_account_state_for_decision(self) -> None:
+        settings = self.context_builder.settings
+        capabilities = getattr(self.context_builder.mode_controller, "environment_capabilities", None)
+        if not bool(getattr(capabilities, "exchange_coupled", False)):
+            return
+        if settings.account_backend != "okx" or not settings.account_read_enabled:
+            return
+        refresh = getattr(self.context_builder.account_service, "refresh", None)
+        if not callable(refresh):
+            return
+        try:
+            await refresh(force_account_state=True)
+        except TypeError as exc:
+            if "force_account_state" not in str(exc):
+                raise
+            await refresh()
 
     # R2-P0-D1：publish 硬超时。若 NATS 背压或 bus 内部死锁，publish_model 可能
     # 永不返回。_publish_failure_best_effort 在 raise 原始业务异常之前 await 这个

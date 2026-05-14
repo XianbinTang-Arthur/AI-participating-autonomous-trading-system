@@ -1154,6 +1154,61 @@ class TestExecutionRecovery(unittest.TestCase):
         self.assertEqual(close_outcome.realized_pnl_delta, Decimal("0.100"))
         self.assertIn("fill_gap_compensated:2", artifacts.status.notes)
 
+    def test_exchange_coupled_fill_gap_replay_ignores_configured_initial_balance_without_bootstrap(self) -> None:
+        execution_repo = InMemoryExecutionRepository()
+        fill_outcome_repo = InMemoryFillOutcomeRepository()
+        now = utc_now()
+        execution_repo.save_fill(
+            FillEvent(
+                fill_id="fill_exchange_coupled_no_seed",
+                decision_id="decision_exchange_coupled_no_seed",
+                intent_id="intent_exchange_coupled_no_seed",
+                client_order_id="client_exchange_coupled_no_seed",
+                exchange_order_id="exchange_exchange_coupled_no_seed",
+                symbol="BTC-USDT-SWAP",
+                venue="OKX",
+                side="buy",
+                fill_qty=Decimal("0.001"),
+                fill_price=Decimal("78000"),
+                fee_amount=Decimal("0"),
+                fee_currency="USDT",
+                product_type="derivatives",
+                margin_mode="cross",
+                position_mode="long_short_mode",
+                pos_side="long",
+                exposure_side="long",
+                execution_action="enter",
+                position_intent="open_long",
+                liquidity_role="taker",
+                exchange_timestamp=now,
+                ingestion_timestamp=now,
+            )
+        )
+        recovery = self._service(
+            execution_repo=execution_repo,
+            fill_outcome_repo=fill_outcome_repo,
+            bootstrap_portfolio_from_exchange=False,
+            exchange_coupled=True,
+            settings_override={
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ["BTC-USDT-SWAP"],
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "initial_usdt_balance": 1234.5,
+                "bootstrap_portfolio_from_exchange": False,
+            },
+        )
+
+        artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=1234.5))
+
+        outcome = fill_outcome_repo.get_outcome("fill_exchange_coupled_no_seed")
+        self.assertIsNotNone(outcome)
+        assert outcome is not None
+        self.assertEqual(outcome.balances_before.get("USDT"), Decimal("0"))
+        self.assertIn("fill_gap_compensated:1", artifacts.status.notes)
+
     def test_recovery_backfills_fill_outcomes_via_portfolio_outbox_projection(self) -> None:
         execution_repo = InMemoryExecutionRepository()
         fill_outcome_repo = InMemoryFillOutcomeRepository()
@@ -1312,6 +1367,7 @@ class TestExecutionRecovery(unittest.TestCase):
         portfolio_repo: InMemoryPortfolioRepository | None = None,
         kill_switch: KillSwitch | None = None,
         bootstrap_portfolio_from_exchange: bool = False,
+        exchange_coupled: bool | None = None,
         reconciliation_repo: InMemoryReconciliationRepository | None = None,
         strategy_runtime_repo: InMemoryStrategyRuntimeRepository | None = None,
         fill_outcome_repo: InMemoryFillOutcomeRepository | None = None,
@@ -1343,6 +1399,7 @@ class TestExecutionRecovery(unittest.TestCase):
             price_provider=lambda _symbol: Decimal("0"),
             kill_switch=kill_switch or KillSwitch(),
             bootstrap_portfolio_from_exchange=bootstrap_portfolio_from_exchange,
+            exchange_coupled=exchange_coupled,
             reconciliation_stale_after_seconds=settings.reconciliation_stale_after_seconds,
             fill_outcome_repo=fill_outcome_repo,
             persistent_lot_book_service=persistent_lot_book_service,  # type: ignore[arg-type]

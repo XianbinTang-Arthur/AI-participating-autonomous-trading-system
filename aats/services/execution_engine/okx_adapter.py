@@ -228,7 +228,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
             return None
         if not self._is_risk_reducing_intent(intent):
             return None
-        snapshot = await self.account_service.refresh()
+        snapshot = await self._refresh_account_snapshot_for_balance_check()
         instrument = self.account_service.instrument_metadata(intent.symbol)
         if snapshot is None or instrument is None:
             return None
@@ -287,7 +287,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
         return await self.submit(order_intent_from_leg_order_intent(leg_intent))
 
     async def submit(self, intent: OrderIntent) -> tuple[OrderState, list[FillEvent]]:
-        snapshot = await self.account_service.refresh()
+        snapshot = await self._refresh_account_snapshot_for_balance_check()
         instrument = self.account_service.instrument_metadata(intent.symbol)
         if snapshot is None or instrument is None:
             raise RuntimeError(f"OKX instrument metadata unavailable for symbol={intent.symbol}")
@@ -438,6 +438,17 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 ),
                 [],
             )
+
+    async def _refresh_account_snapshot_for_balance_check(self) -> ExchangeAccountSnapshot | None:
+        refresh = getattr(self.account_service, "refresh", None)
+        if not callable(refresh):
+            return None
+        try:
+            return await refresh(force_account_state=True)
+        except TypeError as exc:
+            if "force_account_state" not in str(exc):
+                raise
+            return await refresh()
 
     async def cancel(self, order_state: OrderState) -> tuple[OrderState, list[FillEvent]]:
         if order_state.status in {"FILLED", "CANCELED", "REJECTED", "FAILED", "EXPIRED"}:
