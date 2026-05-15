@@ -42,6 +42,14 @@ class _FakeExecutionRepo:
         return [fill for fill in self._fills if fill.get("decision_id") in allowed]
 
 
+class _NoneRowExecutionRepo(_FakeExecutionRepo):
+    def order_states_for_decision(self, decision_id: str):
+        return None
+
+    def fills_for_decisions(self, decision_ids: list[str]):
+        return None
+
+
 class _FakeMappingResult:
     def __init__(self, row: dict[str, Any] | None) -> None:
         self._row = row
@@ -271,6 +279,19 @@ def test_decision_truth_chain_links_repo_order_fill_and_lifecycle_refs() -> None
     }
     assert payload["execution_science"]["sequence_validation"]["status"] == "missing_orderbook_refs"
     assert payload["execution_science"]["sequence_validation"]["missing_snapshot_ref_sequence_stage_count"] == 1
+
+
+def test_decision_repo_payload_lookup_treats_none_rows_as_empty() -> None:
+    query = _service()
+    query.runtime.execution_repo = _NoneRowExecutionRepo()
+
+    order_payloads, order_issue = query._decision_order_payloads_from_repo("decision-1")
+    fill_payloads, fill_issue = query._decision_fill_payloads_from_repo("decision-1")
+
+    assert order_payloads == []
+    assert order_issue is None
+    assert fill_payloads == []
+    assert fill_issue is None
 
 
 def test_decision_truth_chain_reports_linked_orderbook_context_by_stage() -> None:

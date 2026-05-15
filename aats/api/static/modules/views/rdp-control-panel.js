@@ -46,6 +46,33 @@ const OBSERVATION_STATUS_LABELS = {
   rolled_back: "已回滚",
 };
 
+const OBSERVATION_RECOMMENDATION_LABELS = {
+  review: "人工复核",
+  keep: "继续观察",
+  continue: "继续观察",
+  rollback: "回滚",
+  rollback_recommended: "回滚",
+  none: "无新增动作",
+};
+
+const EFFECTIVENESS_DETAIL_FIELD_LABELS = {
+  conclusion: "结论",
+  behavior: "行为指标",
+  execution: "执行指标",
+  operations: "运维指标",
+  governance: "治理结论",
+};
+
+const EFFECTIVENESS_DETAIL_VALUE_LABELS = {
+  rollback_triggered: "已触发回滚",
+  positive: "正向",
+  negative: "负向",
+  mixed: "混合",
+  neutral: "中性",
+  passed: "通过",
+  failed: "失败",
+};
+
 const WORKFLOW_LABELS = {
   data_maintenance: "刷新数据",
   research_cycle: "运行完整 RDP",
@@ -215,6 +242,42 @@ function labelForObservationStatus(status) {
   return OBSERVATION_STATUS_LABELS[status] || readableState(status || "unknown", "未知");
 }
 
+function labelForObservationRecommendation(recommendation) {
+  const normalized = String(recommendation || "").trim();
+  if (!normalized) return "";
+  return OBSERVATION_RECOMMENDATION_LABELS[normalized] || localizeError(normalized, "待复核");
+}
+
+function labelForEffectivenessDetailField(field) {
+  const normalized = String(field || "").trim();
+  if (!normalized) return "指标";
+  return EFFECTIVENESS_DETAIL_FIELD_LABELS[normalized] || localizeError(normalized, "指标");
+}
+
+function labelForEffectivenessDetailValue(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return "待确认";
+  return EFFECTIVENESS_DETAIL_VALUE_LABELS[normalized] || localizeError(normalized, "待确认");
+}
+
+function formatEffectivenessDetail(detail) {
+  const text = String(detail || "").trim();
+  if (!text) return "";
+  const segments = text.split(";").map((segment) => segment.trim()).filter(Boolean);
+  const pairs = segments
+    .map((segment) => {
+      const separatorIndex = segment.indexOf("=");
+      if (separatorIndex <= 0 || separatorIndex >= segment.length - 1) return null;
+      return [
+        segment.slice(0, separatorIndex).trim(),
+        segment.slice(separatorIndex + 1).trim(),
+      ];
+    })
+    .filter(Boolean);
+  if (!pairs.length || pairs.length !== segments.length) return localizeError(text);
+  return `观察评估：${pairs.map(([field, value]) => `${labelForEffectivenessDetailField(field)} ${labelForEffectivenessDetailValue(value)}`).join("；")}`;
+}
+
 function labelForApplyResult(status) {
   return APPLY_RESULT_LABELS[status] || readableState(status || "unknown", "未执行");
 }
@@ -277,7 +340,10 @@ function renderWorkItem({
 }
 
 function buildObservationAction(item, canAdmin, tone = "secondary", releaseHistoryStale = false) {
-  return actionButton("运行观察", "rdp-run-observation", item.release_id, tone, {
+  const status = String(item?.observation_status || item?.observation?.status || "").trim();
+  const shouldRerun = ["completed", "rollback_recommended", "rolled_back"].includes(status);
+  const label = shouldRerun ? "重新运行观察" : "运行观察";
+  return actionButton(label, "rdp-run-observation", item.release_id, tone, {
     disabled: !canAdmin || releaseHistoryStale,
     title: !canAdmin
       ? "当前账号只有查看权限"
@@ -306,6 +372,8 @@ function buildRollbackAction(item, canAdmin, tone = "warning", releaseHistorySta
 function buildObservationCard(item, canAdmin, releaseHistoryStale = false) {
   const observation = item.observation || {};
   const effectiveness = item.effectiveness || {};
+  const recommendationLabel = labelForObservationRecommendation(observation.recommendation);
+  const effectivenessDetail = formatEffectivenessDetail(effectiveness.detail);
   const rollbackFirst = item.observation_status === "rollback_recommended";
   return renderWorkItem({
     tone: toneForObservationStatus(item.observation_status),
@@ -317,8 +385,8 @@ function buildObservationCard(item, canAdmin, releaseHistoryStale = false) {
     ],
     body: `
       <p class="meta-copy">当前参数集 ${escapeHtml(shortId(item.parameter_set_id))}，上一版 ${escapeHtml(shortId(item.previous_parameter_set_id))}</p>
-      <p class="meta-copy">观察结论：${escapeHtml(labelForObservationStatus(observation.status || item.observation_status))}${observation.recommendation ? `，建议 ${escapeHtml(observation.recommendation)}` : ""}</p>
-      ${effectiveness.detail ? `<p class="meta-copy">${escapeHtml(effectiveness.detail)}</p>` : ""}
+      <p class="meta-copy">观察结论：${escapeHtml(labelForObservationStatus(observation.status || item.observation_status))}${recommendationLabel ? `，建议 ${escapeHtml(recommendationLabel)}` : ""}</p>
+      ${effectivenessDetail ? `<p class="meta-copy">${escapeHtml(effectivenessDetail)}</p>` : ""}
     `,
     meta: [
       item.created_at ? `发布于 ${relativeTime(item.created_at)}` : "",

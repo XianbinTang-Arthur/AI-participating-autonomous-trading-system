@@ -3769,6 +3769,8 @@ class OperatorQueryService:
                 rows = order_states_for_scope(execution_repo, self.state_scope)
         except Exception as exc:
             return [], f"order_lookup_failed:{type(exc).__name__}"
+        if rows is None:
+            rows = []
         payloads: list[dict[str, Any]] = []
         for row in rows:
             payload = self._record_payload_dict(row)
@@ -3803,6 +3805,8 @@ class OperatorQueryService:
                 rows = fills_for_scope(execution_repo, self.state_scope)
         except Exception as exc:
             return [], f"fill_lookup_failed:{type(exc).__name__}"
+        if rows is None:
+            rows = []
         payloads: list[dict[str, Any]] = []
         for row in rows:
             payload = self._record_payload_dict(row)

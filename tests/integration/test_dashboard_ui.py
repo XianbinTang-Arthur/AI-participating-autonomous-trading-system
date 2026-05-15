@@ -4244,6 +4244,65 @@ console.log(JSON.stringify({
         self.assertIn('"rollbackDisabledWhenStale":true', stdout)
         self.assertIn('"observationDisabledWhenStale":true', stdout)
 
+    def test_rdp_completed_observation_cards_localize_machine_diagnostics(self) -> None:
+        script = """
+import { renderRdpView } from './aats/api/static/modules/views/rdp-view.js';
+
+const rawDetail = 'conclusion=rollback_triggered; behavior=positive; execution=positive; operations=negative; governance=mixed';
+const html = renderRdpView({
+  session: { role: 'admin', identity: 'admin' },
+  authProviders: { auth_enabled: true },
+  errors: {},
+  uiState: {},
+  uiHints: { pendingPanels: {} },
+  rdpWorkbenchOverview: {
+    status: 'ready',
+    primary_action: { label: '运行完整 RDP', ui_action: 'rdp-trigger-workflow', value: 'research_cycle', enabled: true },
+    secondary_actions: [],
+  },
+  rdpWorkbenchItems: { items: [] },
+  rdpWorkbenchAlerts: { integrity_alerts: [] },
+  rdpTuningOverview: { status: 'ready' },
+  rdpTuningProposals: { proposals: [] },
+  rdpControl: {
+    health: { status: 'ready' },
+    overview: {},
+    recommendations: [],
+    observation_queue: [{
+      release_id: 'rel-completed-1',
+      family: 'independent',
+      timeframe: '15m',
+      parameter_set_id: 'ps-1',
+      previous_parameter_set_id: 'ps-0',
+      observation_status: 'completed',
+      apply_result: 'success',
+      is_current_active_release: true,
+      observation: { status: 'completed', recommendation: 'review' },
+      effectiveness: { detail: rawDetail },
+    }],
+    release_history_status: { stale: false, source: 'postgres' },
+  },
+});
+
+console.log(JSON.stringify({
+  completedActionLabel: html.includes('重新运行观察'),
+  recommendationLocalized: html.includes('建议 人工复核') && !html.includes('建议 review'),
+  detailLocalized: html.includes('观察评估：结论 已触发回滚')
+    && html.includes('行为指标 正向')
+    && html.includes('执行指标 正向')
+    && html.includes('运维指标 负向')
+    && html.includes('治理结论 混合'),
+  rawDetailHidden: !html.includes(rawDetail) && !html.includes('conclusion=rollback_triggered'),
+}));
+"""
+        result = _run_node_module(script, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"completedActionLabel":true', stdout)
+        self.assertIn('"recommendationLocalized":true', stdout)
+        self.assertIn('"detailLocalized":true', stdout)
+        self.assertIn('"rawDetailHidden":true', stdout)
+
     def test_rdp_action_handlers_use_default_observation_windows_without_prompt(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """
