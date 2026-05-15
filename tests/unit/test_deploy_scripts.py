@@ -12,11 +12,27 @@ def test_sync_to_wsl2_pull_tracks_current_source_head() -> None:
     assert "git rev-parse HEAD" in text
 
 
+def test_sync_to_wsl2_branch_drift_repair_does_not_swallow_checkout_failures() -> None:
+    text = (REPO_ROOT / "scripts" / "sync_to_wsl2.sh").read_text(encoding="utf-8")
+
+    assert "checkout -b '$source_branch' FETCH_HEAD 2>/dev/null || true" not in text
+    assert "git -C $WSL_PROJECT fetch '$WIN_PROJECT_WSL' '$source_branch'" in text
+
+
 def test_deploy_script_rejects_dirty_synced_deploys() -> None:
     text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
 
     assert "当前同步机制只会部署已提交的 Git HEAD" in text
     assert "继续部署 WSL2 侧现有代码？[y/N]" in text
+
+
+def test_deploy_script_commit_only_uses_precisely_staged_files() -> None:
+    text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+
+    assert "\n            git add -A" not in text
+    assert "--commit 只提交已精确暂存的文件" in text
+    assert "repo_has_staged_changes()" in text
+    assert "repo_has_unstaged_or_untracked_changes()" in text
 
 
 def test_deploy_script_health_check_covers_current_topology() -> None:
@@ -64,6 +80,23 @@ def test_deploy_script_accepts_root_and_legacy_wsl2_env_file_locations() -> None
     assert 'test -f $WSL_PROJECT/$DEPLOY_DIR/.env.wsl2' in text
 
 
+def test_deploy_script_reports_actual_wsl_deployed_head() -> None:
+    text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+
+    assert "Windows HEAD:" in text
+    assert "WSL HEAD:" in text
+    assert "实际部署版本" in text
+    assert "git -C $WSL_PROJECT rev-parse HEAD" in text
+
+
+def test_deploy_script_syncs_postgres_password_with_psql_variables() -> None:
+    text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+
+    assert "-v pg_user=" in text
+    assert "-v pg_password=" in text
+    assert 'ALTER USER :"pg_user" PASSWORD :\'pg_password\';' in text
+
+
 def test_deploy_script_provisions_tls_for_live_profiles_and_uses_https_health_checks() -> None:
     text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
     compose_text = (REPO_ROOT / "deploy" / "wsl2-dev" / "docker-compose.aats.yml").read_text(encoding="utf-8")
@@ -87,3 +120,20 @@ def test_derivatives_live_overlay_enables_execution_command_flow() -> None:
     ).read_text(encoding="utf-8")
 
     assert 'AATS_EXECUTION_COMMAND_FLOW_ENABLED: "true"' in compose_text
+
+
+def test_deploy_runbook_no_longer_points_to_stale_sync_or_bootstrap_paths() -> None:
+    runbook = (REPO_ROOT / "deploy" / "wsl2-dev" / "RUNBOOK.md").read_text(encoding="utf-8")
+    readme = (REPO_ROOT / "deploy" / "wsl2-dev" / "README.md").read_text(encoding="utf-8")
+    sync_workflow = (REPO_ROOT / "docs" / "operations" / "wsl2_sync_workflow.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "单独 rsync 到 `~/aats-deploy/`" not in runbook
+    assert "python3 -m aats.scripts.bootstrap_database" not in runbook
+    assert "python3 -m aats.api.main" not in runbook
+    assert "docker compose --env-file deploy/wsl2-dev/.env.wsl2" not in runbook
+    assert "docker compose down -v" not in readme
+    assert "envs/.env.wsl2-dev" not in readme
+    assert "docker compose --env-file .env.wsl2 up -d" not in sync_workflow
+    assert "bash scripts/deploy.sh --profile derivatives-live --skip-commit" in sync_workflow

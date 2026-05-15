@@ -155,7 +155,7 @@ cmd_pull() {
         if [[ "$wsl_branch" == worktree-agent-* || "$wsl_branch" == "(detached)" ]]; then
             echo "[sync pull] 检测到 sub-agent 遗留 branch / detached HEAD, 自动切回 $source_branch"
             # 工作区已预检 clean, 安全切换
-            if ! wsl_run "git -C $WSL_PROJECT checkout '$source_branch' 2>/dev/null || git -C $WSL_PROJECT checkout -b '$source_branch' FETCH_HEAD 2>/dev/null || true"; then
+            if ! wsl_run "git -C $WSL_PROJECT fetch '$WIN_PROJECT_WSL' '$source_branch' && (git -C $WSL_PROJECT checkout '$source_branch' 2>/dev/null || git -C $WSL_PROJECT checkout -b '$source_branch' FETCH_HEAD 2>/dev/null)"; then
                 echo "[ERROR] 无法自动切回 $source_branch; 手动执行:" >&2
                 echo "  wsl -d $DISTRO -- bash -c 'cd $WSL_PROJECT && git checkout $source_branch'" >&2
                 exit 2

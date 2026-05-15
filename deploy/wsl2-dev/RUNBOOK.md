@@ -43,9 +43,9 @@ which python3
 
 ### 0.5 检查 git 仓库位置
 本项目源码假设位于 Windows 路径 `D:\文件\project\AIParticipatingAutonomousTradingSystem`，
-WSL2 内对应 `/mnt/d/文件/project/AIParticipatingAutonomousTradingSystem`。
-直接在 `/mnt/d/...` 下运行 docker compose 是可以的；但如果 I/O 太慢可以
-把 deploy 目录单独 rsync 到 `~/aats-deploy/` 内运行。
+WSL2 native checkout 位于 `~/aats`。标准同步入口是 `scripts/sync_to_wsl2.sh pull`，
+标准发布入口是 `scripts/deploy.sh`。不要从 `/mnt/d/...` 直接发布，也不要用
+`rsync` 复制 deploy 目录。
 
 ---
 
@@ -53,7 +53,7 @@ WSL2 内对应 `/mnt/d/文件/project/AIParticipatingAutonomousTradingSystem`。
 
 ### 1.1 准备 .env.wsl2
 ```bash
-cd /mnt/d/文件/project/AIParticipatingAutonomousTradingSystem
+cd ~/aats
 cp configs/templates/.env.wsl2.example .env.wsl2
 # 用编辑器把 POSTGRES_PASSWORD / GRAFANA_ADMIN_PASSWORD 改成长随机串
 nano .env.wsl2
@@ -96,29 +96,25 @@ curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3000/api/health
 
 ### 1.4 初始化 Postgres schema 和 migrations
 ```bash
-cd /mnt/d/文件/project/AIParticipatingAutonomousTradingSystem
-export AATS_DATABASE_URL="postgresql+psycopg2://aats:$(grep POSTGRES_PASSWORD .env.wsl2 | cut -d= -f2)@127.0.0.1:5432/aats"
-python3 -m aats.scripts.bootstrap_database  # 假设有这个脚本；如果没有就走 build_runtime 启动一次
+# 当前 schema 初始化和 migrations 由标准部署启动链路触发。
+# 从 Windows repo root 执行：
+bash scripts/deploy.sh --profile derivatives-live --skip-commit
 ```
-（如果项目里没有 bootstrap_database 脚本，跳过这一步：第一次 build_runtime
-启动 monolith 时会自动 create_all + apply_current_migrations。）
+不要调用旧的 `aats.scripts.bootstrap_database` 占位模块；当前仓库没有这个入口。
 
 ---
 
 ## 2. 单进程冒烟测试（Day 1）
 
-在切到多进程之前，先用 monolith 跑通基础能力。
+如需单进程形态冒烟，用当前保留的 monolith profile，而不是手动启动不存在的
+`aats.api.main` 入口。
 
 ### 2.1 用真实 Postgres 跑 monolith
 ```bash
-cd /mnt/d/文件/project/AIParticipatingAutonomousTradingSystem
-export AATS_DATABASE_URL="..."  # 同上
-export AATS_STORAGE_MODE=postgres
-unset AATS_PROCESS_ROLE  # monolith 模式
-python3 -m aats.api.main  # 或者项目的主入口
+# Windows repo root
+bash scripts/deploy.sh --profile derivatives-live-monolith --skip-commit --timeout 120
 ```
-观察日志没有 traceback，dashboard 在 http://127.0.0.1:8000 能打开（端口
-按项目 settings.api_port 为准）。
+观察部署健康检查通过，Operator 地址以部署报告打印的端口为准。
 
 ### 2.2 验证 advisory lock 拿到了 monolith 的 lock_key
 ```bash
@@ -137,45 +133,20 @@ Ctrl+C 即可。lock 会自动释放。
 ⚠️ 多进程切片化已经是当前主要拓扑，但本地 WSL2 栈仍是开发/演练环境，不是生产 HA 模板。
 真实资金运行前必须按 `DEPLOYMENT.md` 和 `docs/operations/operator_checklist.md` 完成 trading-ready 检查。
 
-### 3.1 一进程一终端
-开 4 个 WSL2 终端，分别 cd 到项目根目录，分别 export 环境变量：
+### 3.1 标准 4 进程拓扑
+当前 4 进程拓扑由 `scripts/deploy.sh` 管理，不再开 4 个终端手动 export role。
 
-终端 A — gateway：
 ```bash
-export AATS_DATABASE_URL="..."
-export AATS_STORAGE_MODE=postgres
-export AATS_PROCESS_ROLE=gateway
-python3 -m aats.api.main
+# Windows repo root
+bash scripts/deploy.sh --profile derivatives-live --skip-commit --timeout 120
 ```
 
-终端 B — market：
-```bash
-export AATS_DATABASE_URL="..."
-export AATS_STORAGE_MODE=postgres
-export AATS_PROCESS_ROLE=market
-python3 -m aats.api.main
-```
-
-终端 C — decision：
-```bash
-export AATS_DATABASE_URL="..."
-export AATS_STORAGE_MODE=postgres
-export AATS_PROCESS_ROLE=decision
-python3 -m aats.api.main
-```
-
-终端 D — execution：
-```bash
-export AATS_DATABASE_URL="..."
-export AATS_STORAGE_MODE=postgres
-export AATS_PROCESS_ROLE=execution
-python3 -m aats.api.main
-```
+部署报告和健康检查应显示 `aats-gateway`、`aats-market`、`aats-decision`、
+`aats-execution`、`aats-rdp-daemon` 均为 running healthy。
 
 ### 3.2 验证 4 把 advisory lock 互不冲突
 ```bash
-docker compose --env-file deploy/wsl2-dev/.env.wsl2 exec postgres \
-  psql -U aats -d aats -c "SELECT objid, granted FROM pg_locks WHERE locktype='advisory';"
+wsl -d Ubuntu bash -lc 'set -a; source ~/aats/.env.wsl2; set +a; docker exec aats-postgres psql -U "$POSTGRES_USER" -d aats -c "SELECT objid, granted FROM pg_locks WHERE locktype='\''advisory'\'';"'
 ```
 应当看到 4 条 granted=true 的记录，objid 各不相同（因为 per-role hash
 派生）。
@@ -190,7 +161,7 @@ docker compose --env-file deploy/wsl2-dev/.env.wsl2 exec postgres \
 
 ### 4.1 手动备份
 ```bash
-cd /mnt/d/文件/project/AIParticipatingAutonomousTradingSystem/deploy/wsl2-dev
+cd ~/aats/deploy/wsl2-dev
 RETENTION_DAYS=14 ./scripts/backup_postgres.sh
 ```
 备份产出落到 `deploy/wsl2-dev/backups/`，文件名 `aats-YYYYmmdd-HHMMSS.dump`。
@@ -200,12 +171,12 @@ RETENTION_DAYS=14 ./scripts/backup_postgres.sh
 ```bash
 crontab -e
 # 加一行：每天凌晨 03:00 备份
-0 3 * * * cd /mnt/d/文件/project/AIParticipatingAutonomousTradingSystem/deploy/wsl2-dev && RETENTION_DAYS=14 ./scripts/backup_postgres.sh >> /tmp/aats-backup.log 2>&1
+0 3 * * * cd ~/aats/deploy/wsl2-dev && RETENTION_DAYS=14 ./scripts/backup_postgres.sh >> /tmp/aats-backup.log 2>&1
 ```
 
 ### 4.3 恢复演练（建议每月一次）
 ```bash
-cd /mnt/d/文件/project/AIParticipatingAutonomousTradingSystem/deploy/wsl2-dev
+cd ~/aats/deploy/wsl2-dev
 ./scripts/restore_postgres.sh latest
 # 脚本会要求输入 yes 确认
 ```
@@ -230,12 +201,12 @@ cd /mnt/d/文件/project/AIParticipatingAutonomousTradingSystem/deploy/wsl2-dev
 
 ### 5.1 服务起不来
 ```bash
-docker compose --env-file .env.wsl2 logs --tail=100 <service_name>
+wsl -d Ubuntu -- docker logs <container_name> --tail 100
 ```
 常见原因：
 - 端口被占（5432/6379/4222 等）→ 关掉宿主 Postgres / 改 compose 端口映射
 - 内存不足 → `docker stats` 看哪个容器在喊 OOM；调小 deploy 限额
-- 数据卷权限 → `docker compose down -v` 然后重新 up（注意：会清空数据）
+- 数据卷权限 → 先停止发布流程并做备份；不要直接清空 volume，必须先人工确认影响范围
 
 ### 5.2 monolith 起来后立刻退出
 查日志找 `database_single_runtime_guard_failed`：
@@ -249,14 +220,14 @@ docker compose --env-file .env.wsl2 logs --tail=100 <service_name>
 
 ### 5.3 多进程 advisory lock 冲突
 症状：4 个进程里有一两个起不来，日志报 `database_single_runtime_guard_failed`。
-原因：可能两个进程的 AATS_PROCESS_ROLE 取了同样的值。
-解决：检查 `env | grep AATS_PROCESS_ROLE`，确认 4 个终端各自不同。
+原因：profile 或 compose 注入的 `AATS_PROCESS_ROLE` 可能漂移，或旧容器没有干净退出。
+解决：检查标准部署报告和对应容器日志，确认每个容器的 process role 与容器名一致。
 
 ### 5.4 NATS JetStream stream 没创建
 等到 Stage 4 把 build_runtime 接通后，第一次启动会自动 ensure_stream。
 如果看不到 stream，手动创建：
 ```bash
-docker compose --env-file .env.wsl2 exec nats nats stream add AATS_EVENTS \
+wsl -d Ubuntu -- docker exec aats-nats nats stream add AATS_EVENTS \
   --subjects "aats.*" --storage file --retention limits --discard old --max-age 7d
 ```
 
@@ -278,7 +249,7 @@ AATS 应用容器尚未启动时，Prometheus targets 会显示 DOWN，这是正
 
 ### 5.7 备份脚本失败
 ```bash
-cd deploy/wsl2-dev
+cd ~/aats/deploy/wsl2-dev
 bash -x ./scripts/backup_postgres.sh 2>&1 | tee /tmp/backup-debug.log
 ```
 最常见：`POSTGRES_PASSWORD` 没正确读到（.env.wsl2 没有 export）。
@@ -300,8 +271,8 @@ asyncio.run(build_runtime())
 
 ### 6.2 升级 docker 镜像
 ```bash
-docker compose --env-file .env.wsl2 pull
-docker compose --env-file .env.wsl2 up -d
+# Windows repo root
+bash scripts/deploy.sh --profile derivatives-live --skip-commit --no-cache --timeout 180
 ```
 **升级前一定要先备份**：`./scripts/backup_postgres.sh`。
 

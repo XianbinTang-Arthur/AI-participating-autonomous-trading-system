@@ -77,12 +77,10 @@ cd ~/aats
 cp configs/templates/.env.wsl2.example .env.wsl2
 $EDITOR .env.wsl2     # 把 *_change_me 改成你自己的值
 
-# 3. 拉起全部服务
-cd deploy/wsl2-dev
-docker compose --env-file ../../.env.wsl2 up -d
+# 3. 从 Windows repo root 走标准部署入口拉起基础设施和应用服务
+bash scripts/deploy.sh --profile derivatives-live --skip-commit
 
-# 4. 看一下健康状况（首次启动 ~30s）
-docker compose --env-file ../../.env.wsl2 ps
+# 4. 查看部署报告中的健康检查结果；必要时再跑 scripts/sync_to_wsl2.sh check 对齐 HEAD
 
 # 5. 验证关键端口
 docker exec aats-postgres pg_isready -U aats  # Postgres
@@ -101,27 +99,19 @@ curl -s http://localhost:16686/ | head -1      # Jaeger UI
 ## 日常使用
 
 ```bash
-# 启动
-docker compose --env-file ../../.env.wsl2 up -d
+# 发布 / 重建 / 健康检查
+bash scripts/deploy.sh --profile derivatives-live --skip-commit
 
-# 查看日志（跟踪一个服务）
-docker compose logs -f postgres
-
-# 重启某个服务
-docker compose restart nats
-
-# 停止全部（保留数据）
-docker compose down
-
-# 完全清理（删除全部数据，慎用！）
-docker compose down -v
+# 确认 Windows 与 WSL2 checkout 是否一致
+bash scripts/sync_to_wsl2.sh check
 ```
 
 ---
 
 ## 连接信息（AATS 进程侧 .env）
 
-把下面的内容追加到 `D:/文件/project/.../envs/.env.wsl2-dev` （或你实际使用的 .env），然后让 4 个进程加载：
+这些连接信息由 `scripts/deploy.sh` 通过根目录 `.env.wsl2` 和 profile env 文件注入。
+不要再维护单独的旧式 WSL2 dev env 文件或手动启动 4 个进程。
 
 ```bash
 # Postgres
@@ -201,7 +191,7 @@ cat backup_2026-04-07.dump | docker exec -i aats-postgres pg_restore -U aats -d 
 
 - 全部端口仅监听 `127.0.0.1`，**不会**暴露到局域网或公网
 - `.env.wsl2` 已在 `.gitignore` 排除，密码不会泄露到 git
-- **永远不要**直接在生产环境复用这套 compose；这只是开发栈
+- 发布和重启统一使用 `scripts/deploy.sh`；不要把本文的基础设施细节当作第二套部署入口
 - NATS dev 配置未启用生产级认证/多节点 HA；只适合本机演练
 - live profile 即使能在本地跑起来，也必须按 `DEPLOYMENT.md` 和 Operator checklist 完成 trading-ready 检查。
 

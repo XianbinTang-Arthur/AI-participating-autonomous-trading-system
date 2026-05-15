@@ -8,7 +8,7 @@
 | 项目 | 内容 |
 |---|---|
 | 创建日期 | 2026-04-07 |
-| 文档作用 | 把 Windows 上的代码改动 sync 到 WSL2 native checkout 的标准流程，让 docker compose / 全量 pytest / 集成测试在 ext4 上跑而不是 9P mount 上 |
+| 文档作用 | 把 Windows 上的已提交代码同步到 WSL2 native checkout；发布仍统一走 `scripts/deploy.sh`，测试可在 ext4 checkout 上运行 |
 | 关联脚本 | `scripts/sync_to_wsl2.sh` |
 | 维护责任 | 同步流程或目标路径变化时更新本文 + memory |
 
@@ -60,29 +60,27 @@ native ext4 上 (`/home/arthur/aats`) 跑这些工作负载没有上述问题。
 
 ## 3. 标准日常流程
 
-### 3.1 在 Windows 上做完代码改动后想跑 docker / pytest 全套
+### 3.1 在 Windows 上做完代码改动后想发布或跑 WSL2 验证
 
 ```bash
 # Windows 端：commit 改动
 git add <files>
 git commit -m "..."
 
-# Sync 到 WSL2
-scripts/sync_to_wsl2.sh pull
+# 发布到当前 profile。deploy.sh 会先同步 Windows committed HEAD 到 WSL2。
+bash scripts/deploy.sh --profile derivatives-live --skip-commit
 
-# 在 WSL2 端跑 docker compose
-wsl -d Ubuntu --cd /home/arthur/aats/deploy/wsl2-dev bash -c "
-  docker compose --env-file .env.wsl2 up -d
-  docker compose -f docker-compose.aats.yml --env-file .env.wsl2 build
-  docker compose -f docker-compose.aats.yml --env-file .env.wsl2 up -d
-"
+# 如果只是想在 WSL2 native checkout 上跑测试，不发布：
+scripts/sync_to_wsl2.sh pull
+wsl -d Ubuntu bash -lc "cd ~/aats && source ~/aats-venv/bin/activate && pytest tests/integration/ -x -q"
 ```
 
 ### 3.2 想直接进 WSL2 项目目录手动操作
 
 ```bash
 scripts/sync_to_wsl2.sh shell
-# 现在已经在 /home/arthur/aats 内的 bash，可以直接 docker / pytest / git
+# 现在已经在 ~/aats 内的 bash，可以做 pytest / git / 只读排查。
+# 发布仍回到 Windows repo root 使用 scripts/deploy.sh。
 ```
 
 ### 3.3 不确定双方是否同步
@@ -100,8 +98,8 @@ scripts/sync_to_wsl2.sh check
 - Windows ↔ WSL2 两端纯本地同步（无远端、无团队、单机两环境）
 
 **不替代**的场景：
-- 想把 commit 同步给团队 → 用 `git push origin main`
-- 想从 GitHub 拉别人的修改 → `git pull origin main`（在 Windows 端）然后再 `scripts/sync_to_wsl2.sh pull` 推到 WSL2
+- 想把 commit 同步给团队 → 用 `git push origin <current-branch>`
+- 想从 GitHub 拉别人的修改 → `git pull origin <current-branch>`（在 Windows 端）然后再 `scripts/sync_to_wsl2.sh pull` 推到 WSL2
 - 想跨多台机器同步 → 走 GitHub 或其他 git 远端
 
 简而言之：**本地两端走脚本，跨机器走远端**。两套机制互补不冲突。

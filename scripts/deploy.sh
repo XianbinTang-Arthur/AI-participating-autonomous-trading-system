@@ -18,6 +18,7 @@
 #   - 默认 profile 为 derivatives-live
 #   - 未提交改动不会被同步到 WSL2；如需部署当前 Windows 工作区，请先提交
 #   - --skip-sync 只会部署 WSL2 侧当前 checkout，不会带上 Windows 新改动
+#   - --commit 只提交已经精确暂存的文件；不会自动 git add -A
 # =============================================================================
 
 set -euo pipefail
@@ -95,6 +96,30 @@ wsl_run() {
 
 repo_has_uncommitted_changes() {
     ! git diff --quiet || ! git diff --cached --quiet || [[ -n "$(git ls-files --others --exclude-standard)" ]]
+}
+
+repo_has_staged_changes() {
+    ! git diff --cached --quiet
+}
+
+repo_has_unstaged_or_untracked_changes() {
+    ! git diff --quiet || [[ -n "$(git ls-files --others --exclude-standard)" ]]
+}
+
+windows_head_oneline() {
+    cd "$PROJECT_ROOT" && git log --oneline -1
+}
+
+wsl_head_oneline() {
+    wsl_run "git -C $WSL_PROJECT log --oneline -1 2>/dev/null" | tr -d '\r'
+}
+
+windows_head_rev() {
+    cd "$PROJECT_ROOT" && git rev-parse HEAD
+}
+
+wsl_head_rev() {
+    wsl_run "git -C $WSL_PROJECT rev-parse HEAD 2>/dev/null" | tr -d '\r'
 }
 
 required_app_containers_for_profile() {
@@ -311,10 +336,20 @@ step_commit() {
 
     if [[ -n "$COMMIT_MSG" ]]; then
         log_info "Step 1/7: 提交代码..."
-        if repo_has_uncommitted_changes; then
-            git add -A
+        if repo_has_staged_changes; then
+            if repo_has_unstaged_or_untracked_changes; then
+                log_error "--commit 只提交已精确暂存的文件；检测到未暂存或未跟踪改动"
+                log_error "请先用 git add <files> 精确暂存本次部署文件，或清理无关改动"
+                git status --short
+                exit 1
+            fi
             git commit -m "$COMMIT_MSG"
             log_ok "已提交: $(git log --oneline -1)"
+        elif repo_has_unstaged_or_untracked_changes; then
+            log_error "--commit 不再自动执行 git add -A，避免把无关改动发布到 live"
+            log_error "请先用 git add <files> 精确暂存本次部署文件后重试"
+            git status --short
+            exit 1
         else
             log_warn "工作区干净，无需提交"
         fi
@@ -404,10 +439,19 @@ step_infra_up() {
     done
 
     wsl -d "$DISTRO" bash <<PWEOF
+set -euo pipefail
 cd $WSL_PROJECT
 PG_USER=\$(grep '^POSTGRES_USER=' "$WSL2_ENV_FILE" | cut -d= -f2-)
 PG_PW=\$(grep '^POSTGRES_PASSWORD=' "$WSL2_ENV_FILE" | cut -d= -f2-)
-docker exec aats-postgres psql -U "\$PG_USER" -d aats -c "SET password_encryption = 'scram-sha-256'; ALTER USER \$PG_USER PASSWORD '\$PG_PW';" >/dev/null 2>&1
+docker exec -i aats-postgres psql \
+    -v ON_ERROR_STOP=1 \
+    -v pg_user="\$PG_USER" \
+    -v pg_password="\$PG_PW" \
+    -U "\$PG_USER" \
+    -d aats >/dev/null 2>&1 <<'SQLEOF'
+SET password_encryption = 'scram-sha-256';
+ALTER USER :"pg_user" PASSWORD :'pg_password';
+SQLEOF
 PWEOF
 
     log_ok "基础设施就绪，密码已同步"
@@ -478,9 +522,23 @@ report() {
     wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && ${env_prefix:+env $env_prefix }docker compose $COMPOSE_CMD_ARGS ps --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}'" || true
     echo
 
-    local head
-    head=$(cd "$PROJECT_ROOT" && git log --oneline -1)
-    log_info "Git HEAD:   $head"
+    local win_head
+    local win_rev
+    local wsl_head
+    local wsl_rev
+    win_head="$(windows_head_oneline)"
+    win_rev="$(windows_head_rev)"
+    wsl_head="$(wsl_head_oneline || true)"
+    wsl_rev="$(wsl_head_rev || true)"
+    log_info "Windows HEAD: $win_head"
+    if [[ -n "$wsl_head" ]]; then
+        log_info "WSL HEAD:     $wsl_head"
+    else
+        log_warn "WSL HEAD:     无法读取"
+    fi
+    if [[ -n "$wsl_rev" && "$wsl_rev" != "$win_rev" ]]; then
+        log_warn "Windows HEAD 与 WSL deployed HEAD 不一致；本次报告以 WSL HEAD 为实际部署版本"
+    fi
     if [[ "$OPERATOR_TLS_ENABLED" == true ]]; then
         local port
         port=$(wsl_run "grep -h '^AATS_API_PORT=' \"$ENV_PROFILE_PATH\" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\"'" || echo "")
