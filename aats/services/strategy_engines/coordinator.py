@@ -2069,8 +2069,8 @@ class StrategyCoordinatorService:
         if family == "smart_arbitrage":
             pair_count = Decimal(str(self._smart_arbitrage_pair_count(intent)))
             # Per-strategy ceiling only; live affordability comes from
-            # DecisionContext.available_trading_equity in the strategy sizer
-            # and from downstream risk/execution guards.
+            # DecisionContext.available_trading_equity in the per-pair sizer,
+            # the aggregate smart-arbitrage cap, and downstream guards.
             quote_budget_limit = Decimal(str(self.settings.smart_arbitrage_quote_budget_per_trade)) * pair_count
             notional_cap = Decimal(str(self.settings.smart_arbitrage_max_pair_notional)) * pair_count
             allocator_base_weight = Decimal("1.15")

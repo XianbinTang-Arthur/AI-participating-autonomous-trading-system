@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.exchange import ExchangeAccountSnapshot
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.strategy_runtime import StrategyCandidate
-from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
+from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, quantize_decimal, to_decimal
 from aats.services.strategy_engines.base import StrategyEngineInput
 from aats.services.strategy_engines.smart_arbitrage.capabilities import resolve_execution_capability
 from aats.services.strategy_engines.smart_arbitrage.cost_model import build_cost_breakdown
@@ -79,8 +79,13 @@ class SmartArbitrageStrategyEngine:
                 metrics=resolved_pair_metrics,
             )
 
+        available_quote_budget = self._available_quote_budget(engine_input)
         candidates = [self._evaluate_pair(pair=pair, engine_input=engine_input) for pair in pair_definitions]
         selected_pairs = self._select_candidates(candidates)
+        selected_pairs = self._cap_opening_pairs_to_available_quote_budget(
+            selected_pairs=selected_pairs,
+            available_quote_budget=available_quote_budget,
+        )
         selected = self._aggregate_candidates(candidates=candidates, selected_pairs=selected_pairs)
         selected.metrics = {
             **selected.metrics,
@@ -1073,6 +1078,177 @@ class SmartArbitrageStrategyEngine:
         if opening_pairs:
             return self._parallel_safe_candidates(candidates=opening_pairs, existing=[], limit=max_pairs)
         return ranked[:1]
+
+    def _cap_opening_pairs_to_available_quote_budget(
+        self,
+        *,
+        selected_pairs: list[StrategyCandidate],
+        available_quote_budget: Decimal,
+    ) -> list[StrategyCandidate]:
+        if not selected_pairs:
+            return selected_pairs
+        opening_pairs = [
+            item
+            for item in selected_pairs
+            if item.state_phase == "opening" and item.route_action == "override_target" and item.execution_compatible
+        ]
+        if not opening_pairs:
+            return selected_pairs
+        opening_pair_ids = {id(item) for item in opening_pairs}
+        requested_notional = sum(
+            (self._candidate_requested_notional(item) for item in opening_pairs),
+            start=Decimal("0"),
+        )
+        available_quote_budget = max(to_decimal(available_quote_budget), Decimal("0"))
+        if requested_notional <= EPSILON_DECIMAL_12 or requested_notional <= available_quote_budget:
+            return [
+                self._with_available_budget_metrics(
+                    candidate=item,
+                    requested_notional=requested_notional,
+                    available_quote_budget=available_quote_budget,
+                    budget_cap_ratio=Decimal("1"),
+                    capped=False,
+                )
+                if id(item) in opening_pair_ids
+                else item
+                for item in selected_pairs
+            ]
+        budget_cap_ratio = available_quote_budget / requested_notional
+        return [
+            self._scale_opening_candidate_to_available_budget(
+                candidate=item,
+                scale_ratio=budget_cap_ratio,
+                requested_notional=requested_notional,
+                available_quote_budget=available_quote_budget,
+            )
+            if id(item) in opening_pair_ids
+            else item
+            for item in selected_pairs
+        ]
+
+    def _with_available_budget_metrics(
+        self,
+        *,
+        candidate: StrategyCandidate,
+        requested_notional: Decimal,
+        available_quote_budget: Decimal,
+        budget_cap_ratio: Decimal,
+        capped: bool,
+    ) -> StrategyCandidate:
+        metrics = dict(candidate.metrics or {})
+        metrics.update(
+            {
+                "selected_opening_requested_notional_before_available_cap": requested_notional,
+                "available_quote_budget": available_quote_budget,
+                "available_quote_budget_cap_ratio": budget_cap_ratio,
+                "available_quote_budget_capped": capped,
+            }
+        )
+        return candidate.model_copy(deep=True, update={"metrics": metrics})
+
+    def _scale_opening_candidate_to_available_budget(
+        self,
+        *,
+        candidate: StrategyCandidate,
+        scale_ratio: Decimal,
+        requested_notional: Decimal,
+        available_quote_budget: Decimal,
+    ) -> StrategyCandidate:
+        scale_ratio = max(min(to_decimal(scale_ratio), Decimal("1")), Decimal("0"))
+        reason_code = "smart_arbitrage_available_quote_budget_aggregate_capped"
+        scaled_legs = []
+        for leg in candidate.legs:
+            current_qty = to_decimal(leg.current_position_qty or Decimal("0"))
+            scaled_delta_qty = self._quantize_budget_delta(
+                to_decimal(leg.delta_position_qty or Decimal("0")) * scale_ratio
+            )
+            scaled_legs.append(
+                leg.model_copy(
+                    deep=True,
+                    update={
+                        "target_position_qty": quantize_decimal(current_qty + scaled_delta_qty),
+                        "delta_position_qty": scaled_delta_qty,
+                        "trigger_reason_codes": list(
+                            dict.fromkeys([*leg.trigger_reason_codes, reason_code])
+                        ),
+                        "note": self._append_note(leg.note, "Scaled by aggregate available quote budget."),
+                    },
+                )
+            )
+        metrics = dict(candidate.metrics or {})
+        metrics.update(
+            {
+                "selected_opening_requested_notional_before_available_cap": requested_notional,
+                "available_quote_budget": available_quote_budget,
+                "available_quote_budget_cap_ratio": scale_ratio,
+                "available_quote_budget_capped": True,
+                "target_pair_qty": self._quantize_budget_delta(to_decimal(metrics.get("target_pair_qty")) * scale_ratio),
+                "target_account_spot_qty": self._target_qty_from_scaled_legs(
+                    scaled_legs,
+                    role="primary",
+                    fallback=metrics.get("target_account_spot_qty"),
+                ),
+                "target_account_derivatives_qty": self._target_qty_from_scaled_legs(
+                    scaled_legs,
+                    role="hedge",
+                    fallback=metrics.get("target_account_derivatives_qty"),
+                ),
+                "target_sleeve_spot_qty": quantize_decimal(
+                    to_decimal(metrics.get("current_sleeve_spot_qty"))
+                    + self._delta_qty_from_scaled_legs(scaled_legs, role="primary")
+                ),
+                "target_sleeve_derivatives_qty": quantize_decimal(
+                    to_decimal(metrics.get("current_sleeve_derivatives_qty"))
+                    + self._delta_qty_from_scaled_legs(scaled_legs, role="hedge")
+                ),
+            }
+        )
+        target_position_qty = self._target_qty_from_scaled_legs(
+            scaled_legs,
+            role="hedge",
+            fallback=candidate.target_position_qty,
+        )
+        delta_position_qty = self._delta_qty_from_scaled_legs(scaled_legs, role="hedge")
+        return candidate.model_copy(
+            deep=True,
+            update={
+                "target_position_qty": target_position_qty,
+                "delta_position_qty": delta_position_qty,
+                "reason_codes": list(dict.fromkeys([*candidate.reason_codes, reason_code])),
+                "metrics": metrics,
+                "legs": scaled_legs,
+            },
+        )
+
+    @staticmethod
+    def _append_note(note: str | None, addition: str) -> str:
+        if not note:
+            return addition
+        if addition in note:
+            return note
+        return f"{note} {addition}"
+
+    @staticmethod
+    def _quantize_budget_delta(value: Decimal) -> Decimal:
+        if abs(value) <= EPSILON_DECIMAL_12:
+            return Decimal("0")
+        return value.quantize(Decimal("0.000000000001"), rounding=ROUND_DOWN)
+
+    @staticmethod
+    def _target_qty_from_scaled_legs(legs, *, role: str, fallback: object) -> Decimal:
+        for leg in legs:
+            if leg.role == role:
+                return quantize_decimal(leg.target_position_qty)
+        return quantize_decimal(fallback)
+
+    @staticmethod
+    def _delta_qty_from_scaled_legs(legs, *, role: str) -> Decimal:
+        return quantize_decimal(
+            sum(
+                (to_decimal(leg.delta_position_qty or Decimal("0")) for leg in legs if leg.role == role),
+                start=Decimal("0"),
+            )
+        )
 
     def _resolved_hedge_margin_mode(self, engine_input: StrategyEngineInput) -> str | None:
         normalized = str(getattr(engine_input.directional_target, "margin_mode", "") or "").strip()

@@ -2884,6 +2884,73 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(budget_snapshot.approved_notional, Decimal("200"))
         self.assertEqual(len(applied.strategy_execution_legs), 4)
 
+    def test_smart_arbitrage_caps_parallel_opening_pairs_to_realtime_available_equity(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_enabled": True,
+                "smart_arbitrage_basis_entry_bps": 5.0,
+                "smart_arbitrage_quote_budget_per_trade": 100.0,
+                "smart_arbitrage_max_pair_notional": 100.0,
+                "smart_arbitrage_max_concurrent_pairs": 2,
+                "smart_arbitrage_pair_definitions": (
+                    {
+                        "pair_id": "eth_usdt_swap",
+                        "spot_symbol": "ETH-USDT",
+                        "hedge_symbol": "ETH-USDT-SWAP",
+                    },
+                ),
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway(
+                {
+                    "BTC-USDT": _market_snapshot("BTC-USDT", "100"),
+                    "BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "101"),
+                    "ETH-USDT": _market_snapshot("ETH-USDT", "200"),
+                    "ETH-USDT-SWAP": _market_snapshot("ETH-USDT-SWAP", "203"),
+                }
+            ),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0",
+            target_qty="0",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                current_position_qty="0",
+                available_trading_equity="120",
+            ),
+            baseline=_baseline(symbol="BTC-USDT-SWAP", regime="trend"),
+            directional_target=base_target,
+        )
+        candidate = next(item for item in snapshot.candidates if item.family == "smart_arbitrage")
+        budget_snapshot = next(
+            item for item in snapshot.allocation_decision.budget_snapshots if item.family == "smart_arbitrage"
+        )
+
+        self.assertEqual(candidate.pair_id, "multi_pair")
+        self.assertEqual(candidate.metrics["pair_count_selected"], 2)
+        self.assertEqual(candidate.metrics["selected_opening_requested_notional_before_available_cap"], Decimal("202.5"))
+        self.assertEqual(candidate.metrics["available_quote_budget"], Decimal("120"))
+        self.assertTrue(candidate.metrics["available_quote_budget_capped"])
+        self.assertIn("smart_arbitrage_available_quote_budget_aggregate_capped", candidate.reason_codes)
+        self.assertLessEqual(candidate.metrics["aggregate_requested_notional"], Decimal("120"))
+        self.assertLessEqual(budget_snapshot.requested_notional, Decimal("120"))
+
     def test_smart_arbitrage_does_not_parallel_open_pairs_with_overlapping_symbol_scope(self) -> None:
         settings = AATSSettings.model_validate(
             {
