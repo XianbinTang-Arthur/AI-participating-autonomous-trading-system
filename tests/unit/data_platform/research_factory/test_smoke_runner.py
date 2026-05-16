@@ -22,6 +22,7 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def write_execution_cost_summary(path: Path, *, cost_adjusted_edge: float = 1.75) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
@@ -146,7 +147,7 @@ def test_research_factory_smoke_runner_writes_failure_artifact(tmp_path: Path) -
 
 def test_research_factory_smoke_runner_merges_execution_realism_metrics(tmp_path: Path) -> None:
     root = artifact_root(tmp_path)
-    execution_summary_path = tmp_path / "execution_cost_summary.json"
+    execution_summary_path = root.parent / "phase4" / "execution_cost_summary.json"
     write_execution_cost_summary(execution_summary_path)
 
     result = run_research_factory_smoke(
@@ -165,6 +166,11 @@ def test_research_factory_smoke_runner_merges_execution_realism_metrics(tmp_path
     registry_entries = read_jsonl(root.parent / "registry" / "research_memory.jsonl")
 
     assert result.status == "succeeded"
+    assert (experiment_dir / "execution_cost_summary.json").exists()
+    assert read_json(experiment_dir / "execution_cost_summary.json")["cost_adjusted_edge"]["mean"] == pytest.approx(1.75)
+    assert read_json(experiment_dir / "experiment_manifest.json")["output_refs"]["execution_cost_summary"] == (
+        "execution_cost_summary.json"
+    )
     assert metrics["fillable_ratio"] == pytest.approx(0.75)
     assert metrics["partial_fill_ratio"] == pytest.approx(0.25)
     assert metrics["turnover"] == pytest.approx(0.5)
@@ -186,7 +192,7 @@ def test_research_factory_smoke_runner_merges_execution_realism_metrics(tmp_path
 
 def test_research_factory_smoke_runner_fails_on_negative_executable_edge(tmp_path: Path) -> None:
     root = artifact_root(tmp_path)
-    execution_summary_path = tmp_path / "execution_cost_summary.json"
+    execution_summary_path = root.parent / "phase4" / "execution_cost_summary.json"
     write_execution_cost_summary(execution_summary_path, cost_adjusted_edge=-0.25)
 
     result = run_research_factory_smoke(
@@ -212,6 +218,28 @@ def test_research_factory_smoke_runner_fails_on_negative_executable_edge(tmp_pat
     assert "cost_adjusted_edge_bps_mean" in registry_entries[0]["failure_reason"]
     assert not (experiment_dir / "candidate_artifact.json").exists()
     assert not (experiment_dir / "research_recommendation.json").exists()
+
+
+def test_research_factory_smoke_runner_rejects_unsafe_execution_summary_path(tmp_path: Path) -> None:
+    root = artifact_root(tmp_path)
+    unsafe_path = tmp_path / "artifacts" / "research" / ".env.execution_cost_summary.json"
+    write_execution_cost_summary(unsafe_path)
+
+    result = run_research_factory_smoke(
+        ResearchFactorySmokeConfig(
+            artifact_root=root,
+            experiment_id="rf_smoke_unsafe_exec_summary",
+            execution_cost_summary_path=unsafe_path,
+            overwrite=True,
+        )
+    )
+
+    failure = read_json(root / "rf_smoke_unsafe_exec_summary" / "failure.json")
+
+    assert result.status == "failed"
+    assert "forbidden path token" in result.error
+    assert failure["reason"] == "[REDACTED]"
+    assert not (root / "rf_smoke_unsafe_exec_summary" / "execution_cost_summary.json").exists()
 
 
 def test_research_factory_smoke_runner_rejects_non_research_root(tmp_path: Path) -> None:

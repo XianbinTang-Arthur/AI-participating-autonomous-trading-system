@@ -28,6 +28,10 @@ from aats.data_platform.research_factory.metrics.snapshots import (
     load_execution_cost_summary_metrics,
     merge_metric_snapshots,
 )
+from aats.data_platform.research_factory.paths import (
+    copy_research_artifact_file,
+    require_research_artifact_json_file,
+)
 from aats.data_platform.research_factory.recommendations import build_research_recommendation
 from aats.data_platform.research_factory.registry import (
     ResearchMemoryRegistry,
@@ -49,6 +53,7 @@ DEFAULT_SMOKE_FACTOR_EXPRESSION = "Return(close, 1)"
 DEFAULT_SMOKE_TIMESTAMP = datetime(2026, 5, 16, tzinfo=UTC)
 SMOKE_CODE_VERSION = "research_factory_smoke_v1"
 SMOKE_DATASET_VERSION = "research_factory_smoke_v1"
+EXECUTION_COST_SUMMARY_REF = "execution_cost_summary.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,16 +175,29 @@ def run_research_factory_smoke(
         )
         execution_cost_summary_ref = None
         if config.execution_cost_summary_path is not None:
-            execution_metrics = load_execution_cost_summary_metrics(
-                config.execution_cost_summary_path
+            execution_cost_summary_path = require_research_artifact_json_file(
+                config.execution_cost_summary_path,
+                "execution_cost_summary_path",
+                research_root=config.artifact_root,
             )
+            execution_metrics = load_execution_cost_summary_metrics(execution_cost_summary_path)
             _require_complete_execution_realism_metrics(execution_metrics)
             metrics = merge_metric_snapshots(
                 metrics,
                 execution_metrics,
                 conflict_strategy="prefer_right",
             )
-            execution_cost_summary_ref = Path(config.execution_cost_summary_path).name
+            execution_cost_summary_ref = copy_research_artifact_file(
+                execution_cost_summary_path,
+                experiment_dir,
+                destination_name=EXECUTION_COST_SUMMARY_REF,
+                research_root=config.artifact_root,
+            )
+            recorder.record_output_ref(
+                experiment_id,
+                "execution_cost_summary",
+                execution_cost_summary_ref,
+            )
         recorder.record_metrics(experiment_id, metrics)
         gate = _deterministic_gate(metrics, config.timestamp)
         if not gate.passed:

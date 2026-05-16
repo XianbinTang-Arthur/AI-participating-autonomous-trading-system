@@ -181,6 +181,39 @@ class ExperimentRecorder:
         self._write_manifest(experiment_id, updated)
         return updated
 
+    def record_output_ref(
+        self,
+        experiment_id: str,
+        ref_name: str,
+        output_ref: str,
+    ) -> dict[str, Any]:
+        """Attach an additional relative output artifact ref to the manifest."""
+        if not isinstance(ref_name, str) or not ref_name.strip():
+            raise ValueError("ref_name must be a non-empty string")
+        if not isinstance(output_ref, str) or not output_ref.strip():
+            raise ValueError("output_ref must be a non-empty string")
+
+        manifest = self._read_manifest(experiment_id)
+        if is_terminal_status(manifest["status"]):
+            raise ValueError(f"experiment {experiment_id!r} is already terminal")
+        output_refs = dict(manifest["output_refs"])
+        output_refs[ref_name] = output_ref
+
+        updated = build_artifact_manifest(
+            artifact_id=manifest["artifact_id"],
+            artifact_type=manifest["artifact_type"],
+            status=manifest["status"],
+            started_at=manifest["started_at"],
+            finished_at=manifest.get("finished_at"),
+            input_refs=manifest["input_refs"],
+            output_refs=output_refs,
+            metrics_ref=manifest.get("metrics_ref"),
+            code_version=manifest.get("code_version"),
+            notes=manifest.get("notes"),
+        )
+        self._write_manifest(experiment_id, updated)
+        return updated
+
     def finish(self, experiment_id: str, status: str) -> dict[str, Any]:
         """Move an experiment to a terminal status without writing failure details."""
         status = require_valid_status(status)

@@ -8,7 +8,8 @@ def test_rdp_run_research_factory_smoke_cli_accepts_execution_summary(
     capsys,
 ) -> None:
     artifact_root = tmp_path / "artifacts" / "research" / "research_factory" / "experiments"
-    execution_summary = tmp_path / "execution_cost_summary.json"
+    execution_summary = tmp_path / "artifacts" / "research" / "phase4" / "execution_cost_summary.json"
+    execution_summary.parent.mkdir(parents=True, exist_ok=True)
     execution_summary.write_text(
         json.dumps(
             {

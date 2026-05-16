@@ -52,6 +52,7 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def write_execution_cost_summary(path: Path, *, cost_adjusted_edge: float = 1.75) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
@@ -161,9 +162,25 @@ def test_gold_replay_data_source_loads_records_with_watermark() -> None:
     assert result.source_watermark["build_run_ids"] == ["run-1"]
 
 
+def test_real_data_config_timestamp_defaults_to_current_utc(tmp_path: Path) -> None:
+    before = datetime.now(UTC)
+    config = ResearchFactoryExperimentConfig(
+        symbol="BTC-USDT-SWAP",
+        timeframe="1h",
+        start=START,
+        end=START + timedelta(hours=12),
+        factor_expression="Return(close, 1)",
+        artifact_root=artifact_root(tmp_path),
+    )
+    after = datetime.now(UTC)
+
+    assert before <= config.timestamp <= after
+    assert config.timestamp != datetime(2026, 5, 16, tzinfo=UTC)
+
+
 def test_real_data_runner_writes_recommendation_and_registry(tmp_path: Path) -> None:
     root = artifact_root(tmp_path)
-    execution_summary = tmp_path / "execution_cost_summary.json"
+    execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
     write_execution_cost_summary(execution_summary)
 
     result = run_research_factory_experiment(
@@ -180,8 +197,12 @@ def test_real_data_runner_writes_recommendation_and_registry(tmp_path: Path) -> 
     assert result.candidate_generated is True
     assert result.recommendation_ref == "research_recommendation.json"
     assert result.dataset_fingerprint
+    assert (experiment_dir / "execution_cost_summary.json").exists()
+    assert read_json(experiment_dir / "execution_cost_summary.json")["cost_adjusted_edge"]["mean"] == pytest.approx(1.75)
+    assert manifest["output_refs"]["execution_cost_summary"] == "execution_cost_summary.json"
     assert manifest["output_refs"]["research_recommendation"] == "research_recommendation.json"
     assert recommendation["evidence"]["execution_realism_required"] is True
+    assert recommendation["evidence"]["evidence_refs"]["execution_cost_summary"] == "execution_cost_summary.json"
     assert registry_entries[0]["status"] == "recommendation_ready"
     assert registry_entries[0]["created_by"] == "research_factory_real_data_runner"
 
@@ -209,3 +230,69 @@ def test_real_data_runner_fails_when_execution_realism_required_but_missing(tmp_
     assert registry_entries[0]["status"] == "failed"
     assert "execution realism summary is required" in registry_entries[0]["failure_reason"]
     assert not (experiment_dir / "candidate_artifact.json").exists()
+
+
+def test_real_data_runner_rejects_unsafe_execution_summary_path(tmp_path: Path) -> None:
+    root = artifact_root(tmp_path)
+    unsafe_path = tmp_path / "artifacts" / "research" / "live_execution_cost_summary.json"
+    write_execution_cost_summary(unsafe_path)
+
+    result = run_research_factory_experiment(
+        experiment_config(
+            root,
+            execution_cost_summary_path=unsafe_path,
+            experiment_id="rf_real_unsafe_exec",
+        ),
+        data_source=FakeDataSource(load_result()),
+    )
+
+    experiment_dir = root / "rf_real_unsafe_exec"
+    failure = read_json(experiment_dir / "failure.json")
+
+    assert result.status == "failed"
+    assert "forbidden path token" in result.error
+    assert failure["reason"] == "[REDACTED]"
+    assert not (experiment_dir / "execution_cost_summary.json").exists()
+
+
+def test_real_data_runner_rejects_execution_summary_outside_research_artifacts(tmp_path: Path) -> None:
+    root = artifact_root(tmp_path)
+    outside_path = tmp_path / "execution_cost_summary.json"
+    write_execution_cost_summary(outside_path)
+
+    result = run_research_factory_experiment(
+        experiment_config(
+            root,
+            execution_cost_summary_path=outside_path,
+            experiment_id="rf_real_outside_exec",
+        ),
+        data_source=FakeDataSource(load_result()),
+    )
+
+    failure = read_json(root / "rf_real_outside_exec" / "failure.json")
+
+    assert result.status == "failed"
+    assert "under artifacts/research" in failure["reason"]
+
+
+def test_real_data_runner_rejects_execution_summary_outside_configured_research_root(
+    tmp_path: Path,
+) -> None:
+    root = artifact_root(tmp_path)
+    other_research_root = tmp_path / "other" / "artifacts" / "research"
+    outside_path = other_research_root / "phase4" / "execution_cost_summary.json"
+    write_execution_cost_summary(outside_path)
+
+    result = run_research_factory_experiment(
+        experiment_config(
+            root,
+            execution_cost_summary_path=outside_path,
+            experiment_id="rf_real_other_root_exec",
+        ),
+        data_source=FakeDataSource(load_result()),
+    )
+
+    failure = read_json(root / "rf_real_other_root_exec" / "failure.json")
+
+    assert result.status == "failed"
+    assert "under artifacts/research" in failure["reason"]

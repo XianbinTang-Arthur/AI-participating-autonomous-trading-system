@@ -155,6 +155,33 @@ def test_record_metrics_writes_snapshot_and_updates_manifest(workspace_tmp_path:
     assert stored_manifest["status"] == "running"
 
 
+def test_record_output_ref_attaches_relative_artifact_ref(workspace_tmp_path: Path) -> None:
+    root = artifact_root(workspace_tmp_path)
+    recorder = ExperimentRecorder(root)
+    spec = experiment_spec(root)
+    recorder.start(spec)
+
+    manifest = recorder.record_output_ref(
+        spec.experiment_id,
+        "execution_cost_summary",
+        "execution_cost_summary.json",
+    )
+
+    stored_manifest = read_json(root / spec.experiment_id / "experiment_manifest.json")
+    assert manifest["output_refs"]["execution_cost_summary"] == "execution_cost_summary.json"
+    assert stored_manifest["output_refs"]["execution_cost_summary"] == "execution_cost_summary.json"
+
+
+def test_record_output_ref_rejects_path_traversal(workspace_tmp_path: Path) -> None:
+    root = artifact_root(workspace_tmp_path)
+    recorder = ExperimentRecorder(root)
+    spec = experiment_spec(root)
+    recorder.start(spec)
+
+    with pytest.raises(ValueError, match="relative"):
+        recorder.record_output_ref(spec.experiment_id, "bad", "../outside.json")
+
+
 def test_finish_requires_terminal_status_and_writes_finished_manifest(workspace_tmp_path: Path) -> None:
     root = artifact_root(workspace_tmp_path)
     recorder = ExperimentRecorder(root)
