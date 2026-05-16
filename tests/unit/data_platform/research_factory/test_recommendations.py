@@ -237,6 +237,35 @@ def test_recommendation_requires_execution_realism_metrics_when_execution_ref_pr
         build_research_recommendation(candidate, evidence_refs=evidence_refs())
 
 
+def test_recommendation_can_require_execution_realism_without_execution_ref() -> None:
+    metrics = metrics_snapshot(
+        fillable_ratio=None,
+        missing_reasons={"fillable_ratio": "not provided by execution summary"},
+    )
+    gate = evaluate_candidate_gate(metrics, {"max_drawdown_limit": 0.2})
+    candidate = CandidateArtifact(
+        candidate_id="cand_20260516_000005",
+        experiment_id="exp_20260516_000005",
+        candidate_type="factor",
+        payload={
+            "factor_expression": "Return(close, 1)",
+            "dataset_fingerprint": "sha256:ghi789",
+            "benchmark_segment": "test",
+            "generated_by": "unit_test",
+            "research_only": True,
+        },
+        metrics=metrics,
+        gate=gate,
+    )
+
+    with pytest.raises(ValueError, match="execution realism evidence missing"):
+        build_research_recommendation(
+            candidate,
+            evidence_refs=evidence_refs(),
+            require_execution_realism=True,
+        )
+
+
 def test_recorder_writes_research_recommendation_after_candidate(workspace_tmp_path: Path) -> None:
     root = artifact_root(workspace_tmp_path)
     recorder = ExperimentRecorder(root, code_version="test-sha", clock=lambda: dt(9))

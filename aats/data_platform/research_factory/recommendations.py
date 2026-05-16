@@ -202,10 +202,13 @@ def build_research_recommendation(
     recommendation_id: str | None = None,
     status: str = "ready_for_review",
     created_at: datetime | None = None,
+    require_execution_realism: bool = False,
 ) -> ResearchRecommendation:
     """Build a deterministic research-only recommendation from a passing candidate."""
     if not isinstance(candidate, CandidateArtifact):
         raise ValueError("candidate must be a CandidateArtifact")
+    if not isinstance(require_execution_realism, bool):
+        raise ValueError("require_execution_realism must be a bool")
 
     dataset_fingerprint = _require_non_empty_text(
         candidate.payload.get("dataset_fingerprint"),
@@ -215,7 +218,9 @@ def build_research_recommendation(
         candidate.payload.get("benchmark_segment"),
         "candidate.payload.benchmark_segment",
     )
-    execution_realism_required = candidate.payload.get("execution_cost_summary_ref") is not None
+    execution_realism_required = (
+        require_execution_realism or candidate.payload.get("execution_cost_summary_ref") is not None
+    )
 
     evidence = PreApplyEvidence(
         candidate_id=candidate.candidate_id,
