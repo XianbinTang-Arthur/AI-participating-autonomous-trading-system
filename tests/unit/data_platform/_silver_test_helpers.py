@@ -325,7 +325,7 @@ def insert_oi_funding_ticks(
         kw = dict(symbol=symbol, ts=r["ts"], tick_type=r["tick_type"])
         for col in (
             "oi", "oi_ccy", "funding_rate", "next_funding_rate",
-            "next_funding_time", "mark_px",
+            "next_funding_time", "mark_px", "received_at",
         ):
             if col in r:
                 kw[col] = r[col]

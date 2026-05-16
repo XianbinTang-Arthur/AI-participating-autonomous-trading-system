@@ -93,6 +93,11 @@ _WHALE_SIZE_FALLBACK = Decimal("2.0")
 #: 本 Silver ETL 产出的 dataset_version (与既有 candles/funding Silver 独立)
 DEFAULT_DATASET_VERSION = "p1d_microstructure_v1.0"
 
+#: Funding 状态按 received_at 回退时的最大 carry window。OKX funding rate
+#: 通常 8h 一个有效周期;12h 给采集抖动留余量, 同时避免 collector 断链后无限
+#: 复用陈旧 funding 状态。
+_FUNDING_STATE_CARRY_WINDOW = timedelta(hours=12)
+
 
 #: Per-table "源空" 判定: table_key -> {source *_no_data flag 子集}。
 #: 当该集合 ⊆ 当前 bar 的 flags 时, 意味着该表的 silver row 完全来自 NULL/0
@@ -732,17 +737,13 @@ def _build_oi_funding_metrics(
     if oi_ema is not None and oi_ema > 0 and oi_close_dec is not None:
         oi_delta_vs_ema = (oi_close_dec - oi_ema) / oi_ema
 
-    # ── Funding: last value per bar ─────────────────────────────
-    funding_row = session.execute(
-        text(
-            "SELECT funding_rate, next_funding_rate, next_funding_time "
-            "FROM staging.market_oi_funding_ticks "
-            "WHERE symbol = :sym AND tick_type = 'funding' "
-            "AND ts >= :bs AND ts < :be "
-            "ORDER BY ts DESC LIMIT 1"
-        ),
-        {"sym": symbol, "bs": bar_start, "be": bar_end},
-    ).fetchone()
+    # ── Funding: state known during this bar ────────────────────
+    funding_row = _fetch_funding_state_for_bar(
+        session=session,
+        symbol=symbol,
+        bar_start=bar_start,
+        bar_end=bar_end,
+    )
 
     if funding_row is None:
         flags.append("funding_no_data")
@@ -752,7 +753,7 @@ def _build_oi_funding_metrics(
     else:
         funding_rate = funding_row.funding_rate
         funding_next_est = funding_row.next_funding_rate
-        next_funding_time = funding_row.next_funding_time
+        next_funding_time = _coerce_aware_datetime(funding_row.next_funding_time)
 
     # ── Mark: last value per bar ────────────────────────────────
     mark_row = session.execute(
@@ -882,6 +883,82 @@ def _build_oi_funding_metrics(
     }
     _upsert_silver_oi_funding(session, params)
     return 1
+
+
+def _fetch_funding_state_for_bar(
+    *,
+    session: Session,
+    symbol: str,
+    bar_start: datetime,
+    bar_end: datetime,
+) -> Any:
+    """Return the funding state known for a 15m bar.
+
+    Preserve the original exchange-time behavior first. If OKX sends a funding
+    tick whose exchange ``ts`` points at the next funding event, fall back to
+    the time this system received the state. Finally, carry the most recent
+    state known before bar close, capped to avoid indefinite stale reuse.
+    """
+    params = {"sym": symbol, "bs": bar_start, "be": bar_end}
+    row = session.execute(
+        text(
+            "SELECT funding_rate, next_funding_rate, next_funding_time "
+            "FROM staging.market_oi_funding_ticks "
+            "WHERE symbol = :sym AND tick_type = 'funding' "
+            "AND ts >= :bs AND ts < :be "
+            "AND funding_rate IS NOT NULL "
+            "ORDER BY ts DESC, received_at DESC LIMIT 1"
+        ),
+        params,
+    ).fetchone()
+    if row is not None:
+        return row
+
+    row = session.execute(
+        text(
+            "SELECT funding_rate, next_funding_rate, next_funding_time "
+            "FROM staging.market_oi_funding_ticks "
+            "WHERE symbol = :sym AND tick_type = 'funding' "
+            "AND received_at >= :bs AND received_at < :be "
+            "AND funding_rate IS NOT NULL "
+            "ORDER BY received_at DESC, ts DESC LIMIT 1"
+        ),
+        params,
+    ).fetchone()
+    if row is not None:
+        return row
+
+    return session.execute(
+        text(
+            "SELECT funding_rate, next_funding_rate, next_funding_time "
+            "FROM staging.market_oi_funding_ticks "
+            "WHERE symbol = :sym AND tick_type = 'funding' "
+            "AND received_at >= :carry_start AND received_at < :be "
+            "AND funding_rate IS NOT NULL "
+            "ORDER BY received_at DESC, ts DESC LIMIT 1"
+        ),
+        {
+            **params,
+            "carry_start": bar_start - _FUNDING_STATE_CARRY_WINDOW,
+        },
+    ).fetchone()
+
+
+def _coerce_aware_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 # ─────────────────────────────────────────────────────────────────────

@@ -131,6 +131,126 @@ class TestFundingAndMarkLastValue(unittest.TestCase):
             )
             self.assertAlmostEqual(float(row.mark_price), 95003.0, places=1)
 
+    def test_funding_received_in_bar_with_future_ts_is_kept(self) -> None:
+        """OKX funding tick 的 ts 可指向下一次 funding, 用 received_at 判定已知状态。"""
+        env = make_env()
+        with Session(env.engine) as sess:
+            ticks = [
+                {"ts": env.bar_start + timedelta(seconds=10), "tick_type": "oi",
+                 "oi": Decimal("1000000.0")},
+                {"ts": env.bar_start + timedelta(seconds=100), "tick_type": "mark",
+                 "mark_px": Decimal("95001")},
+                {
+                    "ts": env.bar_end + timedelta(hours=4),
+                    "received_at": env.bar_start + timedelta(seconds=120),
+                    "tick_type": "funding",
+                    "funding_rate": Decimal("0.00010"),
+                    "next_funding_time": env.bar_end + timedelta(hours=8),
+                },
+                {
+                    "ts": env.bar_end + timedelta(hours=4),
+                    "received_at": env.bar_start + timedelta(seconds=300),
+                    "tick_type": "funding",
+                    "funding_rate": Decimal("0.00018"),
+                    "next_funding_time": env.bar_end + timedelta(hours=8),
+                },
+            ]
+            insert_oi_funding_ticks(sess, symbol=env.symbol, rows=ticks)
+
+            result = build_silver_microstructure_15m(
+                session=sess, symbol=env.symbol,
+                bar_start_ts=env.bar_start, bar_end_ts=env.bar_end,
+                ingest_run_id=env.ingest_run_id,
+            )
+            sess.commit()
+
+            row = sess.execute(
+                text(
+                    "SELECT funding_rate_current, quality_flags "
+                    "FROM silver.market_oi_funding_metrics_15m "
+                    "WHERE symbol = :sym AND ts = :ts"
+                ),
+                {"sym": env.symbol, "ts": env.bar_start},
+            ).fetchone()
+            self.assertAlmostEqual(
+                float(row.funding_rate_current), 0.00018, places=6,
+            )
+            self.assertNotIn("funding_no_data", result.quality_flags)
+            self.assertNotIn("funding_no_data", str(row.quality_flags))
+
+    def test_recent_funding_state_carries_forward_by_received_at(self) -> None:
+        env = make_env()
+        with Session(env.engine) as sess:
+            ticks = [
+                {"ts": env.bar_start + timedelta(seconds=10), "tick_type": "oi",
+                 "oi": Decimal("1000000.0")},
+                {"ts": env.bar_start + timedelta(seconds=100), "tick_type": "mark",
+                 "mark_px": Decimal("95001")},
+                {
+                    "ts": env.bar_end + timedelta(hours=4),
+                    "received_at": env.bar_start - timedelta(minutes=5),
+                    "tick_type": "funding",
+                    "funding_rate": Decimal("0.00021"),
+                    "next_funding_time": env.bar_end + timedelta(hours=8),
+                },
+            ]
+            insert_oi_funding_ticks(sess, symbol=env.symbol, rows=ticks)
+
+            result = build_silver_microstructure_15m(
+                session=sess, symbol=env.symbol,
+                bar_start_ts=env.bar_start, bar_end_ts=env.bar_end,
+                ingest_run_id=env.ingest_run_id,
+            )
+            sess.commit()
+
+            row = sess.execute(
+                text(
+                    "SELECT funding_rate_current "
+                    "FROM silver.market_oi_funding_metrics_15m "
+                    "WHERE symbol = :sym AND ts = :ts"
+                ),
+                {"sym": env.symbol, "ts": env.bar_start},
+            ).fetchone()
+            self.assertAlmostEqual(
+                float(row.funding_rate_current), 0.00021, places=6,
+            )
+            self.assertNotIn("funding_no_data", result.quality_flags)
+
+    def test_stale_funding_state_still_marks_no_data(self) -> None:
+        env = make_env()
+        with Session(env.engine) as sess:
+            ticks = [
+                {"ts": env.bar_start + timedelta(seconds=10), "tick_type": "oi",
+                 "oi": Decimal("1000000.0")},
+                {"ts": env.bar_start + timedelta(seconds=100), "tick_type": "mark",
+                 "mark_px": Decimal("95001")},
+                {
+                    "ts": env.bar_end + timedelta(hours=4),
+                    "received_at": env.bar_start - timedelta(hours=13),
+                    "tick_type": "funding",
+                    "funding_rate": Decimal("0.00021"),
+                },
+            ]
+            insert_oi_funding_ticks(sess, symbol=env.symbol, rows=ticks)
+
+            result = build_silver_microstructure_15m(
+                session=sess, symbol=env.symbol,
+                bar_start_ts=env.bar_start, bar_end_ts=env.bar_end,
+                ingest_run_id=env.ingest_run_id,
+            )
+            sess.commit()
+
+            row = sess.execute(
+                text(
+                    "SELECT funding_rate_current "
+                    "FROM silver.market_oi_funding_metrics_15m "
+                    "WHERE symbol = :sym AND ts = :ts"
+                ),
+                {"sym": env.symbol, "ts": env.bar_start},
+            ).fetchone()
+            self.assertIsNone(row.funding_rate_current)
+            self.assertIn("funding_no_data", result.quality_flags)
+
 
 if __name__ == "__main__":
     unittest.main()
