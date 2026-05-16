@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import fields, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePath
@@ -17,6 +17,7 @@ from aats.data_platform.research_factory.artifacts import (
     write_artifact_manifest_atomic,
 )
 from aats.data_platform.research_factory.metrics.gates import CandidateArtifact
+from aats.data_platform.research_factory.recommendations import ResearchRecommendation
 from aats.data_platform.research_factory.specs import ExperimentSpec, MetricsSnapshot
 from aats.data_platform.research_factory.status import is_terminal_status, require_valid_status
 
@@ -25,6 +26,7 @@ EXPERIMENT_SPEC_REF = "experiment_spec.json"
 METRICS_REF = "metrics_snapshot.json"
 FAILURE_REF = "failure.json"
 CANDIDATE_REF = "candidate_artifact.json"
+RECOMMENDATION_REF = "research_recommendation.json"
 
 _SECRET_MARKERS = (
     "api_key",
@@ -47,9 +49,11 @@ class ExperimentRecorder:
         root: str | Path = Path("artifacts") / "research" / "research_factory" / "experiments",
         *,
         code_version: str | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.root = _require_research_recorder_root(root)
         self.code_version = code_version
+        self._clock = clock or _utc_now
 
     def start(self, experiment_spec: ExperimentSpec) -> dict[str, Any]:
         """Create an experiment directory, write the spec, and mark it running."""
@@ -61,7 +65,7 @@ class ExperimentRecorder:
             raise ValueError(f"experiment {experiment_spec.experiment_id!r} already exists")
 
         experiment_dir.mkdir(parents=True)
-        started_at = _utc_now()
+        started_at = self._now()
         _write_json_atomic(experiment_dir / EXPERIMENT_SPEC_REF, _to_jsonable(experiment_spec))
 
         manifest = build_artifact_manifest(
@@ -138,6 +142,45 @@ class ExperimentRecorder:
         self._write_manifest(experiment_id, updated)
         return updated
 
+    def record_recommendation(
+        self,
+        experiment_id: str,
+        recommendation: ResearchRecommendation,
+    ) -> dict[str, Any]:
+        """Write a research-only recommendation evidence package."""
+        if not isinstance(recommendation, ResearchRecommendation):
+            raise ValueError("recommendation must be a ResearchRecommendation")
+        if recommendation.experiment_id != experiment_id:
+            raise ValueError("recommendation experiment_id must match the recorder experiment_id")
+
+        manifest = self._read_manifest(experiment_id)
+        if is_terminal_status(manifest["status"]):
+            raise ValueError(f"experiment {experiment_id!r} is already terminal")
+        if not manifest.get("metrics_ref"):
+            raise ValueError("metrics must be recorded before recommendation generation")
+        output_refs = dict(manifest["output_refs"])
+        if "candidate_artifact" not in output_refs:
+            raise ValueError("candidate artifact must be recorded before recommendation generation")
+
+        experiment_dir = self._experiment_dir(experiment_id)
+        _write_json_atomic(experiment_dir / RECOMMENDATION_REF, _to_jsonable(recommendation))
+        output_refs["research_recommendation"] = RECOMMENDATION_REF
+
+        updated = build_artifact_manifest(
+            artifact_id=manifest["artifact_id"],
+            artifact_type=manifest["artifact_type"],
+            status=manifest["status"],
+            started_at=manifest["started_at"],
+            finished_at=manifest.get("finished_at"),
+            input_refs=manifest["input_refs"],
+            output_refs=output_refs,
+            metrics_ref=manifest.get("metrics_ref"),
+            code_version=manifest.get("code_version"),
+            notes=manifest.get("notes"),
+        )
+        self._write_manifest(experiment_id, updated)
+        return updated
+
     def finish(self, experiment_id: str, status: str) -> dict[str, Any]:
         """Move an experiment to a terminal status without writing failure details."""
         status = require_valid_status(status)
@@ -150,7 +193,7 @@ class ExperimentRecorder:
         reason = _redact_failure_reason(reason)
         experiment_dir = self._experiment_dir(experiment_id)
         failure_payload = {
-            "recorded_at": _utc_now().isoformat(),
+            "recorded_at": self._now().isoformat(),
             "reason": reason,
             "redacted": reason == "[REDACTED]",
         }
@@ -181,7 +224,7 @@ class ExperimentRecorder:
             artifact_type=manifest["artifact_type"],
             status=status,
             started_at=manifest["started_at"],
-            finished_at=_utc_now(),
+            finished_at=self._now(),
             input_refs=manifest["input_refs"],
             output_refs=merged_output_refs,
             metrics_ref=manifest.get("metrics_ref"),
@@ -193,6 +236,9 @@ class ExperimentRecorder:
 
     def _experiment_dir(self, experiment_id: str) -> Path:
         return self.root / _require_safe_experiment_id(experiment_id)
+
+    def _now(self) -> datetime:
+        return self._clock()
 
     def _manifest_path(self, experiment_id: str) -> Path:
         return self._experiment_dir(experiment_id) / MANIFEST_REF

@@ -56,6 +56,21 @@ def build_execution_cost_summary(
         for r in slippage_rows
         if r.get("estimated_total_execution_cost_bps") is not None
     ]
+    valid_fee = [
+        r["estimated_fee_bps"]
+        for r in slippage_rows
+        if r.get("estimated_fee_bps") is not None
+    ]
+    valid_funding = [
+        _funding_bps(row)
+        for row in slippage_rows
+        if _funding_bps(row) is not None
+    ]
+    row_turnover = [
+        r["turnover"]
+        for r in slippage_rows
+        if r.get("turnover") is not None
+    ]
 
     valid_cost_adjusted_edge = [
         r["cost_adjusted_edge_bps"]
@@ -71,6 +86,8 @@ def build_execution_cost_summary(
 
     slippage_stats = _compute_distribution_stats(valid_slippage) if valid_slippage else {}
     cost_stats = _compute_distribution_stats(valid_total_cost) if valid_total_cost else {}
+    fee_stats = _compute_distribution_stats(valid_fee) if valid_fee else {}
+    funding_stats = _compute_distribution_stats(valid_funding) if valid_funding else {}
     edge_stats = _compute_distribution_stats(valid_cost_adjusted_edge) if valid_cost_adjusted_edge else {}
 
     # ---- 3. 与 Phase 2 假设的比较 ----
@@ -94,6 +111,12 @@ def build_execution_cost_summary(
     # ---- 5. openings vs closes 分拆 ----
     opening_rows = [r for r in slippage_rows if r.get("candidate_action") == "open"]
     close_rows = [r for r in slippage_rows if r.get("candidate_action") == "close"]
+    action_turnover_ratio = round((len(opening_rows) + len(close_rows)) / max(total, 1), 4)
+    turnover_stats = (
+        _compute_distribution_stats(row_turnover)
+        if row_turnover
+        else {"mean": action_turnover_ratio, "count": total}
+    )
 
     opening_slippage = [
         r["estimated_slippage_bps"]
@@ -124,6 +147,9 @@ def build_execution_cost_summary(
         "close_slippage": _compute_distribution_stats(close_slippage) if close_slippage else {},
         # 总执行成本分布
         "total_execution_cost": cost_stats,
+        "fee": fee_stats,
+        "funding": funding_stats,
+        "turnover": turnover_stats,
         # 成本调整后的 edge
         "cost_adjusted_edge": edge_stats,
         "positive_edge_count": positive_edge_count,
@@ -211,6 +237,9 @@ def _empty_summary() -> dict[str, Any]:
         "insufficient_data_count": 0,
         "slippage": {},
         "total_execution_cost": {},
+        "fee": {},
+        "funding": {},
+        "turnover": {},
         "cost_adjusted_edge": {},
         "positive_edge_count": 0,
         "positive_edge_ratio": 0,
@@ -220,3 +249,11 @@ def _empty_summary() -> dict[str, Any]:
         "data_source": "gold_ohlcv_bars",
         "limitations": [],
     }
+
+
+def _funding_bps(row: dict[str, Any]) -> float | None:
+    if row.get("funding_bps") is not None:
+        return row["funding_bps"]
+    if row.get("funding_adjustment_bps") is not None:
+        return row["funding_adjustment_bps"]
+    return None

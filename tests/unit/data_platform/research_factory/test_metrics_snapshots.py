@@ -160,6 +160,14 @@ def test_execution_cost_summary_adapter_maps_cost_adjusted_edge_mean() -> None:
     assert snapshot.cost_adjusted_edge_bps_mean == pytest.approx(1.75)
 
 
+def test_execution_cost_summary_adapter_maps_cost_stack_v1() -> None:
+    snapshot = execution_cost_summary_to_metric_snapshot(execution_cost_summary())
+
+    assert snapshot.turnover == pytest.approx(0.75)
+    assert snapshot.fee_bps_mean == pytest.approx(5.0)
+    assert snapshot.funding_bps_mean == pytest.approx(0.25)
+
+
 def test_execution_cost_summary_adapter_reads_json_file(workspace_tmp_path: Path) -> None:
     path = workspace_tmp_path / "execution_cost_summary.json"
     path.write_text(json.dumps(execution_cost_summary()), encoding="utf-8")
@@ -197,6 +205,9 @@ def execution_cost_summary() -> dict:
         "total_candidates": 8,
         "full_fill_ratio": 0.875,
         "partial_fill_ratio": 0.1,
+        "turnover": {"mean": 0.75},
+        "fee": {"mean": 5.0},
+        "funding": {"mean": 0.25},
         "slippage": {"mean": 2.25, "p95": 4.0},
         "total_execution_cost": {"mean": 7.25},
         "cost_adjusted_edge": {"mean": 1.75, "p95": 4.2},

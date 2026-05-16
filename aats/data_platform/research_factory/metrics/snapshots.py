@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
+from aats.data_platform.research_factory.numeric import require_finite_number
 from aats.data_platform.research_factory.specs import METRIC_FIELDS, MetricsSnapshot
 
 SIGNAL_METRICS = ("ic", "rank_ic", "icir", "rank_icir")
@@ -27,10 +29,13 @@ METRIC_GROUPS: Mapping[str, tuple[str, ...]] = {
 }
 MERGE_STRATEGIES = frozenset({"reject", "prefer_left", "prefer_right"})
 EXECUTION_COST_SUMMARY_MAPPINGS = {
-    "fillable_ratio": ("full_fill_ratio",),
-    "partial_fill_ratio": ("partial_fill_ratio",),
-    "slippage_bps_mean": ("slippage", "mean"),
-    "cost_adjusted_edge_bps_mean": ("cost_adjusted_edge", "mean"),
+    "turnover": (("turnover", "mean"),),
+    "fee_bps_mean": (("fee", "mean"), ("estimated_fee", "mean")),
+    "slippage_bps_mean": (("slippage", "mean"),),
+    "funding_bps_mean": (("funding", "mean"), ("funding_adjustment", "mean")),
+    "fillable_ratio": (("full_fill_ratio",),),
+    "partial_fill_ratio": (("partial_fill_ratio",),),
+    "cost_adjusted_edge_bps_mean": (("cost_adjusted_edge", "mean"),),
 }
 
 _ALL_GROUPED_METRICS = tuple(metric for metrics in METRIC_GROUPS.values() for metric in metrics)
@@ -109,8 +114,8 @@ def execution_cost_summary_to_metric_snapshot(summary: Mapping[str, Any]) -> Met
         for metric_name in METRIC_FIELDS
     }
 
-    for metric_name, path in EXECUTION_COST_SUMMARY_MAPPINGS.items():
-        value, reason = _read_numeric_path(summary, path)
+    for metric_name, paths in EXECUTION_COST_SUMMARY_MAPPINGS.items():
+        value, reason = _read_first_numeric_path(summary, paths)
         if reason is None:
             values[metric_name] = value
             missing_reasons.pop(metric_name, None)
@@ -212,9 +217,25 @@ def _read_numeric_path(summary: Mapping[str, Any], path: tuple[str, ...]) -> tup
         current = current[key]
     if current is None:
         return None, f"execution cost summary field is null: {rendered_path}"
-    if isinstance(current, bool) or not isinstance(current, int | float):
+    if isinstance(current, bool) or not isinstance(current, int | float | Decimal):
         return None, f"execution cost summary field is not numeric: {rendered_path}"
-    return float(current), None
+    try:
+        return require_finite_number(current, rendered_path), None
+    except ValueError:
+        return None, f"execution cost summary field is not finite: {rendered_path}"
+
+
+def _read_first_numeric_path(
+    summary: Mapping[str, Any],
+    paths: tuple[tuple[str, ...], ...],
+) -> tuple[float | None, str | None]:
+    reasons: list[str] = []
+    for path in paths:
+        value, reason = _read_numeric_path(summary, path)
+        if reason is None:
+            return value, None
+        reasons.append(reason)
+    return None, reasons[0]
 
 
 def _missing_metrics_snapshot(reason: str) -> MetricsSnapshot:
