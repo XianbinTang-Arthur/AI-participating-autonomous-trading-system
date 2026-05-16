@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from time import perf_counter
@@ -503,6 +503,15 @@ class DashboardSnapshotPlane:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def invalidate_all_and_refresh(self, *, reason: str = "mutation") -> None:
+        await self.invalidate_all(reason=reason)
+        await self.enqueue_all(reason=reason)
+
+    async def invalidate_all_and_refresh_scheduled(self, *, reason: str = "mutation") -> None:
+        await self.invalidate_all(reason=reason)
+        await self.enqueue_scheduled(reason=reason)
+
+    async def invalidate_all(self, *, reason: str = "mutation") -> None:
+        _ = reason
         now = utc_now()
         async with self._lock:
             for snapshot in self._snapshots.values():
@@ -510,7 +519,6 @@ class DashboardSnapshotPlane:
                 if policy is None:
                     continue
                 snapshot.generated_at = now - timedelta(seconds=policy.stale_after_seconds + 0.001)
-        await self.enqueue_all(reason=reason)
 
     async def seed_panel(
         self,
@@ -539,6 +547,22 @@ class DashboardSnapshotPlane:
 
     async def enqueue_all(self, *, reason: str) -> None:
         for target in self._iter_snapshot_targets():
+            await self.enqueue(target.panel_key, variant_key=target.variant_key, reason=reason)
+
+    async def enqueue_scheduled(self, *, reason: str) -> None:
+        for target in self._iter_snapshot_targets():
+            policy = self._policies[target.panel_key]
+            if not policy.scheduled_refresh:
+                continue
+            await self.enqueue(target.panel_key, variant_key=target.variant_key, reason=reason)
+
+    async def enqueue_panels(self, panel_keys: Iterable[str], *, reason: str) -> None:
+        selected = {str(panel_key) for panel_key in panel_keys if str(panel_key).strip()}
+        if not selected:
+            return
+        for target in self._iter_snapshot_targets():
+            if target.panel_key not in selected:
+                continue
             await self.enqueue(target.panel_key, variant_key=target.variant_key, reason=reason)
 
     async def enqueue(self, panel_key: str, *, reason: str, variant_key: str | None = None) -> bool:

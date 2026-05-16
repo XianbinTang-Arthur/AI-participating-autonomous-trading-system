@@ -352,6 +352,9 @@ class TestCollectOIWithMockedHTTP(unittest.TestCase):
         ) as mock_write, patch(
             "aats.data_platform.jobs.checkpoint_manager.upsert_checkpoint",
             return_value="cp-1",
+        ), patch(
+            "aats.data_platform.models.utc_now",
+            return_value=_ms_to_dt(now_ms),
         ):
             from aats.data_platform.collectors.backfill.okx_rest_history_collectors import (
                 collect_oi_history,

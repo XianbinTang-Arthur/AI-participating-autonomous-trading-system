@@ -674,6 +674,103 @@ class DashboardSnapshotPlaneTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await plane.stop()
 
+    async def test_invalidate_and_refresh_scheduled_skips_non_scheduled_panels_until_read(self) -> None:
+        calls: list[str] = []
+
+        async def loader(snapshot_key: str) -> dict[str, Any]:
+            calls.append(snapshot_key)
+            return {"snapshot_key": snapshot_key, "version": 2}
+
+        plane = DashboardSnapshotPlane(
+            loader=loader,
+            default_factory=lambda _panel_key: {},
+            policies={
+                "runtime": DashboardSnapshotPolicy(
+                    panel_key="runtime",
+                    ttl_seconds=60.0,
+                    stale_after_seconds=60.0,
+                    hard_expire_seconds=120.0,
+                    timeout_seconds=1.0,
+                    scheduled_refresh=True,
+                ),
+                "strategyAttribution": DashboardSnapshotPolicy(
+                    panel_key="strategyAttribution",
+                    ttl_seconds=120.0,
+                    stale_after_seconds=300.0,
+                    hard_expire_seconds=900.0,
+                    timeout_seconds=35.0,
+                    priority="p3",
+                    scheduled_refresh=False,
+                ),
+            },
+            scheduler_interval_seconds=60.0,
+        )
+        try:
+            await plane.seed_panel("runtime", {"snapshot_key": "runtime", "version": 1})
+            await plane.seed_panel("strategyAttribution", {"snapshot_key": "strategyAttribution", "version": 1})
+
+            await plane.invalidate_all_and_refresh_scheduled(reason="post_mutation")
+            await _wait_for_panel_snapshot(plane, "runtime", {"snapshot_key": "runtime", "version": 2})
+            await asyncio.sleep(0.02)
+
+            self.assertIn("runtime", calls)
+            self.assertNotIn("strategyAttribution", calls)
+
+            read = await plane.read_panel("strategyAttribution")
+
+            self.assertEqual(read.data, {"snapshot_key": "strategyAttribution", "version": 1})
+            self.assertEqual(read.meta["status"], "stale")
+            self.assertTrue(read.meta["refreshing"])
+
+            await _wait_for_panel_snapshot(
+                plane,
+                "strategyAttribution",
+                {"snapshot_key": "strategyAttribution", "version": 2},
+            )
+        finally:
+            await plane.stop()
+
+    async def test_enqueue_panels_refreshes_selected_non_scheduled_panels(self) -> None:
+        calls: list[str] = []
+
+        async def loader(snapshot_key: str) -> dict[str, Any]:
+            calls.append(snapshot_key)
+            return {"snapshot_key": snapshot_key}
+
+        plane = DashboardSnapshotPlane(
+            loader=loader,
+            default_factory=lambda _panel_key: {},
+            policies={
+                "rdpControl": DashboardSnapshotPolicy(
+                    panel_key="rdpControl",
+                    ttl_seconds=30.0,
+                    stale_after_seconds=120.0,
+                    hard_expire_seconds=360.0,
+                    timeout_seconds=15.0,
+                    priority="p2",
+                    scheduled_refresh=False,
+                ),
+                "strategyAttribution": DashboardSnapshotPolicy(
+                    panel_key="strategyAttribution",
+                    ttl_seconds=120.0,
+                    stale_after_seconds=300.0,
+                    hard_expire_seconds=900.0,
+                    timeout_seconds=35.0,
+                    priority="p3",
+                    scheduled_refresh=False,
+                ),
+            },
+            scheduler_interval_seconds=60.0,
+        )
+        try:
+            await plane.enqueue_panels(("rdpControl",), reason="post_mutation")
+            await _wait_for_panel_snapshot(plane, "rdpControl", {"snapshot_key": "rdpControl"})
+            await asyncio.sleep(0.02)
+
+            self.assertEqual(calls, ["rdpControl"])
+        finally:
+            await plane.stop()
+
     async def test_variant_snapshots_are_isolated_by_storage_key(self) -> None:
         calls: list[str] = []
 

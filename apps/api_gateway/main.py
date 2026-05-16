@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
+from time import monotonic
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -40,6 +42,15 @@ from aats.data_platform.governance._exceptions import (
 # 刚刚发生的状态变化。只在 2xx/3xx 响应上清缓存——失败请求不应该污染缓存
 # （也不产生状态变化，所以原样保留缓存即可）。
 _MUTATING_METHODS = frozenset({"POST", "PATCH", "PUT", "DELETE"})
+_AUTH_SNAPSHOT_REFRESH_EXEMPT_PATH_PREFIXES = ("/auth/",)
+_DASHBOARD_SNAPSHOT_MUTATION_REFRESH_COOLDOWN_SECONDS = 5.0
+_DASHBOARD_SNAPSHOT_REFRESH_LOCK_ATTR = "_dashboard_snapshot_mutation_refresh_lock"
+_DASHBOARD_SNAPSHOT_REFRESH_LAST_ATTR = "_dashboard_snapshot_mutation_refresh_last_at"
+_DASHBOARD_SNAPSHOT_MUTATION_EAGER_PANEL_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("/ai/operating-mode/", ("aiConfigModel",)),
+    ("/rdp/", ("rdpControl", "rdpWorkbenchOverview")),
+    ("/strategy-profiles/", ("profileControlSummary",)),
+)
 
 
 _FASTAPI_ROLES: frozenset[str] = frozenset({PROCESS_ROLE_GATEWAY, PROCESS_ROLE_MONOLITH})
@@ -123,14 +134,83 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="AATS API Gateway", lifespan=lifespan)
 
 
+def _is_successful_mutation(method: str, status_code: int) -> bool:
+    return method.upper() in _MUTATING_METHODS and 200 <= int(status_code) < 400
+
+
+def _dashboard_snapshot_refresh_exempt_path(path: str) -> bool:
+    normalized_path = "/" + str(path or "").lstrip("/")
+    return any(normalized_path.startswith(prefix) for prefix in _AUTH_SNAPSHOT_REFRESH_EXEMPT_PATH_PREFIXES)
+
+
+def _should_refresh_dashboard_snapshots_after_mutation(method: str, path: str, status_code: int) -> bool:
+    if not _is_successful_mutation(method, status_code):
+        return False
+    return not _dashboard_snapshot_refresh_exempt_path(path)
+
+
+def _eager_dashboard_snapshot_panels_for_mutation(path: str) -> tuple[str, ...]:
+    normalized_path = "/" + str(path or "").lstrip("/")
+    panels: list[str] = []
+    for prefix, panel_keys in _DASHBOARD_SNAPSHOT_MUTATION_EAGER_PANEL_PREFIXES:
+        if normalized_path.startswith(prefix):
+            panels.extend(panel_keys)
+    return tuple(dict.fromkeys(panels))
+
+
+def _dashboard_snapshot_refresh_lock(app_state: object) -> asyncio.Lock:
+    lock = getattr(app_state, _DASHBOARD_SNAPSHOT_REFRESH_LOCK_ATTR, None)
+    if isinstance(lock, asyncio.Lock):
+        return lock
+    lock = asyncio.Lock()
+    setattr(app_state, _DASHBOARD_SNAPSHOT_REFRESH_LOCK_ATTR, lock)
+    return lock
+
+
+async def _refresh_dashboard_snapshots_after_mutation(request: Request, *, reason: str) -> bool:
+    plane = getattr(request.app.state, "dashboard_snapshot_plane", None)
+    invalidate = getattr(plane, "invalidate_all", None)
+    enqueue_scheduled = getattr(plane, "enqueue_scheduled", None)
+    if not callable(invalidate) or not callable(enqueue_scheduled):
+        return False
+
+    await invalidate(reason=reason)
+
+    lock = _dashboard_snapshot_refresh_lock(request.app.state)
+    now = monotonic()
+    async with lock:
+        last_refresh_at = getattr(request.app.state, _DASHBOARD_SNAPSHOT_REFRESH_LAST_ATTR, None)
+        if (
+            isinstance(last_refresh_at, float)
+            and now - last_refresh_at < _DASHBOARD_SNAPSHOT_MUTATION_REFRESH_COOLDOWN_SECONDS
+        ):
+            return False
+        setattr(request.app.state, _DASHBOARD_SNAPSHOT_REFRESH_LAST_ATTR, now)
+
+    await enqueue_scheduled(reason=reason)
+    enqueue_panels = getattr(plane, "enqueue_panels", None)
+    if callable(enqueue_panels):
+        await enqueue_panels(
+            _eager_dashboard_snapshot_panels_for_mutation(request.url.path),
+            reason=reason,
+        )
+    return True
+
+
 @app.middleware("http")
 async def _invalidate_bundle_cache_on_mutation(request: Request, call_next):
     response = await call_next(request)
-    if request.method in _MUTATING_METHODS and 200 <= response.status_code < 400:
+    if _is_successful_mutation(request.method, response.status_code):
         invalidate_bundle_cache()
-        plane = getattr(request.app.state, "dashboard_snapshot_plane", None)
-        if plane is not None:
-            await plane.invalidate_all_and_refresh(reason=f"{request.method.lower()}_mutation")
+        if _should_refresh_dashboard_snapshots_after_mutation(
+            request.method,
+            request.url.path,
+            response.status_code,
+        ):
+            await _refresh_dashboard_snapshots_after_mutation(
+                request,
+                reason=f"{request.method.lower()}_mutation",
+            )
     return response
 
 
