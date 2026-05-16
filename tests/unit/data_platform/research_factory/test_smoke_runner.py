@@ -17,6 +17,10 @@ def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def read_jsonl(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
 def write_execution_cost_summary(path: Path, *, cost_adjusted_edge: float = 1.75) -> None:
     path.write_text(
         json.dumps(
@@ -51,10 +55,12 @@ def test_research_factory_smoke_runner_writes_success_artifacts(tmp_path: Path) 
     metrics = read_json(experiment_dir / "metrics_snapshot.json")
     candidate = read_json(experiment_dir / "candidate_artifact.json")
     recommendation = read_json(experiment_dir / "research_recommendation.json")
+    registry_entries = read_jsonl(root.parent / "registry" / "research_memory.jsonl")
 
     assert result.status == "succeeded"
     assert result.candidate_generated is True
     assert result.recommendation_ref == "research_recommendation.json"
+    assert result.registry_ref == (root.parent / "registry" / "research_memory.jsonl").as_posix()
     assert manifest["status"] == "succeeded"
     assert manifest["metrics_ref"] == "metrics_snapshot.json"
     assert manifest["output_refs"]["candidate_artifact"] == "candidate_artifact.json"
@@ -66,6 +72,11 @@ def test_research_factory_smoke_runner_writes_success_artifacts(tmp_path: Path) 
     assert recommendation["runtime_mutation_allowed"] is False
     assert recommendation["operator_approval_required"] is True
     assert recommendation["evidence"]["candidate_id"] == candidate["candidate_id"]
+    assert registry_entries[0]["status"] == "recommendation_ready"
+    assert registry_entries[0]["candidate_id"] == candidate["candidate_id"]
+    assert registry_entries[0]["artifact_refs"]["research_recommendation"] == (
+        "rf_smoke_success/research_recommendation.json"
+    )
     assert "active_parameter" not in (experiment_dir / "candidate_artifact.json").read_text(
         encoding="utf-8"
     )
@@ -87,6 +98,9 @@ def test_research_factory_smoke_runner_outputs_stable_artifacts(tmp_path: Path) 
         encoding="utf-8"
     )
     first_manifest = (experiment_dir / "experiment_manifest.json").read_text(encoding="utf-8")
+    first_registry = (root.parent / "registry" / "research_memory.jsonl").read_text(
+        encoding="utf-8"
+    )
 
     run_research_factory_smoke(config)
 
@@ -96,6 +110,9 @@ def test_research_factory_smoke_runner_outputs_stable_artifacts(tmp_path: Path) 
         experiment_dir / "research_recommendation.json"
     ).read_text(encoding="utf-8") == first_recommendation
     assert (experiment_dir / "experiment_manifest.json").read_text(encoding="utf-8") == first_manifest
+    assert (
+        root.parent / "registry" / "research_memory.jsonl"
+    ).read_text(encoding="utf-8") == first_registry
 
 
 def test_research_factory_smoke_runner_writes_failure_artifact(tmp_path: Path) -> None:
@@ -112,13 +129,17 @@ def test_research_factory_smoke_runner_writes_failure_artifact(tmp_path: Path) -
     experiment_dir = root / "rf_smoke_failure"
     manifest = read_json(experiment_dir / "experiment_manifest.json")
     failure = read_json(experiment_dir / "failure.json")
+    registry_entries = read_jsonl(root.parent / "registry" / "research_memory.jsonl")
 
     assert result.status == "failed"
     assert result.candidate_generated is False
+    assert result.registry_ref == (root.parent / "registry" / "research_memory.jsonl").as_posix()
     assert result.failure_ref == "failure.json"
     assert manifest["status"] == "failed"
     assert manifest["output_refs"]["failure"] == "failure.json"
     assert failure["reason"] == "unknown factor function: Unknown"
+    assert registry_entries[0]["status"] == "failed"
+    assert registry_entries[0]["failure_reason"] == "unknown factor function: Unknown"
     assert not (experiment_dir / "candidate_artifact.json").exists()
     assert not (experiment_dir / "research_recommendation.json").exists()
 
@@ -141,6 +162,7 @@ def test_research_factory_smoke_runner_merges_execution_realism_metrics(tmp_path
     metrics = read_json(experiment_dir / "metrics_snapshot.json")
     candidate = read_json(experiment_dir / "candidate_artifact.json")
     recommendation = read_json(experiment_dir / "research_recommendation.json")
+    registry_entries = read_jsonl(root.parent / "registry" / "research_memory.jsonl")
 
     assert result.status == "succeeded"
     assert metrics["fillable_ratio"] == pytest.approx(0.75)
@@ -155,6 +177,10 @@ def test_research_factory_smoke_runner_merges_execution_realism_metrics(tmp_path
     assert (
         recommendation["evidence"]["evidence_refs"]["execution_cost_summary"]
         == "execution_cost_summary.json"
+    )
+    assert registry_entries[0]["status"] == "recommendation_ready"
+    assert registry_entries[0]["metric_snapshot"]["metrics"]["cost_adjusted_edge_bps_mean"] == pytest.approx(
+        1.75
     )
 
 
@@ -176,11 +202,14 @@ def test_research_factory_smoke_runner_fails_on_negative_executable_edge(tmp_pat
     manifest = read_json(experiment_dir / "experiment_manifest.json")
     failure = read_json(experiment_dir / "failure.json")
     metrics = read_json(experiment_dir / "metrics_snapshot.json")
+    registry_entries = read_jsonl(root.parent / "registry" / "research_memory.jsonl")
 
     assert result.status == "failed"
     assert manifest["status"] == "failed"
     assert metrics["cost_adjusted_edge_bps_mean"] == pytest.approx(-0.25)
     assert "cost_adjusted_edge_bps_mean" in failure["reason"]
+    assert registry_entries[0]["status"] == "gate_failed"
+    assert "cost_adjusted_edge_bps_mean" in registry_entries[0]["failure_reason"]
     assert not (experiment_dir / "candidate_artifact.json").exists()
     assert not (experiment_dir / "research_recommendation.json").exists()
 

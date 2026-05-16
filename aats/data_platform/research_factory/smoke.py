@@ -29,6 +29,11 @@ from aats.data_platform.research_factory.metrics.snapshots import (
     merge_metric_snapshots,
 )
 from aats.data_platform.research_factory.recommendations import build_research_recommendation
+from aats.data_platform.research_factory.registry import (
+    ResearchMemoryRegistry,
+    build_research_memory_entry,
+    default_research_memory_path_for_artifact_root,
+)
 from aats.data_platform.research_factory.specs import (
     DatasetSpec,
     ExperimentSpec,
@@ -59,6 +64,7 @@ class ResearchFactorySmokeConfig:
     funding_bps: float = 0.5
     periods_per_year: float = 1.0
     execution_cost_summary_path: Path | None = None
+    registry_path: Path | None = None
     timestamp: datetime = DEFAULT_SMOKE_TIMESTAMP
 
 
@@ -73,6 +79,7 @@ class ResearchFactorySmokeResult:
     metrics_ref: str | None = None
     candidate_ref: str | None = None
     recommendation_ref: str | None = None
+    registry_ref: str | None = None
     failure_ref: str | None = None
     error: str | None = None
 
@@ -85,6 +92,7 @@ class ResearchFactorySmokeResult:
             "metrics_ref": self.metrics_ref,
             "candidate_ref": self.candidate_ref,
             "recommendation_ref": self.recommendation_ref,
+            "registry_ref": self.registry_ref,
             "failure_ref": self.failure_ref,
             "error": self.error,
         }
@@ -101,6 +109,10 @@ def run_research_factory_smoke(
     artifact_root = _require_research_artifact_root(config.artifact_root)
     experiment_id = _require_safe_identifier(config.experiment_id, "experiment_id")
     experiment_dir = artifact_root / experiment_id
+    registry = ResearchMemoryRegistry(
+        config.registry_path or default_research_memory_path_for_artifact_root(artifact_root)
+    )
+    registry_ref = registry.path.as_posix()
 
     if config.overwrite:
         _remove_existing_experiment_dir(artifact_root, experiment_id)
@@ -127,6 +139,7 @@ def run_research_factory_smoke(
         artifact_root=str(artifact_root),
         governance_mode="candidate_only",
     )
+    smoke_dataset_fingerprint = _smoke_dataset_fingerprint(dataset_spec)
 
     recorder = ExperimentRecorder(
         artifact_root,
@@ -134,6 +147,9 @@ def run_research_factory_smoke(
         clock=lambda: config.timestamp,
     )
     started = False
+    metrics: MetricsSnapshot | None = None
+    gate: CandidateGateResult | None = None
+    candidate: CandidateArtifact | None = None
     try:
         recorder.start(experiment_spec)
         started = True
@@ -184,7 +200,19 @@ def run_research_factory_smoke(
             evidence_refs=_recommendation_evidence_refs(execution_cost_summary_ref),
             created_at=config.timestamp,
         )
-        recorder.record_recommendation(experiment_id, recommendation)
+        manifest = recorder.record_recommendation(experiment_id, recommendation)
+        registry.upsert(
+            build_research_memory_entry(
+                experiment_id=experiment_id,
+                status="recommendation_ready",
+                created_by="research_factory_smoke_runner",
+                created_at=config.timestamp,
+                candidate=candidate,
+                metrics=metrics,
+                gate=gate,
+                artifact_refs=_memory_artifact_refs(experiment_id, manifest),
+            )
+        )
         manifest = recorder.finish(experiment_id, "succeeded")
         return ResearchFactorySmokeResult(
             experiment_id=experiment_id,
@@ -194,16 +222,32 @@ def run_research_factory_smoke(
             metrics_ref=manifest.get("metrics_ref"),
             candidate_ref=manifest["output_refs"].get("candidate_artifact"),
             recommendation_ref=manifest["output_refs"].get("research_recommendation"),
+            registry_ref=registry_ref,
         )
     except Exception as exc:
         if started:
             manifest = recorder.fail(experiment_id, str(exc))
+            registry.upsert(
+                build_research_memory_entry(
+                    experiment_id=experiment_id,
+                    status=_memory_failure_status(gate),
+                    created_by="research_factory_smoke_runner",
+                    created_at=config.timestamp,
+                    metrics=metrics,
+                    gate=gate,
+                    factor_expression=feature.expression,
+                    dataset_fingerprint=smoke_dataset_fingerprint,
+                    failure_reason=str(exc),
+                    artifact_refs=_memory_artifact_refs(experiment_id, manifest),
+                )
+            )
             return ResearchFactorySmokeResult(
                 experiment_id=experiment_id,
                 artifact_dir=experiment_dir.as_posix(),
                 status=manifest["status"],
                 candidate_generated=False,
                 metrics_ref=manifest.get("metrics_ref"),
+                registry_ref=registry_ref,
                 failure_ref=manifest["output_refs"].get("failure"),
                 error=str(exc),
             )
@@ -303,11 +347,7 @@ def _build_candidate(
     execution_cost_summary_ref: str | None,
     created_at: datetime,
 ) -> CandidateArtifact:
-    fingerprint = dataset_fingerprint(
-        prepared.dataset_spec,
-        source_watermark={"fixture_max_ts": _build_smoke_records()[-1].ts.isoformat()},
-        processor_versions={"research_factory_smoke": SMOKE_CODE_VERSION},
-    )
+    fingerprint = _smoke_dataset_fingerprint(prepared.dataset_spec)
     return CandidateArtifact(
         candidate_id=f"cand_{experiment_id}",
         experiment_id=experiment_id,
@@ -326,6 +366,14 @@ def _build_candidate(
     )
 
 
+def _smoke_dataset_fingerprint(dataset_spec: DatasetSpec) -> str:
+    return dataset_fingerprint(
+        dataset_spec,
+        source_watermark={"fixture_max_ts": _build_smoke_records()[-1].ts.isoformat()},
+        processor_versions={"research_factory_smoke": SMOKE_CODE_VERSION},
+    )
+
+
 def _recommendation_evidence_refs(execution_cost_summary_ref: str | None) -> dict[str, str]:
     refs = {
         "candidate_artifact": "candidate_artifact.json",
@@ -335,6 +383,25 @@ def _recommendation_evidence_refs(execution_cost_summary_ref: str | None) -> dic
     if execution_cost_summary_ref is not None:
         refs["execution_cost_summary"] = execution_cost_summary_ref
     return refs
+
+
+def _memory_artifact_refs(experiment_id: str, manifest: Mapping[str, Any]) -> dict[str, str]:
+    refs = {"experiment_manifest": f"{experiment_id}/experiment_manifest.json"}
+    metrics_ref = manifest.get("metrics_ref")
+    if isinstance(metrics_ref, str) and metrics_ref:
+        refs["metrics_snapshot"] = f"{experiment_id}/{metrics_ref}"
+    output_refs = manifest.get("output_refs", {})
+    if isinstance(output_refs, Mapping):
+        for name, ref in output_refs.items():
+            if isinstance(ref, str) and ref:
+                refs[str(name)] = f"{experiment_id}/{ref}"
+    return refs
+
+
+def _memory_failure_status(gate: CandidateGateResult | None) -> str:
+    if gate is not None and not gate.passed:
+        return "gate_failed"
+    return "failed"
 
 
 def _require_complete_execution_realism_metrics(snapshot: MetricsSnapshot) -> None:

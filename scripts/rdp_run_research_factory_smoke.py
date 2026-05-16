@@ -56,6 +56,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Optional Phase 4 execution_cost_summary.json to merge into Research Factory metrics.",
     )
+    parser.add_argument(
+        "--registry-path",
+        type=Path,
+        default=None,
+        help="Optional research memory JSONL path under artifacts/research.",
+    )
     return parser.parse_args(argv)
 
 
@@ -73,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
                 funding_bps=args.funding_bps,
                 periods_per_year=args.periods_per_year,
                 execution_cost_summary_path=args.execution_cost_summary,
+                registry_path=args.registry_path,
             )
         )
     except Exception as exc:

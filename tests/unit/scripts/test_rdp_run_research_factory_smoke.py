@@ -43,3 +43,4 @@ def test_rdp_run_research_factory_smoke_cli_accepts_execution_summary(
     assert payload["status"] == "succeeded"
     assert payload["candidate_generated"] is True
     assert payload["recommendation_ref"] == "research_recommendation.json"
+    assert payload["registry_ref"].endswith("/registry/research_memory.jsonl")
