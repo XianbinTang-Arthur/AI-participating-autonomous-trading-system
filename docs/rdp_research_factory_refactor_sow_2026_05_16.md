@@ -286,8 +286,10 @@ Research Factory 只负责到 recommendation draft / candidate；后续仍由现
 ## Documentation and operations manual
 
 - 本计划书作为后续重构总 SOW。
+- 细粒度实施必须遵循 [RDP Research Factory 重构实施 Playbook](task/rdp_research_factory_refactor_implementation_playbook_2026_05_16.md)。
 - 每个 phase 开始前应补充更小的 implementation SOW 或 task doc。
-- 自动化开发任务的 prompt 必须引用本计划书和 `CLAUDE.md` / `AGENTS.md` 的 live trading 约束。
+- 自动化开发任务的 prompt 必须引用本计划书、实施 Playbook 和 `CLAUDE.md` / `AGENTS.md` 的 live trading 约束。
+- 自动化开发任务每轮只能选择一个 Playbook task card；若需要越过 task card 文件范围，必须停止并起草新的 SOW。
 - Operator runbook 更新只在实际新增 UI/API 行为后进行。
 
 ## Deployment and acceptance criteria
