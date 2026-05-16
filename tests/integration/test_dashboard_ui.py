@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -64,7 +65,14 @@ def _run_node_module(script: str, *, encoding: str | None = None) -> subprocess.
             check=False,
         )
     finally:
-        temp_script.unlink(missing_ok=True)
+        for attempt in range(5):
+            try:
+                temp_script.unlink(missing_ok=True)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05)
 
 
 def _render_strategy_view_with_hidden_strings(strings: list[str]) -> subprocess.CompletedProcess[str]:
