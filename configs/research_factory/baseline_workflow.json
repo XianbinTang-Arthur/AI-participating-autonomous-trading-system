@@ -1,0 +1,132 @@
+{
+  "workflow_id": "research_factory_baseline_v1",
+  "config_version": "v1",
+  "description": "Research-only baseline workflow example for deterministic AATS Research Factory runs.",
+  "owner": "rdp_research_factory",
+  "governance_mode": "candidate_only",
+  "artifact_root": "artifacts/research/research_factory",
+  "automation_contract": {
+    "external_trigger_only": true,
+    "external_trigger": "codex_automation_heartbeat",
+    "no_internal_scheduler": true,
+    "one_task_card_per_run": true,
+    "no_runtime_effect": true
+  },
+  "dataset_defaults": {
+    "symbol": "BTC-USDT-SWAP",
+    "timeframe": "15m",
+    "dataset_version": "research_factory_v1",
+    "lookback_days": 90,
+    "segments": {
+      "train_ratio": 0.6,
+      "valid_ratio": 0.2,
+      "test_ratio": 0.2
+    },
+    "source_refs": {
+      "bars": "gold_replay_bars",
+      "funding": "gold_replay_bars.funding_rate",
+      "orderbook": "reserved_research_only"
+    }
+  },
+  "label_defaults": {
+    "name": "future_net_return_h4",
+    "horizon_bars": 4,
+    "return_kind": "simple_return",
+    "net_of_fee": true,
+    "net_of_slippage": true,
+    "include_funding": true,
+    "fee_bps": 5.0,
+    "slippage_bps": 2.0
+  },
+  "stages": [
+    {
+      "name": "dataset",
+      "purpose": "Build deterministic train, valid, test, and replay slices from AATS Gold bars.",
+      "outputs": [
+        "dataset_spec.json",
+        "dataset_fingerprint.txt"
+      ]
+    },
+    {
+      "name": "feature",
+      "purpose": "Evaluate safe factor DSL expressions without Python eval or external network access.",
+      "outputs": [
+        "feature_spec.json",
+        "factor_values.json"
+      ]
+    },
+    {
+      "name": "experiment",
+      "purpose": "Run a deterministic baseline experiment and record metrics under the research artifact root.",
+      "outputs": [
+        "experiment_manifest.json",
+        "experiment_spec.json",
+        "metrics_snapshot.json"
+      ]
+    },
+    {
+      "name": "benchmark",
+      "purpose": "Compare factor signals against labels with cost-adjusted return and execution realism metrics.",
+      "outputs": [
+        "baseline_metrics.json",
+        "benchmark_summary.json"
+      ]
+    },
+    {
+      "name": "governance",
+      "purpose": "Create candidate-only artifacts after deterministic gates pass; never mutate live runtime state.",
+      "action": "candidate_gate",
+      "outputs": [
+        "candidate_artifact.json",
+        "gate_result.json"
+      ]
+    },
+    {
+      "name": "sandbox",
+      "purpose": "Validate research proposals and candidate patches with path, secret, import, and network guardrails.",
+      "outputs": [
+        "sandbox_validation.json",
+        "static_scan_result.json"
+      ]
+    }
+  ],
+  "required_metrics": [
+    "ic",
+    "rank_ic",
+    "icir",
+    "rank_icir",
+    "annualized_return",
+    "net_annualized_return",
+    "information_ratio",
+    "sharpe",
+    "max_drawdown",
+    "turnover",
+    "fee_bps_mean",
+    "slippage_bps_mean",
+    "funding_bps_mean",
+    "fillable_ratio",
+    "partial_fill_ratio",
+    "cost_adjusted_edge_bps_mean"
+  ],
+  "candidate_gate_defaults": {
+    "min_net_annualized_return": 0.0,
+    "max_drawdown_limit": 0.2,
+    "min_cost_adjusted_edge_bps_mean": 0.0,
+    "critical_metrics": [
+      "net_annualized_return",
+      "max_drawdown",
+      "cost_adjusted_edge_bps_mean"
+    ]
+  },
+  "validation_commands": [
+    ".venv\\Scripts\\python.exe -m ruff check aats\\ --fix",
+    ".venv\\Scripts\\python.exe -m pytest tests\\unit\\data_platform\\research_factory\\ -q"
+  ],
+  "hard_boundaries": {
+    "read_env_files": false,
+    "modify_live_execution": false,
+    "call_okx_write_apis": false,
+    "deploy": false,
+    "introduce_qlib_or_rdagent_runtime_dependency": false
+  }
+}

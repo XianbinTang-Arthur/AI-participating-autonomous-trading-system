@@ -1,0 +1,44 @@
+{
+  "allowed_write_roots": [
+    "aats/data_platform/research_factory/",
+    "configs/research_factory/",
+    "artifacts/research/research_factory/tmp/"
+  ],
+  "denied_env_patterns": [
+    ".env",
+    "OKX",
+    "SECRET",
+    "TOKEN",
+    "PASSWORD",
+    "KEY"
+  ],
+  "denied_path_patterns": [
+    ".env*",
+    "**/.env*",
+    "deploy/*",
+    "deploy/**",
+    "configs/templates/*live*",
+    "configs/templates/**/*live*",
+    "configs/templates/*credential*",
+    "configs/templates/**/*credential*",
+    "*credential*",
+    "**/*credential*",
+    "*credentials*",
+    "**/*credentials*",
+    "*live*template*",
+    "**/*live*template*",
+    "*template*live*",
+    "**/*template*live*",
+    "*.live",
+    "**/*.live"
+  ],
+  "forbidden_output_terms": [
+    "active_parameter",
+    "active_parameters",
+    "apply",
+    "live_order",
+    "okx_write",
+    "operator_write",
+    "production_config"
+  ]
+}
