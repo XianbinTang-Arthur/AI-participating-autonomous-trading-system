@@ -28,6 +28,15 @@ METRICS_REF = "metrics_snapshot.json"
 FAILURE_REF = "failure.json"
 CANDIDATE_REF = "candidate_artifact.json"
 RECOMMENDATION_REF = "research_recommendation.json"
+FORBIDDEN_OUTPUT_REF_NAME_TERMS = (
+    "active_parameter",
+    "active_parameters",
+    "apply",
+    "live_order",
+    "okx_write",
+    "operator_write",
+    "production_config",
+)
 
 _SECRET_MARKERS = (
     "api_key",
@@ -80,6 +89,33 @@ class ExperimentRecorder:
         )
         self._write_manifest(experiment_spec.experiment_id, manifest)
         return manifest
+
+    def replace_experiment_spec(self, experiment_spec: ExperimentSpec) -> dict[str, Any]:
+        """Replace the stored experiment spec before the experiment is terminal."""
+        if not isinstance(experiment_spec, ExperimentSpec):
+            raise ValueError("experiment_spec must be an ExperimentSpec")
+        manifest = self._read_manifest(experiment_spec.experiment_id)
+        if is_terminal_status(manifest["status"]):
+            raise ValueError(f"experiment {experiment_spec.experiment_id!r} is already terminal")
+
+        experiment_dir = self._experiment_dir(experiment_spec.experiment_id)
+        _write_json_atomic(experiment_dir / EXPERIMENT_SPEC_REF, _to_jsonable(experiment_spec))
+        output_refs = dict(manifest["output_refs"])
+        output_refs["experiment_spec"] = EXPERIMENT_SPEC_REF
+        updated = build_artifact_manifest(
+            artifact_id=manifest["artifact_id"],
+            artifact_type=manifest["artifact_type"],
+            status=manifest["status"],
+            started_at=manifest["started_at"],
+            finished_at=manifest.get("finished_at"),
+            input_refs=_experiment_input_refs(experiment_spec),
+            output_refs=output_refs,
+            metrics_ref=manifest.get("metrics_ref"),
+            code_version=manifest.get("code_version"),
+            notes=manifest.get("notes"),
+        )
+        self._write_manifest(experiment_spec.experiment_id, updated)
+        return updated
 
     def record_metrics(self, experiment_id: str, metrics: MetricsSnapshot) -> dict[str, Any]:
         """Write a metrics snapshot and attach it to the experiment manifest."""
@@ -189,8 +225,7 @@ class ExperimentRecorder:
         output_ref: str,
     ) -> dict[str, Any]:
         """Attach an additional relative output artifact ref to the manifest."""
-        if not isinstance(ref_name, str) or not ref_name.strip():
-            raise ValueError("ref_name must be a non-empty string")
+        ref_name = _require_research_output_ref_name(ref_name)
         if not isinstance(output_ref, str) or not output_ref.strip():
             raise ValueError("output_ref must be a non-empty string")
 
@@ -371,6 +406,16 @@ def _require_safe_experiment_id(value: str) -> str:
         raise ValueError("experiment_id must be a non-empty string")
     if "/" in value or "\\" in value or value in {".", ".."} or ".." in value:
         raise ValueError("experiment_id must not contain path traversal or separators")
+    return value
+
+
+def _require_research_output_ref_name(value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("ref_name must be a non-empty string")
+    lowered = value.lower()
+    for forbidden in FORBIDDEN_OUTPUT_REF_NAME_TERMS:
+        if forbidden in lowered:
+            raise ValueError(f"ref_name must remain research-only; forbidden term: {forbidden}")
     return value
 
 

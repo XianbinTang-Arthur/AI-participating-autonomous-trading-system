@@ -281,31 +281,12 @@ def run_research_factory_experiment(
     else:
         preflight_execution_error = None
 
-    load_result = _load_gold_replay_records(config, data_source)
     segments = build_time_segments(
         config.start,
         config.end,
         config.train_ratio,
         config.valid_ratio,
         config.test_ratio,
-    )
-    dataset_spec = DatasetSpec(
-        dataset_id=_dataset_id(config),
-        symbol=config.symbol.upper(),
-        timeframe=config.timeframe,
-        dataset_version=load_result.dataset_version,
-        window_start=config.start,
-        window_end=config.end,
-        segments=segments,
-        source_refs={
-            "gold_replay_bars": load_result.gold_table,
-            "source_candle_dataset_version": config.dataset_version,
-        },
-    )
-    research_dataset_fingerprint = dataset_fingerprint(
-        dataset_spec,
-        source_watermark=load_result.source_watermark,
-        processor_versions={"research_factory_real_data_runner": REAL_DATA_CODE_VERSION},
     )
     feature = FeatureSpec(name="research_factor", expression=config.factor_expression)
     label = LabelSpec(
@@ -318,15 +299,18 @@ def run_research_factory_experiment(
         fee_bps=config.fee_bps,
         slippage_bps=config.slippage_bps,
     )
-    experiment_spec = ExperimentSpec(
+    pending_dataset_spec = _build_dataset_spec(
+        config,
+        segments,
+        dataset_version=config.dataset_version or "gold_replay_pending",
+        gold_table=_gold_table_ref(config),
+    )
+    experiment_spec = _build_experiment_spec(
         experiment_id=experiment_id,
-        dataset=dataset_spec,
-        features=[feature],
+        artifact_root=artifact_root,
+        dataset_spec=pending_dataset_spec,
+        feature=feature,
         label=label,
-        model_ref="baseline_long_flat",
-        metrics=["net_annualized_return", "max_drawdown", "cost_adjusted_edge_bps_mean"],
-        artifact_root=str(artifact_root),
-        governance_mode="candidate_only",
     )
 
     recorder = ExperimentRecorder(
@@ -338,12 +322,33 @@ def run_research_factory_experiment(
     metrics: MetricsSnapshot | None = None
     gate: CandidateGateResult | None = None
     candidate: CandidateArtifact | None = None
+    research_dataset_fingerprint: str | None = None
     try:
         recorder.start(experiment_spec)
         started = True
         if preflight_execution_error is not None:
             raise ValueError(preflight_execution_error)
 
+        load_result = _load_gold_replay_records(config, data_source)
+        dataset_spec = _build_dataset_spec(
+            config,
+            segments,
+            dataset_version=load_result.dataset_version,
+            gold_table=load_result.gold_table,
+        )
+        experiment_spec = _build_experiment_spec(
+            experiment_id=experiment_id,
+            artifact_root=artifact_root,
+            dataset_spec=dataset_spec,
+            feature=feature,
+            label=label,
+        )
+        recorder.replace_experiment_spec(experiment_spec)
+        research_dataset_fingerprint = dataset_fingerprint(
+            dataset_spec,
+            source_watermark=load_result.source_watermark,
+            processor_versions={"research_factory_real_data_runner": REAL_DATA_CODE_VERSION},
+        )
         execution_cost_summary_ref = None
         execution_metrics: MetricsSnapshot | None = None
         execution_summary_payload: Mapping[str, Any] | None = None
@@ -527,6 +532,52 @@ def run_research_factory_experiment(
                 error=str(exc),
             )
         raise
+
+
+def _build_dataset_spec(
+    config: ResearchFactoryExperimentConfig,
+    segments: Sequence[Any],
+    *,
+    dataset_version: str,
+    gold_table: str,
+) -> DatasetSpec:
+    return DatasetSpec(
+        dataset_id=_dataset_id(config),
+        symbol=config.symbol.upper(),
+        timeframe=config.timeframe,
+        dataset_version=dataset_version,
+        window_start=config.start,
+        window_end=config.end,
+        segments=segments,
+        source_refs={
+            "gold_replay_bars": gold_table,
+            "source_candle_dataset_version": config.dataset_version,
+        },
+    )
+
+
+def _build_experiment_spec(
+    *,
+    experiment_id: str,
+    artifact_root: Path,
+    dataset_spec: DatasetSpec,
+    feature: FeatureSpec,
+    label: LabelSpec,
+) -> ExperimentSpec:
+    return ExperimentSpec(
+        experiment_id=experiment_id,
+        dataset=dataset_spec,
+        features=[feature],
+        label=label,
+        model_ref="baseline_long_flat",
+        metrics=["net_annualized_return", "max_drawdown", "cost_adjusted_edge_bps_mean"],
+        artifact_root=str(artifact_root),
+        governance_mode="candidate_only",
+    )
+
+
+def _gold_table_ref(config: ResearchFactoryExperimentConfig) -> str:
+    return replay_bar_table_name(config.symbol.upper(), config.timeframe)
 
 
 def _load_gold_replay_records(

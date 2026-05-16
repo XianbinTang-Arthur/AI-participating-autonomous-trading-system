@@ -15,6 +15,7 @@ from aats.data_platform.research_factory.numeric import require_finite_number
 from aats.data_platform.research_factory.specs import DatasetSpec
 
 EVIDENCE_SCHEMA_VERSION = "research_factory_evidence_v1"
+EXECUTION_EVIDENCE_CONTRACT_SCHEMA_VERSION = "execution_cost_summary_v1"
 TIMEFRAME_DELTAS = {
     "1m": timedelta(minutes=1),
     "5m": timedelta(minutes=5),
@@ -127,6 +128,7 @@ class SourceIntegrityReport:
     candle_version_consistent: bool
     funding_version_consistent: bool
     build_run_traceable: bool
+    build_run_consistent: bool
     timestamp_timezone_assumption: str
     passed: bool
     failures: Sequence[str]
@@ -173,11 +175,15 @@ class ExecutionEvidenceReport:
 
     dataset_id: str
     evidence_ref: str
+    contract_schema_version: str | None
+    source_run_id: str | None
     symbol: str | None
     timeframe: str | None
     window_start: datetime | None
     window_end: datetime | None
     dataset_fingerprint: str | None
+    dataset_fingerprint_compatible: bool
+    compatibility_reason: str | None
     passed: bool
     failures: Sequence[str]
     created_at: datetime
@@ -186,6 +192,10 @@ class ExecutionEvidenceReport:
     def __post_init__(self) -> None:
         _require_non_empty(self.dataset_id, "dataset_id")
         _require_non_empty(self.evidence_ref, "evidence_ref")
+        if self.contract_schema_version is not None:
+            _require_non_empty(self.contract_schema_version, "contract_schema_version")
+        if self.source_run_id is not None:
+            _require_non_empty(self.source_run_id, "source_run_id")
         if self.symbol is not None:
             _require_non_empty(self.symbol, "symbol")
         if self.timeframe is not None:
@@ -196,6 +206,10 @@ class ExecutionEvidenceReport:
             _require_aware_datetime(self.window_end, "window_end")
         if self.dataset_fingerprint is not None:
             _require_non_empty(self.dataset_fingerprint, "dataset_fingerprint")
+        if not isinstance(self.dataset_fingerprint_compatible, bool):
+            raise ValueError("dataset_fingerprint_compatible must be a bool")
+        if self.compatibility_reason is not None:
+            _require_non_empty(self.compatibility_reason, "compatibility_reason")
         _require_aware_datetime(self.created_at, "created_at")
         object.__setattr__(self, "failures", _normalize_failures(self.failures, self.passed))
 
@@ -342,10 +356,10 @@ def build_source_integrity_report(
     )
     candle_version_consistent = len(candle_versions) == 1 and (
         candle_versions[0] == dataset_spec.dataset_version
-        or dataset_spec.dataset_version == "gold_replay_mixed_versions"
     )
     funding_version_consistent = len(funding_versions) == 1
     build_run_traceable = bool(build_run_ids)
+    build_run_consistent = len(build_run_ids) == 1
     failures: list[str] = []
     if not candle_version_consistent:
         failures.append("source candle dataset version must be single and match dataset_version")
@@ -353,6 +367,8 @@ def build_source_integrity_report(
         failures.append("source funding dataset version must be single and traceable")
     if not build_run_traceable:
         failures.append("build_run_id is required for source traceability")
+    elif not build_run_consistent:
+        failures.append("build_run_id must be single and traceable")
 
     return SourceIntegrityReport(
         dataset_id=dataset_spec.dataset_id,
@@ -363,6 +379,7 @@ def build_source_integrity_report(
         candle_version_consistent=candle_version_consistent,
         funding_version_consistent=funding_version_consistent,
         build_run_traceable=build_run_traceable,
+        build_run_consistent=build_run_consistent,
         timestamp_timezone_assumption=str(
             source_watermark.get(
                 "timestamp_timezone_assumption",
@@ -386,12 +403,26 @@ def build_execution_evidence_report(
     """Verify execution evidence is aligned with the experiment dataset."""
     if not isinstance(summary, Mapping):
         raise ValueError("summary must be a mapping")
+    contract_schema_version = _optional_text(summary.get("schema_version"))
+    source_run_id = _optional_text(summary.get("source_run_id"))
     symbol = _optional_text(summary.get("symbol"))
     timeframe = _optional_text(summary.get("timeframe"))
     window_start = _optional_datetime(summary.get("window_start"))
     window_end = _optional_datetime(summary.get("window_end"))
     summary_dataset_fingerprint = _optional_text(summary.get("dataset_fingerprint"))
+    compatibility_marker = _optional_text(summary.get("dataset_fingerprint_compatibility"))
+    compatibility_reason = _optional_text(summary.get("compatibility_reason"))
+    dataset_fingerprint_compatible = compatibility_marker == "compatible"
     failures: list[str] = []
+    if contract_schema_version is None:
+        failures.append("execution evidence schema_version is required")
+    elif contract_schema_version != EXECUTION_EVIDENCE_CONTRACT_SCHEMA_VERSION:
+        failures.append(
+            "execution evidence schema_version must be "
+            f"{EXECUTION_EVIDENCE_CONTRACT_SCHEMA_VERSION}"
+        )
+    if source_run_id is None:
+        failures.append("execution evidence source_run_id is required")
     if symbol is None:
         failures.append("execution evidence symbol is required")
     elif symbol.upper() != dataset_spec.symbol.upper():
@@ -408,17 +439,27 @@ def build_execution_evidence_report(
         failures.append("execution evidence window_end is required")
     elif window_end != dataset_spec.window_end:
         failures.append("execution evidence window_end must match dataset window_end")
-    if summary_dataset_fingerprint is not None and summary_dataset_fingerprint != dataset_fingerprint:
+    if summary_dataset_fingerprint is None and not dataset_fingerprint_compatible:
+        failures.append(
+            "execution evidence dataset_fingerprint or explicit compatibility is required"
+        )
+    elif summary_dataset_fingerprint is not None and summary_dataset_fingerprint != dataset_fingerprint:
         failures.append("execution evidence dataset_fingerprint must match dataset fingerprint")
+    if dataset_fingerprint_compatible and compatibility_reason is None:
+        failures.append("execution evidence compatibility_reason is required")
 
     return ExecutionEvidenceReport(
         dataset_id=dataset_spec.dataset_id,
         evidence_ref=evidence_ref,
+        contract_schema_version=contract_schema_version,
+        source_run_id=source_run_id,
         symbol=symbol,
         timeframe=timeframe,
         window_start=window_start,
         window_end=window_end,
         dataset_fingerprint=summary_dataset_fingerprint,
+        dataset_fingerprint_compatible=dataset_fingerprint_compatible,
+        compatibility_reason=compatibility_reason,
         passed=not failures,
         failures=tuple(failures),
         created_at=created_at,

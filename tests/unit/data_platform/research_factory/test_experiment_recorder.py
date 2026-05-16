@@ -182,6 +182,16 @@ def test_record_output_ref_rejects_path_traversal(workspace_tmp_path: Path) -> N
         recorder.record_output_ref(spec.experiment_id, "bad", "../outside.json")
 
 
+def test_record_output_ref_rejects_runtime_ref_name(workspace_tmp_path: Path) -> None:
+    root = artifact_root(workspace_tmp_path)
+    recorder = ExperimentRecorder(root)
+    spec = experiment_spec(root)
+    recorder.start(spec)
+
+    with pytest.raises(ValueError, match="research-only"):
+        recorder.record_output_ref(spec.experiment_id, "active_parameter", "candidate.json")
+
+
 def test_record_json_artifact_writes_payload_and_manifest_ref(workspace_tmp_path: Path) -> None:
     root = artifact_root(workspace_tmp_path)
     recorder = ExperimentRecorder(root)
@@ -199,6 +209,39 @@ def test_record_json_artifact_writes_payload_and_manifest_ref(workspace_tmp_path
     assert stored["passed"] is True
     assert stored["row_count"] == 12
     assert manifest["output_refs"]["dataset_quality_report"] == "dataset_quality_report.json"
+
+
+def test_replace_experiment_spec_updates_manifest_input_refs(workspace_tmp_path: Path) -> None:
+    root = artifact_root(workspace_tmp_path)
+    recorder = ExperimentRecorder(root)
+    spec = experiment_spec(root)
+    recorder.start(spec)
+    resolved_spec = experiment_spec(root, experiment_id=spec.experiment_id)
+    resolved_dataset = DatasetSpec(
+        dataset_id=resolved_spec.dataset.dataset_id,
+        symbol=resolved_spec.dataset.symbol,
+        timeframe=resolved_spec.dataset.timeframe,
+        dataset_version="v2.0",
+        window_start=resolved_spec.dataset.window_start,
+        window_end=resolved_spec.dataset.window_end,
+        segments=resolved_spec.dataset.segments,
+        source_refs=resolved_spec.dataset.source_refs,
+    )
+    resolved_spec = ExperimentSpec(
+        experiment_id=resolved_spec.experiment_id,
+        dataset=resolved_dataset,
+        features=resolved_spec.features,
+        label=resolved_spec.label,
+        model_ref=resolved_spec.model_ref,
+        metrics=resolved_spec.metrics,
+        artifact_root=resolved_spec.artifact_root,
+    )
+
+    manifest = recorder.replace_experiment_spec(resolved_spec)
+
+    stored_spec = read_json(root / spec.experiment_id / "experiment_spec.json")
+    assert stored_spec["dataset"]["dataset_version"] == "v2.0"
+    assert manifest["input_refs"]["dataset_version"] == "v2.0"
 
 
 def test_finish_requires_terminal_status_and_writes_finished_manifest(workspace_tmp_path: Path) -> None:

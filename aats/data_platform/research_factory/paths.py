@@ -61,13 +61,36 @@ def copy_research_artifact_file(
         research_root=research_root,
     )
     destination_name = _require_safe_filename(destination_name, "destination_name")
-    destination = Path(destination_dir) / destination_name
+    destination_dir_path = _require_research_artifact_directory(
+        destination_dir,
+        "destination_dir",
+        research_root=research_root,
+    )
+    destination = destination_dir_path / destination_name
     _reject_unsafe_path_parts(destination, "destination")
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     if source.resolve() != destination.resolve(strict=False):
         shutil.copyfile(source, destination)
     return destination_name
+
+
+def _require_research_artifact_directory(
+    path: str | Path,
+    field_name: str,
+    *,
+    research_root: str | Path | None,
+) -> Path:
+    directory = Path(path)
+    _reject_unsafe_path_parts(directory, field_name)
+    allowed_root = _research_artifact_root(Path(research_root)) if research_root else None
+    if allowed_root is None:
+        allowed_root = _research_artifact_root(directory)
+    if allowed_root is None:
+        raise ValueError(f"{field_name} must be under artifacts/research")
+    if not _is_relative_to(directory.resolve(strict=False), allowed_root):
+        raise ValueError(f"{field_name} must be under artifacts/research")
+    return directory
 
 
 def _research_artifact_root(path: Path) -> Path | None:
