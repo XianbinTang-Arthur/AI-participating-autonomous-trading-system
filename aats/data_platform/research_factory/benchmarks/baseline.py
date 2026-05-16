@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from typing import Any
 
+from aats.data_platform.research_factory.numeric import require_finite_number
 from aats.data_platform.research_factory.specs import METRIC_FIELDS, MetricsSnapshot
 
 NumericValue = int | float | Decimal
@@ -42,7 +43,8 @@ def run_factor_baseline(
     gross_returns, net_returns, signal_changes = _long_flat_returns(
         factor_values,
         label_values,
-        costs["total_cost_bps"],
+        trade_cost_bps=costs["trade_cost_bps"],
+        funding_bps=costs["funding_bps"],
     )
     annualized_return = _annualize(gross_returns, costs["periods_per_year"])
     net_annualized_return = _annualize(net_returns, costs["periods_per_year"])
@@ -93,7 +95,7 @@ def _normalize_cost_config(cost_config: Mapping[str, NumericValue]) -> dict[str,
         "fee_bps": fee_bps,
         "slippage_bps": slippage_bps,
         "funding_bps": funding_bps,
-        "total_cost_bps": fee_bps + slippage_bps + funding_bps,
+        "trade_cost_bps": fee_bps + slippage_bps,
         "periods_per_year": periods_per_year,
     }
 
@@ -114,24 +116,28 @@ def _valid_pairs(
 def _long_flat_returns(
     factor_values: Sequence[NumericValue | None],
     label_values: Sequence[NumericValue | None],
-    cost_bps: float,
+    *,
+    trade_cost_bps: float,
+    funding_bps: float,
 ) -> tuple[list[float], list[float], list[float]]:
     gross_returns: list[float] = []
     net_returns: list[float] = []
     signal_changes: list[float] = []
     previous_signal = 0.0
-    cost_return = cost_bps / 10_000.0
+    trade_cost_return = trade_cost_bps / 10_000.0
+    funding_return = funding_bps / 10_000.0
 
     for factor_value, label_value in zip(factor_values, label_values, strict=True):
         factor = _optional_float(factor_value)
         label = _optional_float(label_value)
         signal = 1.0 if factor is not None and factor > 0 else 0.0
-        signal_changes.append(abs(signal - previous_signal))
+        turnover = abs(signal - previous_signal)
+        signal_changes.append(turnover)
         previous_signal = signal
         if label is None:
             continue
         gross_return = label * signal
-        net_return = gross_return - cost_return * signal
+        net_return = gross_return - trade_cost_return * turnover - funding_return * signal
         gross_returns.append(gross_return)
         net_returns.append(net_return)
 
@@ -242,13 +248,11 @@ def _optional_float(value: Any) -> float | None:
         return None
     if isinstance(value, bool) or not isinstance(value, int | float | Decimal):
         raise ValueError("factor and label values must be numeric or None")
-    return float(value)
+    return require_finite_number(value, "factor and label value")
 
 
 def _float_value(value: Any, field_name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float | Decimal):
-        raise ValueError(f"{field_name} must be numeric")
-    return float(value)
+    return require_finite_number(value, field_name)
 
 
 def _non_negative_float(value: Any, field_name: str) -> float:

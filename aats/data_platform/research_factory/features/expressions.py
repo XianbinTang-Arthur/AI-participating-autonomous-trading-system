@@ -6,6 +6,8 @@ import ast
 from dataclasses import dataclass
 from typing import Any
 
+from aats.data_platform.research_factory.numeric import require_finite_number
+
 ALLOWED_FACTOR_FIELDS = frozenset(
     {
         "open",
@@ -106,6 +108,7 @@ class _SafeFactorExpressionVisitor(ast.NodeVisitor):
     def visit_Constant(self, node: ast.Constant) -> None:
         if isinstance(node.value, bool) or not isinstance(node.value, int | float):
             raise ValueError("factor constants must be numeric")
+        require_finite_number(node.value, "factor constant")
 
     def visit_BinOp(self, node: ast.BinOp) -> None:
         if not isinstance(node.op, ALLOWED_BINARY_OPS):
@@ -171,7 +174,7 @@ def _numeric_constant(node: ast.AST) -> int | float | None:
     if isinstance(node, ast.Constant):
         if isinstance(node.value, bool) or not isinstance(node.value, int | float):
             return None
-        return node.value
+        return require_finite_number(node.value, "factor constant")
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ALLOWED_UNARY_OPS):
         value = _numeric_constant(node.operand)
         if value is None:

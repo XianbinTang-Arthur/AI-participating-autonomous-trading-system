@@ -30,7 +30,7 @@ def test_rejects_env_read_path() -> None:
         proposal_type="factor",
         hypothesis="Test a research-only factor.",
         read_paths=(".env.derivatives.live",),
-        write_paths=("aats/data_platform/research_factory/sandbox/tmp/factor.py",),
+        write_paths=("aats/data_platform/research_factory/generated/factor.py",),
         outputs={"candidate_factor": "Mean(close, 3)"},
     )
 
@@ -51,13 +51,13 @@ def test_rejects_active_parameter_output() -> None:
         validate_sandbox_proposal(proposal, SandboxPolicy())
 
 
-def test_research_factory_tmp_write_path_passes() -> None:
+def test_research_factory_generated_write_path_passes() -> None:
     proposal = SandboxProposal(
         proposal_id="proposal_factor_3",
         proposal_type="factor",
         hypothesis="Test a research-only factor.",
         read_paths=("artifacts/research/research_factory/tmp/input.json",),
-        write_paths=("aats/data_platform/research_factory/sandbox/tmp/factor.py",),
+        write_paths=("aats/data_platform/research_factory/generated/factor.py",),
         outputs={"candidate_factor": "Mean(close, 3)"},
         metadata={"source": "sandbox_contract_test"},
     )
@@ -69,7 +69,8 @@ def test_sandbox_policy_json_loads_with_defaults_shape() -> None:
     policy_path = Path("configs/research_factory/sandbox_policy.json")
     policy = SandboxPolicy.from_mapping(json.loads(policy_path.read_text(encoding="utf-8")))
 
-    assert "aats/data_platform/research_factory" in policy.allowed_write_roots
+    assert "aats/data_platform/research_factory/generated" in policy.allowed_write_roots
+    assert "aats/data_platform/research_factory/sandbox/**" in policy.denied_path_patterns
     assert ".env" in policy.denied_env_patterns
     assert "active_parameter" in policy.forbidden_output_terms
 
@@ -77,9 +78,9 @@ def test_sandbox_policy_json_loads_with_defaults_shape() -> None:
 def test_static_scan_rejects_os_environ_access() -> None:
     with pytest.raises(ValueError, match="forbidden module"):
         scan_candidate_patch(
-            changed_paths=("aats/data_platform/research_factory/features/generated_factor.py",),
+            changed_paths=("aats/data_platform/research_factory/generated/generated_factor.py",),
             text_blobs={
-                "aats/data_platform/research_factory/features/generated_factor.py": "import os\nVALUE = os.environ\n",
+                "aats/data_platform/research_factory/generated/generated_factor.py": "import os\nVALUE = os.environ\n",
             },
             policy=SandboxPolicy(),
         )
@@ -88,9 +89,9 @@ def test_static_scan_rejects_os_environ_access() -> None:
 def test_static_scan_rejects_network_call_hint() -> None:
     with pytest.raises(ValueError, match="network call hint"):
         scan_candidate_patch(
-            changed_paths=("aats/data_platform/research_factory/features/generated_factor.py",),
+            changed_paths=("aats/data_platform/research_factory/generated/generated_factor.py",),
             text_blobs={
-                "aats/data_platform/research_factory/features/generated_factor.py": (
+                "aats/data_platform/research_factory/generated/generated_factor.py": (
                     "def run():\n"
                     "    return requests.post('https://www.okx.com')\n"
                 ),
@@ -110,9 +111,9 @@ def test_static_scan_rejects_live_execution_path() -> None:
 
 def test_static_scan_accepts_research_factory_feature_patch() -> None:
     changed_paths = scan_candidate_patch(
-        changed_paths=("aats/data_platform/research_factory/features/foo.py",),
+        changed_paths=("aats/data_platform/research_factory/generated/foo.py",),
         text_blobs={
-            "aats/data_platform/research_factory/features/foo.py": (
+            "aats/data_platform/research_factory/generated/foo.py": (
                 "def compute_factor(row):\n"
                 "    return row['close'] - row['open']\n"
             ),
@@ -120,4 +121,18 @@ def test_static_scan_accepts_research_factory_feature_patch() -> None:
         policy=SandboxPolicy(),
     )
 
-    assert changed_paths == ("aats/data_platform/research_factory/features/foo.py",)
+    assert changed_paths == ("aats/data_platform/research_factory/generated/foo.py",)
+
+
+def test_static_scan_rejects_research_factory_guardrail_patch() -> None:
+    with pytest.raises(ValueError, match="denied path pattern"):
+        scan_candidate_patch(
+            changed_paths=("aats/data_platform/research_factory/sandbox/guardrails.py",),
+            text_blobs={
+                "aats/data_platform/research_factory/sandbox/guardrails.py": (
+                    "def loosen_policy():\n"
+                    "    return True\n"
+                )
+            },
+            policy=SandboxPolicy(),
+        )

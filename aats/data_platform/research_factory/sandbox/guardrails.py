@@ -15,9 +15,10 @@ from aats.data_platform.research_factory.sandbox.proposal import (
 )
 
 DEFAULT_ALLOWED_WRITE_ROOTS = (
-    "aats/data_platform/research_factory/",
-    "configs/research_factory/",
     "artifacts/research/research_factory/tmp/",
+    "artifacts/research/research_factory/generated/",
+    "configs/research_factory/generated/",
+    "aats/data_platform/research_factory/generated/",
 )
 DEFAULT_DENIED_ENV_PATTERNS = (".env", "OKX", "SECRET", "TOKEN", "PASSWORD", "KEY")
 DEFAULT_DENIED_PATH_PATTERNS = (
@@ -39,6 +40,14 @@ DEFAULT_DENIED_PATH_PATTERNS = (
     "**/*template*live*",
     "*.live",
     "**/*.live",
+    "aats/data_platform/research_factory/sandbox/*",
+    "aats/data_platform/research_factory/sandbox/**",
+    "aats/data_platform/research_factory/metrics/*",
+    "aats/data_platform/research_factory/metrics/**",
+    "aats/data_platform/research_factory/experiments/*",
+    "aats/data_platform/research_factory/experiments/**",
+    "aats/data_platform/research_factory/datasets/*",
+    "aats/data_platform/research_factory/datasets/**",
 )
 DEFAULT_FORBIDDEN_OUTPUT_TERMS = (
     "active_parameter",

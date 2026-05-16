@@ -48,7 +48,7 @@ class ExperimentRecorder:
         *,
         code_version: str | None = None,
     ) -> None:
-        self.root = Path(root)
+        self.root = _require_research_recorder_root(root)
         self.code_version = code_version
 
     def start(self, experiment_spec: ExperimentSpec) -> dict[str, Any]:
@@ -276,6 +276,20 @@ def _require_safe_experiment_id(value: str) -> str:
     if "/" in value or "\\" in value or value in {".", ".."} or ".." in value:
         raise ValueError("experiment_id must not contain path traversal or separators")
     return value
+
+
+def _require_research_recorder_root(value: str | Path) -> Path:
+    path = Path(value)
+    parts = path.parts
+    if ".." in parts:
+        raise ValueError("recorder root must not contain path traversal")
+    has_research_artifact_root = any(
+        parts[index] == "artifacts" and parts[index + 1] == "research"
+        for index in range(len(parts) - 1)
+    )
+    if not has_research_artifact_root:
+        raise ValueError("recorder root must be under artifacts/research")
+    return path
 
 
 def _utc_now() -> datetime:

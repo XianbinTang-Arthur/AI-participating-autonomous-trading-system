@@ -236,6 +236,20 @@ def test_label_rejects_non_positive_horizon() -> None:
         )
 
 
+def test_label_rejects_non_finite_cost_inputs() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        LabelSpec(
+            name="future_net_return_h4",
+            horizon_bars=4,
+            return_kind="simple_return",
+            net_of_fee=True,
+            net_of_slippage=True,
+            include_funding=True,
+            fee_bps=float("nan"),
+            slippage_bps=2.0,
+        )
+
+
 def test_metrics_snapshot_requires_missing_reason_for_null_metric() -> None:
     with pytest.raises(ValueError, match="missing without a reason"):
         MetricsSnapshot(
@@ -307,16 +321,20 @@ def test_research_workflow_rejects_unknown_stage() -> None:
         )
 
 
-def test_research_workflow_rejects_sandbox_after_governance_apply() -> None:
-    with pytest.raises(ValueError, match="sandbox stage must not run after governance apply"):
+def test_research_workflow_rejects_governance_apply_action_itself() -> None:
+    with pytest.raises(ValueError, match="not research-only"):
         ResearchWorkflowSpec(
-            workflow_id="sandbox_after_apply",
+            workflow_id="apply_action",
             stages=[
                 WorkflowStageSpec(name="dataset", purpose="prepare dataset"),
                 WorkflowStageSpec(name="governance", purpose="apply candidate", action="apply"),
-                WorkflowStageSpec(name="sandbox", purpose="generate proposal"),
             ],
         )
+
+
+def test_research_workflow_rejects_unknown_action() -> None:
+    with pytest.raises(ValueError, match="must be one of"):
+        WorkflowStageSpec(name="governance", purpose="unexpected action", action="promote")
 
 
 def test_research_workflow_rejects_non_research_outputs() -> None:
@@ -361,3 +379,25 @@ def test_research_workflow_accepts_research_only_outputs() -> None:
 
     assert [stage.name for stage in spec.stages] == ["dataset", "experiment", "governance"]
     assert spec.outputs == ("research_summary.json",)
+
+
+def test_metrics_snapshot_rejects_non_finite_metric() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        MetricsSnapshot(
+            ic=float("inf"),
+            rank_ic=0.1,
+            icir=0.1,
+            rank_icir=0.1,
+            annualized_return=0.1,
+            net_annualized_return=0.1,
+            information_ratio=0.1,
+            sharpe=0.1,
+            max_drawdown=0.1,
+            turnover=0.1,
+            fee_bps_mean=1.0,
+            slippage_bps_mean=1.0,
+            funding_bps_mean=1.0,
+            fillable_ratio=0.9,
+            partial_fill_ratio=0.1,
+            cost_adjusted_edge_bps_mean=1.0,
+        )

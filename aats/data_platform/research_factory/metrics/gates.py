@@ -5,8 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
+from aats.data_platform.research_factory.numeric import require_finite_number
 from aats.data_platform.research_factory.specs import MetricsSnapshot
 
 ALLOWED_CANDIDATE_TYPES = frozenset(
@@ -61,6 +63,7 @@ class CandidateGateResult:
             raise ValueError("failing gate must contain at least one failure")
         if not isinstance(self.thresholds, Mapping):
             raise ValueError("gate thresholds must be a mapping")
+        _reject_nonfinite_threshold_values(self.thresholds)
         if not all(isinstance(metric, str) and metric.strip() for metric in self.critical_metrics):
             raise ValueError("critical metrics must be non-empty strings")
         object.__setattr__(self, "thresholds", dict(self.thresholds))
@@ -193,9 +196,7 @@ def _normalize_thresholds(thresholds: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _float_threshold(value: Any, field_name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise ValueError(f"{field_name} must be numeric")
-    return float(value)
+    return require_finite_number(value, field_name)
 
 
 def _non_negative_threshold(value: Any, field_name: str) -> float:
@@ -232,3 +233,19 @@ def _reject_forbidden_text(value: str) -> None:
     for forbidden in FORBIDDEN_CANDIDATE_TERMS:
         if forbidden in lowered:
             raise ValueError(f"candidate artifact must remain research-only; forbidden term: {forbidden}")
+
+
+def _reject_nonfinite_threshold_values(value: Any) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            _reject_nonfinite_threshold_values(key)
+            _reject_nonfinite_threshold_values(item)
+        return
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        for item in value:
+            _reject_nonfinite_threshold_values(item)
+        return
+    if isinstance(value, bool):
+        return
+    if isinstance(value, int | float | Decimal):
+        require_finite_number(value, "gate thresholds")

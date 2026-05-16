@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import PurePath
 from typing import Any
 
+from aats.data_platform.research_factory.numeric import require_finite_number
+
 ALLOWED_SEGMENT_NAMES = frozenset({"train", "valid", "test", "replay"})
 ALLOWED_PROCESSOR_NAMES = frozenset(
     {
@@ -42,6 +44,17 @@ FORBIDDEN_WORKFLOW_OUTPUT_TERMS = frozenset(
         "production_config",
     }
 )
+ALLOWED_WORKFLOW_ACTIONS = frozenset(
+    {
+        "candidate_gate",
+        "candidate_review",
+        "validate",
+        "record",
+        "static_scan",
+        "draft_recommendation",
+    }
+)
+FORBIDDEN_WORKFLOW_ACTION_TERMS = FORBIDDEN_WORKFLOW_OUTPUT_TERMS
 
 METRIC_FIELDS = (
     "ic",
@@ -109,6 +122,17 @@ def _require_research_only_output(value: str) -> str:
     for forbidden in FORBIDDEN_WORKFLOW_OUTPUT_TERMS:
         if forbidden in lowered:
             raise ValueError(f"workflow output {value!r} is not research-only")
+    return value
+
+
+def _require_research_only_action(value: str) -> str:
+    value = _require_non_empty(value, "workflow_stage.action").lower()
+    for forbidden in FORBIDDEN_WORKFLOW_ACTION_TERMS:
+        if forbidden in value:
+            raise ValueError(f"workflow action {value!r} is not research-only")
+    if value not in ALLOWED_WORKFLOW_ACTIONS:
+        allowed = ", ".join(sorted(ALLOWED_WORKFLOW_ACTIONS))
+        raise ValueError(f"workflow action {value!r} must be one of: {allowed}")
     return value
 
 
@@ -182,10 +206,14 @@ class LabelSpec:
         if self.return_kind not in ALLOWED_RETURN_KINDS:
             allowed = ", ".join(sorted(ALLOWED_RETURN_KINDS))
             raise ValueError(f"label return_kind must be one of: {allowed}")
-        if self.fee_bps < 0:
+        fee_bps = require_finite_number(self.fee_bps, "label fee_bps")
+        slippage_bps = require_finite_number(self.slippage_bps, "label slippage_bps")
+        if fee_bps < 0:
             raise ValueError("label fee_bps must be non-negative")
-        if self.slippage_bps < 0:
+        if slippage_bps < 0:
             raise ValueError("label slippage_bps must be non-negative")
+        object.__setattr__(self, "fee_bps", fee_bps)
+        object.__setattr__(self, "slippage_bps", slippage_bps)
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,7 +287,15 @@ class MetricsSnapshot:
             raise ValueError("missing_reasons must be a mapping")
         missing_reasons = dict(self.missing_reasons)
         for field_name in METRIC_FIELDS:
-            if getattr(self, field_name) is None and not missing_reasons.get(field_name):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    field_name,
+                    require_finite_number(value, f"metric {field_name}"),
+                )
+                continue
+            if not missing_reasons.get(field_name):
                 raise ValueError(f"metric {field_name!r} is missing without a reason")
         object.__setattr__(self, "missing_reasons", missing_reasons)
 
@@ -313,7 +349,7 @@ class WorkflowStageSpec:
         outputs = tuple(_require_research_only_output(output) for output in self.outputs)
         action = self.action
         if action is not None:
-            action = _require_non_empty(action, "workflow_stage.action")
+            action = _require_research_only_action(action)
         object.__setattr__(self, "outputs", outputs)
         object.__setattr__(self, "action", action)
 

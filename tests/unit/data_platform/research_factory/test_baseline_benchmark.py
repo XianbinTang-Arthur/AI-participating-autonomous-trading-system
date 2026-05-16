@@ -47,7 +47,9 @@ def test_run_factor_baseline_subtracts_fee_slippage_and_funding_from_net_return(
     )
 
     expected_gross_mean = (0.01 + 0.02 - 0.01) / 3
-    expected_net_mean = expected_gross_mean - 17.0 / 10_000.0
+    expected_trade_cost_mean = (15.0 / 10_000.0) / 3
+    expected_funding_cost_mean = 2.0 / 10_000.0
+    expected_net_mean = expected_gross_mean - expected_trade_cost_mean - expected_funding_cost_mean
     assert metrics.annualized_return == pytest.approx(expected_gross_mean)
     assert metrics.net_annualized_return == pytest.approx(expected_net_mean)
     assert metrics.fee_bps_mean == pytest.approx(10.0)
@@ -65,6 +67,24 @@ def test_run_factor_baseline_uses_long_flat_signal_and_turnover_proxy() -> None:
     )
 
     assert metrics.annualized_return == pytest.approx((0.01 + 0.0 + 0.03 + 0.0) / 4)
+    assert metrics.turnover == pytest.approx(1.0)
+
+
+def test_run_factor_baseline_charges_exit_turnover_cost() -> None:
+    metrics = run_factor_baseline(
+        DATASET,
+        factor_values=[1.0, 0.0],
+        label_values=[0.01, 0.02],
+        cost_config={
+            "fee_bps": 10.0,
+            "slippage_bps": 5.0,
+            "funding_bps": 0.0,
+            "periods_per_year": 1.0,
+        },
+    )
+
+    expected_net_mean = ((0.01 - 15.0 / 10_000.0) + (0.0 - 15.0 / 10_000.0)) / 2
+    assert metrics.net_annualized_return == pytest.approx(expected_net_mean)
     assert metrics.turnover == pytest.approx(1.0)
 
 
@@ -89,4 +109,24 @@ def test_run_factor_baseline_rejects_mismatched_input_lengths() -> None:
             factor_values=[1.0],
             label_values=[0.01, 0.02],
             cost_config={},
+        )
+
+
+def test_run_factor_baseline_rejects_non_finite_values() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        run_factor_baseline(
+            DATASET,
+            factor_values=[float("inf")],
+            label_values=[0.01],
+            cost_config={},
+        )
+
+
+def test_run_factor_baseline_rejects_non_finite_costs() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        run_factor_baseline(
+            DATASET,
+            factor_values=[1.0],
+            label_values=[0.01],
+            cost_config={"fee_bps": float("nan")},
         )

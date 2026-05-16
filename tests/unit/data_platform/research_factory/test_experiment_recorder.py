@@ -128,6 +128,16 @@ def test_start_writes_running_manifest_and_experiment_spec(workspace_tmp_path: P
     assert stored_spec["dataset"]["dataset_id"] == "btc_15m_v1"
 
 
+def test_recorder_rejects_root_outside_research_artifacts() -> None:
+    with pytest.raises(ValueError, match="under artifacts/research"):
+        ExperimentRecorder(Path("configs"))
+
+
+def test_recorder_rejects_root_with_path_traversal() -> None:
+    with pytest.raises(ValueError, match="path traversal"):
+        ExperimentRecorder(Path("artifacts") / "research" / ".." / "private")
+
+
 def test_record_metrics_writes_snapshot_and_updates_manifest(workspace_tmp_path: Path) -> None:
     root = artifact_root(workspace_tmp_path)
     recorder = ExperimentRecorder(root)

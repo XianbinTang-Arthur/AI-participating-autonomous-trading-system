@@ -16,6 +16,7 @@ from aats.data_platform.research_factory.features.expressions import (
     FactorExpression,
     parse_factor_expression,
 )
+from aats.data_platform.research_factory.numeric import require_finite_number
 
 NumericValue = int | float | Decimal
 
@@ -228,7 +229,11 @@ class _FactorRowEvaluator:
         if isinstance(node.value, bool) or not isinstance(node.value, int | float):
             self._add_missing(row_index, "non-numeric constant")
             return None
-        return float(node.value)
+        try:
+            return require_finite_number(node.value, "factor constant")
+        except ValueError as exc:
+            self._add_missing(row_index, str(exc))
+            return None
 
     def _ref_value(self, field_name: str, offset: int, row_index: int) -> float | None:
         if offset < 0:
@@ -280,7 +285,11 @@ class _FactorRowEvaluator:
         if isinstance(value, bool) or not isinstance(value, int | float | Decimal):
             self._add_missing(reason_index, f"field {field_name!r} is non-numeric")
             return None
-        return float(value)
+        try:
+            return require_finite_number(value, f"field {field_name!r}")
+        except ValueError as exc:
+            self._add_missing(reason_index, str(exc))
+            return None
 
     def _add_missing(self, row_index: int, reason: str) -> None:
         if reason not in self.missing_reasons[row_index]:
@@ -317,7 +326,7 @@ def _numeric_constant(node: ast.AST) -> int | float | None:
     if isinstance(node, ast.Constant):
         if isinstance(node.value, bool) or not isinstance(node.value, int | float):
             return None
-        return node.value
+        return require_finite_number(node.value, "factor constant")
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ALLOWED_UNARY_OPS):
         value = _numeric_constant(node.operand)
         if value is None:

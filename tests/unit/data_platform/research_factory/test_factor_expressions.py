@@ -79,6 +79,11 @@ def test_parse_factor_expression_rejects_string_constants() -> None:
         parse_factor_expression('Mean(close, "20")')
 
 
+def test_parse_factor_expression_rejects_non_finite_constants() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        parse_factor_expression("1e309")
+
+
 def test_evaluate_factor_expression_computes_return_mean_std_and_delta() -> None:
     rows = [
         {"close": 100.0},
@@ -141,6 +146,13 @@ def test_evaluate_factor_expression_handles_missing_and_null_fields() -> None:
     assert result.values == (None, None, None)
     assert "field 'close' is null" in result.missing_reasons[1]
     assert "field 'close' is null" in result.missing_reasons[2]
+
+
+def test_evaluate_factor_expression_marks_non_finite_field_missing() -> None:
+    result = evaluate_factor_expression("close", [{"close": float("inf")}])
+
+    assert result.values == (None,)
+    assert "field 'close' must be finite" in result.missing_reasons[0]
 
 
 def test_evaluate_factor_expression_does_not_mutate_input_rows() -> None:

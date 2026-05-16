@@ -118,6 +118,46 @@ def test_prepare_rejects_timeframe_mismatch() -> None:
         prepare([record(0), record(1), record(2), record(3), record(4, timeframe="15m")])
 
 
+def test_gold_bar_record_rejects_non_finite_price() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        GoldBarRecord(
+            symbol="BTC-USDT-SWAP",
+            timeframe="1h",
+            ts=ts(0),
+            open=float("nan"),
+            high=101.0,
+            low=99.0,
+            close=100.5,
+            volume=1.0,
+        )
+
+
+def test_gold_bar_record_rejects_invalid_ohlcv_invariants() -> None:
+    with pytest.raises(ValueError, match="record.high"):
+        GoldBarRecord(
+            symbol="BTC-USDT-SWAP",
+            timeframe="1h",
+            ts=ts(0),
+            open=100.0,
+            high=99.0,
+            low=98.0,
+            close=100.5,
+            volume=1.0,
+        )
+
+    with pytest.raises(ValueError, match="record.volume"):
+        GoldBarRecord(
+            symbol="BTC-USDT-SWAP",
+            timeframe="1h",
+            ts=ts(0),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.5,
+            volume=-1.0,
+        )
+
+
 def test_prepare_rejects_duplicate_timestamp() -> None:
     with pytest.raises(ValueError, match="duplicate timestamp"):
         prepare([record(0), record(0), record(2), record(3), record(4), record(5)])

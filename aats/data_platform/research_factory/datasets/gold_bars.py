@@ -13,6 +13,7 @@ from pathlib import PurePath, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from aats.data_platform.research_factory.datasets.segments import assert_no_leakage
+from aats.data_platform.research_factory.numeric import require_finite_number
 from aats.data_platform.research_factory.specs import DatasetSpec, ProcessorSpec, SegmentSpec
 
 NumericValue = int | float | Decimal
@@ -39,12 +40,26 @@ class GoldBarRecord:
         _require_non_empty(self.symbol, "record.symbol")
         _require_non_empty(self.timeframe, "record.timeframe")
         _require_aware_datetime(self.ts, "record.ts")
-        for field_name in ("open", "high", "low", "close", "volume"):
-            _require_numeric(getattr(self, field_name), f"record.{field_name}")
+        prices = {
+            field_name: require_finite_number(getattr(self, field_name), f"record.{field_name}")
+            for field_name in ("open", "high", "low", "close")
+        }
+        volume = require_finite_number(self.volume, "record.volume")
+        for field_name, value in prices.items():
+            if value <= 0:
+                raise ValueError(f"record.{field_name} must be positive")
+        if volume < 0:
+            raise ValueError("record.volume must be non-negative")
+        if prices["high"] < max(prices["open"], prices["low"], prices["close"]):
+            raise ValueError("record.high must be greater than or equal to open, low, and close")
+        if prices["low"] > min(prices["open"], prices["high"], prices["close"]):
+            raise ValueError("record.low must be less than or equal to open, high, and close")
         if self.vwap is not None:
-            _require_numeric(self.vwap, "record.vwap")
+            vwap = require_finite_number(self.vwap, "record.vwap")
+            if vwap <= 0:
+                raise ValueError("record.vwap must be positive")
         if self.funding_rate is not None:
-            _require_numeric(self.funding_rate, "record.funding_rate")
+            require_finite_number(self.funding_rate, "record.funding_rate")
         if not isinstance(self.metadata, Mapping):
             raise ValueError("record.metadata must be a mapping")
         object.__setattr__(self, "metadata", dict(self.metadata))
@@ -229,11 +244,6 @@ def _require_aware_datetime(value: datetime, field_name: str) -> None:
         raise ValueError(f"{field_name} must be a datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware")
-
-
-def _require_numeric(value: Any, field_name: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, int | float | Decimal):
-        raise ValueError(f"{field_name} must be numeric")
 
 
 def _require_cache_material(value: Any, field_name: str) -> None:

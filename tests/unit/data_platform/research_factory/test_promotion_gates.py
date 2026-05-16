@@ -145,6 +145,14 @@ def test_candidate_gate_rejects_missing_critical_metric() -> None:
     assert any("net_annualized_return is missing" in failure for failure in result.failures)
 
 
+def test_candidate_gate_rejects_non_finite_threshold() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        evaluate_candidate_gate(
+            metrics_snapshot(),
+            {"max_drawdown_limit": float("inf")},
+        )
+
+
 def test_gate_pass_writes_candidate_artifact_without_active_parameter(workspace_tmp_path: Path) -> None:
     root = artifact_root(workspace_tmp_path)
     recorder = ExperimentRecorder(root, code_version="test-sha")
