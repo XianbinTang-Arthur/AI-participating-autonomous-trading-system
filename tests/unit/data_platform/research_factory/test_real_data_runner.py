@@ -1,4 +1,8 @@
 import json
+import shutil
+import uuid
+from collections.abc import Iterator
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +19,16 @@ from aats.data_platform.research_factory.real_data import (
 
 UTC = timezone.utc
 START = datetime(2026, 5, 1, tzinfo=UTC)
+
+
+@pytest.fixture
+def tmp_path() -> Iterator[Path]:
+    path = Path(".pytest_workspace_tmp") / f"real_data_runner_{uuid.uuid4().hex}"
+    path.mkdir(parents=True)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 class FakeDataSource:
@@ -56,6 +70,10 @@ def write_execution_cost_summary(path: Path, *, cost_adjusted_edge: float = 1.75
     path.write_text(
         json.dumps(
             {
+                "symbol": "BTC-USDT-SWAP",
+                "timeframe": "1h",
+                "window_start": START.isoformat(),
+                "window_end": (START + timedelta(hours=12)).isoformat(),
                 "full_fill_ratio": 0.9,
                 "partial_fill_ratio": 0.1,
                 "turnover": {"mean": 0.5},
@@ -85,22 +103,35 @@ def gold_records() -> tuple[GoldBarRecord, ...]:
                 close=close,
                 volume=10_000 + index * 100,
                 funding_rate=0.0001,
+                metadata={
+                    "source_candle_dataset_version": "v1.0",
+                    "source_funding_dataset_version": "funding_v1",
+                    "build_run_id": "build-1",
+                },
             )
         )
     return tuple(records)
 
 
-def load_result() -> GoldReplayLoadResult:
+def load_result(
+    records: tuple[GoldBarRecord, ...] | None = None,
+    *,
+    dataset_version: str = "v1.0",
+) -> GoldReplayLoadResult:
+    records = records or gold_records()
     return GoldReplayLoadResult(
-        records=gold_records(),
+        records=records,
         source_watermark={
             "gold_table": "gold.market_swap_replay_bars_1h",
-            "row_count": 12,
-            "min_ts": START.isoformat(),
-            "max_ts": (START + timedelta(hours=11)).isoformat(),
+            "row_count": len(records),
+            "min_ts": records[0].ts.isoformat(),
+            "max_ts": records[-1].ts.isoformat(),
+            "source_candle_dataset_versions": ["v1.0"],
+            "source_funding_dataset_versions": ["funding_v1"],
+            "build_run_ids": ["build-1"],
         },
         gold_table="gold.market_swap_replay_bars_1h",
-        dataset_version="v1.0",
+        dataset_version=dataset_version,
     )
 
 
@@ -160,6 +191,8 @@ def test_gold_replay_data_source_loads_records_with_watermark() -> None:
     assert result.records[0].close == pytest.approx(100.5)
     assert result.source_watermark["row_count"] == 1
     assert result.source_watermark["build_run_ids"] == ["run-1"]
+    assert result.source_watermark["source_funding_dataset_versions"] == ["funding_v1"]
+    assert result.source_watermark["timestamp_timezone_assumption"] == "timezone-aware database timestamp"
 
 
 def test_real_data_config_timestamp_defaults_to_current_utc(tmp_path: Path) -> None:
@@ -191,6 +224,10 @@ def test_real_data_runner_writes_recommendation_and_registry(tmp_path: Path) -> 
     experiment_dir = root / "rf_real_success"
     manifest = read_json(experiment_dir / "experiment_manifest.json")
     recommendation = read_json(experiment_dir / "research_recommendation.json")
+    evidence_bundle = read_json(experiment_dir / "evidence_bundle.json")
+    dataset_quality = read_json(experiment_dir / "dataset_quality_report.json")
+    source_integrity = read_json(experiment_dir / "source_integrity_report.json")
+    execution_evidence = read_json(experiment_dir / "execution_evidence_report.json")
     registry_entries = read_jsonl(root.parent / "registry" / "research_memory.jsonl")
 
     assert result.status == "succeeded"
@@ -200,9 +237,21 @@ def test_real_data_runner_writes_recommendation_and_registry(tmp_path: Path) -> 
     assert (experiment_dir / "execution_cost_summary.json").exists()
     assert read_json(experiment_dir / "execution_cost_summary.json")["cost_adjusted_edge"]["mean"] == pytest.approx(1.75)
     assert manifest["output_refs"]["execution_cost_summary"] == "execution_cost_summary.json"
+    assert manifest["output_refs"]["dataset_quality_report"] == "dataset_quality_report.json"
+    assert manifest["output_refs"]["source_integrity_report"] == "source_integrity_report.json"
+    assert manifest["output_refs"]["execution_evidence_report"] == "execution_evidence_report.json"
+    assert manifest["output_refs"]["evidence_bundle"] == "evidence_bundle.json"
     assert manifest["output_refs"]["research_recommendation"] == "research_recommendation.json"
+    assert evidence_bundle["passed"] is True
+    assert dataset_quality["row_count"] == 12
+    assert dataset_quality["funding_missing_ratio"] == 0.0
+    assert source_integrity["source_candle_dataset_versions"] == ["v1.0"]
+    assert source_integrity["source_funding_dataset_versions"] == ["funding_v1"]
+    assert execution_evidence["window_start"] == START.isoformat()
     assert recommendation["evidence"]["execution_realism_required"] is True
     assert recommendation["evidence"]["evidence_refs"]["execution_cost_summary"] == "execution_cost_summary.json"
+    assert recommendation["evidence"]["evidence_refs"]["evidence_bundle"] == "evidence_bundle.json"
+    assert recommendation["evidence"]["evidence_refs"]["dataset_quality_report"] == "dataset_quality_report.json"
     assert registry_entries[0]["status"] == "recommendation_ready"
     assert registry_entries[0]["created_by"] == "research_factory_real_data_runner"
 
@@ -229,6 +278,96 @@ def test_real_data_runner_fails_when_execution_realism_required_but_missing(tmp_
     assert "execution realism summary is required" in failure["reason"]
     assert registry_entries[0]["status"] == "failed"
     assert "execution realism summary is required" in registry_entries[0]["failure_reason"]
+    assert not (experiment_dir / "candidate_artifact.json").exists()
+
+
+def test_real_data_runner_rejects_mixed_source_candle_versions(tmp_path: Path) -> None:
+    root = artifact_root(tmp_path)
+    execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
+    write_execution_cost_summary(execution_summary)
+    records = list(gold_records())
+    records[-1] = replace(
+        records[-1],
+        metadata={
+            "source_candle_dataset_version": "v2.0",
+            "source_funding_dataset_version": "funding_v1",
+            "build_run_id": "build-1",
+        },
+    )
+
+    result = run_research_factory_experiment(
+        experiment_config(
+            root,
+            execution_cost_summary_path=execution_summary,
+            experiment_id="rf_real_mixed_versions",
+        ),
+        data_source=FakeDataSource(load_result(tuple(records))),
+    )
+
+    experiment_dir = root / "rf_real_mixed_versions"
+    failure = read_json(experiment_dir / "failure.json")
+    bundle = read_json(experiment_dir / "evidence_bundle.json")
+    source_integrity = read_json(experiment_dir / "source_integrity_report.json")
+
+    assert result.status == "failed"
+    assert "evidence quality gate failed" in failure["reason"]
+    assert bundle["passed"] is False
+    assert source_integrity["source_candle_dataset_versions"] == ["v1.0", "v2.0"]
+    assert not (experiment_dir / "candidate_artifact.json").exists()
+
+
+def test_real_data_runner_rejects_missing_funding_alignment(tmp_path: Path) -> None:
+    root = artifact_root(tmp_path)
+    execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
+    write_execution_cost_summary(execution_summary)
+    records = list(gold_records())
+    records[3] = replace(records[3], funding_rate=None)
+
+    result = run_research_factory_experiment(
+        experiment_config(
+            root,
+            execution_cost_summary_path=execution_summary,
+            experiment_id="rf_real_missing_funding",
+        ),
+        data_source=FakeDataSource(load_result(tuple(records))),
+    )
+
+    experiment_dir = root / "rf_real_missing_funding"
+    bundle = read_json(experiment_dir / "evidence_bundle.json")
+    dataset_quality = read_json(experiment_dir / "dataset_quality_report.json")
+
+    assert result.status == "failed"
+    assert bundle["passed"] is False
+    assert dataset_quality["funding_missing_count"] == 1
+    assert "funding_missing_ratio" in bundle["failures"][0]
+    assert not (experiment_dir / "candidate_artifact.json").exists()
+
+
+def test_real_data_runner_rejects_execution_summary_window_mismatch(tmp_path: Path) -> None:
+    root = artifact_root(tmp_path)
+    execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
+    write_execution_cost_summary(execution_summary)
+    payload = read_json(execution_summary)
+    payload["window_end"] = (START + timedelta(hours=11)).isoformat()
+    execution_summary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    result = run_research_factory_experiment(
+        experiment_config(
+            root,
+            execution_cost_summary_path=execution_summary,
+            experiment_id="rf_real_bad_execution_window",
+        ),
+        data_source=FakeDataSource(load_result()),
+    )
+
+    experiment_dir = root / "rf_real_bad_execution_window"
+    bundle = read_json(experiment_dir / "evidence_bundle.json")
+    execution_evidence = read_json(experiment_dir / "execution_evidence_report.json")
+
+    assert result.status == "failed"
+    assert bundle["passed"] is False
+    assert execution_evidence["passed"] is False
+    assert "window_end" in execution_evidence["failures"][0]
     assert not (experiment_dir / "candidate_artifact.json").exists()
 
 

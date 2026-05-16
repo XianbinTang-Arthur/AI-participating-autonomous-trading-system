@@ -13,6 +13,7 @@ from typing import Any
 
 from aats.data_platform.research_factory.artifacts import (
     build_artifact_manifest,
+    normalize_relative_artifact_path,
     validate_artifact_manifest,
     write_artifact_manifest_atomic,
 )
@@ -213,6 +214,22 @@ class ExperimentRecorder:
         )
         self._write_manifest(experiment_id, updated)
         return updated
+
+    def record_json_artifact(
+        self,
+        experiment_id: str,
+        ref_name: str,
+        output_ref: str,
+        payload: Any,
+    ) -> dict[str, Any]:
+        """Write an additional JSON artifact and attach it to the manifest."""
+        normalized_ref = normalize_relative_artifact_path(output_ref)
+        manifest = self._read_manifest(experiment_id)
+        if is_terminal_status(manifest["status"]):
+            raise ValueError(f"experiment {experiment_id!r} is already terminal")
+        target = self._experiment_dir(experiment_id) / normalized_ref
+        _write_json_atomic(target, _to_jsonable(payload))
+        return self.record_output_ref(experiment_id, ref_name, normalized_ref)
 
     def finish(self, experiment_id: str, status: str) -> dict[str, Any]:
         """Move an experiment to a terminal status without writing failure details."""

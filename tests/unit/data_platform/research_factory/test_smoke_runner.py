@@ -1,4 +1,7 @@
 import json
+import shutil
+import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -7,6 +10,16 @@ from aats.data_platform.research_factory.smoke import (
     ResearchFactorySmokeConfig,
     run_research_factory_smoke,
 )
+
+
+@pytest.fixture
+def tmp_path() -> Iterator[Path]:
+    path = Path(".pytest_workspace_tmp") / f"smoke_runner_{uuid.uuid4().hex}"
+    path.mkdir(parents=True)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def artifact_root(tmp_path: Path) -> Path:

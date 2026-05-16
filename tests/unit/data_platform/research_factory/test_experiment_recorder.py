@@ -182,6 +182,25 @@ def test_record_output_ref_rejects_path_traversal(workspace_tmp_path: Path) -> N
         recorder.record_output_ref(spec.experiment_id, "bad", "../outside.json")
 
 
+def test_record_json_artifact_writes_payload_and_manifest_ref(workspace_tmp_path: Path) -> None:
+    root = artifact_root(workspace_tmp_path)
+    recorder = ExperimentRecorder(root)
+    spec = experiment_spec(root)
+    recorder.start(spec)
+
+    manifest = recorder.record_json_artifact(
+        spec.experiment_id,
+        "dataset_quality_report",
+        "dataset_quality_report.json",
+        {"passed": True, "row_count": 12},
+    )
+
+    stored = read_json(root / spec.experiment_id / "dataset_quality_report.json")
+    assert stored["passed"] is True
+    assert stored["row_count"] == 12
+    assert manifest["output_refs"]["dataset_quality_report"] == "dataset_quality_report.json"
+
+
 def test_finish_requires_terminal_status_and_writes_finished_manifest(workspace_tmp_path: Path) -> None:
     root = artifact_root(workspace_tmp_path)
     recorder = ExperimentRecorder(root)

@@ -1,6 +1,22 @@
 import json
+import shutil
+import uuid
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
 
 from scripts.rdp_run_research_factory_smoke import main
+
+
+@pytest.fixture
+def tmp_path() -> Iterator[Path]:
+    path = Path(".pytest_workspace_tmp") / f"smoke_cli_{uuid.uuid4().hex}"
+    path.mkdir(parents=True)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def test_rdp_run_research_factory_smoke_cli_accepts_execution_summary(

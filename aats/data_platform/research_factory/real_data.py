@@ -21,6 +21,13 @@ from aats.data_platform.research_factory.datasets.gold_bars import (
     dataset_fingerprint,
 )
 from aats.data_platform.research_factory.datasets.segments import build_time_segments
+from aats.data_platform.research_factory.evidence import (
+    DatasetQualityThresholds,
+    build_dataset_quality_report,
+    build_evidence_bundle,
+    build_execution_evidence_report,
+    build_source_integrity_report,
+)
 from aats.data_platform.research_factory.experiments.recorder import ExperimentRecorder
 from aats.data_platform.research_factory.features.functions import evaluate_factor_expression
 from aats.data_platform.research_factory.metrics.gates import (
@@ -53,6 +60,10 @@ from aats.data_platform.research_factory.specs import (
 DEFAULT_EXPERIMENT_ARTIFACT_ROOT = Path("artifacts") / "research" / "research_factory" / "experiments"
 REAL_DATA_CODE_VERSION = "research_factory_real_data_runner_v1"
 EXECUTION_COST_SUMMARY_REF = "execution_cost_summary.json"
+DATASET_QUALITY_REPORT_REF = "dataset_quality_report.json"
+SOURCE_INTEGRITY_REPORT_REF = "source_integrity_report.json"
+EXECUTION_EVIDENCE_REPORT_REF = "execution_evidence_report.json"
+EVIDENCE_BUNDLE_REF = "evidence_bundle.json"
 TIMEFRAME_PERIODS_PER_YEAR = {
     "1m": 365.0 * 24.0 * 60.0,
     "5m": 365.0 * 24.0 * 12.0,
@@ -108,6 +119,12 @@ class ResearchFactoryExperimentConfig:
     registry_path: Path | None = None
     overwrite: bool = False
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
+    min_total_bars: int = 10
+    min_train_bars: int = 2
+    min_valid_bars: int = 2
+    min_test_bars: int = 2
+    max_bar_gap_ratio: float = 0.0
+    max_funding_missing_ratio: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +216,13 @@ class GoldReplayDataSource:
                 if getattr(row, "source_candle_dataset_version", None) is not None
             }
         )
+        row_funding_dataset_versions = sorted(
+            {
+                str(getattr(row, "source_funding_dataset_version"))
+                for row in rows
+                if getattr(row, "source_funding_dataset_version", None) is not None
+            }
+        )
         resolved_dataset_version = dataset_version or (
             row_dataset_versions[0] if len(row_dataset_versions) == 1 else "gold_replay_mixed_versions"
         )
@@ -208,6 +232,7 @@ class GoldReplayDataSource:
             "min_ts": records[0].ts.isoformat(),
             "max_ts": records[-1].ts.isoformat(),
             "source_candle_dataset_versions": row_dataset_versions,
+            "source_funding_dataset_versions": row_funding_dataset_versions,
             "build_run_ids": sorted(
                 {
                     str(getattr(row, "build_run_id"))
@@ -215,6 +240,7 @@ class GoldReplayDataSource:
                     if getattr(row, "build_run_id", None) is not None
                 }
             ),
+            "timestamp_timezone_assumption": _timestamp_timezone_assumption(rows),
         }
         return GoldReplayLoadResult(
             records=records,
@@ -318,7 +344,92 @@ def run_research_factory_experiment(
         if preflight_execution_error is not None:
             raise ValueError(preflight_execution_error)
 
+        execution_cost_summary_ref = None
+        execution_metrics: MetricsSnapshot | None = None
+        execution_summary_payload: Mapping[str, Any] | None = None
+        if config.execution_cost_summary_path is not None:
+            execution_cost_summary_path = require_research_artifact_json_file(
+                config.execution_cost_summary_path,
+                "execution_cost_summary_path",
+                research_root=config.artifact_root,
+            )
+            execution_summary_payload = _load_json_mapping(
+                execution_cost_summary_path,
+                "execution_cost_summary",
+            )
+            execution_metrics = load_execution_cost_summary_metrics(execution_cost_summary_path)
+            _require_complete_execution_realism_metrics(execution_metrics)
+            execution_cost_summary_ref = copy_research_artifact_file(
+                execution_cost_summary_path,
+                experiment_dir,
+                destination_name=EXECUTION_COST_SUMMARY_REF,
+                research_root=config.artifact_root,
+            )
+            recorder.record_output_ref(
+                experiment_id,
+                "execution_cost_summary",
+                execution_cost_summary_ref,
+            )
+
         prepared = GoldBarDatasetHandler().prepare(load_result.records, dataset_spec)
+        dataset_quality = build_dataset_quality_report(
+            records=load_result.records,
+            prepared=prepared,
+            dataset_spec=dataset_spec,
+            dataset_fingerprint=research_dataset_fingerprint,
+            thresholds=_quality_thresholds(config),
+            created_at=config.timestamp,
+        )
+        recorder.record_json_artifact(
+            experiment_id,
+            "dataset_quality_report",
+            DATASET_QUALITY_REPORT_REF,
+            dataset_quality,
+        )
+        source_integrity = build_source_integrity_report(
+            records=load_result.records,
+            dataset_spec=dataset_spec,
+            source_watermark=load_result.source_watermark,
+            created_at=config.timestamp,
+        )
+        recorder.record_json_artifact(
+            experiment_id,
+            "source_integrity_report",
+            SOURCE_INTEGRITY_REPORT_REF,
+            source_integrity,
+        )
+        execution_evidence = None
+        if execution_summary_payload is not None and execution_cost_summary_ref is not None:
+            execution_evidence = build_execution_evidence_report(
+                summary=execution_summary_payload,
+                dataset_spec=dataset_spec,
+                dataset_fingerprint=research_dataset_fingerprint,
+                evidence_ref=execution_cost_summary_ref,
+                created_at=config.timestamp,
+            )
+            recorder.record_json_artifact(
+                experiment_id,
+                "execution_evidence_report",
+                EXECUTION_EVIDENCE_REPORT_REF,
+                execution_evidence,
+            )
+        evidence_bundle = build_evidence_bundle(
+            dataset_quality=dataset_quality,
+            source_integrity=source_integrity,
+            execution_evidence=execution_evidence,
+            execution_evidence_required=config.require_execution_realism,
+            created_at=config.timestamp,
+        )
+        recorder.record_json_artifact(
+            experiment_id,
+            "evidence_bundle",
+            EVIDENCE_BUNDLE_REF,
+            evidence_bundle,
+        )
+        if not evidence_bundle.passed:
+            failures = "; ".join(evidence_bundle.failures)
+            raise ValueError(f"evidence quality gate failed: {failures}")
+
         test_rows = prepared.rows_for_segment("test")
         factor_values = evaluate_factor_expression(feature.expression, test_rows).values
         label_values = _future_simple_returns(test_rows, label.horizon_bars)
@@ -333,30 +444,11 @@ def run_research_factory_experiment(
                 "periods_per_year": _periods_per_year(config),
             },
         )
-        execution_cost_summary_ref = None
-        if config.execution_cost_summary_path is not None:
-            execution_cost_summary_path = require_research_artifact_json_file(
-                config.execution_cost_summary_path,
-                "execution_cost_summary_path",
-                research_root=config.artifact_root,
-            )
-            execution_metrics = load_execution_cost_summary_metrics(execution_cost_summary_path)
-            _require_complete_execution_realism_metrics(execution_metrics)
+        if execution_metrics is not None:
             metrics = merge_metric_snapshots(
                 metrics,
                 execution_metrics,
                 conflict_strategy="prefer_right",
-            )
-            execution_cost_summary_ref = copy_research_artifact_file(
-                execution_cost_summary_path,
-                experiment_dir,
-                destination_name=EXECUTION_COST_SUMMARY_REF,
-                research_root=config.artifact_root,
-            )
-            recorder.record_output_ref(
-                experiment_id,
-                "execution_cost_summary",
-                execution_cost_summary_ref,
             )
         recorder.record_metrics(experiment_id, metrics)
         gate = _deterministic_gate(metrics, config.timestamp)
@@ -371,6 +463,7 @@ def run_research_factory_experiment(
             dataset_fingerprint_value=research_dataset_fingerprint,
             benchmark_segment="test",
             execution_cost_summary_ref=execution_cost_summary_ref,
+            evidence_bundle_ref=EVIDENCE_BUNDLE_REF,
             created_at=config.timestamp,
         )
         recorder.record_candidate(experiment_id, candidate)
@@ -474,6 +567,16 @@ def _row_to_gold_bar_record(row: Any, timeframe: str) -> GoldBarRecord:
     )
 
 
+def _timestamp_timezone_assumption(rows: Sequence[Any]) -> str:
+    if any(_is_naive_datetime(getattr(row, "ts", None)) for row in rows):
+        return "naive_db_timestamp_treated_as_utc"
+    return "timezone-aware database timestamp"
+
+
+def _is_naive_datetime(value: Any) -> bool:
+    return isinstance(value, datetime) and (value.tzinfo is None or value.utcoffset() is None)
+
+
 def _future_simple_returns(
     rows: Sequence[Mapping[str, Any]],
     horizon_bars: int,
@@ -522,6 +625,7 @@ def _build_candidate(
     dataset_fingerprint_value: str,
     benchmark_segment: str,
     execution_cost_summary_ref: str | None,
+    evidence_bundle_ref: str,
     created_at: datetime,
 ) -> CandidateArtifact:
     return CandidateArtifact(
@@ -533,6 +637,7 @@ def _build_candidate(
             "dataset_fingerprint": dataset_fingerprint_value,
             "benchmark_segment": benchmark_segment,
             "execution_cost_summary_ref": execution_cost_summary_ref,
+            "evidence_bundle_ref": evidence_bundle_ref,
             "generated_by": "research_factory_real_data_runner",
             "research_only": True,
         },
@@ -545,11 +650,15 @@ def _build_candidate(
 def _recommendation_evidence_refs(execution_cost_summary_ref: str | None) -> dict[str, str]:
     refs = {
         "candidate_artifact": "candidate_artifact.json",
+        "dataset_quality_report": DATASET_QUALITY_REPORT_REF,
+        "evidence_bundle": EVIDENCE_BUNDLE_REF,
         "experiment_manifest": "experiment_manifest.json",
         "metrics_snapshot": "metrics_snapshot.json",
+        "source_integrity_report": SOURCE_INTEGRITY_REPORT_REF,
     }
     if execution_cost_summary_ref is not None:
         refs["execution_cost_summary"] = execution_cost_summary_ref
+        refs["execution_evidence_report"] = EXECUTION_EVIDENCE_REPORT_REF
     return refs
 
 
@@ -586,6 +695,28 @@ def _require_complete_execution_realism_metrics(snapshot: MetricsSnapshot) -> No
     if missing:
         rendered = ", ".join(missing)
         raise ValueError(f"execution realism metrics missing required fields: {rendered}")
+
+
+def _load_json_mapping(path: Path, field_name: str) -> Mapping[str, Any]:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{field_name} must be valid JSON") from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"{field_name} must be a JSON object")
+    return payload
+
+
+def _quality_thresholds(config: ResearchFactoryExperimentConfig) -> DatasetQualityThresholds:
+    return DatasetQualityThresholds(
+        min_total_bars=config.min_total_bars,
+        min_train_bars=config.min_train_bars,
+        min_valid_bars=config.min_valid_bars,
+        min_test_bars=config.min_test_bars,
+        max_bar_gap_ratio=config.max_bar_gap_ratio,
+        max_funding_missing_ratio=config.max_funding_missing_ratio,
+    )
 
 
 def _periods_per_year(config: ResearchFactoryExperimentConfig) -> float:
