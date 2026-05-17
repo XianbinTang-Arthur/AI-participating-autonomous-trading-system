@@ -542,8 +542,11 @@ def build_preapply_review_decision(
     _require_review_matches_package(review, package)
     if decision == "review_approved_for_manual_apply_design" and package.status != "preapply_ready":
         raise ValueError("manual apply design review approval requires a preapply_ready package")
-    if decision == "review_approved_for_manual_apply_design" and review.reference_integrity_passed is False:
-        raise ValueError("manual apply design review approval requires passing reference integrity")
+    if decision == "review_approved_for_manual_apply_design":
+        if review.reference_integrity_ref is None:
+            raise ValueError("manual apply design review approval requires reference integrity report")
+        if review.reference_integrity_passed is not True:
+            raise ValueError("manual apply design review approval requires passing reference integrity")
     return PreApplyReviewDecision(
         review_id=review.review_id,
         package_id=package.package_id,

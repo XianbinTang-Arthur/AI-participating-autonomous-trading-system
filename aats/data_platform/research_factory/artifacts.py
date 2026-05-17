@@ -13,7 +13,16 @@ from typing import Any
 from aats.data_platform.research_factory.status import require_valid_status
 
 ALLOWED_ARTIFACT_TYPES = frozenset(
-    {"experiment", "dataset", "benchmark", "proposal", "observation", "preapply", "preapply_review"}
+    {
+        "experiment",
+        "dataset",
+        "benchmark",
+        "proposal",
+        "observation",
+        "preapply",
+        "preapply_review",
+        "workflow",
+    }
 )
 REQUIRED_MANIFEST_FIELDS = frozenset(
     {

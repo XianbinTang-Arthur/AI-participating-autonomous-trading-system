@@ -507,6 +507,34 @@ def test_preapply_review_approval_requires_ready_package() -> None:
 
 def test_preapply_review_approval_requires_passing_reference_integrity() -> None:
     package = build_ready_package()
+    missing_report_review = build_preapply_review(package, created_at=dt(14))
+
+    with pytest.raises(ValueError, match="requires reference integrity report"):
+        build_preapply_review_decision(
+            review=missing_report_review,
+            package=package,
+            decision="review_approved_for_manual_apply_design",
+            rationale="attempt to approve without integrity report",
+            reviewed_by="operator_reviewer",
+            reviewed_at=dt(14, 1),
+        )
+
+    missing_passed_review = build_preapply_review(
+        package,
+        reference_integrity_ref="evidence_reference_integrity_report.json",
+        created_at=dt(14),
+    )
+
+    with pytest.raises(ValueError, match="passing reference integrity"):
+        build_preapply_review_decision(
+            review=missing_passed_review,
+            package=package,
+            decision="review_approved_for_manual_apply_design",
+            rationale="attempt to approve without explicit passing integrity",
+            reviewed_by="operator_reviewer",
+            reviewed_at=dt(14, 1),
+        )
+
     review = build_preapply_review(
         package,
         reference_integrity_ref="evidence_reference_integrity_report.json",
