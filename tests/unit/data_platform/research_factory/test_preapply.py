@@ -25,7 +25,11 @@ from aats.data_platform.research_factory.observations import (
 from aats.data_platform.research_factory.preapply import (
     PreApplyEvidencePackage,
     PreApplyEvidenceRecorder,
+    PreApplyReviewDecision,
+    PreApplyReviewRecorder,
     build_preapply_evidence_package,
+    build_preapply_review,
+    build_preapply_review_decision,
 )
 from aats.data_platform.research_factory.recommendations import build_research_recommendation
 from aats.data_platform.research_factory.specs import MetricsSnapshot
@@ -49,6 +53,10 @@ def dt(day: int, hour: int = 0) -> datetime:
 
 def preapply_root(tmp_path: Path) -> Path:
     return tmp_path / "artifacts" / "research" / "research_factory" / "preapply"
+
+
+def preapply_review_root(tmp_path: Path) -> Path:
+    return tmp_path / "artifacts" / "research" / "research_factory" / "preapply_reviews"
 
 
 def metrics_snapshot() -> MetricsSnapshot:
@@ -290,6 +298,27 @@ def test_build_preapply_package_maps_keep_reviewing_and_reject() -> None:
     assert rejected.failure_reasons[0] == "review_decision=reject"
 
 
+def test_preapply_package_status_must_match_review_decision() -> None:
+    package = build_ready_package()
+
+    with pytest.raises(ValueError, match="must match review_decision"):
+        PreApplyEvidencePackage(
+            package_id="preapply_inconsistent",
+            candidate_id=package.candidate_id,
+            recommendation_id=package.recommendation_id,
+            observation_id=package.observation_id,
+            experiment_id=package.experiment_id,
+            status="preapply_rejected",
+            evidence_refs=package.evidence_refs,
+            gate_refs=package.gate_refs,
+            review_decision="keep_reviewing",
+            candidate_gate_passed=True,
+            evidence_bundle_passed=True,
+            observation_gate_passed=True,
+            failure_reasons=("manual inconsistency fixture",),
+        )
+
+
 def test_preapply_ready_requires_passing_gate_and_evidence_bundle() -> None:
     candidate = candidate_artifact()
     rec = recommendation(candidate)
@@ -418,3 +447,162 @@ def test_preapply_recorder_writes_package_and_manifest(workspace_tmp_path: Path)
 def test_preapply_recorder_root_must_be_under_research_artifacts(workspace_tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="under artifacts/research"):
         PreApplyEvidenceRecorder(workspace_tmp_path / "configs")
+
+
+def test_build_preapply_review_and_decision_for_ready_package() -> None:
+    package = build_ready_package()
+    review = build_preapply_review(package, created_at=dt(14))
+    decision = build_preapply_review_decision(
+        review=review,
+        package=package,
+        decision="review_approved_for_manual_apply_design",
+        rationale="pre-apply evidence is complete enough to design a separate manual governance plan",
+        reviewed_by="operator_reviewer",
+        reviewed_at=dt(14, 1),
+    )
+
+    assert review.status == "review_pending"
+    assert review.package_id == package.package_id
+    assert review.package_status == "preapply_ready"
+    assert review.runtime_mutation_allowed is False
+    assert decision.decision == "review_approved_for_manual_apply_design"
+    assert decision.recommended_next_step == "prepare_manual_apply_design_for_separate_governance_review"
+    assert decision.runtime_mutation_allowed is False
+    assert decision.operator_approval_required is True
+
+
+def test_preapply_review_approval_requires_ready_package() -> None:
+    candidate = candidate_artifact()
+    rec = recommendation(candidate)
+    gate = observation_gate(candidate, rec, passed=False)
+    package = build_preapply_evidence_package(
+        candidate=candidate,
+        recommendation=rec,
+        evidence_bundle=evidence_bundle(),
+        observation_gate=gate,
+        review_outcome=review_outcome(candidate, rec, decision="keep_reviewing", gate_passed=False),
+        evidence_refs=evidence_refs(),
+        gate_refs=gate_refs(),
+        created_at=dt(13),
+    )
+    review = build_preapply_review(package, created_at=dt(14))
+
+    with pytest.raises(ValueError, match="requires a preapply_ready package"):
+        build_preapply_review_decision(
+            review=review,
+            package=package,
+            decision="review_approved_for_manual_apply_design",
+            rationale="attempt to advance incomplete evidence",
+            reviewed_by="operator_reviewer",
+            reviewed_at=dt(14, 1),
+        )
+
+
+def test_preapply_review_decision_rejects_runtime_promotion_text() -> None:
+    package = build_ready_package()
+    review = build_preapply_review(package, created_at=dt(14))
+
+    with pytest.raises(ValueError, match="runtime promotion term"):
+        build_preapply_review_decision(
+            review=review,
+            package=package,
+            decision="review_rejected",
+            rationale="direct_apply this package",
+            reviewed_by="operator_reviewer",
+            reviewed_at=dt(14, 1),
+        )
+
+    with pytest.raises(ValueError, match="needs_more_evidence requires required_followups"):
+        build_preapply_review_decision(
+            review=review,
+            package=package,
+            decision="needs_more_evidence",
+            rationale="additional review evidence is required",
+            reviewed_by="operator_reviewer",
+            reviewed_at=dt(14, 1),
+        )
+
+    with pytest.raises(ValueError, match="preapply review decision must be one of"):
+        PreApplyReviewDecision(
+            review_id=review.review_id,
+            package_id=package.package_id,
+            candidate_id=package.candidate_id,
+            recommendation_id=package.recommendation_id,
+            observation_id=package.observation_id,
+            experiment_id=package.experiment_id,
+            decision="auto_apply",
+            rationale="invalid decision",
+            reviewed_by="operator_reviewer",
+        )
+
+
+def test_preapply_review_recorder_writes_review_and_decision(workspace_tmp_path: Path) -> None:
+    root = preapply_review_root(workspace_tmp_path)
+    package = build_ready_package()
+    recorder = PreApplyReviewRecorder(root, code_version="test-sha", clock=lambda: dt(14))
+
+    review = recorder.start_review(package)
+    decision = build_preapply_review_decision(
+        review=review,
+        package=package,
+        decision="review_approved_for_manual_apply_design",
+        rationale="evidence package is ready for a separate manual design review",
+        reviewed_by="operator_reviewer",
+        reviewed_at=dt(14, 1),
+    )
+    manifest = recorder.record_decision(decision)
+
+    review_dir = root / review.review_id
+    stored_review = read_json(review_dir / "preapply_review.json")
+    stored_decision = read_json(review_dir / "preapply_review_decision.json")
+    stored_manifest = read_json(review_dir / "preapply_review_manifest.json")
+
+    assert manifest["artifact_type"] == "preapply_review"
+    assert manifest["status"] == "succeeded"
+    assert stored_manifest["output_refs"]["preapply_review"] == "preapply_review.json"
+    assert stored_manifest["output_refs"]["preapply_review_decision"] == "preapply_review_decision.json"
+    assert stored_review["status"] == "review_pending"
+    assert stored_decision["decision"] == "review_approved_for_manual_apply_design"
+    assert stored_decision["runtime_mutation_allowed"] is False
+
+    with pytest.raises(ValueError, match="already exists"):
+        recorder.start_review(package)
+    with pytest.raises(ValueError, match="already terminal"):
+        recorder.record_decision(decision)
+
+
+def test_preapply_review_recorder_rejects_mismatched_decision(workspace_tmp_path: Path) -> None:
+    root = preapply_review_root(workspace_tmp_path)
+    package = build_ready_package()
+    recorder = PreApplyReviewRecorder(root, clock=lambda: dt(14))
+    review = recorder.start_review(package)
+    decision = build_preapply_review_decision(
+        review=review,
+        package=package,
+        decision="review_rejected",
+        rationale="reject despite ready package after manual review",
+        reviewed_by="operator_reviewer",
+        reviewed_at=dt(14, 1),
+    )
+    bad_decision = PreApplyReviewDecision(
+        review_id=decision.review_id,
+        package_id=decision.package_id,
+        candidate_id="cand_other",
+        recommendation_id=decision.recommendation_id,
+        observation_id=decision.observation_id,
+        experiment_id=decision.experiment_id,
+        decision=decision.decision,
+        rationale=decision.rationale,
+        reviewed_by=decision.reviewed_by,
+        reviewed_at=decision.reviewed_at,
+        package_ref=decision.package_ref,
+        review_ref=decision.review_ref,
+    )
+
+    with pytest.raises(ValueError, match="candidate_id must match"):
+        recorder.record_decision(bad_decision)
+
+
+def test_preapply_review_recorder_root_must_be_under_research_artifacts(workspace_tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="under artifacts/research"):
+        PreApplyReviewRecorder(workspace_tmp_path / "configs")

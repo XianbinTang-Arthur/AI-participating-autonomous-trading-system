@@ -25,11 +25,28 @@ from aats.data_platform.research_factory.observations import (
 from aats.data_platform.research_factory.recommendations import ResearchRecommendation
 
 PREAPPLY_SCHEMA_VERSION = "research_preapply_evidence_v1"
+PREAPPLY_REVIEW_SCHEMA_VERSION = "research_preapply_review_v1"
 PREAPPLY_PACKAGE_REF = "preapply_evidence_package.json"
 PREAPPLY_MANIFEST_REF = "preapply_manifest.json"
+PREAPPLY_REVIEW_REF = "preapply_review.json"
+PREAPPLY_REVIEW_DECISION_REF = "preapply_review_decision.json"
+PREAPPLY_REVIEW_MANIFEST_REF = "preapply_review_manifest.json"
 
 ALLOWED_PREAPPLY_PACKAGE_STATUSES = frozenset(
     {"preapply_ready", "needs_more_observation", "preapply_rejected"}
+)
+EXPECTED_PREAPPLY_STATUS_BY_REVIEW_DECISION = {
+    "eligible_for_preapply": "preapply_ready",
+    "keep_reviewing": "needs_more_observation",
+    "reject": "preapply_rejected",
+}
+ALLOWED_PREAPPLY_REVIEW_STATUSES = frozenset({"review_pending"})
+ALLOWED_PREAPPLY_REVIEW_DECISIONS = frozenset(
+    {
+        "review_approved_for_manual_apply_design",
+        "review_rejected",
+        "needs_more_evidence",
+    }
 )
 REQUIRED_PREAPPLY_EVIDENCE_REFS = (
     "candidate_artifact",
@@ -104,7 +121,7 @@ class PreApplyEvidencePackage:
         if self.status not in ALLOWED_PREAPPLY_PACKAGE_STATUSES:
             allowed = ", ".join(sorted(ALLOWED_PREAPPLY_PACKAGE_STATUSES))
             raise ValueError(f"preapply status must be one of: {allowed}")
-        _require_non_empty_text(self.review_decision, "review_decision")
+        _require_consistent_preapply_status(self.status, self.review_decision)
         if not isinstance(self.candidate_gate_passed, bool):
             raise ValueError("candidate_gate_passed must be a bool")
         if not isinstance(self.evidence_bundle_passed, bool):
@@ -154,6 +171,110 @@ class PreApplyEvidencePackage:
         object.__setattr__(self, "notes", _normalize_text_sequence(self.notes, "notes", allow_empty=True))
 
 
+@dataclass(frozen=True, slots=True)
+class PreApplyReview:
+    """Pending research-only review for a pre-apply evidence package."""
+
+    review_id: str
+    package_id: str
+    candidate_id: str
+    recommendation_id: str
+    observation_id: str
+    experiment_id: str
+    package_status: str
+    status: str = "review_pending"
+    package_ref: str = PREAPPLY_PACKAGE_REF
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    schema_version: str = PREAPPLY_REVIEW_SCHEMA_VERSION
+    runtime_mutation_allowed: bool = False
+    operator_approval_required: bool = True
+    recommended_next_step: str = "collect_preapply_review_decision"
+    notes: Sequence[str] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        _require_safe_identifier(self.review_id, "review_id")
+        _require_safe_identifier(self.package_id, "package_id")
+        _require_safe_identifier(self.candidate_id, "candidate_id")
+        _require_safe_identifier(self.recommendation_id, "recommendation_id")
+        _require_safe_identifier(self.observation_id, "observation_id")
+        _require_safe_identifier(self.experiment_id, "experiment_id")
+        if self.package_status not in ALLOWED_PREAPPLY_PACKAGE_STATUSES:
+            allowed = ", ".join(sorted(ALLOWED_PREAPPLY_PACKAGE_STATUSES))
+            raise ValueError(f"package_status must be one of: {allowed}")
+        if self.status not in ALLOWED_PREAPPLY_REVIEW_STATUSES:
+            allowed = ", ".join(sorted(ALLOWED_PREAPPLY_REVIEW_STATUSES))
+            raise ValueError(f"preapply review status must be one of: {allowed}")
+        object.__setattr__(self, "package_ref", _require_relative_ref(self.package_ref, "package_ref"))
+        _require_timezone_aware_datetime(self.created_at, "created_at")
+        if self.schema_version != PREAPPLY_REVIEW_SCHEMA_VERSION:
+            raise ValueError(f"schema_version must be {PREAPPLY_REVIEW_SCHEMA_VERSION!r}")
+        if self.runtime_mutation_allowed is not False:
+            raise ValueError("preapply review must not allow runtime mutation")
+        if self.operator_approval_required is not True:
+            raise ValueError("preapply review must require operator approval")
+        next_step = _require_non_empty_text(self.recommended_next_step, "recommended_next_step")
+        _reject_runtime_promotion_text(next_step, "recommended_next_step")
+        object.__setattr__(self, "recommended_next_step", next_step)
+        object.__setattr__(self, "notes", _normalize_text_sequence(self.notes, "notes", allow_empty=True))
+
+
+@dataclass(frozen=True, slots=True)
+class PreApplyReviewDecision:
+    """Research-only decision on whether a pre-apply package merits manual design work."""
+
+    review_id: str
+    package_id: str
+    candidate_id: str
+    recommendation_id: str
+    observation_id: str
+    experiment_id: str
+    decision: str
+    rationale: str
+    reviewed_by: str
+    required_followups: Sequence[str] = field(default_factory=tuple)
+    reviewed_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    package_ref: str = PREAPPLY_PACKAGE_REF
+    review_ref: str = PREAPPLY_REVIEW_REF
+    schema_version: str = PREAPPLY_REVIEW_SCHEMA_VERSION
+    runtime_mutation_allowed: bool = False
+    operator_approval_required: bool = True
+    recommended_next_step: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_safe_identifier(self.review_id, "review_id")
+        _require_safe_identifier(self.package_id, "package_id")
+        _require_safe_identifier(self.candidate_id, "candidate_id")
+        _require_safe_identifier(self.recommendation_id, "recommendation_id")
+        _require_safe_identifier(self.observation_id, "observation_id")
+        _require_safe_identifier(self.experiment_id, "experiment_id")
+        if self.decision not in ALLOWED_PREAPPLY_REVIEW_DECISIONS:
+            allowed = ", ".join(sorted(ALLOWED_PREAPPLY_REVIEW_DECISIONS))
+            raise ValueError(f"preapply review decision must be one of: {allowed}")
+        rationale = _require_non_empty_text(self.rationale, "rationale")
+        _reject_runtime_promotion_text(rationale, "rationale")
+        object.__setattr__(self, "rationale", rationale)
+        reviewed_by = _require_non_empty_text(self.reviewed_by, "reviewed_by")
+        _reject_runtime_promotion_text(reviewed_by, "reviewed_by")
+        object.__setattr__(self, "reviewed_by", reviewed_by)
+        followups = _normalize_text_sequence(self.required_followups, "required_followups", allow_empty=True)
+        if self.decision == "needs_more_evidence" and not followups:
+            raise ValueError("needs_more_evidence requires required_followups")
+        object.__setattr__(self, "required_followups", followups)
+        _require_timezone_aware_datetime(self.reviewed_at, "reviewed_at")
+        object.__setattr__(self, "package_ref", _require_relative_ref(self.package_ref, "package_ref"))
+        object.__setattr__(self, "review_ref", _require_relative_ref(self.review_ref, "review_ref"))
+        if self.schema_version != PREAPPLY_REVIEW_SCHEMA_VERSION:
+            raise ValueError(f"schema_version must be {PREAPPLY_REVIEW_SCHEMA_VERSION!r}")
+        if self.runtime_mutation_allowed is not False:
+            raise ValueError("preapply review decision must not allow runtime mutation")
+        if self.operator_approval_required is not True:
+            raise ValueError("preapply review decision must require operator approval")
+        next_step = self.recommended_next_step or _default_review_next_step(self.decision)
+        next_step = _require_non_empty_text(next_step, "recommended_next_step")
+        _reject_runtime_promotion_text(next_step, "recommended_next_step")
+        object.__setattr__(self, "recommended_next_step", next_step)
+
+
 class PreApplyEvidenceRecorder:
     """Persist pre-apply evidence packages under a research-only artifact root."""
 
@@ -199,6 +320,102 @@ class PreApplyEvidenceRecorder:
 
     def _package_dir(self, package_id: str) -> Path:
         return self.root / _require_safe_identifier(package_id, "package_id")
+
+    def _now(self) -> datetime:
+        return self._clock()
+
+
+class PreApplyReviewRecorder:
+    """Persist research-only pre-apply review artifacts."""
+
+    def __init__(
+        self,
+        root: str | Path = Path("artifacts") / "research" / "research_factory" / "preapply_reviews",
+        *,
+        code_version: str | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.root = _require_research_preapply_root(root)
+        self.code_version = code_version
+        self._clock = clock or _utc_now
+
+    def start_review(
+        self,
+        package: PreApplyEvidencePackage,
+        *,
+        package_ref: str = PREAPPLY_PACKAGE_REF,
+        review_id: str | None = None,
+        notes: Sequence[str] = (),
+    ) -> PreApplyReview:
+        """Create a pending review for a pre-apply evidence package."""
+        if not isinstance(package, PreApplyEvidencePackage):
+            raise ValueError("package must be a PreApplyEvidencePackage")
+        review = build_preapply_review(
+            package,
+            review_id=review_id,
+            package_ref=package_ref,
+            created_at=self._now(),
+            notes=notes,
+        )
+        review_dir = self._review_dir(review.review_id)
+        if review_dir.exists():
+            raise ValueError(f"preapply review {review.review_id!r} already exists")
+        review_dir.mkdir(parents=True)
+        _write_json_atomic(review_dir / PREAPPLY_REVIEW_REF, _to_jsonable(review))
+        manifest = build_artifact_manifest(
+            artifact_id=review.review_id,
+            artifact_type="preapply_review",
+            status="running",
+            started_at=review.created_at,
+            input_refs={
+                "package_id": review.package_id,
+                "candidate_id": review.candidate_id,
+                "recommendation_id": review.recommendation_id,
+                "observation_id": review.observation_id,
+                "experiment_id": review.experiment_id,
+                "package_status": review.package_status,
+                "package_ref": review.package_ref,
+            },
+            output_refs={"preapply_review": PREAPPLY_REVIEW_REF},
+            code_version=self.code_version,
+            notes="research-only pre-apply review",
+        )
+        write_artifact_manifest_atomic(review_dir / PREAPPLY_REVIEW_MANIFEST_REF, manifest)
+        return review
+
+    def record_decision(self, decision: PreApplyReviewDecision) -> dict[str, Any]:
+        """Record a final decision for a pending pre-apply review."""
+        if not isinstance(decision, PreApplyReviewDecision):
+            raise ValueError("decision must be a PreApplyReviewDecision")
+        review_dir = self._review_dir(decision.review_id)
+        manifest_path = review_dir / PREAPPLY_REVIEW_MANIFEST_REF
+        if not manifest_path.exists():
+            raise ValueError(f"preapply review {decision.review_id!r} does not exist")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest["status"] != "running":
+            raise ValueError(f"preapply review {decision.review_id!r} is already terminal")
+        stored_review = _load_json_mapping(review_dir / PREAPPLY_REVIEW_REF, "preapply_review")
+        _require_decision_matches_review(decision, stored_review)
+
+        _write_json_atomic(review_dir / PREAPPLY_REVIEW_DECISION_REF, _to_jsonable(decision))
+        output_refs = dict(manifest["output_refs"])
+        output_refs["preapply_review_decision"] = PREAPPLY_REVIEW_DECISION_REF
+        updated = build_artifact_manifest(
+            artifact_id=manifest["artifact_id"],
+            artifact_type=manifest["artifact_type"],
+            status="succeeded",
+            started_at=manifest["started_at"],
+            finished_at=self._now(),
+            input_refs=manifest["input_refs"],
+            output_refs=output_refs,
+            code_version=manifest.get("code_version"),
+            notes=manifest.get("notes"),
+        )
+        write_artifact_manifest_atomic(manifest_path, updated)
+        return updated
+
+    def _review_dir(self, review_id: str) -> Path:
+        return self.root / _require_safe_identifier(review_id, "review_id")
 
     def _now(self) -> datetime:
         return self._clock()
@@ -259,6 +476,66 @@ def build_preapply_evidence_package(
             "pre-apply evidence package is review-only",
             "separate governance approval is required before any trading-system change",
         ),
+    )
+
+
+def build_preapply_review(
+    package: PreApplyEvidencePackage,
+    *,
+    review_id: str | None = None,
+    package_ref: str = PREAPPLY_PACKAGE_REF,
+    created_at: datetime | None = None,
+    notes: Sequence[str] = (),
+) -> PreApplyReview:
+    """Build a pending research-only review from a pre-apply evidence package."""
+    if not isinstance(package, PreApplyEvidencePackage):
+        raise ValueError("package must be a PreApplyEvidencePackage")
+    return PreApplyReview(
+        review_id=review_id or f"review_{package.package_id}",
+        package_id=package.package_id,
+        candidate_id=package.candidate_id,
+        recommendation_id=package.recommendation_id,
+        observation_id=package.observation_id,
+        experiment_id=package.experiment_id,
+        package_status=package.status,
+        package_ref=package_ref,
+        created_at=created_at or datetime.now(UTC),
+        notes=notes,
+    )
+
+
+def build_preapply_review_decision(
+    *,
+    review: PreApplyReview,
+    package: PreApplyEvidencePackage,
+    decision: str,
+    rationale: str,
+    reviewed_by: str,
+    required_followups: Sequence[str] = (),
+    reviewed_at: datetime | None = None,
+) -> PreApplyReviewDecision:
+    """Build a research-only decision for a pending pre-apply review."""
+    if not isinstance(review, PreApplyReview):
+        raise ValueError("review must be a PreApplyReview")
+    if not isinstance(package, PreApplyEvidencePackage):
+        raise ValueError("package must be a PreApplyEvidencePackage")
+    _require_review_matches_package(review, package)
+    if decision == "review_approved_for_manual_apply_design" and package.status != "preapply_ready":
+        raise ValueError("manual apply design review approval requires a preapply_ready package")
+    return PreApplyReviewDecision(
+        review_id=review.review_id,
+        package_id=package.package_id,
+        candidate_id=package.candidate_id,
+        recommendation_id=package.recommendation_id,
+        observation_id=package.observation_id,
+        experiment_id=package.experiment_id,
+        decision=decision,
+        rationale=rationale,
+        reviewed_by=reviewed_by,
+        required_followups=required_followups,
+        reviewed_at=reviewed_at or datetime.now(UTC),
+        package_ref=review.package_ref,
+        review_ref=PREAPPLY_REVIEW_REF,
     )
 
 
@@ -423,6 +700,67 @@ def _default_next_step(status: str) -> str:
     if status == "needs_more_observation":
         return "continue_shadow_or_paper_observation"
     return "archive_preapply_rejection"
+
+
+def _default_review_next_step(decision: str) -> str:
+    if decision == "review_approved_for_manual_apply_design":
+        return "prepare_manual_apply_design_for_separate_governance_review"
+    if decision == "needs_more_evidence":
+        return "collect_additional_preapply_evidence"
+    return "archive_preapply_review_rejection"
+
+
+def _require_consistent_preapply_status(status: str, review_decision: str) -> None:
+    review_decision = _require_non_empty_text(review_decision, "review_decision")
+    expected_status = EXPECTED_PREAPPLY_STATUS_BY_REVIEW_DECISION.get(review_decision)
+    if expected_status is None:
+        allowed = ", ".join(sorted(EXPECTED_PREAPPLY_STATUS_BY_REVIEW_DECISION))
+        raise ValueError(f"review_decision must be one of: {allowed}")
+    if status != expected_status:
+        raise ValueError(f"preapply status {status!r} must match review_decision {review_decision!r}")
+
+
+def _require_review_matches_package(review: PreApplyReview, package: PreApplyEvidencePackage) -> None:
+    if review.package_id != package.package_id:
+        raise ValueError("review package_id must match package")
+    if review.candidate_id != package.candidate_id:
+        raise ValueError("review candidate_id must match package")
+    if review.recommendation_id != package.recommendation_id:
+        raise ValueError("review recommendation_id must match package")
+    if review.observation_id != package.observation_id:
+        raise ValueError("review observation_id must match package")
+    if review.experiment_id != package.experiment_id:
+        raise ValueError("review experiment_id must match package")
+    if review.package_status != package.status:
+        raise ValueError("review package_status must match package status")
+
+
+def _require_decision_matches_review(
+    decision: PreApplyReviewDecision,
+    review_payload: Mapping[str, Any],
+) -> None:
+    fields_to_match = (
+        "review_id",
+        "package_id",
+        "candidate_id",
+        "recommendation_id",
+        "observation_id",
+        "experiment_id",
+        "package_ref",
+    )
+    for field_name in fields_to_match:
+        if getattr(decision, field_name) != review_payload.get(field_name):
+            raise ValueError(f"review decision {field_name} must match preapply review")
+
+
+def _load_json_mapping(path: Path, field_name: str) -> Mapping[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{field_name} must be valid JSON") from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"{field_name} must be a JSON object")
+    return payload
 
 
 def _require_relative_ref(value: Any, field_name: str) -> str:
