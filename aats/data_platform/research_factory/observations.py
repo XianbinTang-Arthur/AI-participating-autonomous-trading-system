@@ -27,11 +27,21 @@ OBSERVATION_SCHEMA_VERSION = "research_observation_v1"
 OBSERVATION_MANIFEST_REF = "observation_manifest.json"
 OBSERVATION_RUN_REF = "observation_run.json"
 OBSERVATION_RESULT_REF = "observation_result.json"
+OBSERVATION_GATE_RESULT_REF = "observation_gate_result.json"
 REVIEW_OUTCOME_REF = "review_outcome.json"
 
 ALLOWED_OBSERVATION_RUN_STATUSES = frozenset({"planned", "running", "completed", "failed", "cancelled"})
 TERMINAL_OBSERVATION_RUN_STATUSES = frozenset({"completed", "failed", "cancelled"})
 ALLOWED_REVIEW_DECISIONS = frozenset({"keep_reviewing", "reject", "eligible_for_preapply"})
+DEFAULT_OBSERVATION_CRITICAL_METRICS = (
+    "observed_bars",
+    "observed_events",
+    "fillable_ratio",
+    "partial_fill_ratio",
+    "cost_adjusted_edge_bps_mean",
+    "drawdown",
+    "metric_drift",
+)
 
 RUNTIME_PROMOTION_TERMS = (
     "active_parameter",
@@ -212,6 +222,110 @@ class ObservationResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ObservationThresholds:
+    """Thresholds for shadow/paper observation review gates."""
+
+    min_observed_bars: int | None = None
+    min_observed_events: int | None = None
+    min_fillable_ratio: float = 0.8
+    max_partial_fill_ratio: float = 0.25
+    min_cost_adjusted_edge_bps_mean: float = 0.0
+    max_drawdown: float = 0.2
+    max_metric_drift: float = 0.5
+    require_no_abort: bool = True
+
+    def __post_init__(self) -> None:
+        if self.min_observed_bars is not None:
+            _require_positive_int(self.min_observed_bars, "min_observed_bars")
+        if self.min_observed_events is not None:
+            _require_positive_int(self.min_observed_events, "min_observed_events")
+        object.__setattr__(self, "min_fillable_ratio", _require_ratio(self.min_fillable_ratio, "min_fillable_ratio"))
+        object.__setattr__(
+            self,
+            "max_partial_fill_ratio",
+            _require_ratio(self.max_partial_fill_ratio, "max_partial_fill_ratio"),
+        )
+        object.__setattr__(
+            self,
+            "min_cost_adjusted_edge_bps_mean",
+            require_finite_number(self.min_cost_adjusted_edge_bps_mean, "min_cost_adjusted_edge_bps_mean"),
+        )
+        object.__setattr__(self, "max_drawdown", _require_non_negative_number(self.max_drawdown, "max_drawdown"))
+        object.__setattr__(
+            self,
+            "max_metric_drift",
+            _require_non_negative_number(self.max_metric_drift, "max_metric_drift"),
+        )
+        if not isinstance(self.require_no_abort, bool):
+            raise ValueError("require_no_abort must be a bool")
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationGateResult:
+    """Deterministic observation gate result before review outcome promotion."""
+
+    observation_id: str
+    recommendation_id: str
+    candidate_id: str
+    experiment_id: str
+    passed: bool
+    failures: tuple[str, ...]
+    thresholds: Mapping[str, Any]
+    critical_metrics: tuple[str, ...] = DEFAULT_OBSERVATION_CRITICAL_METRICS
+    evaluated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    schema_version: str = OBSERVATION_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        _require_safe_identifier(self.observation_id, "observation_id")
+        _require_safe_identifier(self.recommendation_id, "recommendation_id")
+        _require_safe_identifier(self.candidate_id, "candidate_id")
+        _require_safe_identifier(self.experiment_id, "experiment_id")
+        if not isinstance(self.passed, bool):
+            raise ValueError("observation gate passed must be a bool")
+        if not all(isinstance(failure, str) and failure.strip() for failure in self.failures):
+            raise ValueError("observation gate failures must be non-empty strings")
+        if self.passed and self.failures:
+            raise ValueError("passing observation gate must not contain failures")
+        if not self.passed and not self.failures:
+            raise ValueError("failing observation gate must contain at least one failure")
+        if not isinstance(self.thresholds, Mapping):
+            raise ValueError("observation gate thresholds must be a mapping")
+        _reject_nonfinite_values(self.thresholds)
+        if not all(isinstance(metric, str) and metric.strip() for metric in self.critical_metrics):
+            raise ValueError("observation gate critical metrics must be non-empty strings")
+        _require_timezone_aware_datetime(self.evaluated_at, "evaluated_at")
+        if self.schema_version != OBSERVATION_SCHEMA_VERSION:
+            raise ValueError(f"schema_version must be {OBSERVATION_SCHEMA_VERSION!r}")
+        object.__setattr__(self, "failures", tuple(self.failures))
+        object.__setattr__(self, "thresholds", dict(self.thresholds))
+        object.__setattr__(self, "critical_metrics", tuple(self.critical_metrics))
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> ObservationGateResult:
+        """Load an observation gate result from its JSON representation."""
+        if not isinstance(value, Mapping):
+            raise ValueError("observation gate payload must be a mapping")
+        failures = value.get("failures", ())
+        if isinstance(failures, str | bytes | bytearray) or not isinstance(failures, Sequence):
+            raise ValueError("observation gate failures must be a sequence")
+        critical_metrics = value.get("critical_metrics", DEFAULT_OBSERVATION_CRITICAL_METRICS)
+        if isinstance(critical_metrics, str | bytes | bytearray) or not isinstance(critical_metrics, Sequence):
+            raise ValueError("observation gate critical metrics must be a sequence")
+        return cls(
+            observation_id=_require_mapping_text(value, "observation_id"),
+            recommendation_id=_require_mapping_text(value, "recommendation_id"),
+            candidate_id=_require_mapping_text(value, "candidate_id"),
+            experiment_id=_require_mapping_text(value, "experiment_id"),
+            passed=value.get("passed"),
+            failures=tuple(str(failure) for failure in failures),
+            thresholds=value.get("thresholds", {}),
+            critical_metrics=tuple(str(metric) for metric in critical_metrics),
+            evaluated_at=_parse_datetime(value.get("evaluated_at"), "evaluated_at"),
+            schema_version=value.get("schema_version", OBSERVATION_SCHEMA_VERSION),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ReviewOutcome:
     """Governance review decision produced from an observation result."""
 
@@ -223,6 +337,8 @@ class ReviewOutcome:
     decision: str
     rationale: str
     observation_result_ref: str = OBSERVATION_RESULT_REF
+    observation_gate_result_ref: str = OBSERVATION_GATE_RESULT_REF
+    observation_gate_passed: bool | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     schema_version: str = OBSERVATION_SCHEMA_VERSION
     runtime_mutation_allowed: bool = False
@@ -246,6 +362,15 @@ class ReviewOutcome:
             "observation_result_ref",
             _require_relative_ref(self.observation_result_ref, "observation_result_ref"),
         )
+        object.__setattr__(
+            self,
+            "observation_gate_result_ref",
+            _require_relative_ref(self.observation_gate_result_ref, "observation_gate_result_ref"),
+        )
+        if self.observation_gate_passed is not None and not isinstance(self.observation_gate_passed, bool):
+            raise ValueError("observation_gate_passed must be a bool when provided")
+        if self.decision == "eligible_for_preapply" and self.observation_gate_passed is not True:
+            raise ValueError("eligible_for_preapply requires a passing observation gate")
         _require_timezone_aware_datetime(self.created_at, "created_at")
         if self.schema_version != OBSERVATION_SCHEMA_VERSION:
             raise ValueError(f"schema_version must be {OBSERVATION_SCHEMA_VERSION!r}")
@@ -415,6 +540,38 @@ class ObservationRecorder:
         self._write_manifest(result.observation_id, updated)
         return updated
 
+    def record_gate_result(self, gate: ObservationGateResult) -> dict[str, Any]:
+        """Write an observation gate result after the observation result artifact."""
+        if not isinstance(gate, ObservationGateResult):
+            raise ValueError("gate must be an ObservationGateResult")
+        run = self._read_run(gate.observation_id)
+        if run.status != "completed":
+            raise ValueError(f"observation {gate.observation_id!r} has no completed result")
+        _require_matching_gate(gate, run)
+        result_path = self._observation_dir(gate.observation_id) / OBSERVATION_RESULT_REF
+        if not result_path.exists():
+            raise ValueError("observation result must be recorded before gate result")
+
+        observation_dir = self._observation_dir(gate.observation_id)
+        _write_json_atomic(observation_dir / OBSERVATION_GATE_RESULT_REF, _to_jsonable(gate))
+        manifest = self._read_manifest(gate.observation_id)
+        output_refs = dict(manifest["output_refs"])
+        output_refs["observation_gate_result"] = OBSERVATION_GATE_RESULT_REF
+        updated = build_artifact_manifest(
+            artifact_id=manifest["artifact_id"],
+            artifact_type=manifest["artifact_type"],
+            status="running",
+            started_at=manifest["started_at"],
+            finished_at=manifest.get("finished_at"),
+            input_refs=manifest["input_refs"],
+            output_refs=output_refs,
+            metrics_ref=manifest.get("metrics_ref"),
+            code_version=manifest.get("code_version"),
+            notes=manifest.get("notes"),
+        )
+        self._write_manifest(gate.observation_id, updated)
+        return updated
+
     def record_review_outcome(self, outcome: ReviewOutcome) -> dict[str, Any]:
         """Write the review outcome and close the observation artifact."""
         if not isinstance(outcome, ReviewOutcome):
@@ -426,6 +583,12 @@ class ObservationRecorder:
         result_path = self._observation_dir(outcome.observation_id) / outcome.observation_result_ref
         if not result_path.exists():
             raise ValueError("observation result must be recorded before review outcome")
+        gate = self._read_gate_result(outcome.observation_id, outcome.observation_gate_result_ref)
+        _require_matching_outcome_gate(outcome, gate)
+        if outcome.observation_gate_passed is not None and outcome.observation_gate_passed != gate.passed:
+            raise ValueError("review outcome observation_gate_passed must match gate result")
+        if outcome.decision == "eligible_for_preapply" and not gate.passed:
+            raise ValueError("eligible_for_preapply requires a passing observation gate")
 
         observation_dir = self._observation_dir(outcome.observation_id)
         _write_json_atomic(observation_dir / REVIEW_OUTCOME_REF, _to_jsonable(outcome))
@@ -470,21 +633,109 @@ class ObservationRecorder:
         with path.open("r", encoding="utf-8") as handle:
             return ObservationRun.from_mapping(json.load(handle))
 
+    def _read_gate_result(self, observation_id: str, gate_ref: str) -> ObservationGateResult:
+        gate_ref = _require_relative_ref(gate_ref, "observation_gate_result_ref")
+        path = self._observation_dir(observation_id) / gate_ref
+        if not path.exists():
+            raise ValueError("observation gate result must be recorded before review outcome")
+        with path.open("r", encoding="utf-8") as handle:
+            return ObservationGateResult.from_mapping(json.load(handle))
+
     def _now(self) -> datetime:
         return self._clock()
+
+
+def evaluate_observation_gate(
+    result: ObservationResult,
+    run: ObservationRun,
+    thresholds: ObservationThresholds | None = None,
+    *,
+    evaluated_at: datetime | None = None,
+) -> ObservationGateResult:
+    """Evaluate whether an observation result is strong enough for pre-apply review."""
+    if not isinstance(result, ObservationResult):
+        raise ValueError("result must be an ObservationResult")
+    if not isinstance(run, ObservationRun):
+        raise ValueError("run must be an ObservationRun")
+    if run.status not in {"running", "completed"}:
+        raise ValueError("observation gate requires a running or completed observation")
+    _require_matching_run(result, run)
+    thresholds = thresholds or ObservationThresholds()
+    if not isinstance(thresholds, ObservationThresholds):
+        raise ValueError("thresholds must be ObservationThresholds")
+
+    min_observed_bars = thresholds.min_observed_bars or run.min_observation_bars
+    min_observed_events = thresholds.min_observed_events or run.min_observation_events
+    resolved_thresholds = {
+        "min_observed_bars": min_observed_bars,
+        "min_observed_events": min_observed_events,
+        "min_fillable_ratio": thresholds.min_fillable_ratio,
+        "max_partial_fill_ratio": thresholds.max_partial_fill_ratio,
+        "min_cost_adjusted_edge_bps_mean": thresholds.min_cost_adjusted_edge_bps_mean,
+        "max_drawdown": thresholds.max_drawdown,
+        "max_metric_drift": thresholds.max_metric_drift,
+        "require_no_abort": thresholds.require_no_abort,
+    }
+
+    failures: list[str] = []
+    if result.observed_bars < min_observed_bars:
+        failures.append(f"observed_bars={result.observed_bars} < {min_observed_bars}")
+    if result.observed_events < min_observed_events:
+        failures.append(f"observed_events={result.observed_events} < {min_observed_events}")
+    if result.fillable_ratio < thresholds.min_fillable_ratio:
+        failures.append(
+            f"fillable_ratio={result.fillable_ratio:.6f} < {thresholds.min_fillable_ratio:.6f}"
+        )
+    if result.partial_fill_ratio > thresholds.max_partial_fill_ratio:
+        failures.append(
+            f"partial_fill_ratio={result.partial_fill_ratio:.6f} > {thresholds.max_partial_fill_ratio:.6f}"
+        )
+    if result.cost_adjusted_edge_bps_mean <= thresholds.min_cost_adjusted_edge_bps_mean:
+        failures.append(
+            "cost_adjusted_edge_bps_mean="
+            f"{result.cost_adjusted_edge_bps_mean:.6f} <= "
+            f"{thresholds.min_cost_adjusted_edge_bps_mean:.6f}"
+        )
+    if result.drawdown > thresholds.max_drawdown:
+        failures.append(f"drawdown={result.drawdown:.6f} > {thresholds.max_drawdown:.6f}")
+    if result.metric_drift > thresholds.max_metric_drift:
+        failures.append(f"metric_drift={result.metric_drift:.6f} > {thresholds.max_metric_drift:.6f}")
+    if thresholds.require_no_abort and result.abort_triggered:
+        failures.append("abort_triggered=true")
+
+    return ObservationGateResult(
+        observation_id=result.observation_id,
+        recommendation_id=result.recommendation_id,
+        candidate_id=result.candidate_id,
+        experiment_id=result.experiment_id,
+        passed=not failures,
+        failures=tuple(failures),
+        thresholds=resolved_thresholds,
+        evaluated_at=evaluated_at or datetime.now(UTC),
+    )
 
 
 def build_review_outcome(
     result: ObservationResult,
     *,
+    gate: ObservationGateResult | None = None,
     rationale: str,
     outcome_id: str | None = None,
     observation_result_ref: str = OBSERVATION_RESULT_REF,
+    observation_gate_result_ref: str = OBSERVATION_GATE_RESULT_REF,
     created_at: datetime | None = None,
 ) -> ReviewOutcome:
     """Build a review outcome from a validated observation result."""
     if not isinstance(result, ObservationResult):
         raise ValueError("result must be an ObservationResult")
+    if gate is not None:
+        if not isinstance(gate, ObservationGateResult):
+            raise ValueError("gate must be an ObservationGateResult")
+        _require_matching_result_gate(result, gate)
+        if result.review_decision == "eligible_for_preapply" and not gate.passed:
+            raise ValueError("eligible_for_preapply requires a passing observation gate")
+    elif result.review_decision == "eligible_for_preapply":
+        raise ValueError("eligible_for_preapply requires a passing observation gate")
     return ReviewOutcome(
         outcome_id=outcome_id or f"out_{result.observation_id}",
         observation_id=result.observation_id,
@@ -494,6 +745,8 @@ def build_review_outcome(
         decision=result.review_decision,
         rationale=rationale,
         observation_result_ref=observation_result_ref,
+        observation_gate_result_ref=observation_gate_result_ref,
+        observation_gate_passed=gate.passed if gate is not None else None,
         created_at=created_at or datetime.now(UTC),
     )
 
@@ -516,6 +769,37 @@ def _require_matching_outcome(outcome: ReviewOutcome, run: ObservationRun) -> No
         raise ValueError("review outcome candidate_id must match run")
     if outcome.experiment_id != run.experiment_id:
         raise ValueError("review outcome experiment_id must match run")
+
+
+def _require_matching_gate(gate: ObservationGateResult, run: ObservationRun) -> None:
+    if gate.recommendation_id != run.recommendation_id:
+        raise ValueError("observation gate recommendation_id must match run")
+    if gate.candidate_id != run.candidate_id:
+        raise ValueError("observation gate candidate_id must match run")
+    if gate.experiment_id != run.experiment_id:
+        raise ValueError("observation gate experiment_id must match run")
+
+
+def _require_matching_result_gate(result: ObservationResult, gate: ObservationGateResult) -> None:
+    if gate.observation_id != result.observation_id:
+        raise ValueError("observation gate observation_id must match result")
+    if gate.recommendation_id != result.recommendation_id:
+        raise ValueError("observation gate recommendation_id must match result")
+    if gate.candidate_id != result.candidate_id:
+        raise ValueError("observation gate candidate_id must match result")
+    if gate.experiment_id != result.experiment_id:
+        raise ValueError("observation gate experiment_id must match result")
+
+
+def _require_matching_outcome_gate(outcome: ReviewOutcome, gate: ObservationGateResult) -> None:
+    if gate.observation_id != outcome.observation_id:
+        raise ValueError("observation gate observation_id must match review outcome")
+    if gate.recommendation_id != outcome.recommendation_id:
+        raise ValueError("observation gate recommendation_id must match review outcome")
+    if gate.candidate_id != outcome.candidate_id:
+        raise ValueError("observation gate candidate_id must match review outcome")
+    if gate.experiment_id != outcome.experiment_id:
+        raise ValueError("observation gate experiment_id must match review outcome")
 
 
 def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
@@ -670,6 +954,22 @@ def _reject_runtime_promotion_text(value: str, field_name: str) -> None:
     for term in RUNTIME_PROMOTION_TERMS:
         if term in lowered:
             raise ValueError(f"{field_name} must not encode runtime promotion term: {term}")
+
+
+def _reject_nonfinite_values(value: Any) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            _reject_nonfinite_values(key)
+            _reject_nonfinite_values(item)
+        return
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        for item in value:
+            _reject_nonfinite_values(item)
+        return
+    if isinstance(value, bool):
+        return
+    if isinstance(value, int | float):
+        require_finite_number(value, "observation gate thresholds")
 
 
 def _require_research_observation_root(value: str | Path) -> Path:

@@ -14,8 +14,10 @@ from aats.data_platform.research_factory.metrics.gates import (
 from aats.data_platform.research_factory.observations import (
     ObservationRecorder,
     ObservationResult,
+    ObservationThresholds,
     ReviewOutcome,
     build_review_outcome,
+    evaluate_observation_gate,
 )
 from aats.data_platform.research_factory.recommendations import build_research_recommendation
 from aats.data_platform.research_factory.specs import MetricsSnapshot
@@ -95,7 +97,15 @@ def recommendation():
     )
 
 
-def observation_result(*, review_decision: str = "eligible_for_preapply") -> ObservationResult:
+def observation_result(
+    *,
+    review_decision: str = "eligible_for_preapply",
+    observed_bars: int = 96,
+    observed_events: int = 12,
+    cost_adjusted_edge_bps_mean: float = 1.1,
+    abort_triggered: bool = False,
+    abort_reason: str | None = None,
+) -> ObservationResult:
     return ObservationResult(
         observation_id="obs_rec_cand_20260516_obs001",
         recommendation_id="rec_cand_20260516_obs001",
@@ -104,8 +114,8 @@ def observation_result(*, review_decision: str = "eligible_for_preapply") -> Obs
         mode="shadow",
         observation_start=dt(10),
         observation_end=dt(12),
-        observed_bars=96,
-        observed_events=12,
+        observed_bars=observed_bars,
+        observed_events=observed_events,
         signal_count=15,
         paper_intent_count=0,
         fillable_ratio=0.92,
@@ -113,10 +123,11 @@ def observation_result(*, review_decision: str = "eligible_for_preapply") -> Obs
         fee_bps_mean=5.0,
         slippage_bps_mean=1.8,
         funding_bps_mean=0.4,
-        cost_adjusted_edge_bps_mean=1.1,
+        cost_adjusted_edge_bps_mean=cost_adjusted_edge_bps_mean,
         drawdown=0.08,
         metric_drift=0.12,
-        abort_triggered=False,
+        abort_triggered=abort_triggered,
+        abort_reason=abort_reason,
         review_decision=review_decision,
         created_at=dt(12, 1),
     )
@@ -137,9 +148,12 @@ def test_observation_recorder_writes_lifecycle_artifacts(workspace_tmp_path: Pat
     assert running.status == "running"
 
     result = observation_result()
+    gate = evaluate_observation_gate(result, running, evaluated_at=dt(12, 1))
     result_manifest = recorder.record_result(result)
+    gate_manifest = recorder.record_gate_result(gate)
     outcome = build_review_outcome(
         result,
+        gate=gate,
         rationale="shadow observation kept positive executable edge",
         created_at=dt(12, 2),
     )
@@ -148,18 +162,26 @@ def test_observation_recorder_writes_lifecycle_artifacts(workspace_tmp_path: Pat
     observation_dir = root / run.observation_id
     stored_run = read_json(observation_dir / "observation_run.json")
     stored_result = read_json(observation_dir / "observation_result.json")
+    stored_gate = read_json(observation_dir / "observation_gate_result.json")
     stored_outcome = read_json(observation_dir / "review_outcome.json")
     stored_manifest = read_json(observation_dir / "observation_manifest.json")
 
     assert result_manifest["status"] == "running"
+    assert gate_manifest["status"] == "running"
     assert final_manifest["status"] == "succeeded"
     assert stored_manifest["artifact_type"] == "observation"
     assert stored_manifest["output_refs"]["observation_run"] == "observation_run.json"
     assert stored_manifest["output_refs"]["observation_result"] == "observation_result.json"
+    assert stored_manifest["output_refs"]["observation_gate_result"] == "observation_gate_result.json"
     assert stored_manifest["output_refs"]["review_outcome"] == "review_outcome.json"
     assert stored_run["status"] == "completed"
     assert stored_result["review_decision"] == "eligible_for_preapply"
+    assert stored_gate["passed"] is True
+    assert stored_gate["thresholds"]["min_observed_bars"] == 48
+    assert stored_gate["thresholds"]["min_observed_events"] == 10
     assert stored_outcome["decision"] == "eligible_for_preapply"
+    assert stored_outcome["observation_gate_passed"] is True
+    assert stored_outcome["observation_gate_result_ref"] == "observation_gate_result.json"
     assert stored_outcome["runtime_mutation_allowed"] is False
     assert stored_outcome["operator_approval_required"] is True
     assert stored_outcome["recommended_next_step"] == "prepare_preapply_evidence_review"
@@ -216,6 +238,105 @@ def test_review_outcome_rejects_runtime_mutation_and_direct_apply_text() -> None
 
     with pytest.raises(ValueError, match="runtime promotion term"):
         build_review_outcome(result, rationale="direct_apply candidate after observation")
+
+
+def test_observation_gate_fails_for_insufficient_samples(workspace_tmp_path: Path) -> None:
+    recorder = ObservationRecorder(observations_root(workspace_tmp_path), clock=lambda: dt(10))
+    planned = recorder.plan(recommendation())
+    running = recorder.start(planned.observation_id, started_at=dt(10, 1))
+    result = observation_result(
+        review_decision="keep_reviewing",
+        observed_bars=10,
+        observed_events=1,
+    )
+
+    gate = evaluate_observation_gate(result, running, evaluated_at=dt(12, 1))
+
+    assert gate.passed is False
+    assert gate.failures == ("observed_bars=10 < 48", "observed_events=1 < 10")
+
+
+def test_observation_gate_fails_for_negative_edge(workspace_tmp_path: Path) -> None:
+    recorder = ObservationRecorder(observations_root(workspace_tmp_path), clock=lambda: dt(10))
+    planned = recorder.plan(recommendation())
+    running = recorder.start(planned.observation_id, started_at=dt(10, 1))
+    result = observation_result(
+        review_decision="reject",
+        cost_adjusted_edge_bps_mean=-0.1,
+    )
+
+    gate = evaluate_observation_gate(result, running, evaluated_at=dt(12, 1))
+
+    assert gate.passed is False
+    assert gate.failures == ("cost_adjusted_edge_bps_mean=-0.100000 <= 0.000000",)
+
+
+def test_eligible_for_preapply_requires_passing_gate_in_builder_and_recorder(
+    workspace_tmp_path: Path,
+) -> None:
+    root = observations_root(workspace_tmp_path)
+    recorder = ObservationRecorder(root, clock=lambda: dt(10))
+    run = recorder.plan(recommendation())
+    running = recorder.start(run.observation_id, started_at=dt(10, 1))
+    result = observation_result(cost_adjusted_edge_bps_mean=-0.1)
+    failing_gate = evaluate_observation_gate(result, running, evaluated_at=dt(12, 1))
+
+    with pytest.raises(ValueError, match="requires a passing observation gate"):
+        build_review_outcome(result, rationale="promote without gate")
+
+    with pytest.raises(ValueError, match="requires a passing observation gate"):
+        build_review_outcome(result, gate=failing_gate, rationale="gate failed")
+
+    with pytest.raises(ValueError, match="requires a passing observation gate"):
+        ReviewOutcome(
+            outcome_id="out_failed_gate",
+            observation_id=result.observation_id,
+            recommendation_id=result.recommendation_id,
+            candidate_id=result.candidate_id,
+            experiment_id=result.experiment_id,
+            decision="eligible_for_preapply",
+            rationale="manual review override attempt",
+            observation_gate_passed=False,
+        )
+
+    recorder.record_result(result)
+    recorder.record_gate_result(failing_gate)
+    mismatched_outcome = ReviewOutcome(
+        outcome_id="out_mismatched_gate",
+        observation_id=result.observation_id,
+        recommendation_id=result.recommendation_id,
+        candidate_id=result.candidate_id,
+        experiment_id=result.experiment_id,
+        decision="keep_reviewing",
+        rationale="continue observation",
+        observation_gate_passed=True,
+    )
+    with pytest.raises(ValueError, match="observation_gate_passed must match gate result"):
+        recorder.record_review_outcome(mismatched_outcome)
+
+
+def test_record_review_outcome_requires_gate_result(workspace_tmp_path: Path) -> None:
+    root = observations_root(workspace_tmp_path)
+    recorder = ObservationRecorder(root, clock=lambda: dt(10))
+    run = recorder.plan(recommendation())
+    running = recorder.start(run.observation_id, started_at=dt(10, 1))
+    result = observation_result(review_decision="keep_reviewing")
+    gate = evaluate_observation_gate(result, running, evaluated_at=dt(12, 1))
+    recorder.record_result(result)
+    outcome = build_review_outcome(
+        result,
+        gate=gate,
+        rationale="continue observation despite passing gate",
+        created_at=dt(12, 2),
+    )
+
+    with pytest.raises(ValueError, match="gate result must be recorded"):
+        recorder.record_review_outcome(outcome)
+
+
+def test_observation_thresholds_reject_nonfinite_values() -> None:
+    with pytest.raises(ValueError, match="must be finite"):
+        ObservationThresholds(min_cost_adjusted_edge_bps_mean=float("inf"))
 
 
 def test_observation_recorder_rejects_result_before_start(workspace_tmp_path: Path) -> None:
