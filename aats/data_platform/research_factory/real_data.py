@@ -43,6 +43,7 @@ from aats.data_platform.research_factory.paths import (
     copy_research_artifact_file,
     require_research_artifact_json_file,
 )
+from aats.data_platform.research_factory.proposals import FactorDSLProposal
 from aats.data_platform.research_factory.recommendations import build_research_recommendation
 from aats.data_platform.research_factory.registry import (
     NoveltyGateResult,
@@ -66,6 +67,7 @@ SOURCE_INTEGRITY_REPORT_REF = "source_integrity_report.json"
 EXECUTION_EVIDENCE_REPORT_REF = "execution_evidence_report.json"
 EVIDENCE_BUNDLE_REF = "evidence_bundle.json"
 NOVELTY_GATE_RESULT_REF = "novelty_gate_result.json"
+FACTOR_PROPOSAL_REF = "factor_proposal.json"
 TIMEFRAME_PERIODS_PER_YEAR = {
     "1m": 365.0 * 24.0 * 60.0,
     "5m": 365.0 * 24.0 * 12.0,
@@ -105,6 +107,7 @@ class ResearchFactoryExperimentConfig:
     start: datetime
     end: datetime
     factor_expression: str
+    proposal: FactorDSLProposal | None = None
     artifact_root: Path = DEFAULT_EXPERIMENT_ARTIFACT_ROOT
     experiment_id: str | None = None
     label_horizon_bars: int = 1
@@ -144,6 +147,7 @@ class ResearchFactoryExperimentResult:
     recommendation_ref: str | None = None
     registry_ref: str | None = None
     novelty_gate_ref: str | None = None
+    proposal_ref: str | None = None
     failure_ref: str | None = None
     dataset_fingerprint: str | None = None
     error: str | None = None
@@ -159,6 +163,7 @@ class ResearchFactoryExperimentResult:
             "recommendation_ref": self.recommendation_ref,
             "registry_ref": self.registry_ref,
             "novelty_gate_ref": self.novelty_gate_ref,
+            "proposal_ref": self.proposal_ref,
             "failure_ref": self.failure_ref,
             "dataset_fingerprint": self.dataset_fingerprint,
             "error": self.error,
@@ -282,6 +287,7 @@ def run_research_factory_experiment(
         raise ValueError("end must be after start")
     if config.label_horizon_bars <= 0:
         raise ValueError("label_horizon_bars must be positive")
+    factor_expression = _resolve_factor_expression(config)
     if config.require_execution_realism and config.execution_cost_summary_path is None:
         preflight_execution_error = "execution realism summary is required for real-data ready_for_review"
     else:
@@ -294,7 +300,7 @@ def run_research_factory_experiment(
         config.valid_ratio,
         config.test_ratio,
     )
-    feature = FeatureSpec(name="research_factor", expression=config.factor_expression)
+    feature = FeatureSpec(name="research_factor", expression=factor_expression)
     label = LabelSpec(
         name=f"future_simple_return_h{config.label_horizon_bars}",
         horizon_bars=config.label_horizon_bars,
@@ -331,10 +337,19 @@ def run_research_factory_experiment(
     research_dataset_fingerprint: str | None = None
     novelty_gate: NoveltyGateResult | None = None
     novelty_gate_ref: str | None = None
+    proposal_ref: str | None = None
     memory_status_override: str | None = None
     try:
         recorder.start(experiment_spec)
         started = True
+        if config.proposal is not None:
+            recorder.record_json_artifact(
+                experiment_id,
+                "factor_proposal",
+                FACTOR_PROPOSAL_REF,
+                config.proposal,
+            )
+            proposal_ref = FACTOR_PROPOSAL_REF
         if preflight_execution_error is not None:
             raise ValueError(preflight_execution_error)
 
@@ -496,12 +511,18 @@ def run_research_factory_experiment(
             execution_cost_summary_ref=execution_cost_summary_ref,
             evidence_bundle_ref=EVIDENCE_BUNDLE_REF,
             novelty_gate_ref=novelty_gate_ref,
+            proposal_ref=proposal_ref,
+            proposal_id=config.proposal.proposal_id if config.proposal is not None else None,
             created_at=config.timestamp,
         )
         recorder.record_candidate(experiment_id, candidate)
         recommendation = build_research_recommendation(
             candidate,
-            evidence_refs=_recommendation_evidence_refs(execution_cost_summary_ref, novelty_gate_ref),
+            evidence_refs=_recommendation_evidence_refs(
+                execution_cost_summary_ref,
+                novelty_gate_ref,
+                proposal_ref,
+            ),
             created_at=config.timestamp,
             require_execution_realism=config.require_execution_realism,
         )
@@ -529,6 +550,7 @@ def run_research_factory_experiment(
             recommendation_ref=manifest["output_refs"].get("research_recommendation"),
             registry_ref=registry_ref,
             novelty_gate_ref=manifest["output_refs"].get("novelty_gate_result"),
+            proposal_ref=manifest["output_refs"].get("factor_proposal"),
             dataset_fingerprint=research_dataset_fingerprint,
         )
     except Exception as exc:
@@ -556,6 +578,7 @@ def run_research_factory_experiment(
                 metrics_ref=manifest.get("metrics_ref"),
                 registry_ref=registry_ref,
                 novelty_gate_ref=manifest["output_refs"].get("novelty_gate_result"),
+                proposal_ref=manifest["output_refs"].get("factor_proposal"),
                 failure_ref=manifest["output_refs"].get("failure"),
                 dataset_fingerprint=research_dataset_fingerprint,
                 error=str(exc),
@@ -622,6 +645,17 @@ def _load_gold_replay_records(
         end=config.end,
         dataset_version=config.dataset_version,
     )
+
+
+def _resolve_factor_expression(config: ResearchFactoryExperimentConfig) -> str:
+    factor_expression = _require_non_empty(config.factor_expression, "factor_expression").strip()
+    if config.proposal is None:
+        return factor_expression
+    if not isinstance(config.proposal, FactorDSLProposal):
+        raise ValueError("proposal must be a FactorDSLProposal")
+    if factor_expression != config.proposal.factor_expression:
+        raise ValueError("proposal factor_expression must match config factor_expression")
+    return config.proposal.factor_expression
 
 
 def _row_to_gold_bar_record(row: Any, timeframe: str) -> GoldBarRecord:
@@ -707,6 +741,8 @@ def _build_candidate(
     execution_cost_summary_ref: str | None,
     evidence_bundle_ref: str,
     novelty_gate_ref: str | None,
+    proposal_ref: str | None,
+    proposal_id: str | None,
     created_at: datetime,
 ) -> CandidateArtifact:
     return CandidateArtifact(
@@ -720,6 +756,8 @@ def _build_candidate(
             "execution_cost_summary_ref": execution_cost_summary_ref,
             "evidence_bundle_ref": evidence_bundle_ref,
             "novelty_gate_ref": novelty_gate_ref,
+            "factor_proposal_ref": proposal_ref,
+            "factor_proposal_id": proposal_id,
             "generated_by": "research_factory_real_data_runner",
             "research_only": True,
         },
@@ -732,6 +770,7 @@ def _build_candidate(
 def _recommendation_evidence_refs(
     execution_cost_summary_ref: str | None,
     novelty_gate_ref: str | None,
+    proposal_ref: str | None,
 ) -> dict[str, str]:
     refs = {
         "candidate_artifact": "candidate_artifact.json",
@@ -743,6 +782,8 @@ def _recommendation_evidence_refs(
     }
     if novelty_gate_ref is not None:
         refs["novelty_gate_result"] = novelty_gate_ref
+    if proposal_ref is not None:
+        refs["factor_proposal"] = proposal_ref
     if execution_cost_summary_ref is not None:
         refs["execution_cost_summary"] = execution_cost_summary_ref
         refs["execution_evidence_report"] = EXECUTION_EVIDENCE_REPORT_REF

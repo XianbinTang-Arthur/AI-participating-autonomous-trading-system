@@ -16,6 +16,7 @@ from aats.data_platform.research_factory.real_data import (
     ResearchFactoryExperimentConfig,
     run_research_factory_experiment,
 )
+from aats.data_platform.research_factory.proposals import FactorDSLProposal
 from aats.data_platform.research_factory.registry import ResearchMemoryRegistry, build_research_memory_entry
 
 UTC = timezone.utc
@@ -151,6 +152,7 @@ def experiment_config(
     execution_cost_summary_path: Path | None,
     require_execution_realism: bool = True,
     experiment_id: str = "rf_real_success",
+    proposal: FactorDSLProposal | None = None,
 ) -> ResearchFactoryExperimentConfig:
     return ResearchFactoryExperimentConfig(
         symbol="BTC-USDT-SWAP",
@@ -158,6 +160,7 @@ def experiment_config(
         start=START,
         end=START + timedelta(hours=12),
         factor_expression="Return(close, 1)",
+        proposal=proposal,
         artifact_root=root,
         experiment_id=experiment_id,
         train_ratio=0.4,
@@ -270,6 +273,65 @@ def test_real_data_runner_writes_recommendation_and_registry(tmp_path: Path) -> 
     assert recommendation["evidence"]["evidence_refs"]["dataset_quality_report"] == "dataset_quality_report.json"
     assert registry_entries[0]["status"] == "recommendation_ready"
     assert registry_entries[0]["created_by"] == "research_factory_real_data_runner"
+
+
+def test_real_data_runner_records_factor_proposal_artifact(tmp_path: Path) -> None:
+    root = artifact_root(tmp_path)
+    execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
+    write_execution_cost_summary(execution_summary)
+    proposal = FactorDSLProposal(
+        hypothesis="Short horizon close momentum may preserve positive executable edge.",
+        factor_expression="Return(close, 1)",
+        rationale="Submit only a safe Factor DSL expression before novelty and evidence gates.",
+        created_at=START,
+    )
+
+    result = run_research_factory_experiment(
+        experiment_config(
+            root,
+            execution_cost_summary_path=execution_summary,
+            experiment_id="rf_real_with_proposal",
+            proposal=proposal,
+        ),
+        data_source=FakeDataSource(load_result()),
+    )
+
+    experiment_dir = root / "rf_real_with_proposal"
+    manifest = read_json(experiment_dir / "experiment_manifest.json")
+    proposal_artifact = read_json(experiment_dir / "factor_proposal.json")
+    candidate = read_json(experiment_dir / "candidate_artifact.json")
+    recommendation = read_json(experiment_dir / "research_recommendation.json")
+
+    assert result.status == "succeeded"
+    assert result.proposal_ref == "factor_proposal.json"
+    assert manifest["output_refs"]["factor_proposal"] == "factor_proposal.json"
+    assert proposal_artifact["hypothesis"] == proposal.hypothesis
+    assert proposal_artifact["factor_expression"] == "Return(close, 1)"
+    assert candidate["payload"]["factor_proposal_ref"] == "factor_proposal.json"
+    assert candidate["payload"]["factor_proposal_id"] == proposal.proposal_id
+    assert recommendation["evidence"]["evidence_refs"]["factor_proposal"] == "factor_proposal.json"
+
+
+def test_real_data_runner_rejects_proposal_expression_mismatch(tmp_path: Path) -> None:
+    root = artifact_root(tmp_path)
+    proposal = FactorDSLProposal(
+        hypothesis="Two bar close momentum should not be silently substituted.",
+        factor_expression="Return(close, 2)",
+        rationale="The proposal expression must be the exact executed research factor.",
+        created_at=START,
+    )
+
+    with pytest.raises(ValueError, match="proposal factor_expression must match"):
+        run_research_factory_experiment(
+            experiment_config(
+                root,
+                execution_cost_summary_path=None,
+                require_execution_realism=False,
+                experiment_id="rf_real_proposal_mismatch",
+                proposal=proposal,
+            ),
+            data_source=FakeDataSource(load_result()),
+        )
 
 
 def test_real_data_runner_skips_duplicate_from_novelty_gate(tmp_path: Path) -> None:

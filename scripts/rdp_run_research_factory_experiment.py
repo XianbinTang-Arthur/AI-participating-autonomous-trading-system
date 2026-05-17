@@ -23,6 +23,10 @@ from aats.data_platform.research_factory.real_data import (  # noqa: E402
     ResearchFactoryExperimentConfig,
     run_research_factory_experiment,
 )
+from aats.data_platform.research_factory.proposals import (  # noqa: E402
+    FactorDSLProposal,
+    load_factor_dsl_proposal,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -33,7 +37,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--timeframe", required=True, help="Gold replay timeframe, e.g. 15m or 1h.")
     parser.add_argument("--start", required=True, help="UTC start timestamp or date.")
     parser.add_argument("--end", required=True, help="UTC end timestamp or date.")
-    parser.add_argument("--factor-expression", required=True, help="Safe factor DSL expression.")
+    parser.add_argument(
+        "--factor-expression",
+        default=None,
+        help="Safe factor DSL expression. Optional when --factor-proposal is provided.",
+    )
+    parser.add_argument(
+        "--factor-proposal",
+        type=Path,
+        default=None,
+        help="Proposal-only JSON artifact with hypothesis, factor_expression, and rationale.",
+    )
     parser.add_argument("--label-horizon-bars", type=int, default=1)
     parser.add_argument("--dataset-version", default=None)
     parser.add_argument("--artifact-root", type=Path, default=DEFAULT_EXPERIMENT_ARTIFACT_ROOT)
@@ -76,6 +90,12 @@ def main(argv: list[str] | None = None) -> int:
             f"database URL environment variable {args.database_url_env!r} is required; .env files are not read"
         )
         return 2
+    run_timestamp = datetime.now(UTC)
+    try:
+        proposal, factor_expression = _resolve_factor_input(args, created_at=run_timestamp)
+    except Exception as exc:
+        _print_failure(str(exc))
+        return 2
 
     engine = create_engine(database_url, pool_pre_ping=True)
     session_factory = sessionmaker(bind=engine, expire_on_commit=False)
@@ -87,7 +107,8 @@ def main(argv: list[str] | None = None) -> int:
                     timeframe=args.timeframe,
                     start=_parse_utc_datetime(args.start),
                     end=_parse_utc_datetime(args.end),
-                    factor_expression=args.factor_expression,
+                    factor_expression=factor_expression,
+                    proposal=proposal,
                     artifact_root=args.artifact_root,
                     experiment_id=args.experiment_id,
                     label_horizon_bars=args.label_horizon_bars,
@@ -100,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
                     require_execution_realism=not args.allow_missing_execution_realism,
                     registry_path=args.registry_path,
                     overwrite=args.overwrite,
+                    timestamp=run_timestamp,
                 ),
                 data_source=GoldReplayDataSource(session),
             )
@@ -111,6 +133,24 @@ def main(argv: list[str] | None = None) -> int:
 
     print(result.to_json(), end="")
     return 0 if result.status == "succeeded" else 1
+
+
+def _resolve_factor_input(args: argparse.Namespace, *, created_at: datetime) -> tuple[FactorDSLProposal | None, str]:
+    proposal = None
+    factor_expression = args.factor_expression.strip() if isinstance(args.factor_expression, str) else None
+    if args.factor_proposal is not None:
+        proposal = load_factor_dsl_proposal(
+            args.factor_proposal,
+            research_root=args.artifact_root,
+            created_at=created_at,
+        )
+        if factor_expression is None:
+            factor_expression = proposal.factor_expression
+        elif factor_expression != proposal.factor_expression:
+            raise ValueError("--factor-expression must match --factor-proposal factor_expression")
+    if not factor_expression:
+        raise ValueError("either --factor-expression or --factor-proposal is required")
+    return proposal, factor_expression
 
 
 def _parse_utc_datetime(value: str) -> datetime:
