@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -23,6 +23,7 @@ from aats.data_platform.research_factory.datasets.gold_bars import (
 from aats.data_platform.research_factory.datasets.segments import build_time_segments
 from aats.data_platform.research_factory.evidence import (
     DatasetQualityThresholds,
+    ExecutionEvidenceReport,
     build_dataset_quality_report,
     build_evidence_bundle,
     build_execution_evidence_report,
@@ -42,6 +43,10 @@ from aats.data_platform.research_factory.metrics.snapshots import (
 from aats.data_platform.research_factory.paths import (
     copy_research_artifact_file,
     require_research_artifact_json_file,
+)
+from aats.data_platform.research_factory.profiles import (
+    ResearchProfile,
+    resolve_research_profile,
 )
 from aats.data_platform.research_factory.proposals import FactorDSLProposal
 from aats.data_platform.research_factory.recommendations import build_research_recommendation
@@ -108,6 +113,7 @@ class ResearchFactoryExperimentConfig:
     end: datetime
     factor_expression: str
     proposal: FactorDSLProposal | None = None
+    research_profile: str | ResearchProfile | None = None
     artifact_root: Path = DEFAULT_EXPERIMENT_ARTIFACT_ROOT
     experiment_id: str | None = None
     label_horizon_bars: int = 1
@@ -288,7 +294,9 @@ def run_research_factory_experiment(
     if config.label_horizon_bars <= 0:
         raise ValueError("label_horizon_bars must be positive")
     factor_expression = _resolve_factor_expression(config)
-    if config.require_execution_realism and config.execution_cost_summary_path is None:
+    research_profile = resolve_research_profile(config.research_profile)
+    execution_evidence_required = _execution_evidence_required(config, research_profile)
+    if execution_evidence_required and config.execution_cost_summary_path is None:
         preflight_execution_error = "execution realism summary is required for real-data ready_for_review"
     else:
         preflight_execution_error = None
@@ -423,7 +431,7 @@ def run_research_factory_experiment(
             prepared=prepared,
             dataset_spec=dataset_spec,
             dataset_fingerprint=research_dataset_fingerprint,
-            thresholds=_quality_thresholds(config),
+            thresholds=_quality_thresholds(config, research_profile),
             created_at=config.timestamp,
         )
         recorder.record_json_artifact(
@@ -453,6 +461,10 @@ def run_research_factory_experiment(
                 evidence_ref=execution_cost_summary_ref,
                 created_at=config.timestamp,
             )
+            execution_evidence = _apply_execution_evidence_policy(
+                execution_evidence,
+                research_profile,
+            )
             recorder.record_json_artifact(
                 experiment_id,
                 "execution_evidence_report",
@@ -463,7 +475,7 @@ def run_research_factory_experiment(
             dataset_quality=dataset_quality,
             source_integrity=source_integrity,
             execution_evidence=execution_evidence,
-            execution_evidence_required=config.require_execution_realism,
+            execution_evidence_required=execution_evidence_required,
             created_at=config.timestamp,
         )
         recorder.record_json_artifact(
@@ -497,7 +509,7 @@ def run_research_factory_experiment(
                 conflict_strategy="prefer_right",
             )
         recorder.record_metrics(experiment_id, metrics)
-        gate = _deterministic_gate(metrics, config.timestamp)
+        gate = _deterministic_gate(metrics, config.timestamp, research_profile)
         if not gate.passed:
             failures = "; ".join(gate.failures)
             raise ValueError(f"candidate gate failed: {failures}")
@@ -524,7 +536,7 @@ def run_research_factory_experiment(
                 proposal_ref,
             ),
             created_at=config.timestamp,
-            require_execution_realism=config.require_execution_realism,
+            require_execution_realism=execution_evidence_required,
         )
         manifest = recorder.record_recommendation(experiment_id, recommendation)
         registry.upsert(
@@ -707,10 +719,15 @@ def _future_simple_returns(
     return tuple(values)
 
 
-def _deterministic_gate(metrics: MetricsSnapshot, evaluated_at: datetime) -> CandidateGateResult:
-    gate = evaluate_candidate_gate(
-        metrics,
-        {
+def _deterministic_gate(
+    metrics: MetricsSnapshot,
+    evaluated_at: datetime,
+    research_profile: ResearchProfile | None = None,
+) -> CandidateGateResult:
+    thresholds = (
+        research_profile.candidate_gate_thresholds
+        if research_profile is not None
+        else {
             "min_net_annualized_return": 0.0,
             "max_drawdown_limit": 0.2,
             "min_cost_adjusted_edge_bps_mean": 0.0,
@@ -719,7 +736,11 @@ def _deterministic_gate(metrics: MetricsSnapshot, evaluated_at: datetime) -> Can
                 "max_drawdown",
                 "cost_adjusted_edge_bps_mean",
             ),
-        },
+        }
+    )
+    gate = evaluate_candidate_gate(
+        metrics,
+        thresholds,
     )
     return CandidateGateResult(
         passed=gate.passed,
@@ -849,7 +870,12 @@ def _load_json_mapping(path: Path, field_name: str) -> Mapping[str, Any]:
     return payload
 
 
-def _quality_thresholds(config: ResearchFactoryExperimentConfig) -> DatasetQualityThresholds:
+def _quality_thresholds(
+    config: ResearchFactoryExperimentConfig,
+    research_profile: ResearchProfile | None = None,
+) -> DatasetQualityThresholds:
+    if research_profile is not None:
+        return research_profile.dataset_quality_thresholds
     return DatasetQualityThresholds(
         min_total_bars=config.min_total_bars,
         min_train_bars=config.min_train_bars,
@@ -858,6 +884,30 @@ def _quality_thresholds(config: ResearchFactoryExperimentConfig) -> DatasetQuali
         max_bar_gap_ratio=config.max_bar_gap_ratio,
         max_funding_missing_ratio=config.max_funding_missing_ratio,
     )
+
+
+def _execution_evidence_required(
+    config: ResearchFactoryExperimentConfig,
+    research_profile: ResearchProfile | None,
+) -> bool:
+    if research_profile is None:
+        return config.require_execution_realism
+    return config.require_execution_realism or research_profile.execution_evidence_policy.required
+
+
+def _apply_execution_evidence_policy(
+    report: ExecutionEvidenceReport,
+    research_profile: ResearchProfile | None,
+) -> ExecutionEvidenceReport:
+    if research_profile is None:
+        return report
+    policy = research_profile.execution_evidence_policy
+    if policy.allow_dataset_fingerprint_compatibility or not report.dataset_fingerprint_compatible:
+        return report
+    failures = tuple(report.failures) + (
+        "execution evidence dataset_fingerprint compatibility is not allowed by research_profile",
+    )
+    return replace(report, passed=False, failures=failures)
 
 
 def _periods_per_year(config: ResearchFactoryExperimentConfig) -> float:

@@ -558,6 +558,32 @@ def test_novelty_gate_marks_same_factor_different_dataset_retest(tmp_path: Path)
     assert "different dataset" in result.reasons[0]
 
 
+def test_novelty_gate_surfaces_preapply_positive_retest_memory(tmp_path: Path) -> None:
+    registry = ResearchMemoryRegistry(registry_path(tmp_path))
+    candidate = candidate_artifact(
+        "exp_registry_novelty_preapply_ready",
+        dataset_fingerprint="sha256:dataset-a",
+    )
+    registry.upsert(
+        build_preapply_memory_entry(
+            candidate=candidate,
+            package=preapply_package(candidate, status="preapply_ready"),
+            created_by="unit_test",
+            created_at=dt(13),
+        )
+    )
+
+    result = registry.evaluate_novelty(
+        factor_expression="Return(close, 1)",
+        dataset_fingerprint="sha256:dataset-b",
+        evaluated_at=dt(14),
+    )
+
+    assert result.decision == "retest"
+    assert result.should_run is True
+    assert any("preapply-positive" in reason for reason in result.reasons)
+
+
 def test_novelty_gate_suppresses_repeated_failed_factor_family(tmp_path: Path) -> None:
     registry = ResearchMemoryRegistry(registry_path(tmp_path))
     for index, status in enumerate(("gate_failed", "observation_rejected"), start=1):
@@ -587,6 +613,35 @@ def test_novelty_gate_suppresses_repeated_failed_factor_family(tmp_path: Path) -
     assert result.should_run is False
     assert result.failure_match_count == 2
     assert "prior failure outcomes" in result.reasons[0]
+
+
+def test_novelty_gate_suppresses_repeated_unresolved_preapply_memory(tmp_path: Path) -> None:
+    registry = ResearchMemoryRegistry(registry_path(tmp_path))
+    for index in range(2):
+        candidate = candidate_artifact(
+            f"exp_registry_unresolved_preapply_{index}",
+            dataset_fingerprint=f"sha256:dataset-review-{index}",
+        )
+        registry.upsert(
+            build_preapply_memory_entry(
+                candidate=candidate,
+                package=preapply_package(candidate, status="needs_more_observation"),
+                created_by="unit_test",
+                created_at=dt(11 + index),
+            )
+        )
+
+    result = registry.evaluate_novelty(
+        factor_expression="Return(close, 1)",
+        dataset_fingerprint="sha256:dataset-new",
+        suppress_after_failures=2,
+        evaluated_at=dt(14),
+    )
+
+    assert result.decision == "suppress"
+    assert result.should_run is False
+    assert "unresolved preapply outcomes" in result.reasons[0]
+    assert any("needs_more_observation=2" in reason for reason in result.reasons)
 
 
 def test_novelty_gate_warns_for_same_dataset_failed_memory(tmp_path: Path) -> None:

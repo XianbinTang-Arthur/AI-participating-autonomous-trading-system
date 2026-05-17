@@ -7,6 +7,7 @@ import json
 import math
 import os
 import tempfile
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from datetime import UTC, datetime
@@ -69,6 +70,24 @@ NOVELTY_GATE_FAILURE_STATUSES = frozenset(
 NOVELTY_GATE_SOFT_FAILURE_STATUSES = frozenset(
     NOVELTY_GATE_FAILURE_STATUSES
     | {"observation_keep_reviewing", "needs_more_observation", "preapply_review_needs_more_evidence"}
+)
+NOVELTY_GATE_PREAPPLY_POSITIVE_STATUSES = frozenset(
+    {
+        "preapply_ready",
+        "preapply_review_approved_for_manual_apply_design",
+    }
+)
+NOVELTY_GATE_PREAPPLY_UNRESOLVED_STATUSES = frozenset(
+    {
+        "needs_more_observation",
+        "preapply_review_needs_more_evidence",
+    }
+)
+NOVELTY_GATE_PREAPPLY_NEGATIVE_STATUSES = frozenset(
+    {
+        "preapply_rejected",
+        "preapply_review_rejected",
+    }
 )
 _SECRET_MARKERS = (
     "api_key",
@@ -521,21 +540,52 @@ def evaluate_novelty_gate(
         match for match in same_factor_matches if match.status in NOVELTY_GATE_FAILURE_STATUSES
     )
     if len(same_factor_failures) >= suppress_after_failures:
+        preapply_failure_count = _count_status_matches(
+            same_factor_failures,
+            NOVELTY_GATE_PREAPPLY_NEGATIVE_STATUSES,
+        )
+        reason = f"same factor family has {len(same_factor_failures)} prior failure outcomes"
+        if preapply_failure_count:
+            reason = f"{reason}, including {preapply_failure_count} preapply rejection outcomes"
         return _build_novelty_gate_result(
             factor_signature=factor_signature,
             dataset_fingerprint=dataset_fingerprint,
             decision="suppress",
-            reasons=(f"same factor family has {len(same_factor_failures)} prior failure outcomes",),
+            reasons=(reason, _status_summary_reason(same_factor_failures)),
             matched_entries=same_factor_failures[:limit],
             failure_match_count=len(same_factor_failures),
             evaluated_at=evaluated_at,
         )
+    same_factor_unresolved_preapply = tuple(
+        match
+        for match in same_factor_matches
+        if match.status in NOVELTY_GATE_PREAPPLY_UNRESOLVED_STATUSES
+    )
+    if len(same_factor_unresolved_preapply) >= suppress_after_failures:
+        return _build_novelty_gate_result(
+            factor_signature=factor_signature,
+            dataset_fingerprint=dataset_fingerprint,
+            decision="suppress",
+            reasons=(
+                "same factor family has "
+                f"{len(same_factor_unresolved_preapply)} unresolved preapply outcomes",
+                _status_summary_reason(same_factor_unresolved_preapply),
+            ),
+            matched_entries=same_factor_unresolved_preapply[:limit],
+            failure_match_count=_count_failure_matches(same_factor_unresolved_preapply),
+            evaluated_at=evaluated_at,
+        )
     if same_factor_matches:
+        reasons = ["same factor_signature exists on a different dataset_fingerprint"]
+        if _count_status_matches(same_factor_matches, NOVELTY_GATE_PREAPPLY_POSITIVE_STATUSES):
+            reasons.append("same factor has prior preapply-positive evidence; run as cross-dataset retest")
+        if _count_status_matches(same_factor_matches, NOVELTY_GATE_PREAPPLY_UNRESOLVED_STATUSES):
+            reasons.append("same factor has unresolved preapply evidence; treat retest priority cautiously")
         return _build_novelty_gate_result(
             factor_signature=factor_signature,
             dataset_fingerprint=dataset_fingerprint,
             decision="retest",
-            reasons=("same factor_signature exists on a different dataset_fingerprint",),
+            reasons=tuple(reasons),
             matched_entries=same_factor_matches,
             failure_match_count=_count_failure_matches(same_factor_matches),
             evaluated_at=evaluated_at,
@@ -553,11 +603,17 @@ def evaluate_novelty_gate(
         match for match in same_dataset_matches if match.status in NOVELTY_GATE_SOFT_FAILURE_STATUSES
     )
     if same_dataset_soft_failures:
+        reasons = ["same dataset_fingerprint has prior failed or unresolved research memory"]
+        if _count_status_matches(
+            same_dataset_soft_failures,
+            NOVELTY_GATE_PREAPPLY_UNRESOLVED_STATUSES | NOVELTY_GATE_PREAPPLY_NEGATIVE_STATUSES,
+        ):
+            reasons.append(_status_summary_reason(same_dataset_soft_failures))
         return _build_novelty_gate_result(
             factor_signature=factor_signature,
             dataset_fingerprint=dataset_fingerprint,
             decision="warn",
-            reasons=("same dataset_fingerprint has prior failed or unresolved research memory",),
+            reasons=tuple(reasons),
             matched_entries=same_dataset_soft_failures[:limit],
             failure_match_count=_count_failure_matches(same_dataset_soft_failures),
             evaluated_at=evaluated_at,
@@ -838,6 +894,19 @@ def _novelty_match_score_and_reason(*, same_factor: bool, same_dataset: bool) ->
 
 def _count_failure_matches(matches: Sequence[ResearchMemorySimilarity]) -> int:
     return sum(1 for match in matches if match.status in NOVELTY_GATE_FAILURE_STATUSES)
+
+
+def _count_status_matches(
+    matches: Sequence[ResearchMemorySimilarity],
+    statuses: frozenset[str],
+) -> int:
+    return sum(1 for match in matches if match.status in statuses)
+
+
+def _status_summary_reason(matches: Sequence[ResearchMemorySimilarity]) -> str:
+    counts = Counter(match.status for match in matches)
+    rendered = ", ".join(f"{status}={count}" for status, count in sorted(counts.items()))
+    return f"matched research memory statuses: {rendered}"
 
 
 def _build_novelty_gate_result(

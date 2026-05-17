@@ -50,6 +50,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--label-horizon-bars", type=int, default=1)
     parser.add_argument("--dataset-version", default=None)
+    parser.add_argument(
+        "--research-profile",
+        default=None,
+        help="Optional named ResearchProfile policy, e.g. real_factor_research or preapply_review.",
+    )
     parser.add_argument("--artifact-root", type=Path, default=DEFAULT_EXPERIMENT_ARTIFACT_ROOT)
     parser.add_argument("--experiment-id", default=None)
     parser.add_argument("--overwrite", action="store_true")
@@ -109,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
                     end=_parse_utc_datetime(args.end),
                     factor_expression=factor_expression,
                     proposal=proposal,
+                    research_profile=args.research_profile,
                     artifact_root=args.artifact_root,
                     experiment_id=args.experiment_id,
                     label_horizon_bars=args.label_horizon_bars,

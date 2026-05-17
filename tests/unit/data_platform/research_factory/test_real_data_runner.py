@@ -153,6 +153,7 @@ def experiment_config(
     require_execution_realism: bool = True,
     experiment_id: str = "rf_real_success",
     proposal: FactorDSLProposal | None = None,
+    research_profile: str | None = None,
 ) -> ResearchFactoryExperimentConfig:
     return ResearchFactoryExperimentConfig(
         symbol="BTC-USDT-SWAP",
@@ -161,6 +162,7 @@ def experiment_config(
         end=START + timedelta(hours=12),
         factor_expression="Return(close, 1)",
         proposal=proposal,
+        research_profile=research_profile,
         artifact_root=root,
         experiment_id=experiment_id,
         train_ratio=0.4,
@@ -273,6 +275,56 @@ def test_real_data_runner_writes_recommendation_and_registry(tmp_path: Path) -> 
     assert recommendation["evidence"]["evidence_refs"]["dataset_quality_report"] == "dataset_quality_report.json"
     assert registry_entries[0]["status"] == "recommendation_ready"
     assert registry_entries[0]["created_by"] == "research_factory_real_data_runner"
+
+
+def test_real_data_runner_applies_research_profile_quality_thresholds(tmp_path: Path) -> None:
+    root = artifact_root(tmp_path)
+    execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
+    write_execution_cost_summary(execution_summary)
+
+    result = run_research_factory_experiment(
+        experiment_config(
+            root,
+            execution_cost_summary_path=execution_summary,
+            require_execution_realism=False,
+            experiment_id="rf_real_profile_strict",
+            research_profile="real_factor_research",
+        ),
+        data_source=FakeDataSource(load_result()),
+    )
+
+    experiment_dir = root / "rf_real_profile_strict"
+    dataset_quality = read_json(experiment_dir / "dataset_quality_report.json")
+    evidence_bundle = read_json(experiment_dir / "evidence_bundle.json")
+
+    assert result.status == "failed"
+    assert result.candidate_generated is False
+    assert dataset_quality["thresholds"]["min_total_bars"] == 500
+    assert any("min_total_bars=500" in failure for failure in dataset_quality["failures"])
+    assert any("dataset_quality" in failure for failure in evidence_bundle["failures"])
+
+
+def test_real_data_runner_profile_rejects_compatible_execution_evidence(tmp_path: Path) -> None:
+    root = artifact_root(tmp_path)
+    execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
+    write_execution_cost_summary(execution_summary)
+
+    result = run_research_factory_experiment(
+        experiment_config(
+            root,
+            execution_cost_summary_path=execution_summary,
+            experiment_id="rf_real_profile_exact_evidence",
+            research_profile="paper_review",
+        ),
+        data_source=FakeDataSource(load_result()),
+    )
+
+    experiment_dir = root / "rf_real_profile_exact_evidence"
+    execution_evidence = read_json(experiment_dir / "execution_evidence_report.json")
+
+    assert result.status == "failed"
+    assert execution_evidence["dataset_fingerprint_compatible"] is True
+    assert any("compatibility is not allowed" in failure for failure in execution_evidence["failures"])
 
 
 def test_real_data_runner_records_factor_proposal_artifact(tmp_path: Path) -> None:
