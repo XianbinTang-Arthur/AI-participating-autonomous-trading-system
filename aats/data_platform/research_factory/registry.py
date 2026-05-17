@@ -38,6 +38,7 @@ ALLOWED_RESEARCH_MEMORY_STATUSES = frozenset(
         "failed",
         "rejected",
         "duplicate",
+        "novelty_suppressed",
         "observation_keep_reviewing",
         "observation_rejected",
         "observation_eligible_for_preapply",
@@ -45,7 +46,7 @@ ALLOWED_RESEARCH_MEMORY_STATUSES = frozenset(
 )
 ALLOWED_NOVELTY_GATE_DECISIONS = frozenset({"allow", "duplicate", "retest", "warn", "suppress"})
 NOVELTY_GATE_FAILURE_STATUSES = frozenset(
-    {"gate_failed", "failed", "rejected", "observation_rejected"}
+    {"gate_failed", "failed", "rejected", "novelty_suppressed", "observation_rejected"}
 )
 NOVELTY_GATE_SOFT_FAILURE_STATUSES = frozenset(
     NOVELTY_GATE_FAILURE_STATUSES | {"observation_keep_reviewing"}

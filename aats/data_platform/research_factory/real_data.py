@@ -45,6 +45,7 @@ from aats.data_platform.research_factory.paths import (
 )
 from aats.data_platform.research_factory.recommendations import build_research_recommendation
 from aats.data_platform.research_factory.registry import (
+    NoveltyGateResult,
     ResearchMemoryRegistry,
     build_research_memory_entry,
     default_research_memory_path_for_artifact_root,
@@ -64,6 +65,7 @@ DATASET_QUALITY_REPORT_REF = "dataset_quality_report.json"
 SOURCE_INTEGRITY_REPORT_REF = "source_integrity_report.json"
 EXECUTION_EVIDENCE_REPORT_REF = "execution_evidence_report.json"
 EVIDENCE_BUNDLE_REF = "evidence_bundle.json"
+NOVELTY_GATE_RESULT_REF = "novelty_gate_result.json"
 TIMEFRAME_PERIODS_PER_YEAR = {
     "1m": 365.0 * 24.0 * 60.0,
     "5m": 365.0 * 24.0 * 12.0,
@@ -116,6 +118,8 @@ class ResearchFactoryExperimentConfig:
     periods_per_year: float | None = None
     execution_cost_summary_path: Path | None = None
     require_execution_realism: bool = True
+    enable_novelty_gate: bool = True
+    novelty_suppress_after_failures: int = 3
     registry_path: Path | None = None
     overwrite: bool = False
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -139,6 +143,7 @@ class ResearchFactoryExperimentResult:
     candidate_ref: str | None = None
     recommendation_ref: str | None = None
     registry_ref: str | None = None
+    novelty_gate_ref: str | None = None
     failure_ref: str | None = None
     dataset_fingerprint: str | None = None
     error: str | None = None
@@ -153,6 +158,7 @@ class ResearchFactoryExperimentResult:
             "candidate_ref": self.candidate_ref,
             "recommendation_ref": self.recommendation_ref,
             "registry_ref": self.registry_ref,
+            "novelty_gate_ref": self.novelty_gate_ref,
             "failure_ref": self.failure_ref,
             "dataset_fingerprint": self.dataset_fingerprint,
             "error": self.error,
@@ -323,6 +329,9 @@ def run_research_factory_experiment(
     gate: CandidateGateResult | None = None
     candidate: CandidateArtifact | None = None
     research_dataset_fingerprint: str | None = None
+    novelty_gate: NoveltyGateResult | None = None
+    novelty_gate_ref: str | None = None
+    memory_status_override: str | None = None
     try:
         recorder.start(experiment_spec)
         started = True
@@ -349,6 +358,23 @@ def run_research_factory_experiment(
             source_watermark=load_result.source_watermark,
             processor_versions={"research_factory_real_data_runner": REAL_DATA_CODE_VERSION},
         )
+        if config.enable_novelty_gate:
+            novelty_gate = registry.evaluate_novelty(
+                factor_expression=feature.expression,
+                dataset_fingerprint=research_dataset_fingerprint,
+                suppress_after_failures=config.novelty_suppress_after_failures,
+                evaluated_at=config.timestamp,
+            )
+            recorder.record_json_artifact(
+                experiment_id,
+                "novelty_gate_result",
+                NOVELTY_GATE_RESULT_REF,
+                novelty_gate,
+            )
+            novelty_gate_ref = NOVELTY_GATE_RESULT_REF
+            if novelty_gate.decision in {"duplicate", "suppress"}:
+                memory_status_override = _memory_status_for_novelty_gate(novelty_gate)
+                raise ValueError(_novelty_gate_failure_reason(novelty_gate))
         execution_cost_summary_ref = None
         execution_metrics: MetricsSnapshot | None = None
         execution_summary_payload: Mapping[str, Any] | None = None
@@ -469,12 +495,13 @@ def run_research_factory_experiment(
             benchmark_segment="test",
             execution_cost_summary_ref=execution_cost_summary_ref,
             evidence_bundle_ref=EVIDENCE_BUNDLE_REF,
+            novelty_gate_ref=novelty_gate_ref,
             created_at=config.timestamp,
         )
         recorder.record_candidate(experiment_id, candidate)
         recommendation = build_research_recommendation(
             candidate,
-            evidence_refs=_recommendation_evidence_refs(execution_cost_summary_ref),
+            evidence_refs=_recommendation_evidence_refs(execution_cost_summary_ref, novelty_gate_ref),
             created_at=config.timestamp,
             require_execution_realism=config.require_execution_realism,
         )
@@ -501,6 +528,7 @@ def run_research_factory_experiment(
             candidate_ref=manifest["output_refs"].get("candidate_artifact"),
             recommendation_ref=manifest["output_refs"].get("research_recommendation"),
             registry_ref=registry_ref,
+            novelty_gate_ref=manifest["output_refs"].get("novelty_gate_result"),
             dataset_fingerprint=research_dataset_fingerprint,
         )
     except Exception as exc:
@@ -509,7 +537,7 @@ def run_research_factory_experiment(
             registry.upsert(
                 build_research_memory_entry(
                     experiment_id=experiment_id,
-                    status=_memory_failure_status(gate),
+                    status=memory_status_override or _memory_failure_status(gate),
                     created_by="research_factory_real_data_runner",
                     created_at=config.timestamp,
                     metrics=metrics,
@@ -527,6 +555,7 @@ def run_research_factory_experiment(
                 candidate_generated=False,
                 metrics_ref=manifest.get("metrics_ref"),
                 registry_ref=registry_ref,
+                novelty_gate_ref=manifest["output_refs"].get("novelty_gate_result"),
                 failure_ref=manifest["output_refs"].get("failure"),
                 dataset_fingerprint=research_dataset_fingerprint,
                 error=str(exc),
@@ -677,6 +706,7 @@ def _build_candidate(
     benchmark_segment: str,
     execution_cost_summary_ref: str | None,
     evidence_bundle_ref: str,
+    novelty_gate_ref: str | None,
     created_at: datetime,
 ) -> CandidateArtifact:
     return CandidateArtifact(
@@ -689,6 +719,7 @@ def _build_candidate(
             "benchmark_segment": benchmark_segment,
             "execution_cost_summary_ref": execution_cost_summary_ref,
             "evidence_bundle_ref": evidence_bundle_ref,
+            "novelty_gate_ref": novelty_gate_ref,
             "generated_by": "research_factory_real_data_runner",
             "research_only": True,
         },
@@ -698,7 +729,10 @@ def _build_candidate(
     )
 
 
-def _recommendation_evidence_refs(execution_cost_summary_ref: str | None) -> dict[str, str]:
+def _recommendation_evidence_refs(
+    execution_cost_summary_ref: str | None,
+    novelty_gate_ref: str | None,
+) -> dict[str, str]:
     refs = {
         "candidate_artifact": "candidate_artifact.json",
         "dataset_quality_report": DATASET_QUALITY_REPORT_REF,
@@ -707,6 +741,8 @@ def _recommendation_evidence_refs(execution_cost_summary_ref: str | None) -> dic
         "metrics_snapshot": "metrics_snapshot.json",
         "source_integrity_report": SOURCE_INTEGRITY_REPORT_REF,
     }
+    if novelty_gate_ref is not None:
+        refs["novelty_gate_result"] = novelty_gate_ref
     if execution_cost_summary_ref is not None:
         refs["execution_cost_summary"] = execution_cost_summary_ref
         refs["execution_evidence_report"] = EXECUTION_EVIDENCE_REPORT_REF
@@ -730,6 +766,19 @@ def _memory_failure_status(gate: CandidateGateResult | None) -> str:
     if gate is not None and not gate.passed:
         return "gate_failed"
     return "failed"
+
+
+def _memory_status_for_novelty_gate(novelty_gate: NoveltyGateResult) -> str:
+    if novelty_gate.decision == "duplicate":
+        return "duplicate"
+    if novelty_gate.decision == "suppress":
+        return "novelty_suppressed"
+    raise ValueError("novelty gate status override requires duplicate or suppress decision")
+
+
+def _novelty_gate_failure_reason(novelty_gate: NoveltyGateResult) -> str:
+    reasons = "; ".join(novelty_gate.reasons)
+    return f"novelty gate rejected proposal: {novelty_gate.decision}; {reasons}"
 
 
 def _require_complete_execution_realism_metrics(snapshot: MetricsSnapshot) -> None:

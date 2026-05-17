@@ -16,6 +16,7 @@ from aats.data_platform.research_factory.real_data import (
     ResearchFactoryExperimentConfig,
     run_research_factory_experiment,
 )
+from aats.data_platform.research_factory.registry import ResearchMemoryRegistry, build_research_memory_entry
 
 UTC = timezone.utc
 START = datetime(2026, 5, 1, tzinfo=UTC)
@@ -250,6 +251,7 @@ def test_real_data_runner_writes_recommendation_and_registry(tmp_path: Path) -> 
     assert manifest["output_refs"]["source_integrity_report"] == "source_integrity_report.json"
     assert manifest["output_refs"]["execution_evidence_report"] == "execution_evidence_report.json"
     assert manifest["output_refs"]["evidence_bundle"] == "evidence_bundle.json"
+    assert manifest["output_refs"]["novelty_gate_result"] == "novelty_gate_result.json"
     assert manifest["output_refs"]["research_recommendation"] == "research_recommendation.json"
     assert evidence_bundle["passed"] is True
     assert dataset_quality["row_count"] == 12
@@ -263,10 +265,144 @@ def test_real_data_runner_writes_recommendation_and_registry(tmp_path: Path) -> 
     assert execution_evidence["dataset_fingerprint_compatible"] is True
     assert recommendation["evidence"]["execution_realism_required"] is True
     assert recommendation["evidence"]["evidence_refs"]["execution_cost_summary"] == "execution_cost_summary.json"
+    assert recommendation["evidence"]["evidence_refs"]["novelty_gate_result"] == "novelty_gate_result.json"
     assert recommendation["evidence"]["evidence_refs"]["evidence_bundle"] == "evidence_bundle.json"
     assert recommendation["evidence"]["evidence_refs"]["dataset_quality_report"] == "dataset_quality_report.json"
     assert registry_entries[0]["status"] == "recommendation_ready"
     assert registry_entries[0]["created_by"] == "research_factory_real_data_runner"
+
+
+def test_real_data_runner_skips_duplicate_from_novelty_gate(tmp_path: Path) -> None:
+    root = artifact_root(tmp_path)
+    execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
+    write_execution_cost_summary(execution_summary)
+    first_data_source = FakeDataSource(load_result())
+    first_result = run_research_factory_experiment(
+        experiment_config(
+            root,
+            execution_cost_summary_path=execution_summary,
+            experiment_id="rf_real_duplicate_seed",
+        ),
+        data_source=first_data_source,
+    )
+    second_data_source = FakeDataSource(load_result())
+
+    second_result = run_research_factory_experiment(
+        experiment_config(
+            root,
+            execution_cost_summary_path=execution_summary,
+            experiment_id="rf_real_duplicate_skip",
+        ),
+        data_source=second_data_source,
+    )
+
+    experiment_dir = root / "rf_real_duplicate_skip"
+    manifest = read_json(experiment_dir / "experiment_manifest.json")
+    novelty_gate = read_json(experiment_dir / "novelty_gate_result.json")
+    failure = read_json(experiment_dir / "failure.json")
+    registry_entries = read_jsonl(root.parent / "registry" / "research_memory.jsonl")
+
+    assert first_result.status == "succeeded"
+    assert second_result.status == "failed"
+    assert second_result.candidate_generated is False
+    assert second_result.novelty_gate_ref == "novelty_gate_result.json"
+    assert second_data_source.calls
+    assert novelty_gate["decision"] == "duplicate"
+    assert novelty_gate["should_run"] is False
+    assert "novelty gate rejected proposal: duplicate" in failure["reason"]
+    assert manifest["output_refs"]["novelty_gate_result"] == "novelty_gate_result.json"
+    assert not (experiment_dir / "candidate_artifact.json").exists()
+    assert registry_entries[-1]["status"] == "duplicate"
+    assert registry_entries[-1]["dataset_fingerprint"] == first_result.dataset_fingerprint
+
+
+def test_real_data_runner_suppresses_repeated_failed_factor_family(tmp_path: Path) -> None:
+    root = artifact_root(tmp_path)
+    execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
+    write_execution_cost_summary(execution_summary)
+    registry = ResearchMemoryRegistry(root.parent / "registry" / "research_memory.jsonl")
+    for index in range(1, 4):
+        registry.upsert(
+            build_research_memory_entry(
+                experiment_id=f"rf_failed_factor_family_{index}",
+                status="observation_rejected",
+                created_by="unit_test",
+                created_at=START + timedelta(hours=index),
+                factor_expression="Return(close, 1)",
+                dataset_fingerprint=f"sha256:failed-family-{index}",
+                failure_reason="observation failed executable edge",
+            )
+        )
+
+    result = run_research_factory_experiment(
+        experiment_config(
+            root,
+            execution_cost_summary_path=execution_summary,
+            experiment_id="rf_real_suppressed_family",
+        ),
+        data_source=FakeDataSource(load_result()),
+    )
+
+    experiment_dir = root / "rf_real_suppressed_family"
+    novelty_gate = read_json(experiment_dir / "novelty_gate_result.json")
+    registry_entries = read_jsonl(registry.path)
+
+    assert result.status == "failed"
+    assert result.candidate_generated is False
+    assert novelty_gate["decision"] == "suppress"
+    assert novelty_gate["failure_match_count"] == 3
+    assert "prior failure outcomes" in novelty_gate["reasons"][0]
+    assert registry_entries[-1]["status"] == "novelty_suppressed"
+    assert not (experiment_dir / "candidate_artifact.json").exists()
+
+
+def test_real_data_runner_records_warn_novelty_gate_and_continues(tmp_path: Path) -> None:
+    root = artifact_root(tmp_path)
+    execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
+    write_execution_cost_summary(execution_summary)
+    seed = run_research_factory_experiment(
+        experiment_config(
+            root,
+            execution_cost_summary_path=execution_summary,
+            experiment_id="rf_real_warn_seed",
+        ),
+        data_source=FakeDataSource(load_result()),
+    )
+    registry = ResearchMemoryRegistry(root.parent / "registry" / "research_memory.jsonl")
+    registry.upsert(
+        build_research_memory_entry(
+            experiment_id="rf_real_warn_prior_failure",
+            status="observation_rejected",
+            created_by="unit_test",
+            created_at=START + timedelta(hours=14),
+            factor_expression="Return(close, 3)",
+            dataset_fingerprint=seed.dataset_fingerprint,
+            failure_reason="observation failed on same dataset",
+        )
+    )
+
+    result = run_research_factory_experiment(
+        replace(
+            experiment_config(
+                root,
+                execution_cost_summary_path=execution_summary,
+                experiment_id="rf_real_warn_continue",
+            ),
+            factor_expression="Delta(close, 1)",
+        ),
+        data_source=FakeDataSource(load_result()),
+    )
+
+    experiment_dir = root / "rf_real_warn_continue"
+    novelty_gate = read_json(experiment_dir / "novelty_gate_result.json")
+    manifest = read_json(experiment_dir / "experiment_manifest.json")
+
+    assert result.status == "succeeded"
+    assert result.candidate_generated is True
+    assert novelty_gate["decision"] == "warn"
+    assert novelty_gate["should_run"] is True
+    assert manifest["output_refs"]["novelty_gate_result"] == "novelty_gate_result.json"
+    assert (experiment_dir / "candidate_artifact.json").exists()
 
 
 def test_real_data_runner_fails_when_execution_realism_required_but_missing(tmp_path: Path) -> None:
