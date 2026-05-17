@@ -9,7 +9,7 @@ import os
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields, is_dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -27,6 +27,7 @@ from aats.data_platform.research_factory.observations import (
 from aats.data_platform.research_factory.specs import MetricsSnapshot
 
 RESEARCH_MEMORY_SCHEMA_VERSION = "research_memory_entry_v1"
+NOVELTY_GATE_SCHEMA_VERSION = "research_novelty_gate_v1"
 DEFAULT_RESEARCH_MEMORY_PATH = (
     Path("artifacts") / "research" / "research_factory" / "registry" / "research_memory.jsonl"
 )
@@ -41,6 +42,13 @@ ALLOWED_RESEARCH_MEMORY_STATUSES = frozenset(
         "observation_rejected",
         "observation_eligible_for_preapply",
     }
+)
+ALLOWED_NOVELTY_GATE_DECISIONS = frozenset({"allow", "duplicate", "retest", "warn", "suppress"})
+NOVELTY_GATE_FAILURE_STATUSES = frozenset(
+    {"gate_failed", "failed", "rejected", "observation_rejected"}
+)
+NOVELTY_GATE_SOFT_FAILURE_STATUSES = frozenset(
+    NOVELTY_GATE_FAILURE_STATUSES | {"observation_keep_reviewing"}
 )
 _SECRET_MARKERS = (
     "api_key",
@@ -95,6 +103,78 @@ class ResearchMemorySimilarity:
             reason=str(payload.get("reason", "")),
             created_at=_parse_datetime(payload.get("created_at"), "similarity.created_at"),
             candidate_id=payload.get("candidate_id"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class NoveltyGateResult:
+    """Research-only novelty decision from prior registry memory."""
+
+    factor_signature: str
+    dataset_fingerprint: str
+    decision: str
+    should_run: bool
+    reasons: tuple[str, ...]
+    matched_entries: tuple[ResearchMemorySimilarity, ...] = field(default_factory=tuple)
+    failure_match_count: int = 0
+    evaluated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    schema_version: str = NOVELTY_GATE_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "factor_signature",
+            _require_non_empty_text(self.factor_signature, "factor_signature"),
+        )
+        object.__setattr__(
+            self,
+            "dataset_fingerprint",
+            _require_non_empty_text(self.dataset_fingerprint, "dataset_fingerprint"),
+        )
+        if self.decision not in ALLOWED_NOVELTY_GATE_DECISIONS:
+            allowed = ", ".join(sorted(ALLOWED_NOVELTY_GATE_DECISIONS))
+            raise ValueError(f"novelty gate decision must be one of: {allowed}")
+        expected_should_run = self.decision not in {"duplicate", "suppress"}
+        if not isinstance(self.should_run, bool):
+            raise ValueError("novelty gate should_run must be a bool")
+        if self.should_run != expected_should_run:
+            raise ValueError("novelty gate should_run must match decision")
+        if not self.reasons:
+            raise ValueError("novelty gate reasons must not be empty")
+        object.__setattr__(self, "reasons", _normalize_text_sequence(self.reasons, "novelty_gate.reasons"))
+        matches = tuple(
+            item if isinstance(item, ResearchMemorySimilarity) else ResearchMemorySimilarity.from_dict(item)
+            for item in self.matched_entries
+        )
+        object.__setattr__(self, "matched_entries", matches)
+        if isinstance(self.failure_match_count, bool) or not isinstance(self.failure_match_count, int):
+            raise ValueError("failure_match_count must be an integer")
+        if self.failure_match_count < 0:
+            raise ValueError("failure_match_count must be non-negative")
+        _require_timezone_aware_datetime(self.evaluated_at, "novelty_gate.evaluated_at")
+        if self.schema_version != NOVELTY_GATE_SCHEMA_VERSION:
+            raise ValueError(f"schema_version must be {NOVELTY_GATE_SCHEMA_VERSION!r}")
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "NoveltyGateResult":
+        if not isinstance(payload, Mapping):
+            raise ValueError("novelty gate payload must be a mapping")
+        reasons = payload.get("reasons", ())
+        if isinstance(reasons, str | bytes | bytearray) or not isinstance(reasons, Sequence):
+            raise ValueError("novelty gate reasons must be a sequence")
+        matched_entries = payload.get("matched_entries", ())
+        if isinstance(matched_entries, str | bytes | bytearray) or not isinstance(matched_entries, Sequence):
+            raise ValueError("novelty gate matched_entries must be a sequence")
+        return cls(
+            factor_signature=str(payload.get("factor_signature", "")),
+            dataset_fingerprint=str(payload.get("dataset_fingerprint", "")),
+            decision=str(payload.get("decision", "")),
+            should_run=payload.get("should_run"),
+            reasons=tuple(reasons),
+            matched_entries=tuple(matched_entries),
+            failure_match_count=payload.get("failure_match_count", 0),
+            evaluated_at=_parse_datetime(payload.get("evaluated_at"), "novelty_gate.evaluated_at"),
+            schema_version=str(payload.get("schema_version", "")),
         )
 
 
@@ -275,6 +355,25 @@ class ResearchMemoryRegistry:
             raise ValueError("entry must be a ResearchMemoryEntry")
         return _find_similar(entry, self.load_entries(), limit=limit)
 
+    def evaluate_novelty(
+        self,
+        *,
+        factor_expression: str,
+        dataset_fingerprint: str,
+        suppress_after_failures: int = 3,
+        limit: int = 5,
+        evaluated_at: datetime | None = None,
+    ) -> NoveltyGateResult:
+        """Evaluate whether a new factor proposal is novel enough to run."""
+        return evaluate_novelty_gate(
+            factor_expression=factor_expression,
+            dataset_fingerprint=dataset_fingerprint,
+            entries=self.load_entries(),
+            suppress_after_failures=suppress_after_failures,
+            limit=limit,
+            evaluated_at=evaluated_at,
+        )
+
     def upsert(self, entry: ResearchMemoryEntry) -> ResearchMemoryEntry:
         if not isinstance(entry, ResearchMemoryEntry):
             raise ValueError("entry must be a ResearchMemoryEntry")
@@ -324,6 +423,111 @@ def factor_signature_from_expression(expression: str) -> str:
             "expression": expression_text.strip(),
         }
     return f"factor_signature_sha256:{_stable_hash(payload)}"
+
+
+def evaluate_novelty_gate(
+    *,
+    factor_expression: str,
+    dataset_fingerprint: str,
+    entries: Sequence[ResearchMemoryEntry],
+    suppress_after_failures: int = 3,
+    limit: int = 5,
+    evaluated_at: datetime | None = None,
+) -> NoveltyGateResult:
+    """Evaluate a factor proposal against prior Research Factory memory."""
+    factor_signature = factor_signature_from_expression(factor_expression)
+    dataset_fingerprint = _require_non_empty_text(dataset_fingerprint, "dataset_fingerprint")
+    if isinstance(entries, str | bytes | bytearray) or not isinstance(entries, Sequence):
+        raise ValueError("entries must be a sequence")
+    normalized_entries = tuple(
+        entry if isinstance(entry, ResearchMemoryEntry) else ResearchMemoryEntry.from_dict(entry)
+        for entry in entries
+    )
+    _require_positive_integer(suppress_after_failures, "suppress_after_failures")
+    _require_positive_integer(limit, "novelty gate limit")
+
+    exact_matches = _novelty_matches(
+        factor_signature=factor_signature,
+        dataset_fingerprint=dataset_fingerprint,
+        entries=normalized_entries,
+        same_factor=True,
+        same_dataset=True,
+        limit=limit,
+    )
+    if exact_matches:
+        return _build_novelty_gate_result(
+            factor_signature=factor_signature,
+            dataset_fingerprint=dataset_fingerprint,
+            decision="duplicate",
+            reasons=("same factor_signature and dataset_fingerprint already exists",),
+            matched_entries=exact_matches,
+            failure_match_count=_count_failure_matches(exact_matches),
+            evaluated_at=evaluated_at,
+        )
+
+    same_factor_matches = _novelty_matches(
+        factor_signature=factor_signature,
+        dataset_fingerprint=dataset_fingerprint,
+        entries=normalized_entries,
+        same_factor=True,
+        same_dataset=False,
+        limit=limit,
+    )
+    same_factor_failures = tuple(
+        match for match in same_factor_matches if match.status in NOVELTY_GATE_FAILURE_STATUSES
+    )
+    if len(same_factor_failures) >= suppress_after_failures:
+        return _build_novelty_gate_result(
+            factor_signature=factor_signature,
+            dataset_fingerprint=dataset_fingerprint,
+            decision="suppress",
+            reasons=(f"same factor family has {len(same_factor_failures)} prior failure outcomes",),
+            matched_entries=same_factor_failures[:limit],
+            failure_match_count=len(same_factor_failures),
+            evaluated_at=evaluated_at,
+        )
+    if same_factor_matches:
+        return _build_novelty_gate_result(
+            factor_signature=factor_signature,
+            dataset_fingerprint=dataset_fingerprint,
+            decision="retest",
+            reasons=("same factor_signature exists on a different dataset_fingerprint",),
+            matched_entries=same_factor_matches,
+            failure_match_count=_count_failure_matches(same_factor_matches),
+            evaluated_at=evaluated_at,
+        )
+
+    same_dataset_matches = _novelty_matches(
+        factor_signature=factor_signature,
+        dataset_fingerprint=dataset_fingerprint,
+        entries=normalized_entries,
+        same_factor=False,
+        same_dataset=True,
+        limit=limit,
+    )
+    same_dataset_soft_failures = tuple(
+        match for match in same_dataset_matches if match.status in NOVELTY_GATE_SOFT_FAILURE_STATUSES
+    )
+    if same_dataset_soft_failures:
+        return _build_novelty_gate_result(
+            factor_signature=factor_signature,
+            dataset_fingerprint=dataset_fingerprint,
+            decision="warn",
+            reasons=("same dataset_fingerprint has prior failed or unresolved research memory",),
+            matched_entries=same_dataset_soft_failures[:limit],
+            failure_match_count=_count_failure_matches(same_dataset_soft_failures),
+            evaluated_at=evaluated_at,
+        )
+
+    return _build_novelty_gate_result(
+        factor_signature=factor_signature,
+        dataset_fingerprint=dataset_fingerprint,
+        decision="allow",
+        reasons=("no matching factor_signature or failed dataset memory found",),
+        matched_entries=(),
+        failure_match_count=0,
+        evaluated_at=evaluated_at,
+    )
 
 
 def build_research_memory_entry(
@@ -485,6 +689,74 @@ def _find_similar(
         )
     matches.sort(key=lambda item: (-item.score, item.created_at.isoformat(), item.entry_id))
     return tuple(matches[:limit])
+
+
+def _novelty_matches(
+    *,
+    factor_signature: str,
+    dataset_fingerprint: str,
+    entries: Sequence[ResearchMemoryEntry],
+    same_factor: bool,
+    same_dataset: bool,
+    limit: int,
+) -> tuple[ResearchMemorySimilarity, ...]:
+    matches: list[ResearchMemorySimilarity] = []
+    for entry in entries:
+        factor_matches = entry.factor_signature == factor_signature
+        dataset_matches = entry.dataset_fingerprint == dataset_fingerprint
+        if same_factor != factor_matches or same_dataset != dataset_matches:
+            continue
+        score, reason = _novelty_match_score_and_reason(
+            same_factor=same_factor,
+            same_dataset=same_dataset,
+        )
+        matches.append(
+            ResearchMemorySimilarity(
+                entry_id=entry.entry_id,
+                experiment_id=entry.experiment_id,
+                status=entry.status,
+                score=score,
+                reason=reason,
+                created_at=entry.created_at,
+                candidate_id=entry.candidate_id,
+            )
+        )
+    matches.sort(key=lambda item: (-item.score, item.created_at.isoformat(), item.entry_id))
+    return tuple(matches[:limit])
+
+
+def _novelty_match_score_and_reason(*, same_factor: bool, same_dataset: bool) -> tuple[float, str]:
+    if same_factor and same_dataset:
+        return 1.0, "same factor_signature and dataset_fingerprint"
+    if same_factor:
+        return 0.8, "same factor_signature on different dataset_fingerprint"
+    return 0.35, "same dataset_fingerprint with different factor_signature"
+
+
+def _count_failure_matches(matches: Sequence[ResearchMemorySimilarity]) -> int:
+    return sum(1 for match in matches if match.status in NOVELTY_GATE_FAILURE_STATUSES)
+
+
+def _build_novelty_gate_result(
+    *,
+    factor_signature: str,
+    dataset_fingerprint: str,
+    decision: str,
+    reasons: Sequence[str],
+    matched_entries: Sequence[ResearchMemorySimilarity],
+    failure_match_count: int,
+    evaluated_at: datetime | None,
+) -> NoveltyGateResult:
+    return NoveltyGateResult(
+        factor_signature=factor_signature,
+        dataset_fingerprint=dataset_fingerprint,
+        decision=decision,
+        should_run=decision not in {"duplicate", "suppress"},
+        reasons=tuple(reasons),
+        matched_entries=tuple(matched_entries),
+        failure_match_count=failure_match_count,
+        evaluated_at=evaluated_at or datetime.now(UTC),
+    )
 
 
 def _similarity_score(target: ResearchMemoryEntry, existing: ResearchMemoryEntry) -> tuple[float, str]:
@@ -768,6 +1040,11 @@ def _require_non_empty_text(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be a non-empty string")
     return value
+
+
+def _require_positive_integer(value: Any, field_name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{field_name} must be a positive integer")
 
 
 def _optional_text(value: Any) -> str | None:

@@ -11,10 +11,12 @@ from aats.data_platform.research_factory.observations import (
     ReviewOutcome,
 )
 from aats.data_platform.research_factory.registry import (
+    NoveltyGateResult,
     ResearchMemoryEntry,
     ResearchMemoryRegistry,
     build_observation_memory_entry,
     build_research_memory_entry,
+    evaluate_novelty_gate,
     factor_signature_from_expression,
 )
 from aats.data_platform.research_factory.specs import MetricsSnapshot
@@ -51,7 +53,12 @@ def metrics_snapshot() -> MetricsSnapshot:
     )
 
 
-def candidate_artifact(experiment_id: str, *, expression: str = "Return(close, 1)") -> CandidateArtifact:
+def candidate_artifact(
+    experiment_id: str,
+    *,
+    expression: str = "Return(close, 1)",
+    dataset_fingerprint: str = "sha256:dataset-fixture",
+) -> CandidateArtifact:
     metrics = metrics_snapshot()
     gate = evaluate_candidate_gate(metrics, {"max_drawdown_limit": 0.2})
     return CandidateArtifact(
@@ -60,7 +67,7 @@ def candidate_artifact(experiment_id: str, *, expression: str = "Return(close, 1
         candidate_type="factor",
         payload={
             "factor_expression": expression,
-            "dataset_fingerprint": "sha256:dataset-fixture",
+            "dataset_fingerprint": dataset_fingerprint,
             "benchmark_segment": "test",
             "generated_by": "unit_test",
             "research_only": True,
@@ -350,3 +357,143 @@ def test_observation_memory_similarity_reuses_factor_and_dataset(tmp_path: Path)
     assert enriched.similarity_to_existing
     assert enriched.similarity_to_existing[0].status == "observation_rejected"
     assert enriched.similarity_to_existing[0].score == pytest.approx(1.0)
+
+
+def test_novelty_gate_marks_same_factor_and_dataset_duplicate(tmp_path: Path) -> None:
+    registry = ResearchMemoryRegistry(registry_path(tmp_path))
+    candidate = candidate_artifact("exp_registry_novelty_duplicate")
+    registry.upsert(
+        build_research_memory_entry(
+            experiment_id=candidate.experiment_id,
+            status="recommendation_ready",
+            created_by="unit_test",
+            created_at=dt(9),
+            candidate=candidate,
+        )
+    )
+
+    result = registry.evaluate_novelty(
+        factor_expression=" Return(close,   1) ",
+        dataset_fingerprint="sha256:dataset-fixture",
+        evaluated_at=dt(14),
+    )
+
+    assert result.decision == "duplicate"
+    assert result.should_run is False
+    assert result.failure_match_count == 0
+    assert result.matched_entries[0].score == pytest.approx(1.0)
+    assert "same factor_signature" in result.reasons[0]
+
+
+def test_novelty_gate_marks_same_factor_different_dataset_retest(tmp_path: Path) -> None:
+    registry = ResearchMemoryRegistry(registry_path(tmp_path))
+    candidate = candidate_artifact("exp_registry_novelty_retest", dataset_fingerprint="sha256:dataset-a")
+    registry.upsert(
+        build_research_memory_entry(
+            experiment_id=candidate.experiment_id,
+            status="recommendation_ready",
+            created_by="unit_test",
+            created_at=dt(9),
+            candidate=candidate,
+        )
+    )
+
+    result = registry.evaluate_novelty(
+        factor_expression="Return(close, 1)",
+        dataset_fingerprint="sha256:dataset-b",
+        evaluated_at=dt(14),
+    )
+
+    assert result.decision == "retest"
+    assert result.should_run is True
+    assert result.matched_entries[0].score == pytest.approx(0.8)
+    assert "different dataset" in result.reasons[0]
+
+
+def test_novelty_gate_suppresses_repeated_failed_factor_family(tmp_path: Path) -> None:
+    registry = ResearchMemoryRegistry(registry_path(tmp_path))
+    for index, status in enumerate(("gate_failed", "observation_rejected"), start=1):
+        candidate = candidate_artifact(
+            f"exp_registry_novelty_suppress_{index}",
+            dataset_fingerprint=f"sha256:dataset-failed-{index}",
+        )
+        registry.upsert(
+            build_research_memory_entry(
+                experiment_id=candidate.experiment_id,
+                status=status,
+                created_by="unit_test",
+                created_at=dt(9 + index),
+                candidate=candidate,
+                failure_reason="novelty gate fixture failure",
+            )
+        )
+
+    result = registry.evaluate_novelty(
+        factor_expression="Return(close, 1)",
+        dataset_fingerprint="sha256:dataset-new",
+        suppress_after_failures=2,
+        evaluated_at=dt(14),
+    )
+
+    assert result.decision == "suppress"
+    assert result.should_run is False
+    assert result.failure_match_count == 2
+    assert "prior failure outcomes" in result.reasons[0]
+
+
+def test_novelty_gate_warns_for_same_dataset_failed_memory(tmp_path: Path) -> None:
+    registry = ResearchMemoryRegistry(registry_path(tmp_path))
+    candidate = candidate_artifact(
+        "exp_registry_novelty_warn",
+        expression="Return(close, 2)",
+        dataset_fingerprint="sha256:dataset-fixture",
+    )
+    registry.upsert(
+        build_research_memory_entry(
+            experiment_id=candidate.experiment_id,
+            status="observation_rejected",
+            created_by="unit_test",
+            created_at=dt(9),
+            candidate=candidate,
+            failure_reason="observation edge failed",
+        )
+    )
+
+    result = evaluate_novelty_gate(
+        factor_expression="Return(close, 1)",
+        dataset_fingerprint="sha256:dataset-fixture",
+        entries=registry.load_entries(),
+        evaluated_at=dt(14),
+    )
+
+    assert result.decision == "warn"
+    assert result.should_run is True
+    assert result.failure_match_count == 1
+    assert result.matched_entries[0].score == pytest.approx(0.35)
+    assert "prior failed" in result.reasons[0]
+
+
+def test_novelty_gate_allows_new_factor_and_dataset() -> None:
+    result = evaluate_novelty_gate(
+        factor_expression="Return(close, 1)",
+        dataset_fingerprint="sha256:dataset-new",
+        entries=(),
+        evaluated_at=dt(14),
+    )
+
+    assert result.decision == "allow"
+    assert result.should_run is True
+    assert result.matched_entries == ()
+    assert result.failure_match_count == 0
+
+
+def test_novelty_gate_result_validates_decision_and_should_run() -> None:
+    with pytest.raises(ValueError, match="should_run must match decision"):
+        NoveltyGateResult(
+            factor_signature=factor_signature_from_expression("Return(close, 1)"),
+            dataset_fingerprint="sha256:dataset-fixture",
+            decision="duplicate",
+            should_run=True,
+            reasons=("duplicate",),
+            evaluated_at=dt(14),
+        )
