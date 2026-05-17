@@ -24,6 +24,10 @@ from aats.data_platform.research_factory.observations import (
     ObservationResult,
     ReviewOutcome,
 )
+from aats.data_platform.research_factory.preapply import (
+    PreApplyEvidencePackage,
+    PreApplyReviewDecision,
+)
 from aats.data_platform.research_factory.specs import MetricsSnapshot
 
 RESEARCH_MEMORY_SCHEMA_VERSION = "research_memory_entry_v1"
@@ -42,14 +46,29 @@ ALLOWED_RESEARCH_MEMORY_STATUSES = frozenset(
         "observation_keep_reviewing",
         "observation_rejected",
         "observation_eligible_for_preapply",
+        "preapply_ready",
+        "preapply_rejected",
+        "needs_more_observation",
+        "preapply_review_approved_for_manual_apply_design",
+        "preapply_review_rejected",
+        "preapply_review_needs_more_evidence",
     }
 )
 ALLOWED_NOVELTY_GATE_DECISIONS = frozenset({"allow", "duplicate", "retest", "warn", "suppress"})
 NOVELTY_GATE_FAILURE_STATUSES = frozenset(
-    {"gate_failed", "failed", "rejected", "novelty_suppressed", "observation_rejected"}
+    {
+        "gate_failed",
+        "failed",
+        "rejected",
+        "novelty_suppressed",
+        "observation_rejected",
+        "preapply_rejected",
+        "preapply_review_rejected",
+    }
 )
 NOVELTY_GATE_SOFT_FAILURE_STATUSES = frozenset(
-    NOVELTY_GATE_FAILURE_STATUSES | {"observation_keep_reviewing"}
+    NOVELTY_GATE_FAILURE_STATUSES
+    | {"observation_keep_reviewing", "needs_more_observation", "preapply_review_needs_more_evidence"}
 )
 _SECRET_MARKERS = (
     "api_key",
@@ -194,6 +213,10 @@ class ResearchMemoryEntry:
     candidate_type: str | None = None
     recommendation_id: str | None = None
     observation_id: str | None = None
+    package_id: str | None = None
+    preapply_status: str | None = None
+    preapply_review_id: str | None = None
+    preapply_review_decision: str | None = None
     review_decision: str | None = None
     factor_expression: str | None = None
     benchmark_segment: str | None = None
@@ -239,6 +262,22 @@ class ResearchMemoryEntry:
             _require_safe_identifier(self.recommendation_id, "recommendation_id")
         if self.observation_id is not None:
             _require_safe_identifier(self.observation_id, "observation_id")
+        if self.package_id is not None:
+            _require_safe_identifier(self.package_id, "package_id")
+        if self.preapply_status is not None:
+            object.__setattr__(
+                self,
+                "preapply_status",
+                _require_non_empty_text(self.preapply_status, "preapply_status"),
+            )
+        if self.preapply_review_id is not None:
+            _require_safe_identifier(self.preapply_review_id, "preapply_review_id")
+        if self.preapply_review_decision is not None:
+            object.__setattr__(
+                self,
+                "preapply_review_decision",
+                _require_non_empty_text(self.preapply_review_decision, "preapply_review_decision"),
+            )
         if self.review_decision is not None:
             object.__setattr__(
                 self,
@@ -307,6 +346,10 @@ class ResearchMemoryEntry:
             candidate_type=payload.get("candidate_type"),
             recommendation_id=payload.get("recommendation_id"),
             observation_id=payload.get("observation_id"),
+            package_id=payload.get("package_id"),
+            preapply_status=payload.get("preapply_status"),
+            preapply_review_id=payload.get("preapply_review_id"),
+            preapply_review_decision=payload.get("preapply_review_decision"),
             review_decision=payload.get("review_decision"),
             factor_expression=payload.get("factor_expression"),
             benchmark_segment=payload.get("benchmark_segment"),
@@ -662,6 +705,65 @@ def build_observation_memory_entry(
     )
 
 
+def build_preapply_memory_entry(
+    *,
+    candidate: CandidateArtifact,
+    package: PreApplyEvidencePackage,
+    created_by: str,
+    created_at: datetime,
+    review_decision: PreApplyReviewDecision | None = None,
+    artifact_refs: Mapping[str, str] | None = None,
+) -> ResearchMemoryEntry:
+    """Build a registry entry from pre-apply package or review artifacts."""
+    if not isinstance(candidate, CandidateArtifact):
+        raise ValueError("candidate must be a CandidateArtifact")
+    if not isinstance(package, PreApplyEvidencePackage):
+        raise ValueError("package must be a PreApplyEvidencePackage")
+    if review_decision is not None and not isinstance(review_decision, PreApplyReviewDecision):
+        raise ValueError("review_decision must be a PreApplyReviewDecision")
+    _require_matching_preapply_memory_inputs(candidate, package, review_decision)
+
+    status = _preapply_memory_status(package, review_decision)
+    factor_expression = _optional_text(candidate.payload.get("factor_expression"))
+    dataset_fingerprint = _optional_text(candidate.payload.get("dataset_fingerprint"))
+    factor_signature = factor_signature_from_expression(factor_expression) if factor_expression is not None else None
+    failure_reasons = list(package.failure_reasons)
+    if review_decision is not None and review_decision.required_followups:
+        failure_reasons.extend(f"preapply_review_followup: {item}" for item in review_decision.required_followups)
+    failure_reason = "; ".join(failure_reasons) if failure_reasons else None
+    entry_id = _build_preapply_entry_id(
+        package_id=package.package_id,
+        candidate_id=candidate.candidate_id,
+        status=status,
+        review_id=review_decision.review_id if review_decision is not None else None,
+    )
+
+    return ResearchMemoryEntry(
+        entry_id=entry_id,
+        experiment_id=candidate.experiment_id,
+        status=status,
+        created_at=created_at,
+        created_by=created_by,
+        factor_signature=factor_signature,
+        dataset_fingerprint=dataset_fingerprint,
+        candidate_id=candidate.candidate_id,
+        candidate_type=candidate.candidate_type,
+        recommendation_id=package.recommendation_id,
+        observation_id=package.observation_id,
+        package_id=package.package_id,
+        preapply_status=package.status,
+        preapply_review_id=review_decision.review_id if review_decision is not None else None,
+        preapply_review_decision=review_decision.decision if review_decision is not None else None,
+        review_decision=package.review_decision,
+        factor_expression=factor_expression,
+        benchmark_segment=_optional_text(candidate.payload.get("benchmark_segment")),
+        metric_snapshot=metric_snapshot_to_dict(candidate.metrics),
+        gate_result=_gate_result_to_dict(candidate.gate),
+        failure_reason=failure_reason,
+        artifact_refs=artifact_refs or {},
+    )
+
+
 def _find_similar(
     target: ResearchMemoryEntry,
     entries: Sequence[ResearchMemoryEntry],
@@ -871,6 +973,21 @@ def _observation_memory_status(review_decision: str) -> str:
     raise ValueError("review_decision must be keep_reviewing, reject, or eligible_for_preapply")
 
 
+def _preapply_memory_status(
+    package: PreApplyEvidencePackage,
+    review_decision: PreApplyReviewDecision | None,
+) -> str:
+    if review_decision is None:
+        return package.status
+    if review_decision.decision == "review_approved_for_manual_apply_design":
+        return "preapply_review_approved_for_manual_apply_design"
+    if review_decision.decision == "review_rejected":
+        return "preapply_review_rejected"
+    if review_decision.decision == "needs_more_evidence":
+        return "preapply_review_needs_more_evidence"
+    raise ValueError("unsupported preapply review decision")
+
+
 def _observation_failure_reasons(
     *,
     review_decision: str,
@@ -886,6 +1003,29 @@ def _observation_failure_reasons(
     if not observation_gate.passed:
         reasons.extend(f"observation_gate: {failure}" for failure in observation_gate.failures)
     return tuple(reasons)
+
+
+def _require_matching_preapply_memory_inputs(
+    candidate: CandidateArtifact,
+    package: PreApplyEvidencePackage,
+    review_decision: PreApplyReviewDecision | None,
+) -> None:
+    if package.candidate_id != candidate.candidate_id:
+        raise ValueError("package candidate_id must match candidate")
+    if package.experiment_id != candidate.experiment_id:
+        raise ValueError("package experiment_id must match candidate")
+    if review_decision is None:
+        return
+    if review_decision.package_id != package.package_id:
+        raise ValueError("preapply review decision package_id must match package")
+    if review_decision.candidate_id != package.candidate_id:
+        raise ValueError("preapply review decision candidate_id must match package")
+    if review_decision.recommendation_id != package.recommendation_id:
+        raise ValueError("preapply review decision recommendation_id must match package")
+    if review_decision.observation_id != package.observation_id:
+        raise ValueError("preapply review decision observation_id must match package")
+    if review_decision.experiment_id != package.experiment_id:
+        raise ValueError("preapply review decision experiment_id must match package")
 
 
 def _build_entry_id(
@@ -913,6 +1053,22 @@ def _build_observation_entry_id(*, observation_id: str, candidate_id: str, statu
         "status": status,
     }
     return f"obs_mem_{_stable_hash(payload)[:20]}"
+
+
+def _build_preapply_entry_id(
+    *,
+    package_id: str,
+    candidate_id: str,
+    status: str,
+    review_id: str | None,
+) -> str:
+    payload = {
+        "candidate_id": candidate_id,
+        "package_id": package_id,
+        "review_id": review_id,
+        "status": status,
+    }
+    return f"preapply_mem_{_stable_hash(payload)[:20]}"
 
 
 def _write_registry_atomic(path: Path, entries: Sequence[ResearchMemoryEntry]) -> None:

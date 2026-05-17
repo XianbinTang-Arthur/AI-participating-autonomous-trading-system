@@ -184,6 +184,8 @@ class PreApplyReview:
     package_status: str
     status: str = "review_pending"
     package_ref: str = PREAPPLY_PACKAGE_REF
+    reference_integrity_ref: str | None = None
+    reference_integrity_passed: bool | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     schema_version: str = PREAPPLY_REVIEW_SCHEMA_VERSION
     runtime_mutation_allowed: bool = False
@@ -205,6 +207,14 @@ class PreApplyReview:
             allowed = ", ".join(sorted(ALLOWED_PREAPPLY_REVIEW_STATUSES))
             raise ValueError(f"preapply review status must be one of: {allowed}")
         object.__setattr__(self, "package_ref", _require_relative_ref(self.package_ref, "package_ref"))
+        if self.reference_integrity_ref is not None:
+            object.__setattr__(
+                self,
+                "reference_integrity_ref",
+                _require_relative_ref(self.reference_integrity_ref, "reference_integrity_ref"),
+            )
+        if self.reference_integrity_passed is not None and not isinstance(self.reference_integrity_passed, bool):
+            raise ValueError("reference_integrity_passed must be a bool when provided")
         _require_timezone_aware_datetime(self.created_at, "created_at")
         if self.schema_version != PREAPPLY_REVIEW_SCHEMA_VERSION:
             raise ValueError(f"schema_version must be {PREAPPLY_REVIEW_SCHEMA_VERSION!r}")
@@ -344,6 +354,8 @@ class PreApplyReviewRecorder:
         package: PreApplyEvidencePackage,
         *,
         package_ref: str = PREAPPLY_PACKAGE_REF,
+        reference_integrity_ref: str | None = None,
+        reference_integrity_passed: bool | None = None,
         review_id: str | None = None,
         notes: Sequence[str] = (),
     ) -> PreApplyReview:
@@ -354,6 +366,8 @@ class PreApplyReviewRecorder:
             package,
             review_id=review_id,
             package_ref=package_ref,
+            reference_integrity_ref=reference_integrity_ref,
+            reference_integrity_passed=reference_integrity_passed,
             created_at=self._now(),
             notes=notes,
         )
@@ -375,6 +389,8 @@ class PreApplyReviewRecorder:
                 "experiment_id": review.experiment_id,
                 "package_status": review.package_status,
                 "package_ref": review.package_ref,
+                "reference_integrity_ref": review.reference_integrity_ref,
+                "reference_integrity_passed": review.reference_integrity_passed,
             },
             output_refs={"preapply_review": PREAPPLY_REVIEW_REF},
             code_version=self.code_version,
@@ -484,6 +500,8 @@ def build_preapply_review(
     *,
     review_id: str | None = None,
     package_ref: str = PREAPPLY_PACKAGE_REF,
+    reference_integrity_ref: str | None = None,
+    reference_integrity_passed: bool | None = None,
     created_at: datetime | None = None,
     notes: Sequence[str] = (),
 ) -> PreApplyReview:
@@ -499,6 +517,8 @@ def build_preapply_review(
         experiment_id=package.experiment_id,
         package_status=package.status,
         package_ref=package_ref,
+        reference_integrity_ref=reference_integrity_ref,
+        reference_integrity_passed=reference_integrity_passed,
         created_at=created_at or datetime.now(UTC),
         notes=notes,
     )
@@ -522,6 +542,8 @@ def build_preapply_review_decision(
     _require_review_matches_package(review, package)
     if decision == "review_approved_for_manual_apply_design" and package.status != "preapply_ready":
         raise ValueError("manual apply design review approval requires a preapply_ready package")
+    if decision == "review_approved_for_manual_apply_design" and review.reference_integrity_passed is False:
+        raise ValueError("manual apply design review approval requires passing reference integrity")
     return PreApplyReviewDecision(
         review_id=review.review_id,
         package_id=package.package_id,

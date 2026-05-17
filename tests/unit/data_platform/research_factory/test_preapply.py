@@ -451,7 +451,12 @@ def test_preapply_recorder_root_must_be_under_research_artifacts(workspace_tmp_p
 
 def test_build_preapply_review_and_decision_for_ready_package() -> None:
     package = build_ready_package()
-    review = build_preapply_review(package, created_at=dt(14))
+    review = build_preapply_review(
+        package,
+        reference_integrity_ref="evidence_reference_integrity_report.json",
+        reference_integrity_passed=True,
+        created_at=dt(14),
+    )
     decision = build_preapply_review_decision(
         review=review,
         package=package,
@@ -464,6 +469,8 @@ def test_build_preapply_review_and_decision_for_ready_package() -> None:
     assert review.status == "review_pending"
     assert review.package_id == package.package_id
     assert review.package_status == "preapply_ready"
+    assert review.reference_integrity_ref == "evidence_reference_integrity_report.json"
+    assert review.reference_integrity_passed is True
     assert review.runtime_mutation_allowed is False
     assert decision.decision == "review_approved_for_manual_apply_design"
     assert decision.recommended_next_step == "prepare_manual_apply_design_for_separate_governance_review"
@@ -493,6 +500,26 @@ def test_preapply_review_approval_requires_ready_package() -> None:
             package=package,
             decision="review_approved_for_manual_apply_design",
             rationale="attempt to advance incomplete evidence",
+            reviewed_by="operator_reviewer",
+            reviewed_at=dt(14, 1),
+        )
+
+
+def test_preapply_review_approval_requires_passing_reference_integrity() -> None:
+    package = build_ready_package()
+    review = build_preapply_review(
+        package,
+        reference_integrity_ref="evidence_reference_integrity_report.json",
+        reference_integrity_passed=False,
+        created_at=dt(14),
+    )
+
+    with pytest.raises(ValueError, match="passing reference integrity"):
+        build_preapply_review_decision(
+            review=review,
+            package=package,
+            decision="review_approved_for_manual_apply_design",
+            rationale="attempt to approve broken evidence references",
             reviewed_by="operator_reviewer",
             reviewed_at=dt(14, 1),
         )
@@ -541,7 +568,11 @@ def test_preapply_review_recorder_writes_review_and_decision(workspace_tmp_path:
     package = build_ready_package()
     recorder = PreApplyReviewRecorder(root, code_version="test-sha", clock=lambda: dt(14))
 
-    review = recorder.start_review(package)
+    review = recorder.start_review(
+        package,
+        reference_integrity_ref="evidence_reference_integrity_report.json",
+        reference_integrity_passed=True,
+    )
     decision = build_preapply_review_decision(
         review=review,
         package=package,
@@ -561,7 +592,10 @@ def test_preapply_review_recorder_writes_review_and_decision(workspace_tmp_path:
     assert manifest["status"] == "succeeded"
     assert stored_manifest["output_refs"]["preapply_review"] == "preapply_review.json"
     assert stored_manifest["output_refs"]["preapply_review_decision"] == "preapply_review_decision.json"
+    assert stored_manifest["input_refs"]["reference_integrity_ref"] == "evidence_reference_integrity_report.json"
+    assert stored_manifest["input_refs"]["reference_integrity_passed"] is True
     assert stored_review["status"] == "review_pending"
+    assert stored_review["reference_integrity_passed"] is True
     assert stored_decision["decision"] == "review_approved_for_manual_apply_design"
     assert stored_decision["runtime_mutation_allowed"] is False
 

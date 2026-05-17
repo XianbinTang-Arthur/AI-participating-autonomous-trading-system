@@ -15,9 +15,14 @@ from aats.data_platform.research_factory.registry import (
     ResearchMemoryEntry,
     ResearchMemoryRegistry,
     build_observation_memory_entry,
+    build_preapply_memory_entry,
     build_research_memory_entry,
     evaluate_novelty_gate,
     factor_signature_from_expression,
+)
+from aats.data_platform.research_factory.preapply import (
+    PreApplyEvidencePackage,
+    PreApplyReviewDecision,
 )
 from aats.data_platform.research_factory.specs import MetricsSnapshot
 
@@ -129,6 +134,72 @@ def review_outcome(result: ObservationResult, *, decision: str, gate_passed: boo
         rationale="observation review completed",
         observation_gate_passed=gate_passed,
         created_at=dt(12),
+    )
+
+
+def preapply_package(candidate: CandidateArtifact, *, status: str = "preapply_ready") -> PreApplyEvidencePackage:
+    if status == "preapply_ready":
+        review_decision = "eligible_for_preapply"
+        failure_reasons = ()
+        observation_gate_passed = True
+    elif status == "needs_more_observation":
+        review_decision = "keep_reviewing"
+        failure_reasons = ("review_decision=keep_reviewing",)
+        observation_gate_passed = False
+    else:
+        review_decision = "reject"
+        failure_reasons = ("review_decision=reject",)
+        observation_gate_passed = False
+    return PreApplyEvidencePackage(
+        package_id=f"preapply_{candidate.candidate_id}",
+        candidate_id=candidate.candidate_id,
+        recommendation_id=f"rec_{candidate.candidate_id}",
+        observation_id=f"obs_{candidate.candidate_id}",
+        experiment_id=candidate.experiment_id,
+        status=status,
+        evidence_refs={
+            "candidate_artifact": "candidate_artifact.json",
+            "research_recommendation": "research_recommendation.json",
+            "metrics_snapshot": "metrics_snapshot.json",
+            "dataset_quality_report": "dataset_quality_report.json",
+            "source_integrity_report": "source_integrity_report.json",
+            "execution_evidence_report": "execution_evidence_report.json",
+            "evidence_bundle": "evidence_bundle.json",
+            "observation_result": "observation_result.json",
+            "review_outcome": "review_outcome.json",
+            "rollback_plan": "research_recommendation.json",
+        },
+        gate_refs={
+            "candidate_gate": "candidate_artifact.json",
+            "observation_gate_result": "observation_gate_result.json",
+        },
+        review_decision=review_decision,
+        candidate_gate_passed=True,
+        evidence_bundle_passed=True,
+        observation_gate_passed=observation_gate_passed,
+        failure_reasons=failure_reasons,
+        created_at=dt(13),
+    )
+
+
+def preapply_review_decision(
+    package: PreApplyEvidencePackage,
+    *,
+    decision: str,
+    required_followups: tuple[str, ...] = (),
+) -> PreApplyReviewDecision:
+    return PreApplyReviewDecision(
+        review_id=f"review_{package.package_id}",
+        package_id=package.package_id,
+        candidate_id=package.candidate_id,
+        recommendation_id=package.recommendation_id,
+        observation_id=package.observation_id,
+        experiment_id=package.experiment_id,
+        decision=decision,
+        rationale="preapply review completed",
+        reviewed_by="unit_test",
+        required_followups=required_followups,
+        reviewed_at=dt(14),
     )
 
 
@@ -357,6 +428,83 @@ def test_observation_memory_similarity_reuses_factor_and_dataset(tmp_path: Path)
     assert enriched.similarity_to_existing
     assert enriched.similarity_to_existing[0].status == "observation_rejected"
     assert enriched.similarity_to_existing[0].score == pytest.approx(1.0)
+
+
+def test_preapply_memory_entry_records_ready_package(tmp_path: Path) -> None:
+    registry = ResearchMemoryRegistry(registry_path(tmp_path))
+    candidate = candidate_artifact("exp_registry_preapply_ready")
+    package = preapply_package(candidate, status="preapply_ready")
+
+    entry = build_preapply_memory_entry(
+        candidate=candidate,
+        package=package,
+        created_by="unit_test",
+        created_at=dt(14),
+        artifact_refs={"preapply_evidence_package": "preapply/preapply_ready/preapply_evidence_package.json"},
+    )
+    registry.upsert(entry)
+    payload = read_jsonl(registry.path)[0]
+
+    assert payload["status"] == "preapply_ready"
+    assert payload["package_id"] == package.package_id
+    assert payload["preapply_status"] == "preapply_ready"
+    assert payload["review_decision"] == "eligible_for_preapply"
+    assert payload["candidate_id"] == candidate.candidate_id
+    assert payload["factor_signature"] == factor_signature_from_expression("Return(close, 1)")
+    assert payload["failure_reason"] is None
+
+
+def test_preapply_memory_entry_records_review_decision_followups(tmp_path: Path) -> None:
+    registry = ResearchMemoryRegistry(registry_path(tmp_path))
+    candidate = candidate_artifact("exp_registry_preapply_review")
+    package = preapply_package(candidate, status="preapply_ready")
+    decision = preapply_review_decision(
+        package,
+        decision="needs_more_evidence",
+        required_followups=("run paper observation profile",),
+    )
+
+    entry = build_preapply_memory_entry(
+        candidate=candidate,
+        package=package,
+        review_decision=decision,
+        created_by="unit_test",
+        created_at=dt(14),
+    )
+    registry.upsert(entry)
+    payload = read_jsonl(registry.path)[0]
+
+    assert payload["status"] == "preapply_review_needs_more_evidence"
+    assert payload["preapply_review_id"] == decision.review_id
+    assert payload["preapply_review_decision"] == "needs_more_evidence"
+    assert payload["failure_reason"] == "preapply_review_followup: run paper observation profile"
+
+
+def test_preapply_memory_entry_validates_identity() -> None:
+    candidate = candidate_artifact("exp_registry_preapply_bad")
+    package = PreApplyEvidencePackage(
+        package_id="preapply_bad",
+        candidate_id="cand_other",
+        recommendation_id="rec_other",
+        observation_id="obs_other",
+        experiment_id=candidate.experiment_id,
+        status="preapply_ready",
+        evidence_refs=preapply_package(candidate).evidence_refs,
+        gate_refs=preapply_package(candidate).gate_refs,
+        review_decision="eligible_for_preapply",
+        candidate_gate_passed=True,
+        evidence_bundle_passed=True,
+        observation_gate_passed=True,
+        created_at=dt(13),
+    )
+
+    with pytest.raises(ValueError, match="package candidate_id must match candidate"):
+        build_preapply_memory_entry(
+            candidate=candidate,
+            package=package,
+            created_by="unit_test",
+            created_at=dt(14),
+        )
 
 
 def test_novelty_gate_marks_same_factor_and_dataset_duplicate(tmp_path: Path) -> None:
