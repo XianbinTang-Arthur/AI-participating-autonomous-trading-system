@@ -142,6 +142,23 @@ def latest_reconciliation_for_scope(repo, scope: RuntimeStateScope) -> Reconcili
     return latest_matching_reconciliation(repo.history(), scope)
 
 
+def execution_truth_repo_for_runtime(runtime: Any):
+    """Return the current execution fact read model for runtime diagnostics.
+
+    ``runtime.execution_repo`` can still be the legacy write-path repository in
+    transitional live profiles. Read-only diagnostics should prefer the
+    dedicated execution truth repository when bootstrap provides one.
+    """
+
+    truth_repo = getattr(runtime, "execution_truth_repo", None)
+    if truth_repo is not None:
+        return truth_repo
+    reconciliation_repo = getattr(runtime, "reconciliation_execution_repo", None)
+    if reconciliation_repo is not None:
+        return reconciliation_repo
+    return getattr(runtime, "execution_repo", None)
+
+
 def portfolio_snapshot_matches_scope(
     snapshot: PortfolioSnapshot,
     scope: RuntimeStateScope,

@@ -10,6 +10,7 @@ from aats.services.execution_engine.exit_intent_aggregator import (
     EXIT_EXECUTION_BLOCKER_KINDS,
 )
 from aats.services.runtime_scope import (
+    execution_truth_repo_for_runtime,
     latest_reconciliation_for_scope,
     runtime_state_scope,
 )
@@ -408,11 +409,12 @@ class RecoveryPostureEvaluator:
         return finalized
 
     def _bundle_recovery_assessment(self):
-        order_states_for_scope = getattr(self.runtime.execution_repo, "order_states_for_scope", None)
+        execution_repo = execution_truth_repo_for_runtime(self.runtime)
+        order_states_for_scope = getattr(execution_repo, "order_states_for_scope", None)
         if callable(order_states_for_scope):
             order_states = order_states_for_scope(scope=self.state_scope)
         else:
-            order_states = self.runtime.execution_repo.order_states()
+            order_states = execution_repo.order_states()
         active_obligations = getattr(self.runtime.obligation_repo, "active_obligations", None)
         obligations = active_obligations() if callable(active_obligations) else []
         strategy_bundles = self._scoped_recent_strategy_bundles()

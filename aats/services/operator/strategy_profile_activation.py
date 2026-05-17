@@ -25,6 +25,7 @@ from aats.services.governance_engine.adaptive_controls import (
     reconciliation_clean_from_safety_state,
     resolve_emergency_safety_fast_track,
 )
+from aats.services.runtime_scope import execution_truth_repo_for_runtime
 
 if TYPE_CHECKING:
     from aats.schemas.operator import AuthSource, OperatorRole
@@ -659,7 +660,7 @@ class StrategyProfileActivationFacade:
         }
 
     def activation_blockers(self) -> list[str]:
-        open_orders = self.owner.runtime.execution_repo.order_states_for_scope(
+        open_orders = execution_truth_repo_for_runtime(self.owner.runtime).order_states_for_scope(
             scope=self.owner.runtime_state_scope,
             open_only=True,
         )

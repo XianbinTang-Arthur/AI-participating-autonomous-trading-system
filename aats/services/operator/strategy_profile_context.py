@@ -13,7 +13,14 @@ from aats.schemas.strategy_profiles import (
 from aats.services.accounting import try_fill_fee_cost_in_quote
 from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12
-from aats.services.runtime_scope import fills_for_scope, latest_reconciliation_for_scope, latest_snapshot_for_scope, runtime_state_scope, snapshots_for_scope
+from aats.services.runtime_scope import (
+    execution_truth_repo_for_runtime,
+    fills_for_scope,
+    latest_reconciliation_for_scope,
+    latest_snapshot_for_scope,
+    runtime_state_scope,
+    snapshots_for_scope,
+)
 
 if TYPE_CHECKING:
     from aats.services.operator.strategy_profiles import StrategyProfileControlService
@@ -68,7 +75,7 @@ class StrategyProfileContextFacade:
             safety_state=safety_state,
             execution_health={
                 "open_order_count": len(
-                    self.owner.runtime.execution_repo.order_states_for_scope(
+                    execution_truth_repo_for_runtime(self.owner.runtime).order_states_for_scope(
                         scope=self.owner.runtime_state_scope,
                         open_only=True,
                     )
@@ -126,7 +133,7 @@ class StrategyProfileContextFacade:
 
     def performance_summary(self) -> dict[str, Any]:
         fills = fills_for_scope(
-            self.owner.runtime.execution_repo,
+            execution_truth_repo_for_runtime(self.owner.runtime),
             self.owner.runtime_state_scope,
             limit=self.owner.evaluation_window_limit,
         )

@@ -401,6 +401,8 @@ class StorageBackends:
     outbox_repo: PostgresOutboxRepository | None = None
     funding_fee_repo: FundingFeeRepository | None = None
     database_runtime: DatabaseRuntime | None = None
+    execution_truth_repo: ExecutionRepository | None = None
+    reconciliation_execution_repo: ExecutionRepository | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -482,6 +484,7 @@ class ApplicationRuntime:
     strategy_sleeve_repo: StrategySleeveRepository
     strategy_runtime_repo: StrategyRuntimeRepository
     recovery_status: RecoveryStatus
+    execution_truth_repo: ExecutionRepository | None = None
     sleeve_auto_execution_config_source: str = "strategy_sleeve_auto_execution_enabled"
     sleeve_auto_execution_uses_deprecated_key: bool = False
     # 高频流式快照（market.snapshots / features.snapshots）的进程内缓存。
@@ -1718,6 +1721,10 @@ def _backfill_fill_outcomes_from_event_store(
         )
 
 
+def _storage_execution_truth_repo(storage: StorageBackends) -> ExecutionRepository:
+    return storage.execution_truth_repo or storage.reconciliation_execution_repo or storage.execution_repo
+
+
 def build_storage_backends(
     settings: AATSSettings,
     *,
@@ -1805,17 +1812,16 @@ def build_storage_backends(
         if process_role in {None, PROCESS_ROLE_MONOLITH, PROCESS_ROLE_EXECUTION}
         else None
     )
-    execution_repo = (
-        ConvergedPostgresExecutionRepository(
-            database_runtime.session_factory,
-            execution_order_repo=execution_order_repo,
-            execution_order_history_repo=execution_order_history_repo,
-            execution_fill_repo=execution_fill_repo_v2,
-            orderbook_snapshot_read_source=orderbook_snapshot_read_source,
-        )
-        if settings.financial_convergence_mode_enabled
-        else legacy_execution_repo
+    converged_execution_repo = ConvergedPostgresExecutionRepository(
+        database_runtime.session_factory,
+        execution_order_repo=execution_order_repo,
+        execution_order_history_repo=execution_order_history_repo,
+        execution_fill_repo=execution_fill_repo_v2,
+        orderbook_snapshot_read_source=orderbook_snapshot_read_source,
     )
+    # Reconciliation compares exchange state against current execution truth
+    # even while live execution still uses the legacy write path.
+    execution_repo = converged_execution_repo if settings.financial_convergence_mode_enabled else legacy_execution_repo
 
     return StorageBackends(
         execution_order_repo=execution_order_repo,
@@ -1854,6 +1860,8 @@ def build_storage_backends(
         fill_outcome_repo=PostgresFillOutcomeRepository(database_runtime.session_factory),
         sleeve_pnl_repo=sleeve_pnl_repo,
         execution_repo=execution_repo,
+        execution_truth_repo=converged_execution_repo,
+        reconciliation_execution_repo=converged_execution_repo,
         exit_execution_repo=PostgresExitExecutionRepository(database_runtime.session_factory),
         obligation_repo=PostgresExecutionObligationRepository(database_runtime.session_factory),
         outbox_repo=PostgresOutboxRepository(database_runtime.session_factory),
@@ -4182,11 +4190,12 @@ def _build_decision_slice(
         event_store=storage.event_store,
         stream_snapshot_cache=slices.stream_snapshot_cache,
     )
+    execution_truth_repo = _storage_execution_truth_repo(storage)
     slices.ai_service = AIInferenceService(
         settings=runtime_settings,
         event_store=storage.event_store,
         bus=slices.bus,
-        execution_repo=storage.execution_repo,
+        execution_repo=execution_truth_repo,
         prompt_builder=PromptBuilder(),
         validator=AssessmentValidator(),
         fee_resolver=slices.fee_resolver,
@@ -4197,7 +4206,7 @@ def _build_decision_slice(
         event_store=storage.event_store,
         market_gateway=slices.market_gateway,
         portfolio_repo=storage.portfolio_repo,
-        execution_repo=storage.execution_repo,
+        execution_repo=execution_truth_repo,
         position_lot_repo=storage.position_lot_repo,
         account_service=slices.account_service,
         strategy_sleeve_repo=storage.strategy_sleeve_repo,
@@ -4227,7 +4236,7 @@ def _build_decision_slice(
             settings=runtime_settings,
             event_store=storage.event_store,
             portfolio_repo=storage.portfolio_repo,
-            execution_repo=storage.execution_repo,
+            execution_repo=execution_truth_repo,
             mode_controller=slices.mode_controller,
             health_service=slices.health_service,
             account_service=slices.account_service,
@@ -4313,7 +4322,7 @@ def _build_decision_slice(
         metrics=slices.metrics,
         bus=slices.bus,
         event_store=storage.event_store,
-        execution_repo=storage.execution_repo,
+        execution_repo=execution_truth_repo,
         strategy_runtime_repo=storage.strategy_runtime_repo,
     )
 
@@ -4538,11 +4547,12 @@ def _build_portfolio_slice(
         default_product_type=runtime_settings.trading_product_type,
         default_margin_mode=runtime_settings.margin_mode,
     )
+    execution_truth_repo = _storage_execution_truth_repo(storage)
     slices.sleeve_pnl_projection_service = SleevePnLProjectionService(
         fill_outcome_repo=storage.fill_outcome_repo,
         funding_fee_repo=storage.funding_fee_repo,
         sleeve_pnl_repo=storage.sleeve_pnl_repo,
-        execution_repo=storage.execution_repo,
+        execution_repo=execution_truth_repo,
         strategy_sleeve_repo=storage.strategy_sleeve_repo,
     )
     if (
@@ -4558,7 +4568,7 @@ def _build_portfolio_slice(
             portfolio_repo=storage.portfolio_repo,
             fill_outcome_repo=storage.fill_outcome_repo,
             price_provider=slices.market_gateway.latest_price,
-            execution_repo=storage.execution_repo,
+            execution_repo=execution_truth_repo,
             settlement_posting_service=LedgerSettlementPostingService(
                 ledger_account_repo=storage.ledger_account_repo,
                 ledger_journal_repo=storage.ledger_journal_repo,
@@ -4588,7 +4598,7 @@ def _build_portfolio_slice(
             portfolio_repo=storage.portfolio_repo,
             fill_outcome_repo=storage.fill_outcome_repo,
             price_provider=slices.market_gateway.latest_price,
-            execution_repo=storage.execution_repo,
+            execution_repo=execution_truth_repo,
             persistent_lot_book_service=(
                 PersistentLotBookService(
                     position_lot_repo=storage.position_lot_repo,
@@ -4649,6 +4659,7 @@ def _build_reconciliation_slice(
         runtime_settings,
         exchange_coupled=runtime_layering.environment_capabilities.exchange_coupled,
     )
+    reconciliation_execution_repo = _storage_execution_truth_repo(storage)
     slices.reconciliation_service = ReconciliationService(
         settings=runtime_settings,
         bus=slices.bus,
@@ -4656,7 +4667,7 @@ def _build_reconciliation_slice(
         comparator=StateComparator(),
         repair_service=ReconciliationRepairService(),
         reconciliation_repo=storage.reconciliation_repo,
-        execution_repo=storage.execution_repo,
+        execution_repo=reconciliation_execution_repo,
         portfolio_repo=storage.portfolio_repo,
         event_store=storage.event_store,
         reconstruction_service=PortfolioReconstructionService(
@@ -4674,7 +4685,7 @@ def _build_reconciliation_slice(
     )
     slices.base_recovery_service = ExecutionRecoveryService(
         settings=runtime_settings,
-        execution_repo=storage.execution_repo,
+        execution_repo=reconciliation_execution_repo,
         obligation_repo=storage.obligation_repo,
         portfolio_repo=storage.portfolio_repo,
         reconciliation_repo=storage.reconciliation_repo,
@@ -5312,7 +5323,7 @@ async def build_runtime(
         hot_state_store=hot_state_store,
         bus=slices.bus,
         process_role=effective_process_role or "monolith",
-        truth_loader=storage.execution_repo.get_order_state,
+        truth_loader=_storage_execution_truth_repo(storage).get_order_state,
         subscribe=False,
     )
     log_event(
@@ -5575,7 +5586,7 @@ async def build_runtime(
         if storage.database_runtime is not None and storage.exit_execution_repo is not None:
             refreshed_exit_execution, startup_refresh_notes = startup_refresh_exit_execution_truth(
                 settings=runtime_settings,
-                execution_repo=storage.execution_repo,
+                execution_repo=_storage_execution_truth_repo(storage),
                 exit_execution_repo=storage.exit_execution_repo,
                 scope=state_scope,
                 exit_execution_writer=slices.exit_execution_writer,
@@ -5671,6 +5682,7 @@ async def build_runtime(
         fill_outcome_repo=storage.fill_outcome_repo,
         sleeve_pnl_repo=storage.sleeve_pnl_repo,
         execution_repo=storage.execution_repo,
+        execution_truth_repo=_storage_execution_truth_repo(storage),
         exit_execution_repo=storage.exit_execution_repo,
         obligation_repo=storage.obligation_repo,
         reconciliation_repo=storage.reconciliation_repo,

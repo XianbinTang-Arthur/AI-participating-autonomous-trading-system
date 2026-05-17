@@ -21,6 +21,7 @@ from aats.storage.execution_order_repo_postgres import (
     PostgresExecutionOrderRepository,
 )
 from aats.storage.execution_repo_converged_postgres import ConvergedPostgresExecutionRepository
+from aats.storage.execution_repo_postgres import PostgresExecutionRepository
 from aats.storage.exit_execution_repo_postgres import PostgresExitExecutionRepository
 from aats.storage.obligation_repo_postgres import PostgresExecutionObligationRepository
 from aats.storage.outbox_repo_postgres import PostgresOutboxRepository
@@ -212,6 +213,9 @@ class TestPostgresExitExecutionResume(unittest.IsolatedAsyncioTestCase):
             storage = build_storage_backends(settings)
             try:
                 self.assertIsInstance(storage.exit_execution_repo, PostgresExitExecutionRepository)
+                self.assertIsInstance(storage.execution_repo, PostgresExecutionRepository)
+                self.assertIsInstance(storage.execution_truth_repo, ConvergedPostgresExecutionRepository)
+                self.assertIsInstance(storage.reconciliation_execution_repo, ConvergedPostgresExecutionRepository)
             finally:
                 if storage.database_runtime is not None:
                     storage.database_runtime.dispose()

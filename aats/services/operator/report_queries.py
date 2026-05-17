@@ -109,7 +109,11 @@ class ReportQueryFacade:
             "offset": offset,
             "total_available": len(rows),
             "has_more": offset + len(paged) < len(rows),
-            "truth_source": "execution_fill_repo_v2" if self.owner._phase5_control_plane_enabled() else "execution_repo",
+            "truth_source": (
+                "execution_fill_repo_v2"
+                if self.owner._phase5_control_plane_enabled()
+                else self.owner._execution_read_truth_source()
+            ),
             "summary": self.owner._execution_quality_summary(rows),
         }
 
@@ -128,7 +132,11 @@ class ReportQueryFacade:
             "offset": offset,
             "total_available": len(attempt_rows),
             "has_more": offset + len(paged) < len(attempt_rows),
-            "truth_source": "execution_fill_repo_v2" if self.owner._phase5_control_plane_enabled() else "execution_repo",
+            "truth_source": (
+                "execution_fill_repo_v2"
+                if self.owner._phase5_control_plane_enabled()
+                else self.owner._execution_read_truth_source()
+            ),
             "summary": self.owner._execution_attempt_summary(rows),
         }
 

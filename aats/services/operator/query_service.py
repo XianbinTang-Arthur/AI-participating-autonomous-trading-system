@@ -106,6 +106,7 @@ from aats.services.strategy_overlay_rollout import (
     overlay_runtime_stage,
 )
 from aats.services.runtime_scope import (
+    execution_truth_repo_for_runtime,
     fill_outcomes_for_scope,
     fills_for_scope,
     funding_fee_records_for_scope,
@@ -500,22 +501,28 @@ class OperatorQueryService:
             f"{','.join(sorted(self.state_scope.allowed_symbols))}"
         )
 
+    def _execution_read_repo(self):
+        return execution_truth_repo_for_runtime(self.runtime)
+
+    def _execution_read_truth_source(self) -> str:
+        return "execution_truth_repo" if getattr(self.runtime, "execution_truth_repo", None) is not None else "execution_repo"
+
     def _scoped_order_states(self):
         return self._cached(
             "scoped_order_states",
-            lambda: order_states_for_scope(self.runtime.execution_repo, self.state_scope),
+            lambda: order_states_for_scope(self._execution_read_repo(), self.state_scope),
         )
 
     def _scoped_open_order_states(self):
         return self._cached(
             "scoped_open_order_states",
-            lambda: order_states_for_scope(self.runtime.execution_repo, self.state_scope, open_only=True),
+            lambda: order_states_for_scope(self._execution_read_repo(), self.state_scope, open_only=True),
         )
 
     def _scoped_fills(self):
         return self._cached(
             "scoped_fills",
-            lambda: fills_for_scope(self.runtime.execution_repo, self.state_scope),
+            lambda: fills_for_scope(self._execution_read_repo(), self.state_scope),
         )
 
     def _scoped_fill_outcomes(self):
@@ -3758,7 +3765,7 @@ class OperatorQueryService:
 
     def _decision_order_payloads_from_repo(self, decision_id: str) -> tuple[list[dict[str, Any]], str | None]:
         runtime = getattr(self, "runtime", None)
-        execution_repo = getattr(runtime, "execution_repo", None)
+        execution_repo = execution_truth_repo_for_runtime(runtime)
         if execution_repo is None:
             return [], "execution_repo_unavailable"
         try:
@@ -3794,7 +3801,7 @@ class OperatorQueryService:
 
     def _decision_fill_payloads_from_repo(self, decision_id: str) -> tuple[list[dict[str, Any]], str | None]:
         runtime = getattr(self, "runtime", None)
-        execution_repo = getattr(runtime, "execution_repo", None)
+        execution_repo = execution_truth_repo_for_runtime(runtime)
         if execution_repo is None:
             return [], "execution_repo_unavailable"
         try:
@@ -3841,7 +3848,7 @@ class OperatorQueryService:
 
     def _orderbook_ref_row_truth_source(self) -> Any:
         runtime = getattr(self, "runtime", None)
-        execution_repo = getattr(runtime, "execution_repo", None)
+        execution_repo = execution_truth_repo_for_runtime(runtime)
         if execution_repo is not None and hasattr(execution_repo, "orderbook_snapshot_read_source"):
             source = getattr(execution_repo, "orderbook_snapshot_read_source", None)
             if source is not None:
@@ -11375,7 +11382,7 @@ class OperatorQueryService:
                 limit=_LIVE_DASHBOARD_RECONCILIATION_REF_LIMIT,
             ),
             "rejections": lambda: order_states_for_scope(
-                self.runtime.execution_repo,
+                self._execution_read_repo(),
                 self.state_scope,
                 statuses=("FAILED", "REJECTED", "BLOCKED"),
                 limit=200,
@@ -13697,7 +13704,7 @@ class OperatorQueryService:
             return {"errors": persisted}
         errors = []
         for order in order_states_for_scope(
-            self.runtime.execution_repo,
+            self._execution_read_repo(),
             self.state_scope,
             statuses=("FAILED", "REJECTED", "BLOCKED"),
             limit=20,
@@ -14665,7 +14672,7 @@ class OperatorQueryService:
     def _scoped_fills_for_order(self, client_order_id: str):
         return [
             item
-            for item in self.runtime.execution_repo.fills_for_order(client_order_id)
+            for item in self._execution_read_repo().fills_for_order(client_order_id)
             if item.product_type == self.state_scope.product_type
             and item.margin_mode == self.state_scope.margin_mode
             and self.state_scope.symbol_allowed(item.symbol)

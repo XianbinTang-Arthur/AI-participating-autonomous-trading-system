@@ -192,15 +192,22 @@ class AccountQueryFacade:
             "control_plane": {
                 "phase5_enabled": self.owner._phase5_control_plane_enabled(),
                 "order_truth_source": (
-                    "execution_order_repo" if self.owner._phase5_control_plane_enabled() else "execution_repo"
+                    "execution_order_repo"
+                    if self.owner._phase5_control_plane_enabled()
+                    else self.owner._execution_read_truth_source()
                 ),
                 "fill_truth_source": (
-                    "execution_fill_repo_v2" if self.owner._phase5_control_plane_enabled() else "execution_repo"
+                    "execution_fill_repo_v2"
+                    if self.owner._phase5_control_plane_enabled()
+                    else self.owner._execution_read_truth_source()
                 ),
                 "balance_truth_source": (
                     "ledger_accounts" if self.owner._phase5_control_plane_enabled() else "portfolio_snapshot"
                 ),
-                "legacy_execution_views_authoritative": not self.owner._phase5_control_plane_enabled(),
+                "legacy_execution_views_authoritative": (
+                    not self.owner._phase5_control_plane_enabled()
+                    and self.owner._execution_read_truth_source() == "execution_repo"
+                ),
             },
             "dashboard_summary_only": True,
             "truth_source": "account_status_plus_recovery_dashboard_summary",
@@ -328,10 +335,21 @@ class AccountQueryFacade:
             },
             "control_plane": {
                 "phase5_enabled": self.owner._phase5_control_plane_enabled(),
-                "order_truth_source": "execution_order_repo" if self.owner._phase5_control_plane_enabled() else "execution_repo",
-                "fill_truth_source": "execution_fill_repo_v2" if self.owner._phase5_control_plane_enabled() else "execution_repo",
+                "order_truth_source": (
+                    "execution_order_repo"
+                    if self.owner._phase5_control_plane_enabled()
+                    else self.owner._execution_read_truth_source()
+                ),
+                "fill_truth_source": (
+                    "execution_fill_repo_v2"
+                    if self.owner._phase5_control_plane_enabled()
+                    else self.owner._execution_read_truth_source()
+                ),
                 "balance_truth_source": "ledger_accounts" if self.owner._phase5_control_plane_enabled() else "portfolio_snapshot",
-                "legacy_execution_views_authoritative": not self.owner._phase5_control_plane_enabled(),
+                "legacy_execution_views_authoritative": (
+                    not self.owner._phase5_control_plane_enabled()
+                    and self.owner._execution_read_truth_source() == "execution_repo"
+                ),
             },
         }
 
@@ -443,7 +461,7 @@ class AccountQueryFacade:
                 "truth_source": "execution_order_repo",
             }
         all_orders = sorted(
-            order_states_for_scope(self.owner.runtime.execution_repo, self.owner.state_scope),
+            order_states_for_scope(self.owner._execution_read_repo(), self.owner.state_scope),
             key=lambda item: (item.last_update_ts or item.created_at, item.client_order_id),
             reverse=True,
         )
@@ -454,7 +472,7 @@ class AccountQueryFacade:
             "offset": offset,
             "total_available": len(all_orders),
             "has_more": offset + len(orders) < len(all_orders),
-            "truth_source": "execution_repo",
+            "truth_source": self.owner._execution_read_truth_source(),
         }
 
     def order_detail(self, client_order_id: str) -> dict[str, Any]:
@@ -497,7 +515,7 @@ class AccountQueryFacade:
                 fills=fills,
                 exchange_snapshot=self.owner.runtime.account_service.latest_snapshot(),
             ),
-            "truth_source": "execution_repo",
+            "truth_source": self.owner._execution_read_truth_source(),
         }
 
     def fills_recent(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
@@ -532,7 +550,7 @@ class AccountQueryFacade:
             "offset": offset,
             "total_available": total_available,
             "has_more": offset + len(fills) < total_available,
-            "truth_source": "execution_repo",
+            "truth_source": self.owner._execution_read_truth_source(),
         }
 
     def fill_detail(self, fill_id: str) -> dict[str, Any]:
@@ -553,7 +571,7 @@ class AccountQueryFacade:
         return {
             "fill": self.owner._execution_record_payload(fill),
             "fill_outcome": None if outcome is None else outcome.model_dump(mode="json"),
-            "truth_source": "execution_repo",
+            "truth_source": self.owner._execution_read_truth_source(),
         }
 
     def execution_latest(self) -> dict[str, Any]:
@@ -609,8 +627,16 @@ class AccountQueryFacade:
             "recent_failures": [] if dashboard_summary_only else self.owner.execution_errors()["errors"],
             "recovery": recovery,
             "truth_source": {
-                "orders": "execution_order_repo" if self.owner._phase5_control_plane_enabled() else "execution_repo",
-                "fills": "execution_fill_repo_v2" if self.owner._phase5_control_plane_enabled() else "execution_repo",
+                "orders": (
+                    "execution_order_repo"
+                    if self.owner._phase5_control_plane_enabled()
+                    else self.owner._execution_read_truth_source()
+                ),
+                "fills": (
+                    "execution_fill_repo_v2"
+                    if self.owner._phase5_control_plane_enabled()
+                    else self.owner._execution_read_truth_source()
+                ),
                 "balances": "ledger_accounts" if self.owner._phase5_control_plane_enabled() else "portfolio_snapshot",
             },
         }
@@ -714,7 +740,7 @@ class AccountQueryFacade:
             "truth_source": (
                 "execution_order_repo"
                 if self.owner._phase5_control_plane_enabled()
-                else "execution_repo_order_states"
+                else self.owner._execution_read_truth_source()
             ),
         }
 

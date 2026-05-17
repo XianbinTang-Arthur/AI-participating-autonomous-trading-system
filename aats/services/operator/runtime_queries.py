@@ -1288,10 +1288,21 @@ class RuntimeQueryFacade:
             },
             "control_plane": {
                 "phase5_enabled": control_plane_consistency["phase5_enabled"],
-                "order_truth_source": "execution_order_repo" if control_plane_consistency["phase5_enabled"] else "execution_repo",
-                "fill_truth_source": "execution_fill_repo_v2" if control_plane_consistency["phase5_enabled"] else "execution_repo",
+                "order_truth_source": (
+                    "execution_order_repo"
+                    if control_plane_consistency["phase5_enabled"]
+                    else self.owner._execution_read_truth_source()
+                ),
+                "fill_truth_source": (
+                    "execution_fill_repo_v2"
+                    if control_plane_consistency["phase5_enabled"]
+                    else self.owner._execution_read_truth_source()
+                ),
                 "balance_truth_source": "ledger_accounts" if control_plane_consistency["phase5_enabled"] else "portfolio_snapshot",
-                "legacy_layer_authoritative": not control_plane_consistency["phase5_enabled"],
+                "legacy_layer_authoritative": (
+                    not control_plane_consistency["phase5_enabled"]
+                    and self.owner._execution_read_truth_source() == "execution_repo"
+                ),
                 "auth_hardened": self.owner.runtime.settings.operator_control_plane_execution_ledger_enabled,
                 "financial_convergence_mode_enabled": control_plane_consistency["financial_convergence_mode_enabled"],
                 "truth_consistency_status": control_plane_consistency["status"],
