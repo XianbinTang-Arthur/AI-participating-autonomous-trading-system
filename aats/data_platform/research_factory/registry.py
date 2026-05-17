@@ -19,6 +19,11 @@ from aats.data_platform.research_factory.metrics.gates import (
     CandidateGateResult,
 )
 from aats.data_platform.research_factory.metrics.snapshots import metric_snapshot_to_dict
+from aats.data_platform.research_factory.observations import (
+    ObservationGateResult,
+    ObservationResult,
+    ReviewOutcome,
+)
 from aats.data_platform.research_factory.specs import MetricsSnapshot
 
 RESEARCH_MEMORY_SCHEMA_VERSION = "research_memory_entry_v1"
@@ -32,6 +37,9 @@ ALLOWED_RESEARCH_MEMORY_STATUSES = frozenset(
         "failed",
         "rejected",
         "duplicate",
+        "observation_keep_reviewing",
+        "observation_rejected",
+        "observation_eligible_for_preapply",
     }
 )
 _SECRET_MARKERS = (
@@ -103,10 +111,16 @@ class ResearchMemoryEntry:
     dataset_fingerprint: str | None = None
     candidate_id: str | None = None
     candidate_type: str | None = None
+    recommendation_id: str | None = None
+    observation_id: str | None = None
+    review_decision: str | None = None
     factor_expression: str | None = None
     benchmark_segment: str | None = None
     metric_snapshot: Mapping[str, Any] = field(default_factory=dict)
     gate_result: Mapping[str, Any] | None = None
+    observation_metrics: Mapping[str, Any] = field(default_factory=dict)
+    observation_gate_result: Mapping[str, Any] | None = None
+    observation_failure_reasons: Sequence[str] = field(default_factory=tuple)
     failure_reason: str | None = None
     artifact_refs: Mapping[str, str] = field(default_factory=dict)
     similarity_to_existing: Sequence[ResearchMemorySimilarity] = field(default_factory=tuple)
@@ -140,6 +154,16 @@ class ResearchMemoryEntry:
                 "candidate_type",
                 _require_non_empty_text(self.candidate_type, "candidate_type"),
             )
+        if self.recommendation_id is not None:
+            _require_safe_identifier(self.recommendation_id, "recommendation_id")
+        if self.observation_id is not None:
+            _require_safe_identifier(self.observation_id, "observation_id")
+        if self.review_decision is not None:
+            object.__setattr__(
+                self,
+                "review_decision",
+                _require_non_empty_text(self.review_decision, "review_decision"),
+            )
         if self.factor_expression is not None:
             object.__setattr__(
                 self,
@@ -155,6 +179,22 @@ class ResearchMemoryEntry:
         object.__setattr__(self, "metric_snapshot", _normalize_json_mapping(self.metric_snapshot, "metric_snapshot"))
         if self.gate_result is not None:
             object.__setattr__(self, "gate_result", _normalize_json_mapping(self.gate_result, "gate_result"))
+        object.__setattr__(
+            self,
+            "observation_metrics",
+            _normalize_json_mapping(self.observation_metrics, "observation_metrics"),
+        )
+        if self.observation_gate_result is not None:
+            object.__setattr__(
+                self,
+                "observation_gate_result",
+                _normalize_json_mapping(self.observation_gate_result, "observation_gate_result"),
+            )
+        object.__setattr__(
+            self,
+            "observation_failure_reasons",
+            _normalize_text_sequence(self.observation_failure_reasons, "observation_failure_reasons"),
+        )
         if self.failure_reason is not None:
             object.__setattr__(
                 self,
@@ -184,10 +224,16 @@ class ResearchMemoryEntry:
             dataset_fingerprint=payload.get("dataset_fingerprint"),
             candidate_id=payload.get("candidate_id"),
             candidate_type=payload.get("candidate_type"),
+            recommendation_id=payload.get("recommendation_id"),
+            observation_id=payload.get("observation_id"),
+            review_decision=payload.get("review_decision"),
             factor_expression=payload.get("factor_expression"),
             benchmark_segment=payload.get("benchmark_segment"),
             metric_snapshot=payload.get("metric_snapshot", {}),
             gate_result=payload.get("gate_result"),
+            observation_metrics=payload.get("observation_metrics", {}),
+            observation_gate_result=payload.get("observation_gate_result"),
+            observation_failure_reasons=payload.get("observation_failure_reasons", ()),
             failure_reason=payload.get("failure_reason"),
             artifact_refs=payload.get("artifact_refs", {}),
             similarity_to_existing=payload.get("similarity_to_existing", ()),
@@ -346,6 +392,71 @@ def build_research_memory_entry(
     )
 
 
+def build_observation_memory_entry(
+    *,
+    candidate: CandidateArtifact,
+    observation_result: ObservationResult,
+    observation_gate: ObservationGateResult,
+    review_outcome: ReviewOutcome,
+    created_by: str,
+    created_at: datetime,
+    artifact_refs: Mapping[str, str] | None = None,
+) -> ResearchMemoryEntry:
+    """Build a registry entry from a completed observation review outcome."""
+    if not isinstance(candidate, CandidateArtifact):
+        raise ValueError("candidate must be a CandidateArtifact")
+    if not isinstance(observation_result, ObservationResult):
+        raise ValueError("observation_result must be an ObservationResult")
+    if not isinstance(observation_gate, ObservationGateResult):
+        raise ValueError("observation_gate must be an ObservationGateResult")
+    if not isinstance(review_outcome, ReviewOutcome):
+        raise ValueError("review_outcome must be a ReviewOutcome")
+    _require_matching_observation_memory_inputs(candidate, observation_result, observation_gate, review_outcome)
+
+    status = _observation_memory_status(review_outcome.decision)
+    failure_reasons = _observation_failure_reasons(
+        review_decision=review_outcome.decision,
+        observation_result=observation_result,
+        observation_gate=observation_gate,
+    )
+    factor_expression = _optional_text(candidate.payload.get("factor_expression"))
+    dataset_fingerprint = _optional_text(candidate.payload.get("dataset_fingerprint"))
+    factor_signature = (
+        factor_signature_from_expression(factor_expression)
+        if factor_expression is not None
+        else None
+    )
+    failure_reason = "; ".join(failure_reasons) if failure_reasons else None
+    entry_id = _build_observation_entry_id(
+        observation_id=observation_result.observation_id,
+        candidate_id=candidate.candidate_id,
+        status=status,
+    )
+    return ResearchMemoryEntry(
+        entry_id=entry_id,
+        experiment_id=candidate.experiment_id,
+        status=status,
+        created_at=created_at,
+        created_by=created_by,
+        factor_signature=factor_signature,
+        dataset_fingerprint=dataset_fingerprint,
+        candidate_id=candidate.candidate_id,
+        candidate_type=candidate.candidate_type,
+        recommendation_id=review_outcome.recommendation_id,
+        observation_id=observation_result.observation_id,
+        review_decision=review_outcome.decision,
+        factor_expression=factor_expression,
+        benchmark_segment=_optional_text(candidate.payload.get("benchmark_segment")),
+        metric_snapshot=metric_snapshot_to_dict(candidate.metrics),
+        gate_result=_gate_result_to_dict(candidate.gate),
+        observation_metrics=_observation_metrics_to_dict(observation_result),
+        observation_gate_result=_observation_gate_result_to_dict(observation_gate),
+        observation_failure_reasons=failure_reasons,
+        failure_reason=failure_reason,
+        artifact_refs=artifact_refs or {},
+    )
+
+
 def _find_similar(
     target: ResearchMemoryEntry,
     entries: Sequence[ResearchMemoryEntry],
@@ -408,6 +519,102 @@ def _gate_result_to_dict(gate: CandidateGateResult) -> dict[str, Any]:
     }
 
 
+def _observation_metrics_to_dict(result: ObservationResult) -> dict[str, Any]:
+    if not isinstance(result, ObservationResult):
+        raise ValueError("observation_result must be an ObservationResult")
+    return {
+        "mode": result.mode,
+        "observation_start": result.observation_start.isoformat(),
+        "observation_end": result.observation_end.isoformat(),
+        "observed_bars": result.observed_bars,
+        "observed_events": result.observed_events,
+        "signal_count": result.signal_count,
+        "paper_intent_count": result.paper_intent_count,
+        "fillable_ratio": result.fillable_ratio,
+        "partial_fill_ratio": result.partial_fill_ratio,
+        "fee_bps_mean": result.fee_bps_mean,
+        "slippage_bps_mean": result.slippage_bps_mean,
+        "funding_bps_mean": result.funding_bps_mean,
+        "cost_adjusted_edge_bps_mean": result.cost_adjusted_edge_bps_mean,
+        "drawdown": result.drawdown,
+        "metric_drift": result.metric_drift,
+        "abort_triggered": result.abort_triggered,
+        "abort_reason": result.abort_reason,
+    }
+
+
+def _observation_gate_result_to_dict(gate: ObservationGateResult) -> dict[str, Any]:
+    if not isinstance(gate, ObservationGateResult):
+        raise ValueError("observation_gate must be an ObservationGateResult")
+    return {
+        "passed": gate.passed,
+        "failures": list(gate.failures),
+        "thresholds": _to_jsonable(gate.thresholds),
+        "critical_metrics": list(gate.critical_metrics),
+        "evaluated_at": gate.evaluated_at.isoformat(),
+    }
+
+
+def _require_matching_observation_memory_inputs(
+    candidate: CandidateArtifact,
+    observation_result: ObservationResult,
+    observation_gate: ObservationGateResult,
+    review_outcome: ReviewOutcome,
+) -> None:
+    if observation_result.candidate_id != candidate.candidate_id:
+        raise ValueError("observation_result candidate_id must match candidate")
+    if observation_result.experiment_id != candidate.experiment_id:
+        raise ValueError("observation_result experiment_id must match candidate")
+    if observation_gate.observation_id != observation_result.observation_id:
+        raise ValueError("observation_gate observation_id must match observation_result")
+    if observation_gate.recommendation_id != observation_result.recommendation_id:
+        raise ValueError("observation_gate recommendation_id must match observation_result")
+    if observation_gate.candidate_id != candidate.candidate_id:
+        raise ValueError("observation_gate candidate_id must match candidate")
+    if observation_gate.experiment_id != candidate.experiment_id:
+        raise ValueError("observation_gate experiment_id must match candidate")
+    if review_outcome.observation_id != observation_result.observation_id:
+        raise ValueError("review_outcome observation_id must match observation_result")
+    if review_outcome.recommendation_id != observation_result.recommendation_id:
+        raise ValueError("review_outcome recommendation_id must match observation_result")
+    if review_outcome.candidate_id != candidate.candidate_id:
+        raise ValueError("review_outcome candidate_id must match candidate")
+    if review_outcome.experiment_id != candidate.experiment_id:
+        raise ValueError("review_outcome experiment_id must match candidate")
+    if (
+        review_outcome.observation_gate_passed is not None
+        and review_outcome.observation_gate_passed != observation_gate.passed
+    ):
+        raise ValueError("review_outcome observation_gate_passed must match observation_gate")
+
+
+def _observation_memory_status(review_decision: str) -> str:
+    if review_decision == "eligible_for_preapply":
+        return "observation_eligible_for_preapply"
+    if review_decision == "keep_reviewing":
+        return "observation_keep_reviewing"
+    if review_decision == "reject":
+        return "observation_rejected"
+    raise ValueError("review_decision must be keep_reviewing, reject, or eligible_for_preapply")
+
+
+def _observation_failure_reasons(
+    *,
+    review_decision: str,
+    observation_result: ObservationResult,
+    observation_gate: ObservationGateResult,
+) -> tuple[str, ...]:
+    if review_decision == "eligible_for_preapply" and observation_gate.passed:
+        return ()
+    reasons: list[str] = [f"review_decision={review_decision}"]
+    if observation_result.abort_triggered:
+        reason = observation_result.abort_reason or "abort_triggered"
+        reasons.append(f"observation_abort: {reason}")
+    if not observation_gate.passed:
+        reasons.extend(f"observation_gate: {failure}" for failure in observation_gate.failures)
+    return tuple(reasons)
+
+
 def _build_entry_id(
     *,
     experiment_id: str,
@@ -424,6 +631,15 @@ def _build_entry_id(
         "status": status,
     }
     return f"mem_{_stable_hash(payload)[:20]}"
+
+
+def _build_observation_entry_id(*, observation_id: str, candidate_id: str, status: str) -> str:
+    payload = {
+        "candidate_id": candidate_id,
+        "observation_id": observation_id,
+        "status": status,
+    }
+    return f"obs_mem_{_stable_hash(payload)[:20]}"
 
 
 def _write_registry_atomic(path: Path, entries: Sequence[ResearchMemoryEntry]) -> None:
@@ -470,6 +686,12 @@ def _normalize_json_mapping(value: Mapping[str, Any], field_name: str) -> dict[s
     if not isinstance(normalized, dict):
         raise ValueError(f"{field_name} must be a mapping")
     return normalized
+
+
+def _normalize_text_sequence(values: Sequence[str], field_name: str) -> tuple[str, ...]:
+    if isinstance(values, str | bytes | bytearray) or not isinstance(values, Sequence):
+        raise ValueError(f"{field_name} must be a sequence")
+    return tuple(_redact_sensitive_text(_require_non_empty_text(str(value), field_name)) for value in values)
 
 
 def _to_jsonable(value: Any) -> Any:
