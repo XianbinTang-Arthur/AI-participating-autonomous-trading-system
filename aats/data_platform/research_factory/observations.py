@@ -42,6 +42,52 @@ DEFAULT_OBSERVATION_CRITICAL_METRICS = (
     "drawdown",
     "metric_drift",
 )
+OBSERVATION_THRESHOLD_PROFILE_VERSION = "observation_threshold_profile_v1"
+ALLOWED_OBSERVATION_THRESHOLD_PROFILES = frozenset(
+    {"smoke", "shadow_review", "paper_review", "preapply"}
+)
+_OBSERVATION_THRESHOLD_PROFILE_CONFIGS: Mapping[str, Mapping[str, Any]] = {
+    "smoke": {
+        "min_observed_bars": 4,
+        "min_observed_events": 1,
+        "min_fillable_ratio": 0.0,
+        "max_partial_fill_ratio": 1.0,
+        "min_cost_adjusted_edge_bps_mean": -100.0,
+        "max_drawdown": 1.0,
+        "max_metric_drift": 1.0,
+        "require_no_abort": True,
+    },
+    "shadow_review": {
+        "min_observed_bars": 48,
+        "min_observed_events": 10,
+        "min_fillable_ratio": 0.75,
+        "max_partial_fill_ratio": 0.25,
+        "min_cost_adjusted_edge_bps_mean": 0.0,
+        "max_drawdown": 0.2,
+        "max_metric_drift": 0.5,
+        "require_no_abort": True,
+    },
+    "paper_review": {
+        "min_observed_bars": 96,
+        "min_observed_events": 20,
+        "min_fillable_ratio": 0.85,
+        "max_partial_fill_ratio": 0.15,
+        "min_cost_adjusted_edge_bps_mean": 0.2,
+        "max_drawdown": 0.15,
+        "max_metric_drift": 0.35,
+        "require_no_abort": True,
+    },
+    "preapply": {
+        "min_observed_bars": 192,
+        "min_observed_events": 40,
+        "min_fillable_ratio": 0.9,
+        "max_partial_fill_ratio": 0.1,
+        "min_cost_adjusted_edge_bps_mean": 0.5,
+        "max_drawdown": 0.1,
+        "max_metric_drift": 0.25,
+        "require_no_abort": True,
+    },
+}
 
 RUNTIME_PROMOTION_TERMS = (
     "active_parameter",
@@ -258,6 +304,31 @@ class ObservationThresholds:
         )
         if not isinstance(self.require_no_abort, bool):
             raise ValueError("require_no_abort must be a bool")
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationThresholdProfile:
+    """Named observation gate threshold profile."""
+
+    name: str
+    thresholds: ObservationThresholds
+    profile_version: str = OBSERVATION_THRESHOLD_PROFILE_VERSION
+
+    def __post_init__(self) -> None:
+        name = _require_observation_threshold_profile(self.name)
+        if not isinstance(self.thresholds, ObservationThresholds):
+            raise ValueError("thresholds must be ObservationThresholds")
+        if self.profile_version != OBSERVATION_THRESHOLD_PROFILE_VERSION:
+            raise ValueError(f"profile_version must be {OBSERVATION_THRESHOLD_PROFILE_VERSION!r}")
+        object.__setattr__(self, "name", name)
+
+    @classmethod
+    def from_name(cls, name: str) -> ObservationThresholdProfile:
+        """Build the configured threshold profile for a named observation stage."""
+        return cls(
+            name=name,
+            thresholds=observation_thresholds_for_profile(name),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -650,6 +721,7 @@ def evaluate_observation_gate(
     run: ObservationRun,
     thresholds: ObservationThresholds | None = None,
     *,
+    threshold_profile: str | ObservationThresholdProfile | None = None,
     evaluated_at: datetime | None = None,
 ) -> ObservationGateResult:
     """Evaluate whether an observation result is strong enough for pre-apply review."""
@@ -660,6 +732,13 @@ def evaluate_observation_gate(
     if run.status not in {"running", "completed"}:
         raise ValueError("observation gate requires a running or completed observation")
     _require_matching_run(result, run)
+    profile_name: str | None = None
+    if threshold_profile is not None:
+        if thresholds is not None:
+            raise ValueError("thresholds and threshold_profile are mutually exclusive")
+        profile = _resolve_observation_threshold_profile(threshold_profile)
+        profile_name = profile.name
+        thresholds = profile.thresholds
     thresholds = thresholds or ObservationThresholds()
     if not isinstance(thresholds, ObservationThresholds):
         raise ValueError("thresholds must be ObservationThresholds")
@@ -667,6 +746,7 @@ def evaluate_observation_gate(
     min_observed_bars = thresholds.min_observed_bars or run.min_observation_bars
     min_observed_events = thresholds.min_observed_events or run.min_observation_events
     resolved_thresholds = {
+        "threshold_profile": profile_name or "custom",
         "min_observed_bars": min_observed_bars,
         "min_observed_events": min_observed_events,
         "min_fillable_ratio": thresholds.min_fillable_ratio,
@@ -800,6 +880,30 @@ def _require_matching_outcome_gate(outcome: ReviewOutcome, gate: ObservationGate
         raise ValueError("observation gate candidate_id must match review outcome")
     if gate.experiment_id != outcome.experiment_id:
         raise ValueError("observation gate experiment_id must match review outcome")
+
+
+def observation_thresholds_for_profile(name: str) -> ObservationThresholds:
+    """Return the configured thresholds for a named observation gate profile."""
+    profile_name = _require_observation_threshold_profile(name)
+    return ObservationThresholds(**_OBSERVATION_THRESHOLD_PROFILE_CONFIGS[profile_name])
+
+
+def _resolve_observation_threshold_profile(
+    value: str | ObservationThresholdProfile,
+) -> ObservationThresholdProfile:
+    if isinstance(value, ObservationThresholdProfile):
+        return value
+    if isinstance(value, str):
+        return ObservationThresholdProfile.from_name(value)
+    raise ValueError("threshold_profile must be a profile name or ObservationThresholdProfile")
+
+
+def _require_observation_threshold_profile(value: Any) -> str:
+    name = _require_non_empty_text(value, "threshold_profile").strip().lower()
+    if name not in ALLOWED_OBSERVATION_THRESHOLD_PROFILES:
+        allowed = ", ".join(sorted(ALLOWED_OBSERVATION_THRESHOLD_PROFILES))
+        raise ValueError(f"threshold_profile must be one of: {allowed}")
+    return name
 
 
 def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:

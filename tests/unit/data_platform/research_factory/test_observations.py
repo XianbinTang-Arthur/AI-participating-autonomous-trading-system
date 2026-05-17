@@ -14,10 +14,12 @@ from aats.data_platform.research_factory.metrics.gates import (
 from aats.data_platform.research_factory.observations import (
     ObservationRecorder,
     ObservationResult,
+    ObservationThresholdProfile,
     ObservationThresholds,
     ReviewOutcome,
     build_review_outcome,
     evaluate_observation_gate,
+    observation_thresholds_for_profile,
 )
 from aats.data_platform.research_factory.recommendations import build_research_recommendation
 from aats.data_platform.research_factory.specs import MetricsSnapshot
@@ -337,6 +339,68 @@ def test_record_review_outcome_requires_gate_result(workspace_tmp_path: Path) ->
 def test_observation_thresholds_reject_nonfinite_values() -> None:
     with pytest.raises(ValueError, match="must be finite"):
         ObservationThresholds(min_cost_adjusted_edge_bps_mean=float("inf"))
+
+
+def test_observation_threshold_profiles_are_stage_specific() -> None:
+    smoke = observation_thresholds_for_profile("smoke")
+    shadow = observation_thresholds_for_profile("shadow_review")
+    paper = observation_thresholds_for_profile("paper_review")
+    preapply = observation_thresholds_for_profile("preapply")
+
+    assert smoke.min_observed_bars < shadow.min_observed_bars < preapply.min_observed_bars
+    assert shadow.min_observed_events < paper.min_observed_events < preapply.min_observed_events
+    assert shadow.min_fillable_ratio < paper.min_fillable_ratio < preapply.min_fillable_ratio
+    assert smoke.max_partial_fill_ratio > shadow.max_partial_fill_ratio > preapply.max_partial_fill_ratio
+    assert paper.min_cost_adjusted_edge_bps_mean > shadow.min_cost_adjusted_edge_bps_mean
+
+
+def test_observation_gate_uses_named_threshold_profile(workspace_tmp_path: Path) -> None:
+    recorder = ObservationRecorder(observations_root(workspace_tmp_path), clock=lambda: dt(10))
+    planned = recorder.plan(recommendation())
+    running = recorder.start(planned.observation_id, started_at=dt(10, 1))
+    result = observation_result(review_decision="keep_reviewing")
+
+    shadow_gate = evaluate_observation_gate(
+        result,
+        running,
+        threshold_profile="shadow_review",
+        evaluated_at=dt(12, 1),
+    )
+    paper_gate = evaluate_observation_gate(
+        result,
+        running,
+        threshold_profile=ObservationThresholdProfile.from_name("paper_review"),
+        evaluated_at=dt(12, 1),
+    )
+
+    assert shadow_gate.passed is True
+    assert shadow_gate.thresholds["threshold_profile"] == "shadow_review"
+    assert shadow_gate.thresholds["min_observed_bars"] == 48
+    assert paper_gate.passed is False
+    assert paper_gate.thresholds["threshold_profile"] == "paper_review"
+    assert paper_gate.thresholds["min_observed_events"] == 20
+    assert paper_gate.failures == ("observed_events=12 < 20",)
+
+
+def test_observation_gate_rejects_invalid_or_ambiguous_threshold_profile(
+    workspace_tmp_path: Path,
+) -> None:
+    recorder = ObservationRecorder(observations_root(workspace_tmp_path), clock=lambda: dt(10))
+    planned = recorder.plan(recommendation())
+    running = recorder.start(planned.observation_id, started_at=dt(10, 1))
+    result = observation_result(review_decision="keep_reviewing")
+
+    with pytest.raises(ValueError, match="threshold_profile must be one of"):
+        observation_thresholds_for_profile("trial")
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        evaluate_observation_gate(
+            result,
+            running,
+            thresholds=ObservationThresholds(),
+            threshold_profile="shadow_review",
+            evaluated_at=dt(12, 1),
+        )
 
 
 def test_observation_recorder_rejects_result_before_start(workspace_tmp_path: Path) -> None:
