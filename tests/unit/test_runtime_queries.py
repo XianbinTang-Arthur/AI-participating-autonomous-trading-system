@@ -213,8 +213,37 @@ class _DashboardStateSnapshot:
         }
 
 
+class _DashboardRebaselineStateSnapshot:
+    recovery_state = "resume_blocked"
+    safe_to_trade = False
+    resume_eligible = False
+    review_required = False
+    halt_required = True
+    bundle_recovery_required = False
+    only_reduce_required = False
+    resume_blocked_reasons_json = [
+        "reconciliation_halt_required",
+        "operator_rebaseline_required",
+    ]
+
+    def model_dump(self, *, mode: str = "json") -> dict:
+        return {
+            "snapshot_id": "snapshot_rebaseline",
+            "details_json": {
+                "reconciliation_severity": "HARD_MISMATCH",
+                "finding_summary": {"halt_required_count": 2},
+            },
+        }
+
+
 class _DashboardRecoveryOwner:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        latest_state_snapshot=None,
+        operator_rebaseline_supported: bool = False,
+    ) -> None:
+        latest_state_snapshot = latest_state_snapshot or _DashboardStateSnapshot()
         self.state_scope = SimpleNamespace(
             product_type="derivatives",
             margin_mode="cross",
@@ -222,11 +251,14 @@ class _DashboardRecoveryOwner:
         )
         self.runtime = SimpleNamespace(
             reconciliation_repo=SimpleNamespace(
-                latest_state_snapshot_for_scope=lambda *, scope: _DashboardStateSnapshot()
+                latest_state_snapshot_for_scope=lambda *, scope: latest_state_snapshot
             ),
             event_store=SimpleNamespace(),
             recovery_status=_RecoveryStatus(),
             kill_switch=SimpleNamespace(halted=False),
+            recovery_policy=SimpleNamespace(
+                operator_rebaseline_supported=operator_rebaseline_supported,
+            ),
         )
         self.recovery_posture = SimpleNamespace(
             finalize_status=lambda *, latest_reconciliation: (_ for _ in ()).throw(
@@ -450,6 +482,25 @@ class TestRuntimeQueryFacade(unittest.TestCase):
             "deferred_from_dashboard_summary",
         )
         self.assertIn("latest_reconciliation", payload["deferred_sections"])
+
+    def test_dashboard_recovery_summary_derives_rebaseline_from_state_snapshot(self) -> None:
+        owner = _DashboardRecoveryOwner(
+            latest_state_snapshot=_DashboardRebaselineStateSnapshot(),
+            operator_rebaseline_supported=True,
+        )
+        facade = RecoveryQueryFacade(owner)
+
+        payload = facade.recovery_view_dashboard()
+
+        self.assertEqual(payload["recovery_state"], "resume_blocked")
+        self.assertFalse(payload["resume_eligible"])
+        self.assertFalse(payload["safe_to_trade"])
+        self.assertTrue(payload["halt_required"])
+        self.assertTrue(payload["rebaseline_available"])
+        self.assertEqual(
+            payload["resume_blocked_reasons"],
+            ["reconciliation_halt_required", "operator_rebaseline_required"],
+        )
 
     def test_dashboard_mode_synthesizes_readiness_and_defers_full_blockers(self) -> None:
         owner = _DashboardModeOwner()

@@ -90,6 +90,49 @@ class TestBlockerControlSummary(unittest.TestCase):
 
         self.assertTrue(snapshot.safe_to_trade)
 
+    def test_reconciliation_halt_surfaces_rebaseline_action_without_forced_resume(self) -> None:
+        owner = SimpleNamespace(
+            runtime=SimpleNamespace(
+                kill_switch=SimpleNamespace(halted=True),
+                health_service=SimpleNamespace(snapshot=lambda: SimpleNamespace(blockers=[])),
+                ai_service=SimpleNamespace(status=lambda: {}),
+            ),
+            recovery_view_dashboard=lambda: {
+                "safe_to_trade": False,
+                "review_required": False,
+                "resume_eligible": False,
+                "halted": True,
+                "rebaseline_available": True,
+                "resume_blocked_reasons": [
+                    "reconciliation_halt_required",
+                    "operator_rebaseline_required",
+                ],
+            },
+            recovery_view=lambda: (_ for _ in ()).throw(
+                AssertionError("dashboard blocker control must not build full recovery")
+            ),
+            _latest_scoped_reconciliation=lambda: SimpleNamespace(
+                reconciliation_id="recon_halt",
+                severity="HARD_MISMATCH",
+                halt_required=True,
+                review_required=False,
+                observational_only=False,
+                recommended_operator_action="halt_execution_and_investigate_state_divergence",
+            ),
+            system_mode=lambda: {"submit_blocked_reasons": []},
+            ai_runtime=lambda: {},
+        )
+        service = BlockerControlService(owner)
+
+        snapshot = service.snapshot()
+
+        self.assertIsNotNone(snapshot.primary_blocker)
+        self.assertEqual(snapshot.primary_blocker.blocker, "reconciliation_halt_required")
+        action_ids = [item.action_id for item in snapshot.primary_task.actions]
+        self.assertIn("reconcile-now", action_ids)
+        self.assertIn("accept-rebaseline", action_ids)
+        self.assertNotIn("resume-system", action_ids)
+
     def test_execution_blocker_summary_reuses_preloaded_health_snapshot(self) -> None:
         owner = SimpleNamespace(
             runtime=SimpleNamespace(

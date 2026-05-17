@@ -236,6 +236,10 @@ class RecoveryQueryFacade:
                     "recovered_reconciliation_available": True,
                 }
             )
+            payload["rebaseline_available"] = self._dashboard_rebaseline_available(
+                latest_state_snapshot=latest_state_snapshot,
+                fallback=payload.get("rebaseline_available"),
+            )
         kill_switch = getattr(self.owner.runtime, "kill_switch", None)
         halted = bool(getattr(kill_switch, "halted", False))
         payload["halted"] = halted
@@ -256,6 +260,17 @@ class RecoveryQueryFacade:
         for key, value in defaults.items():
             payload.setdefault(key, value)
         return payload
+
+    def _dashboard_rebaseline_available(
+        self,
+        *,
+        latest_state_snapshot: Any,
+        fallback: Any,
+    ) -> bool:
+        recovery_state = str(getattr(latest_state_snapshot, "recovery_state", "") or "")
+        recovery_policy = getattr(self.owner.runtime, "recovery_policy", None)
+        operator_supported = getattr(recovery_policy, "operator_rebaseline_supported", fallback)
+        return bool(operator_supported) and recovery_state in {"review_required", "resume_blocked"}
 
     def _claimed_submit_recovery_gate(self, *, dashboard_summary_only: bool = False) -> dict[str, Any]:
         if dashboard_summary_only:
