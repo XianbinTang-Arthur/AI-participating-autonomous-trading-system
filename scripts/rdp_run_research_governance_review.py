@@ -42,6 +42,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--end", required=True, help="UTC end timestamp or date.")
     parser.add_argument("--research-profile", required=True, help="Required ResearchProfile policy name.")
     parser.add_argument(
+        "--allow-smoke-profile",
+        action="store_true",
+        help="Explicitly allow the smoke ResearchProfile for smoke/test workflows.",
+    )
+    parser.add_argument(
         "--observation-summary",
         type=Path,
         required=True,
@@ -141,6 +146,7 @@ def main(argv: list[str] | None = None) -> int:
                     observation_id=args.observation_id,
                     workflow_root=args.workflow_root,
                     registry_path=args.registry_path,
+                    allow_smoke_profile=args.allow_smoke_profile,
                     timestamp=run_timestamp,
                 ),
                 data_source=GoldReplayDataSource(session),

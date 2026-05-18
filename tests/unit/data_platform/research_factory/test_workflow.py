@@ -208,6 +208,7 @@ def test_governance_workflow_creates_review_pending_chain(workspace_tmp_path: Pa
             ),
             observation_summary_path=observation_summary,
             workflow_id="wf_governance_success",
+            allow_smoke_profile=True,
             timestamp=START,
         ),
         data_source=FakeDataSource(load_result()),
@@ -222,6 +223,14 @@ def test_governance_workflow_creates_review_pending_chain(workspace_tmp_path: Pa
     assert result.observation_gate_passed is True
     assert workflow_summary["next_step"] == "operator_preapply_review"
     assert workflow_summary["runtime_mutation_allowed"] is False
+    assert workflow_summary["artifact_refs"]["candidate_artifact"] == (
+        "experiments/rf_governance_success/candidate_artifact.json"
+    )
+    assert workflow_summary["artifact_refs"]["operator_review_summary"] == (
+        "workflows/wf_governance_success/preapply_review_summary.md"
+    )
+    assert workflow_summary["risk_flags"] == ["execution_evidence_uses_dataset_compatibility"]
+    assert workflow_summary["blocking_failures"] == []
     assert (factory_root / "preapply" / result.package_id / "preapply_evidence_package.json").exists()
     assert (
         factory_root
@@ -229,6 +238,16 @@ def test_governance_workflow_creates_review_pending_chain(workspace_tmp_path: Pa
         / result.preapply_review_id
         / "evidence_reference_integrity_report.json"
     ).exists()
+    assert (factory_root / "workflows" / "wf_governance_success" / "preapply_review_summary.md").exists()
+    checklist = read_json(factory_root / "workflows" / "wf_governance_success" / "operator_review_checklist.json")
+    review_manifest = read_json(
+        factory_root / "preapply_reviews" / result.preapply_review_id / "preapply_review_manifest.json"
+    )
+    assert checklist["runtime_mutation_allowed"] is False
+    assert "does not authorize active parameter changes" in checklist["no_runtime_mutation_statement"]
+    assert review_manifest["output_refs"]["evidence_reference_integrity_report"] == (
+        "evidence_reference_integrity_report.json"
+    )
     assert {entry["status"] for entry in registry_entries} >= {
         "recommendation_ready",
         "observation_eligible_for_preapply",
@@ -256,6 +275,25 @@ def test_governance_workflow_requires_explicit_profile(workspace_tmp_path: Path)
         )
 
 
+def test_governance_workflow_rejects_smoke_profile_without_opt_in(workspace_tmp_path: Path) -> None:
+    root = artifact_root(workspace_tmp_path)
+    execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
+    observation_summary = root.parent / "observation_inputs" / "shadow_summary.json"
+    write_execution_cost_summary(execution_summary)
+    write_observation_summary(observation_summary, experiment_id="rf_governance_smoke_blocked")
+
+    with pytest.raises(ValueError, match="allow_smoke_profile=True"):
+        ResearchGovernanceWorkflowConfig(
+            experiment_config=experiment_config(
+                root,
+                execution_summary,
+                experiment_id="rf_governance_smoke_blocked",
+            ),
+            observation_summary_path=observation_summary,
+            timestamp=START,
+        )
+
+
 def test_governance_workflow_failed_observation_gate_does_not_become_ready(workspace_tmp_path: Path) -> None:
     root = artifact_root(workspace_tmp_path)
     execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
@@ -277,6 +315,7 @@ def test_governance_workflow_failed_observation_gate_does_not_become_ready(works
             ),
             observation_summary_path=observation_summary,
             workflow_id="wf_governance_keep_reviewing",
+            allow_smoke_profile=True,
             timestamp=START,
         ),
         data_source=FakeDataSource(load_result()),

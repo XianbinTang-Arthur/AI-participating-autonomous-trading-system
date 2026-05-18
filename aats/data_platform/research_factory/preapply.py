@@ -356,12 +356,16 @@ class PreApplyReviewRecorder:
         package_ref: str = PREAPPLY_PACKAGE_REF,
         reference_integrity_ref: str | None = None,
         reference_integrity_passed: bool | None = None,
+        reference_integrity_payload: Mapping[str, Any] | None = None,
+        reference_integrity_output_ref: str | None = None,
         review_id: str | None = None,
         notes: Sequence[str] = (),
     ) -> PreApplyReview:
         """Create a pending review for a pre-apply evidence package."""
         if not isinstance(package, PreApplyEvidencePackage):
             raise ValueError("package must be a PreApplyEvidencePackage")
+        if reference_integrity_payload is not None and reference_integrity_ref is None:
+            raise ValueError("reference_integrity_ref is required when writing reference integrity payload")
         review = build_preapply_review(
             package,
             review_id=review_id,
@@ -376,6 +380,18 @@ class PreApplyReviewRecorder:
             raise ValueError(f"preapply review {review.review_id!r} already exists")
         review_dir.mkdir(parents=True)
         _write_json_atomic(review_dir / PREAPPLY_REVIEW_REF, _to_jsonable(review))
+        output_refs = {"preapply_review": PREAPPLY_REVIEW_REF}
+        if reference_integrity_payload is not None:
+            if reference_integrity_output_ref is None:
+                reference_integrity_output_ref = PurePosixPath(
+                    _require_relative_ref(reference_integrity_ref, "reference_integrity_ref")
+                ).name
+            output_ref = _require_plain_output_ref(
+                reference_integrity_output_ref,
+                "reference_integrity_output_ref",
+            )
+            _write_json_atomic(review_dir / output_ref, _to_jsonable(reference_integrity_payload))
+            output_refs["evidence_reference_integrity_report"] = output_ref
         manifest = build_artifact_manifest(
             artifact_id=review.review_id,
             artifact_type="preapply_review",
@@ -392,7 +408,7 @@ class PreApplyReviewRecorder:
                 "reference_integrity_ref": review.reference_integrity_ref,
                 "reference_integrity_passed": review.reference_integrity_passed,
             },
-            output_refs={"preapply_review": PREAPPLY_REVIEW_REF},
+            output_refs=output_refs,
             code_version=self.code_version,
             notes="research-only pre-apply review",
         )
@@ -797,6 +813,13 @@ def _require_relative_ref(value: Any, field_name: str) -> str:
     windows_path = PureWindowsPath(ref)
     if posix_path.is_absolute() or windows_path.is_absolute() or windows_path.drive:
         raise ValueError(f"{field_name} must be a relative artifact ref")
+    return ref
+
+
+def _require_plain_output_ref(value: Any, field_name: str) -> str:
+    ref = _require_relative_ref(value, field_name)
+    if "/" in ref or "\\" in ref or ref in {".", ".."}:
+        raise ValueError(f"{field_name} must be a plain relative filename")
     return ref
 
 

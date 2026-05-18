@@ -600,6 +600,12 @@ def test_preapply_review_recorder_writes_review_and_decision(workspace_tmp_path:
         package,
         reference_integrity_ref="evidence_reference_integrity_report.json",
         reference_integrity_passed=True,
+        reference_integrity_payload={
+            "schema_version": "research_evidence_reference_integrity_v1",
+            "subject_id": package.package_id,
+            "passed": True,
+        },
+        reference_integrity_output_ref="evidence_reference_integrity_report.json",
     )
     decision = build_preapply_review_decision(
         review=review,
@@ -614,16 +620,21 @@ def test_preapply_review_recorder_writes_review_and_decision(workspace_tmp_path:
     review_dir = root / review.review_id
     stored_review = read_json(review_dir / "preapply_review.json")
     stored_decision = read_json(review_dir / "preapply_review_decision.json")
+    stored_integrity = read_json(review_dir / "evidence_reference_integrity_report.json")
     stored_manifest = read_json(review_dir / "preapply_review_manifest.json")
 
     assert manifest["artifact_type"] == "preapply_review"
     assert manifest["status"] == "succeeded"
     assert stored_manifest["output_refs"]["preapply_review"] == "preapply_review.json"
     assert stored_manifest["output_refs"]["preapply_review_decision"] == "preapply_review_decision.json"
+    assert stored_manifest["output_refs"]["evidence_reference_integrity_report"] == (
+        "evidence_reference_integrity_report.json"
+    )
     assert stored_manifest["input_refs"]["reference_integrity_ref"] == "evidence_reference_integrity_report.json"
     assert stored_manifest["input_refs"]["reference_integrity_passed"] is True
     assert stored_review["status"] == "review_pending"
     assert stored_review["reference_integrity_passed"] is True
+    assert stored_integrity["passed"] is True
     assert stored_decision["decision"] == "review_approved_for_manual_apply_design"
     assert stored_decision["runtime_mutation_allowed"] is False
 

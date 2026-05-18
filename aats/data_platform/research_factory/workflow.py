@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -67,6 +68,9 @@ WORKFLOW_CODE_VERSION = "research_factory_governance_workflow_v1"
 WORKFLOW_SUMMARY_REF = "workflow_summary.json"
 WORKFLOW_MANIFEST_REF = "workflow_manifest.json"
 REFERENCE_INTEGRITY_REPORT_REF = "evidence_reference_integrity_report.json"
+OPERATOR_REVIEW_SUMMARY_REF = "preapply_review_summary.md"
+OPERATOR_REVIEW_CHECKLIST_REF = "operator_review_checklist.json"
+OPERATOR_REVIEW_CHECKLIST_SCHEMA_VERSION = "research_operator_review_checklist_v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +84,7 @@ class ResearchGovernanceWorkflowConfig:
     observation_id: str | None = None
     workflow_root: Path | None = None
     registry_path: Path | None = None
+    allow_smoke_profile: bool = False
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
@@ -87,6 +92,10 @@ class ResearchGovernanceWorkflowConfig:
             raise ValueError("experiment_config must be ResearchFactoryExperimentConfig")
         if self.experiment_config.research_profile is None:
             raise ValueError("research governance workflow requires an explicit research_profile")
+        if not isinstance(self.allow_smoke_profile, bool):
+            raise ValueError("allow_smoke_profile must be a bool")
+        if _profile_name(self.experiment_config) == "smoke" and not self.allow_smoke_profile:
+            raise ValueError("smoke research_profile is only allowed when allow_smoke_profile=True")
         _require_timezone_aware_datetime(self.timestamp, "timestamp")
         object.__setattr__(self, "observation_summary_path", Path(self.observation_summary_path))
         if self.workflow_id is not None:
@@ -151,7 +160,7 @@ def run_research_governance_workflow(
     profile_name = _profile_name(config.experiment_config)
     research_factory_root = _research_factory_root(config.experiment_config.artifact_root)
     workflow_root = _workflow_root(config, research_factory_root)
-    workflow_id = config.workflow_id or "wf_failed_research_governance"
+    workflow_id = config.workflow_id or _failed_workflow_id(config)
     workflow_dir: Path | None = None
 
     try:
@@ -265,11 +274,9 @@ def run_research_governance_workflow(
             package_ref=f"preapply/{package.package_id}/preapply_evidence_package.json",
             reference_integrity_ref=f"preapply_reviews/{review_id}/{REFERENCE_INTEGRITY_REPORT_REF}",
             reference_integrity_passed=integrity_report.passed,
+            reference_integrity_payload=_to_jsonable(integrity_report),
+            reference_integrity_output_ref=REFERENCE_INTEGRITY_REPORT_REF,
             notes=("workflow created review-pending evidence only",),
-        )
-        _write_json_atomic(
-            research_factory_root / "preapply_reviews" / review_id / REFERENCE_INTEGRITY_REPORT_REF,
-            _to_jsonable(integrity_report),
         )
 
         registry = ResearchMemoryRegistry(
@@ -299,6 +306,27 @@ def run_research_governance_workflow(
         )
 
         status = _workflow_status(package.status, integrity_report)
+        artifact_refs = _workflow_artifact_refs(
+            workflow_id=workflow_id,
+            experiment_id=experiment_result.experiment_id,
+            observation_id=observation_run.observation_id,
+            package_id=package.package_id,
+            review_id=review.review_id,
+            experiment_dir=experiment_dir,
+        )
+        risk_flags = _workflow_risk_flags(
+            evidence_bundle=evidence_bundle,
+            observation_gate=observation_gate,
+            package=package,
+            integrity_report=integrity_report,
+            experiment_dir=experiment_dir,
+        )
+        blocking_failures = _workflow_blocking_failures(
+            evidence_bundle=evidence_bundle,
+            observation_gate=observation_gate,
+            package=package,
+            integrity_report=integrity_report,
+        )
         summary = {
             "workflow_id": workflow_id,
             "status": status,
@@ -315,14 +343,40 @@ def run_research_governance_workflow(
             "reference_integrity_passed": integrity_report.passed,
             "registry_path": registry.path.as_posix(),
             "next_step": _workflow_next_step(status),
+            "artifact_refs": artifact_refs,
+            "risk_flags": risk_flags,
+            "blocking_failures": blocking_failures,
             "runtime_mutation_allowed": False,
             "operator_approval_required": True,
             "created_at": config.timestamp.isoformat(),
         }
+        operator_checklist = _operator_review_checklist(
+            summary=summary,
+            candidate=candidate,
+            recommendation=recommendation,
+            evidence_bundle=evidence_bundle,
+            observation_gate=observation_gate,
+            package=package,
+            integrity_report=integrity_report,
+            experiment_dir=experiment_dir,
+            timestamp=config.timestamp,
+        )
+        operator_summary = _operator_review_summary(
+            summary=summary,
+            candidate=candidate,
+            recommendation=recommendation,
+            evidence_bundle=evidence_bundle,
+            observation_gate=observation_gate,
+            package=package,
+            integrity_report=integrity_report,
+            operator_checklist=operator_checklist,
+        )
         _write_workflow_artifacts(
             workflow_dir=workflow_dir,
             workflow_id=workflow_id,
             summary=summary,
+            operator_summary=operator_summary,
+            operator_checklist=operator_checklist,
             timestamp=config.timestamp,
         )
         return ResearchGovernanceWorkflowResult(
@@ -395,9 +449,18 @@ def _write_workflow_artifacts(
     workflow_dir: Path,
     workflow_id: str,
     summary: Mapping[str, Any],
+    operator_summary: str | None = None,
+    operator_checklist: Mapping[str, Any] | None = None,
     timestamp: datetime,
 ) -> None:
     _write_json_atomic(workflow_dir / WORKFLOW_SUMMARY_REF, _to_jsonable(summary))
+    output_refs = {"workflow_summary": WORKFLOW_SUMMARY_REF}
+    if operator_summary is not None:
+        _write_text_atomic(workflow_dir / OPERATOR_REVIEW_SUMMARY_REF, operator_summary)
+        output_refs["preapply_review_summary"] = OPERATOR_REVIEW_SUMMARY_REF
+    if operator_checklist is not None:
+        _write_json_atomic(workflow_dir / OPERATOR_REVIEW_CHECKLIST_REF, _to_jsonable(operator_checklist))
+        output_refs["operator_review_checklist"] = OPERATOR_REVIEW_CHECKLIST_REF
     manifest = build_artifact_manifest(
         artifact_id=workflow_id,
         artifact_type="workflow",
@@ -408,7 +471,7 @@ def _write_workflow_artifacts(
             "profile": summary.get("profile"),
             "experiment_id": summary.get("experiment_id"),
         },
-        output_refs={"workflow_summary": WORKFLOW_SUMMARY_REF},
+        output_refs=output_refs,
         code_version=WORKFLOW_CODE_VERSION,
         notes="research-only governance workflow summary",
     )
@@ -520,6 +583,207 @@ def _workflow_next_step(status: str) -> str:
     if status == "preapply_rejected":
         return "archive_preapply_rejection"
     return "inspect_workflow_summary"
+
+
+def _workflow_artifact_refs(
+    *,
+    workflow_id: str,
+    experiment_id: str,
+    observation_id: str,
+    package_id: str,
+    review_id: str,
+    experiment_dir: Path,
+) -> dict[str, str]:
+    refs = {
+        "experiment_manifest": f"experiments/{experiment_id}/experiment_manifest.json",
+        "candidate_artifact": f"experiments/{experiment_id}/candidate_artifact.json",
+        "research_recommendation": f"experiments/{experiment_id}/research_recommendation.json",
+        "metrics_snapshot": f"experiments/{experiment_id}/metrics_snapshot.json",
+        "dataset_quality_report": f"experiments/{experiment_id}/dataset_quality_report.json",
+        "source_integrity_report": f"experiments/{experiment_id}/source_integrity_report.json",
+        "execution_evidence_report": f"experiments/{experiment_id}/execution_evidence_report.json",
+        "evidence_bundle": f"experiments/{experiment_id}/evidence_bundle.json",
+        "observation_run": f"observations/{observation_id}/observation_run.json",
+        "observation_result": f"observations/{observation_id}/observation_result.json",
+        "observation_gate_result": f"observations/{observation_id}/observation_gate_result.json",
+        "review_outcome": f"observations/{observation_id}/review_outcome.json",
+        "preapply_evidence_package": f"preapply/{package_id}/preapply_evidence_package.json",
+        "preapply_review": f"preapply_reviews/{review_id}/preapply_review.json",
+        "reference_integrity_report": f"preapply_reviews/{review_id}/{REFERENCE_INTEGRITY_REPORT_REF}",
+        "workflow_summary": f"workflows/{workflow_id}/{WORKFLOW_SUMMARY_REF}",
+        "operator_review_summary": f"workflows/{workflow_id}/{OPERATOR_REVIEW_SUMMARY_REF}",
+        "operator_review_checklist": f"workflows/{workflow_id}/{OPERATOR_REVIEW_CHECKLIST_REF}",
+    }
+    if (experiment_dir / "novelty_gate_result.json").exists():
+        refs["novelty_gate_result"] = f"experiments/{experiment_id}/novelty_gate_result.json"
+    if (experiment_dir / "factor_proposal.json").exists():
+        refs["factor_proposal"] = f"experiments/{experiment_id}/factor_proposal.json"
+    return refs
+
+
+def _workflow_risk_flags(
+    *,
+    evidence_bundle: EvidenceBundle,
+    observation_gate: Any,
+    package: Any,
+    integrity_report: EvidenceReferenceIntegrityReport,
+    experiment_dir: Path,
+) -> list[str]:
+    flags: list[str] = []
+    if not evidence_bundle.passed:
+        flags.append("evidence_bundle_failed")
+    execution_evidence = evidence_bundle.execution_evidence
+    if execution_evidence is not None and execution_evidence.dataset_fingerprint_compatible:
+        flags.append("execution_evidence_uses_dataset_compatibility")
+    if not observation_gate.passed:
+        flags.append("observation_gate_failed")
+    if package.status != "preapply_ready":
+        flags.append(f"preapply_status_{package.status}")
+    if not integrity_report.passed:
+        flags.append("reference_integrity_failed")
+    novelty_payload = _optional_json_mapping(experiment_dir / "novelty_gate_result.json")
+    novelty_decision = novelty_payload.get("decision") if novelty_payload is not None else None
+    if novelty_decision in {"warn", "retest", "suppress", "duplicate"}:
+        flags.append(f"novelty_{novelty_decision}")
+    return flags
+
+
+def _workflow_blocking_failures(
+    *,
+    evidence_bundle: EvidenceBundle,
+    observation_gate: Any,
+    package: Any,
+    integrity_report: EvidenceReferenceIntegrityReport,
+) -> list[str]:
+    failures: list[str] = []
+    failures.extend(f"evidence_bundle: {failure}" for failure in evidence_bundle.failures)
+    failures.extend(f"observation_gate: {failure}" for failure in observation_gate.failures)
+    failures.extend(f"preapply_package: {failure}" for failure in package.failure_reasons)
+    failures.extend(f"reference_integrity: {failure}" for failure in integrity_report.failures)
+    return failures
+
+
+def _operator_review_checklist(
+    *,
+    summary: Mapping[str, Any],
+    candidate: CandidateArtifact,
+    recommendation: ResearchRecommendation,
+    evidence_bundle: EvidenceBundle,
+    observation_gate: Any,
+    package: Any,
+    integrity_report: EvidenceReferenceIntegrityReport,
+    experiment_dir: Path,
+    timestamp: datetime,
+) -> dict[str, Any]:
+    novelty_payload = _optional_json_mapping(experiment_dir / "novelty_gate_result.json")
+    execution_evidence = evidence_bundle.execution_evidence
+    checklist_items = [
+        {
+            "item": "candidate_gate_passed",
+            "passed": candidate.gate.passed,
+            "details": list(candidate.gate.failures),
+        },
+        {
+            "item": "evidence_bundle_passed",
+            "passed": evidence_bundle.passed,
+            "details": list(evidence_bundle.failures),
+        },
+        {
+            "item": "execution_evidence_passed",
+            "passed": execution_evidence.passed if execution_evidence is not None else False,
+            "details": list(execution_evidence.failures) if execution_evidence is not None else ["missing execution evidence"],
+        },
+        {
+            "item": "observation_gate_passed",
+            "passed": observation_gate.passed,
+            "details": list(observation_gate.failures),
+        },
+        {
+            "item": "preapply_package_ready",
+            "passed": package.status == "preapply_ready",
+            "details": list(package.failure_reasons),
+        },
+        {
+            "item": "reference_integrity_passed",
+            "passed": integrity_report.passed,
+            "details": list(integrity_report.failures),
+        },
+        {
+            "item": "runtime_mutation_not_authorized",
+            "passed": True,
+            "details": ["workflow output is evidence-only and does not authorize active parameter or runtime mutation"],
+        },
+    ]
+    return {
+        "schema_version": OPERATOR_REVIEW_CHECKLIST_SCHEMA_VERSION,
+        "workflow_id": summary["workflow_id"],
+        "status": summary["status"],
+        "profile": summary["profile"],
+        "candidate_id": candidate.candidate_id,
+        "recommendation_id": recommendation.recommendation_id,
+        "package_id": package.package_id,
+        "preapply_review_id": summary["preapply_review_id"],
+        "novelty_gate_decision": novelty_payload.get("decision") if novelty_payload is not None else None,
+        "artifact_refs": summary["artifact_refs"],
+        "risk_flags": summary["risk_flags"],
+        "blocking_failures": summary["blocking_failures"],
+        "checklist_items": checklist_items,
+        "recommended_next_step": summary["next_step"],
+        "runtime_mutation_allowed": False,
+        "operator_approval_required": True,
+        "no_runtime_mutation_statement": (
+            "This research governance workflow does not authorize active parameter changes, "
+            "runtime config mutation, live orders, or OKX writes."
+        ),
+        "created_at": timestamp.isoformat(),
+    }
+
+
+def _operator_review_summary(
+    *,
+    summary: Mapping[str, Any],
+    candidate: CandidateArtifact,
+    recommendation: ResearchRecommendation,
+    evidence_bundle: EvidenceBundle,
+    observation_gate: Any,
+    package: Any,
+    integrity_report: EvidenceReferenceIntegrityReport,
+    operator_checklist: Mapping[str, Any],
+) -> str:
+    factor_expression = candidate.payload.get("factor_expression", "n/a")
+    dataset_fingerprint = candidate.payload.get("dataset_fingerprint", "n/a")
+    novelty_decision = operator_checklist.get("novelty_gate_decision") or "not_recorded"
+    risk_flags = ", ".join(summary["risk_flags"]) if summary["risk_flags"] else "none"
+    blocking_failures = summary["blocking_failures"]
+    failure_text = "\n".join(f"- {failure}" for failure in blocking_failures) if blocking_failures else "- none"
+    return (
+        f"# Research Factory Pre-Apply Review Summary\n\n"
+        f"- Workflow: `{summary['workflow_id']}`\n"
+        f"- Status: `{summary['status']}`\n"
+        f"- Profile: `{summary['profile']}`\n"
+        f"- Candidate: `{candidate.candidate_id}`\n"
+        f"- Recommendation: `{recommendation.recommendation_id}`\n"
+        f"- PreApply package: `{package.package_id}`\n"
+        f"- PreApply review: `{summary['preapply_review_id']}`\n"
+        f"- Factor expression: `{factor_expression}`\n"
+        f"- Dataset fingerprint: `{dataset_fingerprint}`\n\n"
+        f"## Gate Status\n\n"
+        f"- Candidate gate passed: `{candidate.gate.passed}`\n"
+        f"- Evidence bundle passed: `{evidence_bundle.passed}`\n"
+        f"- Observation gate passed: `{observation_gate.passed}`\n"
+        f"- PreApply package status: `{package.status}`\n"
+        f"- Reference integrity passed: `{integrity_report.passed}`\n"
+        f"- Novelty gate decision: `{novelty_decision}`\n\n"
+        f"## Review Controls\n\n"
+        f"- Recommended next step: `{summary['next_step']}`\n"
+        f"- Risk flags: `{risk_flags}`\n"
+        f"- Runtime mutation allowed: `False`\n"
+        f"- Operator approval required: `True`\n"
+        f"- No runtime mutation authorized: this summary does not authorize active parameter changes, "
+        f"runtime config mutation, live orders, or OKX writes.\n\n"
+        f"## Blocking Failures\n\n"
+        f"{failure_text}\n"
+    )
 
 
 def _load_candidate(path: Path) -> CandidateArtifact:
@@ -696,6 +960,21 @@ def _profile_name(config: ResearchFactoryExperimentConfig) -> str:
     return _research_profile(config).name
 
 
+def _failed_workflow_id(config: ResearchGovernanceWorkflowConfig) -> str:
+    timestamp = config.timestamp.strftime("%Y%m%dT%H%M%SZ")
+    seed = "|".join(
+        (
+            config.experiment_config.experiment_id or "",
+            config.experiment_config.symbol,
+            config.experiment_config.timeframe,
+            str(config.observation_summary_path),
+            timestamp,
+        )
+    )
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8]
+    return f"wf_failed_{timestamp}_{digest}"
+
+
 def _workflow_root(config: ResearchGovernanceWorkflowConfig, research_factory_root: Path) -> Path:
     if config.workflow_root is not None:
         return _require_research_artifact_directory(config.workflow_root)
@@ -726,6 +1005,12 @@ def _load_json_mapping(path: Path, field_name: str) -> Mapping[str, Any]:
     if not isinstance(payload, Mapping):
         raise ValueError(f"{field_name} must be a JSON object")
     return payload
+
+
+def _optional_json_mapping(path: Path) -> Mapping[str, Any] | None:
+    if not path.exists() or not path.is_file():
+        return None
+    return _load_json_mapping(path, path.name)
 
 
 def _require_mapping(value: Any, field_name: str) -> Mapping[str, Any]:
@@ -811,6 +1096,30 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
         ) as handle:
             temp_path = handle.name
             handle.write(rendered)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            delete=False,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        ) as handle:
+            temp_path = handle.name
+            handle.write(text)
+            if not text.endswith("\n"):
+                handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, path)
