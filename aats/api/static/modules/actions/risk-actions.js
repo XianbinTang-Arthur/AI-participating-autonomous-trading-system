@@ -9,6 +9,7 @@ import { localizeError } from "../terms.js";
 // refresh + baseline import + auto-resume. The command bridge allows 90s and
 // field runs have been ~35-40s, so the 30s default request timeout is too low.
 export const REBASELINE_REQUEST_TIMEOUT_MS = 120_000;
+export const RESUME_REQUEST_TIMEOUT_MS = 120_000;
 
 export function createRiskActionHandlers({
   activeExitExecutionHistoryState,
@@ -107,6 +108,7 @@ export function createRiskActionHandlers({
     await runAction("/system/resume", { reason: "ui_manual_resume" }, "已提交恢复自动运行请求。", {
       target,
       pendingLabel: "正在恢复自动运行…",
+      requestOptions: { timeout: RESUME_REQUEST_TIMEOUT_MS },
     });
   }
 
@@ -467,6 +469,12 @@ export function createRiskActionHandlers({
     if (confirmMessage && !window.confirm(confirmMessage)) return;
     const blockerControl = state.data.blockerControl || {};
     const reason = defaultBlockerActionReason(actionId);
+    const requestOptions = {};
+    if (actionId === "accept-rebaseline") {
+      requestOptions.timeout = REBASELINE_REQUEST_TIMEOUT_MS;
+    } else if (actionId === "resume-system") {
+      requestOptions.timeout = RESUME_REQUEST_TIMEOUT_MS;
+    }
     await runAction(
       `/system/blocker-actions/${encodeURIComponent(actionId)}`,
       {
@@ -478,7 +486,7 @@ export function createRiskActionHandlers({
       {
         target,
         pendingLabel: blockerActionPendingLabel(actionId),
-        requestOptions: actionId === "accept-rebaseline" ? { timeout: REBASELINE_REQUEST_TIMEOUT_MS } : {},
+        requestOptions,
       },
     );
   }

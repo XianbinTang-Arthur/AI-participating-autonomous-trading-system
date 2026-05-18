@@ -80,10 +80,11 @@ try {
         self.assertEqual(payload["name"], "AbortError")
         self.assertEqual(payload["message"], "请求已取消。")
 
-    def test_rebaseline_actions_use_long_request_timeout(self) -> None:
+    def test_rebaseline_and_resume_actions_use_long_request_timeout(self) -> None:
         script = r"""
 import {
   REBASELINE_REQUEST_TIMEOUT_MS,
+  RESUME_REQUEST_TIMEOUT_MS,
   createRiskActionHandlers,
 } from './aats/api/static/modules/actions/risk-actions.js';
 
@@ -122,21 +123,33 @@ const handlers = createRiskActionHandlers({
 
 await handlers['trigger-rebaseline']('', { dataset: {} });
 await handlers['trigger-blocker-action']('accept-rebaseline::operator_rebaseline_required', { dataset: {} });
+await handlers['trigger-resume']('', { dataset: {} });
+await handlers['trigger-blocker-action']('resume-system::', { dataset: {} });
 
 console.log(JSON.stringify({
   timeoutConstant: REBASELINE_REQUEST_TIMEOUT_MS,
+  resumeTimeoutConstant: RESUME_REQUEST_TIMEOUT_MS,
   directTimeout: dangerousCalls[0]?.requestOptions?.timeout,
   blockerPath: actionCalls[0]?.[0],
   blockerTimeout: actionCalls[0]?.[3]?.requestOptions?.timeout,
+  directResumePath: actionCalls[1]?.[0],
+  directResumeTimeout: actionCalls[1]?.[3]?.requestOptions?.timeout,
+  blockerResumePath: actionCalls[2]?.[0],
+  blockerResumeTimeout: actionCalls[2]?.[3]?.requestOptions?.timeout,
 }));
 """
         result = _run_node_module_script(script)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["timeoutConstant"], 120_000)
+        self.assertEqual(payload["resumeTimeoutConstant"], 120_000)
         self.assertEqual(payload["directTimeout"], 120_000)
         self.assertEqual(payload["blockerPath"], "/system/blocker-actions/accept-rebaseline")
         self.assertEqual(payload["blockerTimeout"], 120_000)
+        self.assertEqual(payload["directResumePath"], "/system/resume")
+        self.assertEqual(payload["directResumeTimeout"], 120_000)
+        self.assertEqual(payload["blockerResumePath"], "/system/blocker-actions/resume-system")
+        self.assertEqual(payload["blockerResumeTimeout"], 120_000)
 
     def test_app_action_runner_forwards_request_options_to_request_json(self) -> None:
         app_js = (REPO_ROOT / "aats" / "api" / "static" / "app.js").read_text(encoding="utf-8")
