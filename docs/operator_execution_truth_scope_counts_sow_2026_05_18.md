@@ -26,7 +26,8 @@ Implement scope-aware count/read helpers for Phase 5 execution truth repos and
 route the affected consumers through those helpers:
 
 - operator recent orders and fills;
-- operator order/fill details by id;
+- operator order/fill details by id, including `client_order_id` to
+  `execution_orders.order_id` resolution before reading `execution_fills`;
 - Phase 5 fill page reads;
 - Phase 1 shadow backlog;
 - startup recovery Phase 4 open order/count checks.

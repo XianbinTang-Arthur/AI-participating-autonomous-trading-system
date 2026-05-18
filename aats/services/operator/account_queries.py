@@ -485,7 +485,12 @@ class AccountQueryFacade:
             order = self.owner.runtime.execution_order_repo.get_order_by_client_order_id(client_order_id)
             if order is None or not execution_order_row_matches_scope(order, self.owner.state_scope):
                 raise KeyError(f"order_not_found:{client_order_id}")
-            fills = self.owner.runtime.execution_fill_repo_v2.fills_for_order(client_order_id)
+            order_id = str(order.get("order_id") or client_order_id).strip()
+            fills = [
+                row
+                for row in self.owner.runtime.execution_fill_repo_v2.fills_for_order(order_id)
+                if execution_fill_row_matches_scope(row, self.owner.state_scope)
+            ]
             control_order = self.owner._control_plane_order_state(client_order_id)
             return {
                 "order": self.owner._execution_record_payload(order),

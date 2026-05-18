@@ -107,8 +107,10 @@ from aats.services.strategy_overlay_rollout import (
 )
 from aats.services.runtime_scope import (
     execution_fill_count_for_scope,
+    execution_fill_row_matches_scope,
     execution_fill_rows_for_scope,
     execution_order_count_for_scope,
+    execution_order_row_matches_scope,
     execution_order_rows_for_scope,
     execution_truth_repo_for_runtime,
     fill_outcomes_for_scope,
@@ -1424,9 +1426,14 @@ class OperatorQueryService:
     def _control_plane_fills_for_order(self, client_order_id: str) -> list[Any]:
         if not self._phase5_control_plane_enabled():
             return self._scoped_fills_for_order(client_order_id)
-        rows = self.runtime.execution_fill_repo_v2.fills_for_order(client_order_id)
+        order_id = self._phase5_order_id_for_client_order_id(client_order_id)
+        if order_id is None:
+            return []
+        rows = self.runtime.execution_fill_repo_v2.fills_for_order(order_id)
         hydrated: list[Any] = []
         for row in rows:
+            if not execution_fill_row_matches_scope(row, self.state_scope):
+                continue
             raw_payload = dict(row.get("raw_payload") or {})
             fill_payload = raw_payload.get("fill_event")
             if isinstance(fill_payload, dict):
@@ -1459,6 +1466,18 @@ class OperatorQueryService:
                 )
             )
         return hydrated
+
+    def _phase5_order_id_for_client_order_id(self, client_order_id: str) -> str | None:
+        order_lookup = getattr(self.runtime.execution_order_repo, "get_order_by_client_order_id", None)
+        if not callable(order_lookup):
+            return client_order_id
+        order = order_lookup(client_order_id)
+        if order is None:
+            return client_order_id
+        if not execution_order_row_matches_scope(order, self.state_scope):
+            return None
+        order_id = str(order.get("order_id") or "").strip()
+        return order_id or client_order_id
 
     def _sync_execution_order_truth(self, order_state: OrderState) -> None:
         sync_execution_order_truth_direct_legacy_only(

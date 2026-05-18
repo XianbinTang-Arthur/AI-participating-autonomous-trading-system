@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 
 from aats.services.operator.account_queries import AccountQueryFacade
@@ -262,15 +264,27 @@ class _DetailOrderRepo:
 
 
 class _DetailFillRepo:
-    def __init__(self, row: dict | None) -> None:
+    def __init__(self, row: dict | None, fills_by_order: dict[str, list[dict]] | None = None) -> None:
         self.row = row
+        self.fills_by_order = fills_by_order or {}
+        self.fills_for_order_calls: list[str] = []
 
     def get_fill(self, fill_id: str):
         return self.row
 
+    def fills_for_order(self, order_id: str):
+        self.fills_for_order_calls.append(order_id)
+        return list(self.fills_by_order.get(order_id, []))
+
 
 class _DetailOwner:
-    def __init__(self, *, order: dict | None = None, fill: dict | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        order: dict | None = None,
+        fill: dict | None = None,
+        fills_by_order: dict[str, list[dict]] | None = None,
+    ) -> None:
         self.state_scope = RuntimeStateScope(
             product_type="derivatives",
             margin_mode="cross",
@@ -279,7 +293,7 @@ class _DetailOwner:
         )
         self.runtime = SimpleNamespace(
             execution_order_repo=_DetailOrderRepo(order),
-            execution_fill_repo_v2=_DetailFillRepo(fill),
+            execution_fill_repo_v2=_DetailFillRepo(fill, fills_by_order=fills_by_order),
         )
 
     def _phase5_control_plane_enabled(self):
@@ -287,6 +301,12 @@ class _DetailOwner:
 
     def _fill_outcome_map(self):
         return {}
+
+    def _control_plane_order_state(self, client_order_id: str):
+        return None
+
+    def _execution_record_payload(self, record):
+        return dict(record)
 
 
 def test_phase5_order_rows_uses_scope_aware_repo_reader() -> None:
@@ -406,6 +426,105 @@ def test_phase5_order_detail_rejects_order_outside_current_scope() -> None:
         assert str(exc).strip("'") == "order_not_found:client-spot"
     else:
         raise AssertionError("cross-scope phase5 order detail must be hidden")
+
+
+def test_phase5_order_detail_looks_up_fills_by_execution_order_id() -> None:
+    fill = {
+        "fill_id": "fill-real-order",
+        "order_id": "order-real-id",
+        "client_order_id": "client-real-id",
+        "symbol": "BTC-USDT-SWAP",
+        "raw_payload": {"product_type": "derivatives", "margin_mode": "cross"},
+    }
+    owner = _DetailOwner(
+        order={
+            "order_id": "order-real-id",
+            "client_order_id": "client-real-id",
+            "product_type": "derivatives",
+            "margin_mode": "cross",
+            "symbol": "BTC-USDT-SWAP",
+            "state": "FILLED",
+        },
+        fills_by_order={
+            "client-real-id": [],
+            "order-real-id": [fill],
+        },
+    )
+
+    payload = AccountQueryFacade(owner).order_detail("client-real-id")
+
+    assert owner.runtime.execution_fill_repo_v2.fills_for_order_calls == ["order-real-id"]
+    assert [item["fill_id"] for item in payload["fills"]] == ["fill-real-order"]
+
+
+def test_phase5_control_plane_fills_lookup_uses_execution_order_id() -> None:
+    fill_event_payload = {
+        "fill_id": "fill-control-plane",
+        "decision_id": "decision-control-plane",
+        "intent_id": "intent-control-plane",
+        "client_order_id": "client-control-plane",
+        "exchange_order_id": "exchange-control-plane",
+        "symbol": "BTC-USDT-SWAP",
+        "side": "buy",
+        "fill_qty": Decimal("0.01"),
+        "fill_price": Decimal("100"),
+        "fee_amount": Decimal("0.01"),
+        "liquidity_role": "taker",
+        "exchange_timestamp": datetime(2026, 5, 18, tzinfo=timezone.utc),
+        "ingestion_timestamp": datetime(2026, 5, 18, tzinfo=timezone.utc),
+        "product_type": "derivatives",
+        "margin_mode": "cross",
+    }
+    fill_repo = _DetailFillRepo(
+        None,
+        fills_by_order={
+            "client-control-plane": [],
+            "order-control-plane": [
+                {
+                    "fill_id": "fill-control-plane",
+                    "order_id": "order-control-plane",
+                    "client_order_id": "client-control-plane",
+                    "symbol": "BTC-USDT-SWAP",
+                    "raw_payload": {
+                        "product_type": "derivatives",
+                        "margin_mode": "cross",
+                        "fill_event": fill_event_payload,
+                    },
+                }
+            ],
+        },
+    )
+    service = object.__new__(OperatorQueryService)
+    service.runtime = SimpleNamespace(
+        settings=SimpleNamespace(
+            operator_control_plane_execution_ledger_enabled=True,
+            default_symbol="BTC-USDT-SWAP",
+        ),
+        execution_order_repo=_DetailOrderRepo(
+            {
+                "order_id": "order-control-plane",
+                "client_order_id": "client-control-plane",
+                "product_type": "derivatives",
+                "margin_mode": "cross",
+                "symbol": "BTC-USDT-SWAP",
+                "state": "FILLED",
+            }
+        ),
+        execution_fill_repo_v2=fill_repo,
+        ledger_account_repo=object(),
+        ledger_entry_repo=object(),
+    )
+    service.state_scope = RuntimeStateScope(
+        product_type="derivatives",
+        margin_mode="cross",
+        allowed_symbols=("BTC-USDT-SWAP",),
+        default_symbol="BTC-USDT-SWAP",
+    )
+
+    fills = service._control_plane_fills_for_order("client-control-plane")
+
+    assert fill_repo.fills_for_order_calls == ["order-control-plane"]
+    assert [fill.fill_id for fill in fills] == ["fill-control-plane"]
 
 
 def test_phase5_fill_detail_rejects_fill_outside_current_scope() -> None:
