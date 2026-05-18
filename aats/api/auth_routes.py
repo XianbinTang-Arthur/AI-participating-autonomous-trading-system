@@ -66,6 +66,20 @@ DASHBOARD_MATERIALIZED_SNAPSHOT_VARIANTS: dict[str, tuple[str, ...]] = {
     "trialReviewSummary": (_snapshot_variant_key(segment_limit=100, window_days=7, period_count=4),),
 }
 
+_DASHBOARD_STALE_SYNC_FALLBACK_PANEL_KEYS = frozenset(
+    {
+        "health",
+        "mode",
+        "runtime",
+        "systemRecovery",
+        "blockerControl",
+        "blockers",
+        "accountState",
+        "executionLatest",
+        "reconciliationLatest",
+    }
+)
+
 
 class LoginRequest(BaseModel):
     username: str
@@ -1369,6 +1383,12 @@ async def dashboard_bundle(
                 recent_decisions_limit=recent_decisions,
             )
             read = await snapshot_plane.read_panel(panel_key, variant_key=variant_key)
+            if (
+                panel_key in _DASHBOARD_STALE_SYNC_FALLBACK_PANEL_KEYS
+                and isinstance(read.meta, dict)
+                and read.meta.get("status") == "stale"
+            ):
+                return None
             if (
                 variant_key is not None
                 and not _dashboard_snapshot_variant_is_preheated(panel_key, variant_key)

@@ -699,6 +699,61 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["panels"]["health"]["meta"]["status"], "fresh")
         self.assertEqual(payload["panels"]["runtime"]["meta"]["source"], "dashboard_snapshot")
 
+    async def test_dashboard_bundle_falls_back_to_live_for_stale_recovery_snapshot(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+        policy = P0_DASHBOARD_SNAPSHOT_POLICIES["systemRecovery"]
+        plane = DashboardSnapshotPlane(
+            loader=lambda _panel_key: {
+                "recovery": {
+                    "safe_to_trade": False,
+                    "resume_blocked_reasons": ["background_refresh_placeholder"],
+                }
+            },
+            default_factory=lambda _panel_key: {},
+            policies={"systemRecovery": policy},
+        )
+        await plane.seed_panel(
+            "systemRecovery",
+            {
+                "recovery": {
+                    "safe_to_trade": False,
+                    "resume_blocked_reasons": ["stale_strategy_bundle_recovery_requires_review"],
+                }
+            },
+            generated_at=utc_now() - timedelta(seconds=policy.stale_after_seconds + 1),
+        )
+        app.state.dashboard_snapshot_plane = plane
+
+        with (
+            patch.object(
+                OperatorQueryService,
+                "system_recovery_dashboard",
+                return_value={
+                    "recovery": {
+                        "safe_to_trade": True,
+                        "resume_blocked_reasons": [],
+                    }
+                },
+            ) as live_loader,
+            TestClient(app) as client,
+        ):
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="risk",
+                    panels=["systemRecovery"],
+                )
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        panel = payload["panels"]["systemRecovery"]
+        self.assertTrue(panel["data"]["recovery"]["safe_to_trade"])
+        self.assertEqual(panel["data"]["recovery"]["resume_blocked_reasons"], [])
+        self.assertIsNone(panel["error"])
+        self.assertNotIn("meta", panel)
+        live_loader.assert_called_once()
+
     async def test_dashboard_bundle_reads_p1_panels_from_snapshot_plane(self) -> None:
         runtime = await self._runtime()
         app = self._app(runtime)
