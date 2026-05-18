@@ -41,7 +41,7 @@ def is_baseline_snapshot(snapshot: "PortfolioSnapshot") -> bool:
 
 
 def is_trusted_baseline_snapshot(snapshot: "PortfolioSnapshot") -> bool:
-    return snapshot.snapshot_origin in TRUSTED_BASELINE_SNAPSHOT_ORIGINS or is_legacy_baseline_snapshot(snapshot)
+    return snapshot.snapshot_origin in TRUSTED_BASELINE_SNAPSHOT_ORIGINS
 
 
 class Position(SchemaBase):

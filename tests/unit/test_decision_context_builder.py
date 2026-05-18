@@ -1342,6 +1342,150 @@ class TestDecisionContextBuilder(unittest.TestCase):
         assert context.current_position_state is not None
         self.assertTrue(context.current_position_state.dual_legged)
 
+    def test_exchange_position_truth_overrides_stale_local_derivatives_position(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+            }
+        )
+        event_store = InMemoryEventStore()
+        portfolio_repo = InMemoryPortfolioRepository()
+        now = datetime.now(timezone.utc)
+        portfolio_repo.save_snapshot(
+            PortfolioSnapshot(
+                snapshot_ts=now,
+                snapshot_origin="recovery_auto_healed",
+                balances={"USDT": Decimal("373")},
+                positions=[
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_key="BTC-USDT-SWAP:long",
+                        position_qty=Decimal("0.0001"),
+                        position_notional=Decimal("10"),
+                        avg_entry_price=Decimal("100000"),
+                        unrealized_pnl=Decimal("0"),
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        position_mode="long_short_mode",
+                        pos_side="long",
+                    )
+                ],
+                cost_basis={},
+                realized_pnl=Decimal("0"),
+                unrealized_pnl=Decimal("0"),
+                total_equity=Decimal("373"),
+                gross_exposure=Decimal("10"),
+                net_exposure=Decimal("10"),
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+        for topic, payload in (
+            (
+                topics.MARKET_SNAPSHOTS,
+                MarketSnapshot(
+                    symbol="BTC-USDT-SWAP",
+                    exchange="OKX",
+                    snapshot_ts=now,
+                    best_bid=100_000.0,
+                    best_ask=100_001.0,
+                    last_price=100_000.5,
+                    bid_size=1.0,
+                    ask_size=1.0,
+                    volume_24h=10_000_000.0,
+                    kline_15m={"open": 99_900.0, "high": 100_100.0, "low": 99_800.0, "close": 100_000.5},
+                    kline_1h={"open": 99_800.0, "high": 100_200.0, "low": 99_700.0, "close": 100_000.5},
+                ),
+            ),
+            (
+                topics.FEATURE_SNAPSHOTS,
+                FeatureSnapshot(
+                    symbol="BTC-USDT-SWAP",
+                    snapshot_ts=now,
+                    market_snapshot_ref="evt_market",
+                    trend_strength=0.7,
+                    volatility_state="medium",
+                    volatility_value=0.2,
+                    momentum_score=12.0,
+                    liquidity_score=0.8,
+                    regime_indicator="trend",
+                    regime_confidence=0.75,
+                    multi_timeframe_alignment=0.6,
+                    composite_alpha_score=0.4,
+                    suggested_position_scale=0.5,
+                    volatility_target_scale=1.0,
+                    feature_version="test",
+                ),
+            ),
+        ):
+            event_store.append(
+                build_envelope(
+                    topic=topic,
+                    key="BTC-USDT-SWAP",
+                    payload_model=payload,
+                    source_component="test",
+                )
+            )
+        account_snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=now,
+            balances=[
+                ExchangeBalance(
+                    currency="USDT",
+                    total=Decimal("373"),
+                    available=Decimal("373"),
+                    frozen=Decimal("0"),
+                )
+            ],
+            positions=[],
+            position_mode="long_short_mode",
+        )
+        builder = DecisionContextBuilder(
+            settings=settings,
+            event_store=event_store,
+            portfolio_repo=portfolio_repo,
+            execution_repo=InMemoryExecutionRepository(),
+            mode_controller=RuntimeModeController(settings=settings, kill_switch=KillSwitch()),
+            health_service=_FakeHealthService(),
+            account_service=_StatusAccountService(
+                snapshot=account_snapshot,
+                status={"ready": True, "last_error": None},
+            ),
+        )
+
+        with self.assertLogs("aats.decision_engine.context_builder", level="WARNING") as ctx:
+            context = builder.build(
+                "BTC-USDT-SWAP",
+                "15m",
+                decision_id="decision_exchange_flat",
+                health_snapshot_ref="evt_health",
+            )
+
+        self.assertEqual(context.current_position_qty, Decimal("0"))
+        self.assertEqual(context.current_net_position_qty, Decimal("0"))
+        self.assertEqual(context.current_gross_position_qty, Decimal("0"))
+        self.assertEqual(context.current_long_position_qty, Decimal("0"))
+        self.assertEqual(context.current_short_position_qty, Decimal("0"))
+        self.assertEqual(context.current_position_legs, [])
+        self.assertIsNone(context.current_position_state)
+        self.assertEqual(context.current_exposure_side, "flat")
+        self.assertEqual(context.current_target_leverage, 1.0)
+        self.assertEqual(context.available_trading_equity, Decimal("373"))
+        self.assertTrue(
+            any(
+                "exchange_position_truth_overrode_portfolio_position" in record.getMessage()
+                for record in ctx.records
+            )
+        )
+
     def test_build_populates_dual_leg_lifecycle_timestamps_from_fills(self) -> None:
         settings = AATSSettings.model_validate(
             {

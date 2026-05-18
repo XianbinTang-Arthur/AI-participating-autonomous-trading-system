@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
@@ -23,6 +23,7 @@ from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_deci
 from aats.services.portfolio_service.initial_balance import exchange_account_balance_required
 from aats.services.portfolio_service.instrument_states import (
     instrument_position_state_for_symbol,
+    instrument_position_states_from_exchange_positions,
     instrument_position_states_from_snapshot_positions,
     spot_balance_position_state,
 )
@@ -245,7 +246,26 @@ class DecisionContextBuilder:
                     f"snapshot_ts={_snapshot_ts.isoformat()}"
                 )
         account_snapshot = self._account_snapshot()
-        current_position_state = self._position_state(portfolio_snapshot, symbol, self.settings.trading_product_type)
+        if self._exchange_position_truth_required() and account_snapshot is None:
+            raise RuntimeError(
+                "Fresh exchange account snapshot is required before building derivatives decision context"
+            )
+        local_position_state = self._position_state(portfolio_snapshot, symbol, self.settings.trading_product_type)
+        exchange_position_authoritative, exchange_position_state = self._exchange_position_state_for_symbol(
+            account_snapshot,
+            symbol,
+        )
+        if exchange_position_authoritative:
+            self._log_exchange_position_truth_override(
+                symbol=symbol,
+                account_snapshot=account_snapshot,
+                portfolio_snapshot=portfolio_snapshot,
+                local_position_state=local_position_state,
+                exchange_position_state=exchange_position_state,
+            )
+            current_position_state = exchange_position_state
+        else:
+            current_position_state = local_position_state
         # Extract position fields once to eliminate repeated None-checks.
         _ZERO = Decimal("0")
         _ps = current_position_state
@@ -375,7 +395,11 @@ class DecisionContextBuilder:
             current_open_orders=open_orders,
             product_type=self.settings.trading_product_type,
             current_exposure_side=current_exposure_side,
-            current_target_leverage=self._current_target_leverage(portfolio_snapshot, symbol),
+            current_target_leverage=(
+                self._current_target_leverage_from_exchange_state(current_position_state)
+                if exchange_position_authoritative
+                else self._current_target_leverage(portfolio_snapshot, symbol)
+            ),
             current_position_opened_at=strategy_health.current_position_opened_at,
             last_position_closed_at=strategy_health.last_position_closed_at,
             latest_fill_timestamp=strategy_health.latest_fill_timestamp,
@@ -470,12 +494,113 @@ class DecisionContextBuilder:
         if not callable(loader):
             return None
         snapshot = loader()
-        return snapshot if isinstance(snapshot, ExchangeAccountSnapshot) else None
+        if not isinstance(snapshot, ExchangeAccountSnapshot):
+            return None
+        if exchange_account_balance_required(self.settings) and not self._account_snapshot_is_fresh(snapshot):
+            return None
+        return snapshot
 
     def _exchange_available_balance_required(self) -> bool:
         capabilities = getattr(self.mode_controller, "environment_capabilities", None)
         return exchange_account_balance_required(self.settings) and bool(
             getattr(capabilities, "exchange_coupled", False)
+        )
+
+    def _exchange_position_truth_required(self) -> bool:
+        return self.settings.trading_product_type == "derivatives" and self._exchange_available_balance_required()
+
+    def _account_snapshot_is_fresh(self, snapshot: ExchangeAccountSnapshot) -> bool:
+        fetched_at = snapshot.fetched_at
+        if fetched_at.tzinfo is None:
+            fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+        age_seconds = (utc_now() - fetched_at).total_seconds()
+        stale_after = float(getattr(self.settings, "account_state_stale_after_seconds", 120.0) or 0)
+        return age_seconds <= stale_after
+
+    def _exchange_position_state_for_symbol(
+        self,
+        account_snapshot: ExchangeAccountSnapshot | None,
+        symbol: str,
+    ) -> tuple[bool, InstrumentPositionState | None]:
+        if not self._exchange_position_truth_required():
+            return False, None
+        if account_snapshot is None:
+            return False, None
+        position_mode = account_snapshot.position_mode
+        if position_mode is None and account_snapshot.account_configuration is not None:
+            position_mode = account_snapshot.account_configuration.position_mode
+        exchange_positions = [
+            position
+            for position in account_snapshot.positions
+            if symbol in {position.symbol, position.instrument_id}
+            and abs(to_decimal(position.quantity)) > EPSILON_DECIMAL_12
+        ]
+        state = instrument_position_state_for_symbol(
+            instrument_position_states_from_exchange_positions(
+                exchange_positions,
+                position_mode=position_mode,
+                product_type="derivatives",
+            ),
+            symbol,
+        )
+        return True, state
+
+    @staticmethod
+    def _current_target_leverage_from_exchange_state(
+        state: InstrumentPositionState | None,
+    ) -> float:
+        return 1.0 if state is None else float(state.target_leverage)
+
+    @staticmethod
+    def _position_state_quantities(
+        state: InstrumentPositionState | None,
+    ) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+        if state is None:
+            return (Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0"))
+        return (
+            to_decimal(state.net_position_qty),
+            to_decimal(state.long_position_qty),
+            to_decimal(state.short_position_qty),
+            to_decimal(state.gross_position_qty),
+        )
+
+    def _log_exchange_position_truth_override(
+        self,
+        *,
+        symbol: str,
+        account_snapshot: ExchangeAccountSnapshot | None,
+        portfolio_snapshot: PortfolioSnapshot | None,
+        local_position_state: InstrumentPositionState | None,
+        exchange_position_state: InstrumentPositionState | None,
+    ) -> None:
+        local_net, local_long, local_short, local_gross = self._position_state_quantities(local_position_state)
+        exchange_net, exchange_long, exchange_short, exchange_gross = self._position_state_quantities(
+            exchange_position_state
+        )
+        if (
+            abs(local_net - exchange_net) <= EPSILON_DECIMAL_12
+            and abs(local_long - exchange_long) <= EPSILON_DECIMAL_12
+            and abs(local_short - exchange_short) <= EPSILON_DECIMAL_12
+            and abs(local_gross - exchange_gross) <= EPSILON_DECIMAL_12
+        ):
+            return
+        logging.getLogger("aats.decision_engine.context_builder").warning(
+            "exchange_position_truth_overrode_portfolio_position "
+            "symbol=%s local_net=%s local_long=%s local_short=%s local_gross=%s "
+            "exchange_net=%s exchange_long=%s exchange_short=%s exchange_gross=%s "
+            "account_fetched_at=%s portfolio_snapshot_ts=%s portfolio_origin=%s",
+            symbol,
+            local_net,
+            local_long,
+            local_short,
+            local_gross,
+            exchange_net,
+            exchange_long,
+            exchange_short,
+            exchange_gross,
+            None if account_snapshot is None else account_snapshot.fetched_at,
+            None if portfolio_snapshot is None else portfolio_snapshot.snapshot_ts,
+            None if portfolio_snapshot is None else portfolio_snapshot.snapshot_origin,
         )
 
     @staticmethod

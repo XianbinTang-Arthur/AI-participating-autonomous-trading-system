@@ -597,6 +597,50 @@ class TestExecutionRecovery(unittest.TestCase):
         self.assertIn("auto_healed_portfolio_divergence", ":".join(artifacts.status.notes))
         self.assertIn("stored_snapshot_replaced_by_fill_reconstruction", artifacts.status.notes)
 
+    def test_recovery_auto_healed_snapshot_is_not_trusted_baseline(self) -> None:
+        portfolio_repo = InMemoryPortfolioRepository()
+        now = utc_now()
+        exchange_baseline = PortfolioSnapshot(
+            snapshot_ts=now,
+            snapshot_origin="exchange_import",
+            balances={"USDT": Decimal("1000")},
+            positions=[],
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            total_equity=Decimal("1000"),
+            gross_exposure=Decimal("0"),
+            net_exposure=Decimal("0"),
+            product_type="derivatives",
+            margin_mode="cross",
+        )
+        auto_healed_snapshot = exchange_baseline.model_copy(
+            update={
+                "snapshot_ts": now + timedelta(minutes=1),
+                "snapshot_origin": "recovery_auto_healed",
+                "balances": {"USDT": Decimal("999")},
+                "total_equity": Decimal("999"),
+            }
+        )
+        portfolio_repo.save_snapshot(exchange_baseline)
+        portfolio_repo.save_snapshot(auto_healed_snapshot)
+        recovery = self._service(
+            portfolio_repo=portfolio_repo,
+            bootstrap_portfolio_from_exchange=True,
+            settings_override={
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ["BTC-USDT-SWAP"],
+            },
+        )
+
+        trusted = recovery._trusted_baseline_snapshot()
+
+        self.assertIsNotNone(trusted)
+        assert trusted is not None
+        self.assertEqual(trusted.snapshot_origin, "exchange_import")
+        self.assertEqual(trusted.snapshot_ts, exchange_baseline.snapshot_ts)
+
     def test_recovery_auto_heal_persists_snapshot_via_portfolio_outbox_writer(self) -> None:
         portfolio_repo = InMemoryPortfolioRepository()
         baseline_snapshot = PortfolioSnapshot(
