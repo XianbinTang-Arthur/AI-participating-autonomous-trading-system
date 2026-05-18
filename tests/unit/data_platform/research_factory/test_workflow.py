@@ -236,6 +236,19 @@ def test_governance_workflow_creates_review_pending_chain(workspace_tmp_path: Pa
     assert workflow_summary["next_debug_action"] == (
         "inspect operator_review_checklist.json before any separate manual design review"
     )
+    stage_results = workflow_summary["stage_results"]
+    assert [stage["stage_name"] for stage in stage_results] == [
+        "real_data_experiment",
+        "observation",
+        "observation_gate",
+        "preapply_package",
+        "reference_integrity",
+        "preapply_review",
+        "registry_memory",
+        "workflow_summary",
+    ]
+    assert all(stage["runtime_mutation_allowed"] is False for stage in stage_results)
+    assert all(stage["status"] == "succeeded" for stage in stage_results)
     assert (factory_root / "preapply" / result.package_id / "preapply_evidence_package.json").exists()
     assert (
         factory_root
@@ -251,7 +264,24 @@ def test_governance_workflow_creates_review_pending_chain(workspace_tmp_path: Pa
     assert checklist["runtime_mutation_allowed"] is False
     assert checklist["failed_stage"] is None
     assert checklist["blocking_artifact"] is None
+    assert checklist["schema_version"] == "research_operator_review_checklist_v2"
+    assert checklist["readiness"]["all_required_refs_present"] is True
+    assert checklist["readiness"]["reference_integrity_passed"] is True
+    assert checklist["readiness"]["observation_gate_passed"] is True
+    assert checklist["readiness"]["candidate_gate_passed"] is True
+    assert checklist["readiness"]["runtime_mutation_allowed"] is False
+    assert checklist["readiness"]["operator_decision_required"] is True
+    assert "review_preapply_evidence" in checklist["allowed_next_actions"]
+    assert "active_parameter_apply" in checklist["forbidden_next_actions"]
+    assert "okx_write" in checklist["forbidden_next_actions"]
+    assert checklist["stage_results"][0]["stage_name"] == "real_data_experiment"
     assert "does not authorize active parameter changes" in checklist["no_runtime_mutation_statement"]
+    operator_summary = (
+        factory_root / "workflows" / "wf_governance_success" / "preapply_review_summary.md"
+    ).read_text(encoding="utf-8")
+    assert "## Candidate Overview" in operator_summary
+    assert "## Data Evidence" in operator_summary
+    assert "## Explicit Non-Authorization Statement" in operator_summary
     assert review_manifest["output_refs"]["evidence_reference_integrity_report"] == (
         "evidence_reference_integrity_report.json"
     )
@@ -349,8 +379,13 @@ def test_governance_workflow_failed_observation_gate_does_not_become_ready(works
     assert workflow_summary["next_debug_action"] == (
         f"inspect observations/{result.observation_id}/observation_gate_result.json"
     )
+    blocked_stage = next(stage for stage in workflow_summary["stage_results"] if stage["stage_name"] == "observation_gate")
+    assert blocked_stage["status"] == "blocked"
+    assert blocked_stage["blocking_artifact"] == workflow_summary["blocking_artifact"]
     assert checklist["failed_stage"] == "observation_gate"
     assert checklist["blocking_artifact"] == workflow_summary["blocking_artifact"]
+    assert checklist["readiness"]["observation_gate_passed"] is False
+    assert checklist["readiness"]["preapply_package_ready"] is False
     assert {entry["status"] for entry in registry_entries} >= {
         "observation_keep_reviewing",
         "needs_more_observation",
@@ -393,3 +428,18 @@ def test_governance_workflow_failed_experiment_records_stage(workspace_tmp_path:
     assert workflow_summary["next_debug_action"] == (
         "inspect experiments/rf_governance_no_data_source/experiment_manifest.json"
     )
+    assert workflow_summary["stage_results"] == [
+        {
+            "artifact_refs": {
+                "blocking_artifact": "experiments/rf_governance_no_data_source/experiment_manifest.json",
+                "experiment_manifest": "experiments/rf_governance_no_data_source/experiment_manifest.json",
+                "workflow_summary": "workflows/wf_governance_no_data_source/workflow_summary.json",
+            },
+            "blocking_artifact": "experiments/rf_governance_no_data_source/experiment_manifest.json",
+            "blocking_failures": ["data_source is required; CLI should provide a GoldReplayDataSource"],
+            "next_debug_action": "inspect experiments/rf_governance_no_data_source/experiment_manifest.json",
+            "runtime_mutation_allowed": False,
+            "stage_name": "real_data_experiment",
+            "status": "failed",
+        }
+    ]

@@ -70,7 +70,7 @@ WORKFLOW_MANIFEST_REF = "workflow_manifest.json"
 REFERENCE_INTEGRITY_REPORT_REF = "evidence_reference_integrity_report.json"
 OPERATOR_REVIEW_SUMMARY_REF = "preapply_review_summary.md"
 OPERATOR_REVIEW_CHECKLIST_REF = "operator_review_checklist.json"
-OPERATOR_REVIEW_CHECKLIST_SCHEMA_VERSION = "research_operator_review_checklist_v1"
+OPERATOR_REVIEW_CHECKLIST_SCHEMA_VERSION = "research_operator_review_checklist_v2"
 STAGE_PREPARE_WORKFLOW = "prepare_workflow"
 STAGE_REAL_DATA_EXPERIMENT = "real_data_experiment"
 STAGE_LOAD_RESEARCH_ARTIFACTS = "load_research_artifacts"
@@ -81,6 +81,7 @@ STAGE_REFERENCE_INTEGRITY = "reference_integrity"
 STAGE_PREAPPLY_REVIEW = "preapply_review"
 STAGE_REGISTRY_MEMORY = "registry_memory"
 STAGE_WORKFLOW_SUMMARY = "workflow_summary"
+ALLOWED_STAGE_STATUSES = frozenset({"succeeded", "blocked", "failed"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +158,40 @@ class ResearchGovernanceWorkflowResult:
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchGovernanceStageResult:
+    """Machine-readable result for one research-only governance workflow stage."""
+
+    stage_name: str
+    status: str
+    artifact_refs: Mapping[str, str] = field(default_factory=dict)
+    blocking_failures: Sequence[str] = field(default_factory=tuple)
+    next_debug_action: str = "inspect workflow_summary.json"
+    blocking_artifact: str | None = None
+    runtime_mutation_allowed: bool = False
+
+    def __post_init__(self) -> None:
+        _require_stage_name(self.stage_name)
+        if self.status not in ALLOWED_STAGE_STATUSES:
+            allowed = ", ".join(sorted(ALLOWED_STAGE_STATUSES))
+            raise ValueError(f"stage status must be one of: {allowed}")
+        if not isinstance(self.artifact_refs, Mapping):
+            raise ValueError("stage artifact_refs must be a mapping")
+        object.__setattr__(
+            self,
+            "artifact_refs",
+            {str(key): str(value) for key, value in sorted(self.artifact_refs.items())},
+        )
+        object.__setattr__(self, "blocking_failures", tuple(str(item) for item in self.blocking_failures))
+        if not isinstance(self.next_debug_action, str) or not self.next_debug_action.strip():
+            raise ValueError("stage next_debug_action must be a non-empty string")
+        object.__setattr__(self, "next_debug_action", self.next_debug_action.strip())
+        if self.blocking_artifact is not None:
+            object.__setattr__(self, "blocking_artifact", str(self.blocking_artifact))
+        if self.runtime_mutation_allowed is not False:
+            raise ValueError("research governance stage must not allow runtime mutation")
 
 
 def run_research_governance_workflow(
@@ -354,6 +389,16 @@ def run_research_governance_workflow(
             observation_id=observation_run.observation_id,
             review_id=review.review_id,
         )
+        stage_results = _workflow_stage_results(
+            workflow_id=workflow_id,
+            experiment_id=experiment_result.experiment_id,
+            observation_id=observation_run.observation_id,
+            package_id=package.package_id,
+            review_id=review.review_id,
+            observation_gate=observation_gate,
+            package=package,
+            integrity_report=integrity_report,
+        )
         summary = {
             "workflow_id": workflow_id,
             "status": status,
@@ -380,6 +425,7 @@ def run_research_governance_workflow(
                 failed_stage=failed_stage,
                 blocking_artifact=blocking_artifact,
             ),
+            "stage_results": stage_results,
             "runtime_mutation_allowed": False,
             "operator_approval_required": True,
             "created_at": config.timestamp.isoformat(),
@@ -471,6 +517,20 @@ def _finish_failed_workflow(
             workflow_id=workflow_id,
             experiment_id=experiment_id,
             blocking_artifact=blocking_artifact,
+        ),
+        "stage_results": (
+            ResearchGovernanceStageResult(
+                stage_name=failed_stage,
+                status="failed",
+                artifact_refs=_failed_workflow_artifact_refs(
+                    workflow_id=workflow_id,
+                    experiment_id=experiment_id,
+                    blocking_artifact=blocking_artifact,
+                ),
+                blocking_failures=(error,),
+                next_debug_action=_failed_workflow_next_debug_action(failed_stage, blocking_artifact),
+                blocking_artifact=blocking_artifact,
+            ),
         ),
         "runtime_mutation_allowed": False,
         "operator_approval_required": True,
@@ -714,6 +774,89 @@ def _failed_workflow_next_debug_action(stage: str, blocking_artifact: str | None
     return f"inspect workflow_summary.json for failed stage {stage}"
 
 
+def _workflow_stage_results(
+    *,
+    workflow_id: str,
+    experiment_id: str,
+    observation_id: str,
+    package_id: str,
+    review_id: str,
+    observation_gate: Any,
+    package: Any,
+    integrity_report: EvidenceReferenceIntegrityReport,
+) -> tuple[ResearchGovernanceStageResult, ...]:
+    observation_gate_artifact = f"observations/{observation_id}/observation_gate_result.json"
+    preapply_artifact = f"preapply/{package_id}/preapply_evidence_package.json"
+    integrity_artifact = f"preapply_reviews/{review_id}/{REFERENCE_INTEGRITY_REPORT_REF}"
+    return (
+        ResearchGovernanceStageResult(
+            stage_name=STAGE_REAL_DATA_EXPERIMENT,
+            status="succeeded",
+            artifact_refs={
+                "experiment_manifest": f"experiments/{experiment_id}/experiment_manifest.json",
+                "candidate_artifact": f"experiments/{experiment_id}/candidate_artifact.json",
+                "research_recommendation": f"experiments/{experiment_id}/research_recommendation.json",
+                "evidence_bundle": f"experiments/{experiment_id}/evidence_bundle.json",
+            },
+            next_debug_action=f"inspect experiments/{experiment_id}/experiment_manifest.json",
+        ),
+        ResearchGovernanceStageResult(
+            stage_name=STAGE_OBSERVATION,
+            status="succeeded",
+            artifact_refs={
+                "observation_result": f"observations/{observation_id}/observation_result.json",
+                "review_outcome": f"observations/{observation_id}/review_outcome.json",
+            },
+            next_debug_action=f"inspect observations/{observation_id}/observation_result.json",
+        ),
+        ResearchGovernanceStageResult(
+            stage_name=STAGE_OBSERVATION_GATE,
+            status="succeeded" if observation_gate.passed else "blocked",
+            artifact_refs={"observation_gate_result": observation_gate_artifact},
+            blocking_failures=tuple(observation_gate.failures),
+            next_debug_action=f"inspect {observation_gate_artifact}",
+            blocking_artifact=None if observation_gate.passed else observation_gate_artifact,
+        ),
+        ResearchGovernanceStageResult(
+            stage_name=STAGE_PREAPPLY_PACKAGE,
+            status="succeeded" if package.status == "preapply_ready" else "blocked",
+            artifact_refs={"preapply_evidence_package": preapply_artifact},
+            blocking_failures=tuple(package.failure_reasons),
+            next_debug_action=f"inspect {preapply_artifact}",
+            blocking_artifact=None if package.status == "preapply_ready" else preapply_artifact,
+        ),
+        ResearchGovernanceStageResult(
+            stage_name=STAGE_REFERENCE_INTEGRITY,
+            status="succeeded" if integrity_report.passed else "blocked",
+            artifact_refs={"evidence_reference_integrity_report": integrity_artifact},
+            blocking_failures=tuple(integrity_report.failures),
+            next_debug_action=f"inspect {integrity_artifact}",
+            blocking_artifact=None if integrity_report.passed else integrity_artifact,
+        ),
+        ResearchGovernanceStageResult(
+            stage_name=STAGE_PREAPPLY_REVIEW,
+            status="succeeded",
+            artifact_refs={"preapply_review": f"preapply_reviews/{review_id}/preapply_review.json"},
+            next_debug_action=f"inspect preapply_reviews/{review_id}/preapply_review.json",
+        ),
+        ResearchGovernanceStageResult(
+            stage_name=STAGE_REGISTRY_MEMORY,
+            status="succeeded",
+            artifact_refs={"research_memory": "registry/research_memory.jsonl"},
+            next_debug_action="inspect registry/research_memory.jsonl",
+        ),
+        ResearchGovernanceStageResult(
+            stage_name=STAGE_WORKFLOW_SUMMARY,
+            status="succeeded",
+            artifact_refs={
+                "workflow_summary": f"workflows/{workflow_id}/{WORKFLOW_SUMMARY_REF}",
+                "operator_review_checklist": f"workflows/{workflow_id}/{OPERATOR_REVIEW_CHECKLIST_REF}",
+            },
+            next_debug_action=f"inspect workflows/{workflow_id}/{OPERATOR_REVIEW_CHECKLIST_REF}",
+        ),
+    )
+
+
 def _workflow_artifact_refs(
     *,
     workflow_id: str,
@@ -806,6 +949,19 @@ def _operator_review_checklist(
 ) -> dict[str, Any]:
     novelty_payload = _optional_json_mapping(experiment_dir / "novelty_gate_result.json")
     execution_evidence = evidence_bundle.execution_evidence
+    readiness = {
+        "all_required_refs_present": not integrity_report.missing_refs,
+        "reference_integrity_passed": integrity_report.passed,
+        "observation_gate_passed": observation_gate.passed,
+        "candidate_gate_passed": candidate.gate.passed,
+        "evidence_bundle_passed": evidence_bundle.passed,
+        "source_integrity_passed": evidence_bundle.source_integrity.passed,
+        "dataset_quality_passed": evidence_bundle.dataset_quality.passed,
+        "execution_evidence_passed": execution_evidence.passed if execution_evidence is not None else False,
+        "preapply_package_ready": package.status == "preapply_ready",
+        "runtime_mutation_allowed": False,
+        "operator_decision_required": True,
+    }
     checklist_items = [
         {
             "item": "candidate_gate_passed",
@@ -859,6 +1015,15 @@ def _operator_review_checklist(
         "failed_stage": summary["failed_stage"],
         "blocking_artifact": summary["blocking_artifact"],
         "next_debug_action": summary["next_debug_action"],
+        "stage_results": summary["stage_results"],
+        "readiness": readiness,
+        "allowed_next_actions": ("review_preapply_evidence", "request_more_evidence", "reject"),
+        "forbidden_next_actions": (
+            "active_parameter_apply",
+            "okx_write",
+            "runtime_config_write",
+            "auto_apply",
+        ),
         "checklist_items": checklist_items,
         "recommended_next_step": summary["next_step"],
         "runtime_mutation_allowed": False,
@@ -888,36 +1053,54 @@ def _operator_review_summary(
     risk_flags = ", ".join(summary["risk_flags"]) if summary["risk_flags"] else "none"
     blocking_failures = summary["blocking_failures"]
     failure_text = "\n".join(f"- {failure}" for failure in blocking_failures) if blocking_failures else "- none"
+    readiness = operator_checklist["readiness"]
     return (
         f"# Research Factory Pre-Apply Review Summary\n\n"
+        f"## Candidate Overview\n\n"
         f"- Workflow: `{summary['workflow_id']}`\n"
         f"- Status: `{summary['status']}`\n"
         f"- Profile: `{summary['profile']}`\n"
         f"- Candidate: `{candidate.candidate_id}`\n"
+        f"- Candidate type: `{candidate.candidate_type}`\n"
         f"- Recommendation: `{recommendation.recommendation_id}`\n"
         f"- PreApply package: `{package.package_id}`\n"
         f"- PreApply review: `{summary['preapply_review_id']}`\n"
         f"- Factor expression: `{factor_expression}`\n"
         f"- Dataset fingerprint: `{dataset_fingerprint}`\n\n"
-        f"## Gate Status\n\n"
+        f"## Data Evidence\n\n"
+        f"- Dataset quality passed: `{readiness['dataset_quality_passed']}`\n"
+        f"- Source integrity passed: `{readiness['source_integrity_passed']}`\n\n"
+        f"## Execution Evidence\n\n"
+        f"- Execution evidence passed: `{readiness['execution_evidence_passed']}`\n"
+        f"- Reference integrity passed: `{readiness['reference_integrity_passed']}`\n\n"
+        f"## Candidate Gate\n\n"
         f"- Candidate gate passed: `{candidate.gate.passed}`\n"
-        f"- Evidence bundle passed: `{evidence_bundle.passed}`\n"
+        f"- Candidate gate failures: `{tuple(candidate.gate.failures)}`\n\n"
+        f"## Observation Gate\n\n"
         f"- Observation gate passed: `{observation_gate.passed}`\n"
+        f"- Observation gate failures: `{tuple(observation_gate.failures)}`\n\n"
+        f"## PreApply Package\n\n"
+        f"- Evidence bundle passed: `{evidence_bundle.passed}`\n"
         f"- PreApply package status: `{package.status}`\n"
-        f"- Reference integrity passed: `{integrity_report.passed}`\n"
-        f"- Novelty gate decision: `{novelty_decision}`\n\n"
+        f"- PreApply package ready: `{readiness['preapply_package_ready']}`\n\n"
+        f"## Registry / Novelty Memory\n\n"
+        f"- Novelty gate decision: `{novelty_decision}`\n"
+        f"- Risk flags: `{risk_flags}`\n\n"
+        f"## Required Followups\n\n"
+        f"{failure_text}\n\n"
         f"## Review Controls\n\n"
         f"- Recommended next step: `{summary['next_step']}`\n"
         f"- Failed or blocking stage: `{summary['failed_stage'] or 'none'}`\n"
         f"- Blocking artifact: `{summary['blocking_artifact'] or 'none'}`\n"
         f"- Next debug action: `{summary['next_debug_action']}`\n"
-        f"- Risk flags: `{risk_flags}`\n"
+        f"- Allowed next actions: `{tuple(operator_checklist['allowed_next_actions'])}`\n"
+        f"- Forbidden next actions: `{tuple(operator_checklist['forbidden_next_actions'])}`\n"
         f"- Runtime mutation allowed: `False`\n"
         f"- Operator approval required: `True`\n"
+        f"- Operator decision required: `{readiness['operator_decision_required']}`\n"
+        f"\n## Explicit Non-Authorization Statement\n\n"
         f"- No runtime mutation authorized: this summary does not authorize active parameter changes, "
         f"runtime config mutation, live orders, or OKX writes.\n\n"
-        f"## Blocking Failures\n\n"
-        f"{failure_text}\n"
     )
 
 
@@ -1196,6 +1379,24 @@ def _require_safe_identifier(value: str, field_name: str) -> str:
     if "/" in value or "\\" in value or value in {".", ".."} or ".." in value:
         raise ValueError(f"{field_name} must not contain path traversal or separators")
     return value
+
+
+def _require_stage_name(value: str) -> None:
+    allowed_stages = {
+        STAGE_PREPARE_WORKFLOW,
+        STAGE_REAL_DATA_EXPERIMENT,
+        STAGE_LOAD_RESEARCH_ARTIFACTS,
+        STAGE_OBSERVATION,
+        STAGE_OBSERVATION_GATE,
+        STAGE_PREAPPLY_PACKAGE,
+        STAGE_REFERENCE_INTEGRITY,
+        STAGE_PREAPPLY_REVIEW,
+        STAGE_REGISTRY_MEMORY,
+        STAGE_WORKFLOW_SUMMARY,
+    }
+    if value not in allowed_stages:
+        allowed = ", ".join(sorted(allowed_stages))
+        raise ValueError(f"stage_name must be one of: {allowed}")
 
 
 def _to_jsonable(value: Any) -> Any:
