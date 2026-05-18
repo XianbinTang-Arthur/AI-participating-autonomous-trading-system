@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from aats.data_platform.research_factory.manual_apply_design import (
+    ManualApplyDesignPolicy,
     ManualApplyDesignPackage,
     ManualApplyDesignRecorder,
     ManualApplyDesignReviewDecision,
@@ -16,6 +17,7 @@ from aats.data_platform.research_factory.manual_apply_design import (
     build_manual_apply_design_package,
     build_manual_apply_design_review,
     build_manual_apply_design_review_decision,
+    manual_apply_design_policy_for_profile,
     validate_manual_apply_design_domain,
 )
 from aats.data_platform.research_factory.preapply import (
@@ -506,6 +508,91 @@ def test_manual_apply_design_execution_policy_validation_requires_execution_evid
     assert bad_report.passed is False
     assert "execution_policy design missing evidence ref: execution_evidence" in bad_report.failures
     assert "paper-only validation" in bad_report.failures[-1]
+
+
+def test_manual_apply_design_policy_rejects_unknown_runtime_component() -> None:
+    design = build_design(
+        candidate_type="factor",
+        delta=design_delta(),
+        affected_runtime_components=("unknown_runtime_component",),
+    )
+
+    report = validate_manual_apply_design_domain(
+        design,
+        policy=manual_apply_design_policy_for_profile("research_design"),
+        evaluated_at=dt(16),
+    )
+
+    assert report.passed is False
+    assert "rejects runtime component 'unknown_runtime_component'" in report.failures[0]
+
+
+def test_manual_apply_design_policy_rejects_unknown_parameter_path() -> None:
+    design = build_design(
+        candidate_type="parameter",
+        delta={
+            "parameter_changes": {
+                "unapproved.parameter.path": {
+                    "proposed_value": 0.42,
+                    "rollback_old_value_ref": "preapply_evidence_package.json",
+                }
+            }
+        },
+    )
+
+    report = validate_manual_apply_design_domain(
+        design,
+        policy=manual_apply_design_policy_for_profile("research_design"),
+        evaluated_at=dt(16),
+    )
+
+    assert report.passed is False
+    assert any("rejects parameter path 'unapproved.parameter.path'" in failure for failure in report.failures)
+
+
+def test_manual_apply_design_policy_rejects_forbidden_delta_key() -> None:
+    policy = ManualApplyDesignPolicy(
+        profile_name="research_design",
+        allowed_candidate_types=("factor",),
+        allowed_runtime_components=("decision_engine_research_config",),
+        allowed_parameter_paths=("signal_threshold",),
+        allowed_risk_guard_ids=("position_limit_guard", "drawdown_guard"),
+        required_risk_guard_ids=(),
+        allowed_dry_run_check_ids=("paper_replay_validation", "operator_review_checklist"),
+        required_dry_run_check_ids=(),
+        required_evidence_refs_by_candidate_type={"factor": ()},
+        allowed_delta_keys_by_candidate_type={
+            "factor": ("factor_expression", "unsafe_delta"),
+        },
+        forbidden_delta_keys=("unsafe_delta",),
+    )
+    design = build_design(
+        candidate_type="factor",
+        delta={"factor_expression": "Return(close, 1)", "unsafe_delta": True},
+    )
+
+    report = validate_manual_apply_design_domain(design, policy=policy, evaluated_at=dt(16))
+
+    assert report.passed is False
+    assert any("rejects forbidden delta key 'unsafe_delta'" in failure for failure in report.failures)
+
+
+def test_manual_apply_design_policy_profile_rejects_missing_required_guard() -> None:
+    design = build_design(
+        candidate_type="factor",
+        delta=design_delta(),
+        required_risk_guards=("position_limit_guard", "drawdown_guard"),
+    )
+
+    report = validate_manual_apply_design_domain(
+        design,
+        policy_profile="dry_run_planning",
+        evaluated_at=dt(16),
+    )
+
+    assert report.passed is False
+    assert any("requires risk guard 'paper_only_guard'" in failure for failure in report.failures)
+    assert any("requires risk guard 'rollback_guard'" in failure for failure in report.failures)
 
 
 def test_manual_apply_design_review_decision_requires_passing_validation() -> None:

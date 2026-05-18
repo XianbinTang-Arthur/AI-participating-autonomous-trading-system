@@ -29,6 +29,7 @@ from aats.data_platform.research_factory.preapply import (
 MANUAL_APPLY_DESIGN_SCHEMA_VERSION = "research_manual_apply_design_v1"
 MANUAL_APPLY_DESIGN_VALIDATION_SCHEMA_VERSION = "research_manual_apply_design_validation_v1"
 MANUAL_APPLY_DESIGN_REVIEW_SCHEMA_VERSION = "research_manual_apply_design_review_v1"
+MANUAL_APPLY_DESIGN_POLICY_SCHEMA_VERSION = "research_manual_apply_design_policy_v1"
 MANUAL_APPLY_DESIGN_PACKAGE_REF = "manual_apply_design_package.json"
 MANUAL_APPLY_DESIGN_MANIFEST_REF = "manual_apply_design_manifest.json"
 MANUAL_APPLY_DESIGN_VALIDATION_REF = "manual_apply_design_validation_report.json"
@@ -45,6 +46,9 @@ ALLOWED_MANUAL_APPLY_CANDIDATE_TYPES = frozenset(
 ALLOWED_MANUAL_APPLY_DESIGN_REVIEW_STATUSES = frozenset({"review_pending"})
 ALLOWED_MANUAL_APPLY_DESIGN_REVIEW_DECISIONS = frozenset(
     {"design_ready_for_dry_run_planning", "design_rejected", "needs_design_revision"}
+)
+ALLOWED_MANUAL_APPLY_DESIGN_POLICY_PROFILES = frozenset(
+    {"research_design", "dry_run_planning", "pre_runtime_review"}
 )
 REQUIRED_MANUAL_APPLY_DESIGN_EVIDENCE_REFS = (
     "preapply_evidence_package",
@@ -77,6 +81,105 @@ DESIGN_PROMOTION_TERMS = (
     "runtime_mutation",
     "runtime mutation",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ManualApplyDesignPolicy:
+    """Policy profile for manual apply design domain validation."""
+
+    profile_name: str
+    allowed_candidate_types: Sequence[str]
+    allowed_runtime_components: Sequence[str]
+    allowed_parameter_paths: Sequence[str]
+    allowed_risk_guard_ids: Sequence[str]
+    required_risk_guard_ids: Sequence[str]
+    allowed_dry_run_check_ids: Sequence[str]
+    required_dry_run_check_ids: Sequence[str]
+    required_evidence_refs_by_candidate_type: Mapping[str, Sequence[str]]
+    allowed_delta_keys_by_candidate_type: Mapping[str, Sequence[str]]
+    forbidden_delta_keys: Sequence[str] = field(default_factory=tuple)
+    schema_version: str = MANUAL_APPLY_DESIGN_POLICY_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        profile_name = _require_non_empty_text(self.profile_name, "profile_name")
+        if profile_name not in ALLOWED_MANUAL_APPLY_DESIGN_POLICY_PROFILES:
+            allowed = ", ".join(sorted(ALLOWED_MANUAL_APPLY_DESIGN_POLICY_PROFILES))
+            raise ValueError(f"profile_name must be one of: {allowed}")
+        object.__setattr__(self, "profile_name", profile_name)
+        object.__setattr__(
+            self,
+            "allowed_candidate_types",
+            _normalize_policy_text_sequence(self.allowed_candidate_types, "allowed_candidate_types"),
+        )
+        for candidate_type in self.allowed_candidate_types:
+            _require_candidate_type(candidate_type)
+        object.__setattr__(
+            self,
+            "allowed_runtime_components",
+            _normalize_policy_text_sequence(
+                self.allowed_runtime_components,
+                "allowed_runtime_components",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "allowed_parameter_paths",
+            _normalize_policy_text_sequence(self.allowed_parameter_paths, "allowed_parameter_paths"),
+        )
+        object.__setattr__(
+            self,
+            "allowed_risk_guard_ids",
+            _normalize_policy_text_sequence(self.allowed_risk_guard_ids, "allowed_risk_guard_ids"),
+        )
+        object.__setattr__(
+            self,
+            "required_risk_guard_ids",
+            _normalize_policy_text_sequence(
+                self.required_risk_guard_ids,
+                "required_risk_guard_ids",
+                allow_empty=True,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "allowed_dry_run_check_ids",
+            _normalize_policy_text_sequence(
+                self.allowed_dry_run_check_ids,
+                "allowed_dry_run_check_ids",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "required_dry_run_check_ids",
+            _normalize_policy_text_sequence(
+                self.required_dry_run_check_ids,
+                "required_dry_run_check_ids",
+                allow_empty=True,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "required_evidence_refs_by_candidate_type",
+            _normalize_policy_mapping(
+                self.required_evidence_refs_by_candidate_type,
+                "required_evidence_refs_by_candidate_type",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "allowed_delta_keys_by_candidate_type",
+            _normalize_policy_mapping(
+                self.allowed_delta_keys_by_candidate_type,
+                "allowed_delta_keys_by_candidate_type",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "forbidden_delta_keys",
+            _normalize_forbidden_delta_keys(self.forbidden_delta_keys, "forbidden_delta_keys"),
+        )
+        if self.schema_version != MANUAL_APPLY_DESIGN_POLICY_SCHEMA_VERSION:
+            raise ValueError(f"schema_version must be {MANUAL_APPLY_DESIGN_POLICY_SCHEMA_VERSION!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -600,11 +703,14 @@ class ManualApplyDesignReviewRecorder:
 def validate_manual_apply_design_domain(
     design: ManualApplyDesignPackage,
     *,
+    policy: ManualApplyDesignPolicy | None = None,
+    policy_profile: str = "research_design",
     evaluated_at: datetime | None = None,
 ) -> ManualApplyDesignValidationReport:
     """Validate a manual apply design draft against candidate-type domain rules."""
     if not isinstance(design, ManualApplyDesignPackage):
         raise ValueError("design must be a ManualApplyDesignPackage")
+    active_policy = policy or manual_apply_design_policy_for_profile(policy_profile)
     failures: list[str] = []
     warnings: list[str] = []
     if design.runtime_mutation_allowed is not False:
@@ -626,6 +732,7 @@ def validate_manual_apply_design_domain(
     dry_run_text = " ".join(design.required_dry_run_checks).lower()
     guard_text = " ".join(design.required_risk_guards).lower()
     component_text = " ".join(design.affected_runtime_components).lower()
+    failures.extend(_policy_failures(design, active_policy))
 
     if candidate_type == "factor":
         if not isinstance(delta.get("factor_expression"), str) or not delta["factor_expression"].strip():
@@ -690,6 +797,119 @@ def validate_manual_apply_design_domain(
         warnings=tuple(warnings),
         evaluated_at=evaluated_at or datetime.now(UTC),
     )
+
+
+def manual_apply_design_policy_for_profile(profile_name: str) -> ManualApplyDesignPolicy:
+    """Return a built-in policy profile for manual apply design validation."""
+    profile_name = _require_non_empty_text(profile_name, "profile_name")
+    base = {
+        "allowed_candidate_types": tuple(sorted(ALLOWED_MANUAL_APPLY_CANDIDATE_TYPES)),
+        "allowed_runtime_components": (
+            "decision_engine_research_config",
+            "strategy_research_config",
+            "risk_research_config",
+            "execution_policy_research_config",
+            "model_research_config",
+            "regime_research_config",
+        ),
+        "allowed_parameter_paths": (
+            "signal_threshold",
+            "max_position_multiplier",
+            "risk.max_exposure_multiplier",
+            "risk.drawdown_limit",
+            "risk.kill_switch_threshold",
+            "execution.mode",
+            "execution.participation_rate",
+            "model.inference_threshold",
+            "regime.classifier_threshold",
+        ),
+        "allowed_risk_guard_ids": (
+            "position_limit_guard",
+            "drawdown_guard",
+            "max_exposure_guard",
+            "kill_switch_guard",
+            "paper_only_guard",
+            "rollback_guard",
+        ),
+        "required_risk_guard_ids": (),
+        "allowed_dry_run_check_ids": (
+            "paper_replay_validation",
+            "operator_review_checklist",
+            "paper_only_execution_validation",
+            "shadow_observation_replay",
+            "inference_latency_check",
+            "regime_stability_check",
+        ),
+        "required_dry_run_check_ids": (),
+        "required_evidence_refs_by_candidate_type": {
+            "factor": (),
+            "model": ("model_artifact",),
+            "parameter": (),
+            "execution_policy": (
+                "execution_evidence",
+                "slippage_evidence",
+                "fillability_evidence",
+            ),
+            "risk_budget": (),
+            "regime_classifier": ("regime_definition",),
+        },
+        "allowed_delta_keys_by_candidate_type": {
+            "factor": ("scope", "factor_expression", "max_position_multiplier", "dry_run_only"),
+            "model": ("model_artifact_ref", "inference_threshold", "dry_run_only"),
+            "parameter": ("parameter_changes", "dry_run_only"),
+            "execution_policy": ("execution_mode", "participation_rate", "dry_run_only"),
+            "risk_budget": ("max_exposure", "max_exposure_multiplier", "drawdown_limit", "dry_run_only"),
+            "regime_classifier": ("regime_definition_ref", "classifier_threshold", "dry_run_only"),
+        },
+        "forbidden_delta_keys": (
+            "active_parameter",
+            "runtime_config",
+            "okx_order",
+            "live_order",
+            "production_config",
+        ),
+    }
+    if profile_name == "research_design":
+        return ManualApplyDesignPolicy(profile_name=profile_name, **base)
+    if profile_name == "dry_run_planning":
+        return ManualApplyDesignPolicy(
+            profile_name=profile_name,
+            **{
+                **base,
+                "required_risk_guard_ids": (
+                    "position_limit_guard",
+                    "drawdown_guard",
+                    "paper_only_guard",
+                    "rollback_guard",
+                ),
+                "required_dry_run_check_ids": (
+                    "operator_review_checklist",
+                    "paper_replay_validation",
+                ),
+            },
+        )
+    if profile_name == "pre_runtime_review":
+        return ManualApplyDesignPolicy(
+            profile_name=profile_name,
+            **{
+                **base,
+                "required_risk_guard_ids": (
+                    "position_limit_guard",
+                    "drawdown_guard",
+                    "max_exposure_guard",
+                    "kill_switch_guard",
+                    "paper_only_guard",
+                    "rollback_guard",
+                ),
+                "required_dry_run_check_ids": (
+                    "operator_review_checklist",
+                    "paper_replay_validation",
+                    "shadow_observation_replay",
+                ),
+            },
+        )
+    allowed = ", ".join(sorted(ALLOWED_MANUAL_APPLY_DESIGN_POLICY_PROFILES))
+    raise ValueError(f"profile_name must be one of: {allowed}")
 
 
 def build_manual_apply_design_review(
@@ -884,6 +1104,64 @@ def _default_design_review_next_step(decision: str) -> str:
     return "archive_manual_apply_design_rejection"
 
 
+def _policy_failures(
+    design: ManualApplyDesignPackage,
+    policy: ManualApplyDesignPolicy,
+) -> tuple[str, ...]:
+    if not isinstance(policy, ManualApplyDesignPolicy):
+        raise ValueError("policy must be a ManualApplyDesignPolicy")
+    failures: list[str] = []
+    if design.candidate_type not in policy.allowed_candidate_types:
+        failures.append(f"policy {policy.profile_name} rejects candidate_type {design.candidate_type!r}")
+    for component in design.affected_runtime_components:
+        if component not in policy.allowed_runtime_components:
+            failures.append(f"policy {policy.profile_name} rejects runtime component {component!r}")
+    for guard_id in design.required_risk_guards:
+        if guard_id not in policy.allowed_risk_guard_ids:
+            failures.append(f"policy {policy.profile_name} rejects risk guard {guard_id!r}")
+    for guard_id in policy.required_risk_guard_ids:
+        if guard_id not in design.required_risk_guards:
+            failures.append(f"policy {policy.profile_name} requires risk guard {guard_id!r}")
+    for check_id in design.required_dry_run_checks:
+        if check_id not in policy.allowed_dry_run_check_ids:
+            failures.append(f"policy {policy.profile_name} rejects dry-run check {check_id!r}")
+    for check_id in policy.required_dry_run_check_ids:
+        if check_id not in design.required_dry_run_checks:
+            failures.append(f"policy {policy.profile_name} requires dry-run check {check_id!r}")
+    for ref_name in policy.required_evidence_refs_by_candidate_type.get(design.candidate_type, ()):
+        if ref_name not in design.evidence_refs:
+            failures.append(f"policy {policy.profile_name} requires evidence ref {ref_name!r}")
+
+    allowed_delta_keys = set(policy.allowed_delta_keys_by_candidate_type.get(design.candidate_type, ()))
+    for key_path in _flatten_delta_keys(design.parameter_or_config_delta):
+        key_root = key_path.split(".", 1)[0]
+        if any(part in policy.forbidden_delta_keys for part in key_path.split(".")):
+            failures.append(f"policy {policy.profile_name} rejects forbidden delta key {key_path!r}")
+        if key_root not in allowed_delta_keys and key_path not in allowed_delta_keys:
+            failures.append(f"policy {policy.profile_name} rejects delta key {key_path!r}")
+
+    if design.candidate_type == "parameter":
+        changes = design.parameter_or_config_delta.get("parameter_changes")
+        if isinstance(changes, Mapping):
+            for parameter_path in changes:
+                if parameter_path not in policy.allowed_parameter_paths:
+                    failures.append(
+                        f"policy {policy.profile_name} rejects parameter path {parameter_path!r}"
+                    )
+    return tuple(failures)
+
+
+def _flatten_delta_keys(value: Mapping[str, Any], prefix: str = "") -> tuple[str, ...]:
+    keys: list[str] = []
+    for key, item in value.items():
+        key_text = str(key)
+        key_path = f"{prefix}.{key_text}" if prefix else key_text
+        keys.append(key_path)
+        if isinstance(item, Mapping):
+            keys.extend(_flatten_delta_keys(item, key_path))
+    return tuple(keys)
+
+
 def _load_json_mapping(path: Path, field_name: str) -> Mapping[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -972,6 +1250,46 @@ def _normalize_text_sequence(
     for value in normalized:
         _reject_promotion_text(value, field_name)
     return normalized
+
+
+def _normalize_policy_text_sequence(
+    values: Sequence[str],
+    field_name: str,
+    *,
+    allow_empty: bool = False,
+) -> tuple[str, ...]:
+    if isinstance(values, str | bytes | bytearray) or not isinstance(values, Sequence):
+        raise ValueError(f"{field_name} must be a sequence of strings")
+    normalized = tuple(_require_non_empty_text(value, field_name) for value in values)
+    if not allow_empty and not normalized:
+        raise ValueError(f"{field_name} must not be empty")
+    for value in normalized:
+        _reject_promotion_text(value, field_name)
+    return tuple(dict.fromkeys(normalized))
+
+
+def _normalize_policy_mapping(
+    value: Mapping[str, Sequence[str]],
+    field_name: str,
+) -> dict[str, tuple[str, ...]]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{field_name} must be a mapping")
+    normalized: dict[str, tuple[str, ...]] = {}
+    for key, values in value.items():
+        key_text = _require_candidate_type(key)
+        normalized[key_text] = _normalize_policy_text_sequence(
+            values,
+            f"{field_name}.{key_text}",
+            allow_empty=True,
+        )
+    return dict(sorted(normalized.items()))
+
+
+def _normalize_forbidden_delta_keys(values: Sequence[str], field_name: str) -> tuple[str, ...]:
+    if isinstance(values, str | bytes | bytearray) or not isinstance(values, Sequence):
+        raise ValueError(f"{field_name} must be a sequence of strings")
+    normalized = tuple(_require_non_empty_text(value, field_name) for value in values)
+    return tuple(dict.fromkeys(normalized))
 
 
 def _normalize_json_mapping(value: Mapping[str, Any], field_name: str) -> dict[str, Any]:
