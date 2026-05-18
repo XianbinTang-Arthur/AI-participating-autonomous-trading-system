@@ -116,7 +116,13 @@ def summary_path(tmp_path: Path, *, mode: str = "shadow", payload_overrides: dic
 
 
 def test_shadow_observation_source_builds_neutral_result(tmp_path: Path) -> None:
-    source = ShadowObservationDataSource(summary_path(tmp_path, mode="shadow"))
+    source = ShadowObservationDataSource(
+        summary_path(
+            tmp_path,
+            mode="shadow",
+            payload_overrides={"suggested_review_decision": "eligible_for_preapply"},
+        )
+    )
 
     result = source.load_result(recommendation(mode="shadow"), created_at=dt(13))
 
@@ -149,6 +155,14 @@ def test_observation_source_rejects_identity_mismatch(tmp_path: Path) -> None:
     source = ShadowObservationDataSource(path)
 
     with pytest.raises(ValueError, match="candidate_id must match"):
+        source.load_result(recommendation())
+
+
+def test_observation_source_requires_identity_fields(tmp_path: Path) -> None:
+    path = summary_path(tmp_path, payload_overrides={"recommendation_id": None})
+    source = ShadowObservationDataSource(path)
+
+    with pytest.raises(ValueError, match="recommendation_id"):
         source.load_result(recommendation())
 
 

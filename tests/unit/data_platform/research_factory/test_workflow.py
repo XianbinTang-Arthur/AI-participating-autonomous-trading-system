@@ -129,16 +129,21 @@ def write_execution_cost_summary(path: Path, *, cost_adjusted_edge: float = 1.75
 def write_observation_summary(
     path: Path,
     *,
+    experiment_id: str,
     observed_bars: int = 96,
     observed_events: int = 12,
     cost_adjusted_edge: float = 1.1,
 ) -> None:
+    candidate_id = f"cand_{experiment_id}"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
                 "schema_version": OBSERVATION_SUMMARY_SCHEMA_VERSION,
                 "mode": "shadow",
+                "recommendation_id": f"rec_{candidate_id}",
+                "candidate_id": candidate_id,
+                "experiment_id": experiment_id,
                 "observation_start": (START + timedelta(hours=12)).isoformat(),
                 "observation_end": (START + timedelta(hours=24)).isoformat(),
                 "observed_bars": observed_bars,
@@ -192,7 +197,7 @@ def test_governance_workflow_creates_review_pending_chain(workspace_tmp_path: Pa
     execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
     observation_summary = root.parent / "observation_inputs" / "shadow_summary.json"
     write_execution_cost_summary(execution_summary)
-    write_observation_summary(observation_summary)
+    write_observation_summary(observation_summary, experiment_id="rf_governance_success")
 
     result = run_research_governance_workflow(
         ResearchGovernanceWorkflowConfig(
@@ -236,7 +241,7 @@ def test_governance_workflow_requires_explicit_profile(workspace_tmp_path: Path)
     execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
     observation_summary = root.parent / "observation_inputs" / "shadow_summary.json"
     write_execution_cost_summary(execution_summary)
-    write_observation_summary(observation_summary)
+    write_observation_summary(observation_summary, experiment_id="rf_governance_no_profile")
 
     with pytest.raises(ValueError, match="explicit research_profile"):
         ResearchGovernanceWorkflowConfig(
@@ -258,6 +263,7 @@ def test_governance_workflow_failed_observation_gate_does_not_become_ready(works
     write_execution_cost_summary(execution_summary)
     write_observation_summary(
         observation_summary,
+        experiment_id="rf_governance_keep_reviewing",
         observed_bars=1,
         observed_events=0,
     )

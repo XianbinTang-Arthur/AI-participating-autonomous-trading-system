@@ -55,7 +55,7 @@ class ReadOnlyObservationDataSource:
         mode = _require_text(payload, "mode")
         if mode != self.expected_mode:
             raise ValueError("observation summary mode does not match observation data source")
-        decision = review_decision or _optional_text(payload.get("suggested_review_decision")) or "keep_reviewing"
+        decision = review_decision or "keep_reviewing"
         if decision not in ALLOWED_REVIEW_DECISIONS:
             allowed = ", ".join(sorted(ALLOWED_REVIEW_DECISIONS))
             raise ValueError(f"review_decision must be one of: {allowed}")
@@ -129,8 +129,8 @@ def _require_summary_identity(payload: Mapping[str, Any], recommendation: Resear
         "experiment_id": recommendation.experiment_id,
     }
     for field_name, expected_value in expected.items():
-        actual = _optional_text(payload.get(field_name))
-        if actual is not None and actual != expected_value:
+        actual = _require_text(payload, field_name)
+        if actual != expected_value:
             raise ValueError(f"observation summary {field_name} must match recommendation")
 
 
