@@ -231,6 +231,11 @@ def test_governance_workflow_creates_review_pending_chain(workspace_tmp_path: Pa
     )
     assert workflow_summary["risk_flags"] == ["execution_evidence_uses_dataset_compatibility"]
     assert workflow_summary["blocking_failures"] == []
+    assert workflow_summary["failed_stage"] is None
+    assert workflow_summary["blocking_artifact"] is None
+    assert workflow_summary["next_debug_action"] == (
+        "inspect operator_review_checklist.json before any separate manual design review"
+    )
     assert (factory_root / "preapply" / result.package_id / "preapply_evidence_package.json").exists()
     assert (
         factory_root
@@ -244,6 +249,8 @@ def test_governance_workflow_creates_review_pending_chain(workspace_tmp_path: Pa
         factory_root / "preapply_reviews" / result.preapply_review_id / "preapply_review_manifest.json"
     )
     assert checklist["runtime_mutation_allowed"] is False
+    assert checklist["failed_stage"] is None
+    assert checklist["blocking_artifact"] is None
     assert "does not authorize active parameter changes" in checklist["no_runtime_mutation_statement"]
     assert review_manifest["output_refs"]["evidence_reference_integrity_report"] == (
         "evidence_reference_integrity_report.json"
@@ -323,13 +330,66 @@ def test_governance_workflow_failed_observation_gate_does_not_become_ready(works
 
     factory_root = research_factory_root(workspace_tmp_path)
     package = read_json(factory_root / "preapply" / result.package_id / "preapply_evidence_package.json")
+    workflow_summary = read_json(
+        factory_root / "workflows" / "wf_governance_keep_reviewing" / "workflow_summary.json"
+    )
+    checklist = read_json(
+        factory_root / "workflows" / "wf_governance_keep_reviewing" / "operator_review_checklist.json"
+    )
     registry_entries = read_jsonl(factory_root / "registry" / "research_memory.jsonl")
 
     assert result.status == "needs_more_observation"
     assert result.observation_gate_passed is False
     assert package["status"] == "needs_more_observation"
     assert package["review_decision"] == "keep_reviewing"
+    assert workflow_summary["failed_stage"] == "observation_gate"
+    assert workflow_summary["blocking_artifact"] == (
+        f"observations/{result.observation_id}/observation_gate_result.json"
+    )
+    assert workflow_summary["next_debug_action"] == (
+        f"inspect observations/{result.observation_id}/observation_gate_result.json"
+    )
+    assert checklist["failed_stage"] == "observation_gate"
+    assert checklist["blocking_artifact"] == workflow_summary["blocking_artifact"]
     assert {entry["status"] for entry in registry_entries} >= {
         "observation_keep_reviewing",
         "needs_more_observation",
     }
+
+
+def test_governance_workflow_failed_experiment_records_stage(workspace_tmp_path: Path) -> None:
+    root = artifact_root(workspace_tmp_path)
+    execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
+    observation_summary = root.parent / "observation_inputs" / "shadow_summary.json"
+    write_execution_cost_summary(execution_summary)
+    write_observation_summary(observation_summary, experiment_id="rf_governance_no_data_source")
+
+    result = run_research_governance_workflow(
+        ResearchGovernanceWorkflowConfig(
+            experiment_config=experiment_config(
+                root,
+                execution_summary,
+                experiment_id="rf_governance_no_data_source",
+            ),
+            observation_summary_path=observation_summary,
+            workflow_id="wf_governance_no_data_source",
+            allow_smoke_profile=True,
+            timestamp=START,
+        )
+    )
+
+    factory_root = research_factory_root(workspace_tmp_path)
+    workflow_summary = read_json(factory_root / "workflows" / "wf_governance_no_data_source" / "workflow_summary.json")
+
+    assert result.status == "failed"
+    assert result.error == "data_source is required; CLI should provide a GoldReplayDataSource"
+    assert workflow_summary["failed_stage"] == "real_data_experiment"
+    assert workflow_summary["blocking_artifact"] == (
+        "experiments/rf_governance_no_data_source/experiment_manifest.json"
+    )
+    assert workflow_summary["blocking_failures"] == [
+        "data_source is required; CLI should provide a GoldReplayDataSource"
+    ]
+    assert workflow_summary["next_debug_action"] == (
+        "inspect experiments/rf_governance_no_data_source/experiment_manifest.json"
+    )

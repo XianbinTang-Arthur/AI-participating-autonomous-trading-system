@@ -71,6 +71,16 @@ REFERENCE_INTEGRITY_REPORT_REF = "evidence_reference_integrity_report.json"
 OPERATOR_REVIEW_SUMMARY_REF = "preapply_review_summary.md"
 OPERATOR_REVIEW_CHECKLIST_REF = "operator_review_checklist.json"
 OPERATOR_REVIEW_CHECKLIST_SCHEMA_VERSION = "research_operator_review_checklist_v1"
+STAGE_PREPARE_WORKFLOW = "prepare_workflow"
+STAGE_REAL_DATA_EXPERIMENT = "real_data_experiment"
+STAGE_LOAD_RESEARCH_ARTIFACTS = "load_research_artifacts"
+STAGE_OBSERVATION = "observation"
+STAGE_OBSERVATION_GATE = "observation_gate"
+STAGE_PREAPPLY_PACKAGE = "preapply_package"
+STAGE_REFERENCE_INTEGRITY = "reference_integrity"
+STAGE_PREAPPLY_REVIEW = "preapply_review"
+STAGE_REGISTRY_MEMORY = "registry_memory"
+STAGE_WORKFLOW_SUMMARY = "workflow_summary"
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,8 +172,10 @@ def run_research_governance_workflow(
     workflow_root = _workflow_root(config, research_factory_root)
     workflow_id = config.workflow_id or _failed_workflow_id(config)
     workflow_dir: Path | None = None
+    current_stage = STAGE_PREPARE_WORKFLOW
 
     try:
+        current_stage = STAGE_REAL_DATA_EXPERIMENT
         experiment_result = run_research_factory_experiment(
             config.experiment_config,
             data_source=data_source,
@@ -176,14 +188,18 @@ def run_research_governance_workflow(
                 workflow_id=workflow_id,
                 profile_name=profile_name,
                 experiment_id=experiment_result.experiment_id,
-            error=experiment_result.error or f"experiment status={experiment_result.status}",
-            timestamp=config.timestamp,
-        )
+                failed_stage=STAGE_REAL_DATA_EXPERIMENT,
+                blocking_artifact=f"experiments/{experiment_result.experiment_id}/experiment_manifest.json",
+                error=experiment_result.error or f"experiment status={experiment_result.status}",
+                timestamp=config.timestamp,
+            )
 
         experiment_dir = Path(experiment_result.artifact_dir)
+        current_stage = STAGE_LOAD_RESEARCH_ARTIFACTS
         candidate = _load_candidate(experiment_dir / "candidate_artifact.json")
         recommendation = _load_recommendation(experiment_dir / "research_recommendation.json")
         evidence_bundle = _load_evidence_bundle(experiment_dir / "evidence_bundle.json")
+        current_stage = STAGE_OBSERVATION
         observation_recorder = ObservationRecorder(
             research_factory_root / "observations",
             code_version=WORKFLOW_CODE_VERSION,
@@ -208,6 +224,7 @@ def run_research_governance_workflow(
             review_decision="keep_reviewing",
             created_at=config.timestamp,
         )
+        current_stage = STAGE_OBSERVATION_GATE
         neutral_gate = evaluate_observation_gate(
             neutral_result,
             running_observation,
@@ -234,6 +251,7 @@ def run_research_governance_workflow(
         )
         observation_recorder.record_review_outcome(review_outcome)
 
+        current_stage = STAGE_PREAPPLY_PACKAGE
         package = build_preapply_evidence_package(
             candidate=candidate,
             recommendation=recommendation,
@@ -257,12 +275,14 @@ def run_research_governance_workflow(
         )
         preapply_recorder.record_package(package)
 
+        current_stage = STAGE_REFERENCE_INTEGRITY
         integrity_report = validate_preapply_package_reference_integrity(
             package,
             research_factory_root,
             created_at=config.timestamp,
         )
         review_id = f"review_{package.package_id}"
+        current_stage = STAGE_PREAPPLY_REVIEW
         review_recorder = PreApplyReviewRecorder(
             research_factory_root / "preapply_reviews",
             code_version=WORKFLOW_CODE_VERSION,
@@ -279,6 +299,7 @@ def run_research_governance_workflow(
             notes=("workflow created review-pending evidence only",),
         )
 
+        current_stage = STAGE_REGISTRY_MEMORY
         registry = ResearchMemoryRegistry(
             config.registry_path
             or config.experiment_config.registry_path
@@ -327,6 +348,12 @@ def run_research_governance_workflow(
             package=package,
             integrity_report=integrity_report,
         )
+        failed_stage = _workflow_failed_stage(status, observation_gate, integrity_report)
+        blocking_artifact = _workflow_blocking_artifact(
+            failed_stage=failed_stage,
+            observation_id=observation_run.observation_id,
+            review_id=review.review_id,
+        )
         summary = {
             "workflow_id": workflow_id,
             "status": status,
@@ -346,6 +373,13 @@ def run_research_governance_workflow(
             "artifact_refs": artifact_refs,
             "risk_flags": risk_flags,
             "blocking_failures": blocking_failures,
+            "failed_stage": failed_stage,
+            "blocking_artifact": blocking_artifact,
+            "next_debug_action": _workflow_next_debug_action(
+                status=status,
+                failed_stage=failed_stage,
+                blocking_artifact=blocking_artifact,
+            ),
             "runtime_mutation_allowed": False,
             "operator_approval_required": True,
             "created_at": config.timestamp.isoformat(),
@@ -371,6 +405,7 @@ def run_research_governance_workflow(
             integrity_report=integrity_report,
             operator_checklist=operator_checklist,
         )
+        current_stage = STAGE_WORKFLOW_SUMMARY
         _write_workflow_artifacts(
             workflow_dir=workflow_dir,
             workflow_id=workflow_id,
@@ -402,6 +437,11 @@ def run_research_governance_workflow(
             workflow_id=workflow_id,
             profile_name=profile_name,
             experiment_id=config.experiment_config.experiment_id,
+            failed_stage=current_stage,
+            blocking_artifact=_blocking_artifact_for_failed_stage(
+                current_stage,
+                experiment_id=config.experiment_config.experiment_id,
+            ),
             error=str(exc),
             timestamp=config.timestamp,
         )
@@ -413,6 +453,8 @@ def _finish_failed_workflow(
     workflow_id: str,
     profile_name: str,
     experiment_id: str | None,
+    failed_stage: str,
+    blocking_artifact: str | None,
     error: str,
     timestamp: datetime,
 ) -> ResearchGovernanceWorkflowResult:
@@ -422,9 +464,18 @@ def _finish_failed_workflow(
         "profile": profile_name,
         "experiment_id": experiment_id,
         "error": error,
+        "failed_stage": failed_stage,
+        "blocking_artifact": blocking_artifact,
+        "blocking_failures": (error,),
+        "artifact_refs": _failed_workflow_artifact_refs(
+            workflow_id=workflow_id,
+            experiment_id=experiment_id,
+            blocking_artifact=blocking_artifact,
+        ),
         "runtime_mutation_allowed": False,
         "operator_approval_required": True,
         "next_step": "inspect_failed_research_workflow",
+        "next_debug_action": _failed_workflow_next_debug_action(failed_stage, blocking_artifact),
         "created_at": timestamp.isoformat(),
     }
     _write_workflow_artifacts(
@@ -585,6 +636,84 @@ def _workflow_next_step(status: str) -> str:
     return "inspect_workflow_summary"
 
 
+def _workflow_failed_stage(
+    status: str,
+    observation_gate: Any,
+    integrity_report: EvidenceReferenceIntegrityReport,
+) -> str | None:
+    if status == "preapply_review_pending":
+        return None
+    if not integrity_report.passed:
+        return STAGE_REFERENCE_INTEGRITY
+    if not observation_gate.passed:
+        return STAGE_OBSERVATION_GATE
+    if status in {"needs_more_observation", "preapply_rejected"}:
+        return STAGE_PREAPPLY_PACKAGE
+    return None
+
+
+def _workflow_blocking_artifact(
+    *,
+    failed_stage: str | None,
+    observation_id: str,
+    review_id: str,
+) -> str | None:
+    if failed_stage == STAGE_OBSERVATION_GATE:
+        return f"observations/{observation_id}/observation_gate_result.json"
+    if failed_stage == STAGE_REFERENCE_INTEGRITY:
+        return f"preapply_reviews/{review_id}/{REFERENCE_INTEGRITY_REPORT_REF}"
+    if failed_stage == STAGE_PREAPPLY_PACKAGE:
+        return f"observations/{observation_id}/review_outcome.json"
+    return None
+
+
+def _workflow_next_debug_action(
+    *,
+    status: str,
+    failed_stage: str | None,
+    blocking_artifact: str | None,
+) -> str:
+    if failed_stage is None:
+        return "inspect operator_review_checklist.json before any separate manual design review"
+    if blocking_artifact is not None:
+        return f"inspect {blocking_artifact}"
+    return f"inspect workflow_summary.json for stage={failed_stage} status={status}"
+
+
+def _blocking_artifact_for_failed_stage(stage: str, *, experiment_id: str | None) -> str | None:
+    if experiment_id is None:
+        return None
+    if stage == STAGE_REAL_DATA_EXPERIMENT:
+        return f"experiments/{experiment_id}/experiment_manifest.json"
+    if stage == STAGE_LOAD_RESEARCH_ARTIFACTS:
+        return f"experiments/{experiment_id}/candidate_artifact.json"
+    if stage == STAGE_OBSERVATION:
+        return f"experiments/{experiment_id}/research_recommendation.json"
+    if stage == STAGE_PREAPPLY_PACKAGE:
+        return f"experiments/{experiment_id}/evidence_bundle.json"
+    return None
+
+
+def _failed_workflow_artifact_refs(
+    *,
+    workflow_id: str,
+    experiment_id: str | None,
+    blocking_artifact: str | None,
+) -> dict[str, str]:
+    refs = {"workflow_summary": f"workflows/{workflow_id}/{WORKFLOW_SUMMARY_REF}"}
+    if experiment_id is not None:
+        refs["experiment_manifest"] = f"experiments/{experiment_id}/experiment_manifest.json"
+    if blocking_artifact is not None:
+        refs["blocking_artifact"] = blocking_artifact
+    return refs
+
+
+def _failed_workflow_next_debug_action(stage: str, blocking_artifact: str | None) -> str:
+    if blocking_artifact is not None:
+        return f"inspect {blocking_artifact}"
+    return f"inspect workflow_summary.json for failed stage {stage}"
+
+
 def _workflow_artifact_refs(
     *,
     workflow_id: str,
@@ -727,6 +856,9 @@ def _operator_review_checklist(
         "artifact_refs": summary["artifact_refs"],
         "risk_flags": summary["risk_flags"],
         "blocking_failures": summary["blocking_failures"],
+        "failed_stage": summary["failed_stage"],
+        "blocking_artifact": summary["blocking_artifact"],
+        "next_debug_action": summary["next_debug_action"],
         "checklist_items": checklist_items,
         "recommended_next_step": summary["next_step"],
         "runtime_mutation_allowed": False,
@@ -776,6 +908,9 @@ def _operator_review_summary(
         f"- Novelty gate decision: `{novelty_decision}`\n\n"
         f"## Review Controls\n\n"
         f"- Recommended next step: `{summary['next_step']}`\n"
+        f"- Failed or blocking stage: `{summary['failed_stage'] or 'none'}`\n"
+        f"- Blocking artifact: `{summary['blocking_artifact'] or 'none'}`\n"
+        f"- Next debug action: `{summary['next_debug_action']}`\n"
         f"- Risk flags: `{risk_flags}`\n"
         f"- Runtime mutation allowed: `False`\n"
         f"- Operator approval required: `True`\n"
