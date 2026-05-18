@@ -793,7 +793,11 @@ class AccountQueryFacade:
                     order_id = str(order.get("order_id") or "").strip()
                     if not order_id:
                         continue
-                    payloads.extend(self.owner._execution_record_payload(row) for row in fills_for_order(order_id))
+                    payloads.extend(
+                        self.owner._execution_record_payload(row)
+                        for row in fills_for_order(order_id)
+                        if execution_fill_row_matches_scope(row, self.owner.state_scope)
+                    )
                 return [
                     payload
                     for payload in payloads

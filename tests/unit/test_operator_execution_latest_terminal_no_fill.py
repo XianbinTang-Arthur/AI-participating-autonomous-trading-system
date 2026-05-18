@@ -544,6 +544,36 @@ def test_phase5_fill_detail_rejects_fill_outside_current_scope() -> None:
         raise AssertionError("cross-scope phase5 fill detail must be hidden")
 
 
+def test_phase5_fill_payloads_for_order_group_rejects_fill_outside_current_scope() -> None:
+    owner = _DetailOwner(
+        fills_by_order={
+            "order-scope": [
+                {
+                    "fill_id": "fill-current-scope",
+                    "order_id": "order-scope",
+                    "decision_id": "decision-scope",
+                    "symbol": "BTC-USDT-SWAP",
+                    "raw_payload": {"product_type": "derivatives", "margin_mode": "cross"},
+                },
+                {
+                    "fill_id": "fill-spot",
+                    "order_id": "order-scope",
+                    "decision_id": "decision-scope",
+                    "symbol": "BTC-USDT",
+                    "raw_payload": {"product_type": "spot", "margin_mode": "cash"},
+                },
+            ]
+        }
+    )
+
+    payloads = AccountQueryFacade(owner)._fill_payloads_for_order_group(
+        [{"order_id": "order-scope"}],
+        decision_id="decision-scope",
+    )
+
+    assert [payload["fill_id"] for payload in payloads] == ["fill-current-scope"]
+
+
 def test_phase5_account_open_orders_uses_scoped_open_order_reader() -> None:
     owner = _FakeOwner(
         orders=[
