@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
-from aats.schemas.portfolio import PortfolioSnapshot, is_baseline_snapshot
+from aats.schemas.portfolio import PortfolioSnapshot, is_baseline_snapshot, is_trusted_baseline_snapshot
 from aats.services.runtime_scope import RuntimeStateScope, filter_snapshots, latest_matching_snapshot
 
 _logger = logging.getLogger("aats.storage.portfolio_repo")
@@ -74,5 +74,12 @@ class InMemoryPortfolioRepository:
         scoped = filter_snapshots(self._snapshots, scope)
         for snapshot in reversed(scoped):
             if is_baseline_snapshot(snapshot):
+                return snapshot
+        return None
+
+    def latest_trusted_baseline_for_scope(self, *, scope: RuntimeStateScope) -> PortfolioSnapshot | None:
+        scoped = filter_snapshots(self._snapshots, scope)
+        for snapshot in reversed(scoped):
+            if is_trusted_baseline_snapshot(snapshot):
                 return snapshot
         return None

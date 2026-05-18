@@ -7,7 +7,7 @@ from sqlalchemy import desc, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import dump_payload_exact
-from aats.schemas.portfolio import BASELINE_SNAPSHOT_ORIGINS, PortfolioSnapshot
+from aats.schemas.portfolio import BASELINE_SNAPSHOT_ORIGINS, TRUSTED_BASELINE_SNAPSHOT_ORIGINS, PortfolioSnapshot
 from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.scope_metadata import portfolio_scope_metadata
 from aats.storage.sqlalchemy_models import PortfolioSnapshotModel
@@ -151,6 +151,24 @@ class PostgresPortfolioRepository:
                         (src_fill.is_(None) & src_intent.is_(None)),
                     )
                 )
+                .order_by(
+                    desc(PortfolioSnapshotModel.snapshot_ts),
+                    desc(PortfolioSnapshotModel.sequence_id),
+                )
+                .limit(1)
+            )
+        return self._to_snapshot(row) if row is not None else None
+
+    def latest_trusted_baseline_for_scope(self, *, scope: RuntimeStateScope) -> PortfolioSnapshot | None:
+        """Find the latest exchange/operator imported baseline via a single DB query."""
+        trusted_origins = list(TRUSTED_BASELINE_SNAPSHOT_ORIGINS)
+        origin_col = PortfolioSnapshotModel.payload["snapshot_origin"].as_string()
+        with self.session_factory() as session:
+            row = session.scalar(
+                select(PortfolioSnapshotModel)
+                .where(PortfolioSnapshotModel.product_type == scope.product_type)
+                .where(PortfolioSnapshotModel.margin_mode == scope.margin_mode)
+                .where(origin_col.in_(trusted_origins))
                 .order_by(
                     desc(PortfolioSnapshotModel.snapshot_ts),
                     desc(PortfolioSnapshotModel.sequence_id),

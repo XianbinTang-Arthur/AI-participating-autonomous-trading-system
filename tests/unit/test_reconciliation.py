@@ -2226,6 +2226,7 @@ class TestReconciliationComparator(unittest.TestCase):
         now = utc_now()
         baseline_snapshot = PortfolioSnapshot(
             snapshot_ts=now,
+            snapshot_origin="exchange_import",
             balances={"USDT": 75_630.13129751521, "OKB": 100.0, "ETH": 1.0, "BTC": 5.736e-9},
             positions=[],
             cost_basis={},
@@ -2471,6 +2472,7 @@ class TestReconciliationComparator(unittest.TestCase):
         now = utc_now()
         stored_snapshot = PortfolioSnapshot(
             snapshot_ts=now,
+            snapshot_origin="operator_rebaseline",
             balances={"USDT": 10_000.0},
             positions=[
                 Position(

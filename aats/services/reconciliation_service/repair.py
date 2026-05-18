@@ -38,9 +38,9 @@ from aats.services.execution_engine.exit_intent_aggregator import (
 from aats.services.execution_engine.exit_execution_writer import ExitExecutionWriter
 from aats.services.runtime_scope import (
     fills_for_scope,
-    latest_baseline_for_scope,
     latest_snapshot_for_scope,
     latest_topic_event_for_scope,
+    latest_trusted_baseline_for_scope,
     order_states_for_scope,
     runtime_state_scope,
 )
@@ -206,7 +206,7 @@ class ReconciliationRepairService:
             and getattr(self.settings, "bootstrap_portfolio_from_exchange", False)
         )
         if use_baseline:
-            baseline_snapshot = latest_baseline_for_scope(
+            baseline_snapshot = latest_trusted_baseline_for_scope(
                 self.portfolio_repo, self.runtime_scope,
             )
             if baseline_snapshot is not None:
@@ -467,7 +467,7 @@ class ReconciliationService:
         order_states = order_states_for_scope(self.execution_repo, self.runtime_scope)
         fills = fills_for_scope(self.execution_repo, self.runtime_scope)
         exchange_snapshot: ExchangeAccountSnapshot | None = self.fetcher.fetch_snapshot()
-        baseline_snapshot = latest_baseline_for_scope(
+        baseline_snapshot = latest_trusted_baseline_for_scope(
             self.portfolio_repo, self.runtime_scope,
         )
         trusted_exchange_portfolio_baseline = (
@@ -639,7 +639,7 @@ class ReconciliationService:
         if not self.bootstrap_portfolio_from_exchange:
             return full_replay_snapshot()
 
-        baseline_snapshot = latest_baseline_for_scope(
+        baseline_snapshot = latest_trusted_baseline_for_scope(
             self.portfolio_repo, self.runtime_scope,
         )
         if baseline_snapshot is None:

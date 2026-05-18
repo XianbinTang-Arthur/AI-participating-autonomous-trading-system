@@ -497,7 +497,8 @@ class ExecutionLedgerRecoveryService:
             remaining = stranded_submit_order_count - self._exchange_reconciled_count
             if remaining > 0:
                 _halt_and_block("phase4_created_orders_missing_submit_commands", "created_orders_missing_submit_commands")
-                recovery_action = recovery_action or "halted_created_orders_missing_submit_commands"
+                if recovery_action in {None, "halted_open_orders_require_review"}:
+                    recovery_action = "halted_created_orders_missing_submit_commands"
                 notes.append(f"created_orders_missing_submit_commands:{remaining}")
             else:
                 notes.append(f"created_orders_missing_submit_commands_auto_resolved:{stranded_submit_order_count}")

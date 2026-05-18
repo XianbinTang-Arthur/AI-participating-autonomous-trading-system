@@ -5,7 +5,14 @@ from typing import Any
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.execution import FillEvent, OrderState
-from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot, SleevePnLRecord, is_baseline_snapshot
+from aats.schemas.portfolio import (
+    FillOutcomeRecord,
+    FundingFeeRecord,
+    PortfolioSnapshot,
+    SleevePnLRecord,
+    is_baseline_snapshot,
+    is_trusted_baseline_snapshot,
+)
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import MarginModelType, ProductType
 
@@ -100,6 +107,22 @@ def latest_baseline_for_scope(repo, scope: RuntimeStateScope) -> PortfolioSnapsh
     if callable(repo_method):
         return repo_method(scope=scope)
     candidates = [s for s in snapshots_for_scope(repo, scope) if is_baseline_snapshot(s)]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda s: (s.snapshot_ts, s.created_at))
+
+
+def latest_trusted_baseline_for_scope(repo, scope: RuntimeStateScope) -> PortfolioSnapshot | None:
+    """Return the latest exchange/operator imported baseline for *scope*.
+
+    Recovery and replay can use generic baseline-like snapshots, but exchange
+    portfolio trust must only come from account snapshots imported from the
+    exchange or an operator rebaseline.
+    """
+    repo_method = getattr(repo, "latest_trusted_baseline_for_scope", None)
+    if callable(repo_method):
+        return repo_method(scope=scope)
+    candidates = [s for s in snapshots_for_scope(repo, scope) if is_trusted_baseline_snapshot(s)]
     if not candidates:
         return None
     return max(candidates, key=lambda s: (s.snapshot_ts, s.created_at))

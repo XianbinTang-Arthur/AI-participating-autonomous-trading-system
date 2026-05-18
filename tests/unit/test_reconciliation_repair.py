@@ -11,7 +11,7 @@ from aats.events import topics
 from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent, OrderState
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeFill
-from aats.schemas.portfolio import PortfolioSnapshot
+from aats.schemas.portfolio import PortfolioSnapshot, Position
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.services.execution_engine.exit_intent_aggregator import (
     child_exit_order_ref_from_order_state,
@@ -48,6 +48,44 @@ def build_fill() -> FillEvent:
         exchange_timestamp=now,
         ingestion_timestamp=now,
     )
+
+
+class CapturingComparator:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def compare(self, **kwargs) -> ReconciliationReport:
+        self.calls.append(kwargs)
+        return ReconciliationReport(
+            reconciliation_id="recon_capture",
+            as_of_ts=utc_now(),
+            product_type=kwargs["product_type"],
+            margin_mode=kwargs["margin_mode"],
+            allowed_symbols=list(kwargs["allowed_symbols"]),
+            exchange_comparison_enabled=bool(kwargs["exchange_comparison_enabled"]),
+            order_diff={"reconstructed": {}, "exchange": {}},
+            fill_diff={"replayed": {}, "exchange": {}},
+            balance_diff={"reconstructed": {}, "exchange": {}},
+            position_diff={
+                "stored": {},
+                "reconstructed": {},
+                "reconstructed_mismatches": {},
+                "exchange": {},
+                "exchange_mismatches": {},
+            },
+            mismatch_categories=[],
+            mismatch_reasons=[],
+            safety_impacts=[],
+            severity="CLEAN",
+        )
+
+
+class StaticExchangeFetcher:
+    def __init__(self, snapshot: ExchangeAccountSnapshot | None) -> None:
+        self._snapshot = snapshot
+
+    def fetch_snapshot(self) -> ExchangeAccountSnapshot | None:
+        return self._snapshot
 
 
 class TestReconciliationRepair(unittest.IsolatedAsyncioTestCase):
@@ -99,6 +137,90 @@ class TestReconciliationRepair(unittest.IsolatedAsyncioTestCase):
         service._persist_report_sync(report)
 
         self.assertEqual(calls, ["recon_persist_clearer"])
+
+    def test_report_builder_does_not_trust_recovery_auto_healed_baseline(self) -> None:
+        now = utc_now()
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "bootstrap_portfolio_from_exchange": True,
+            }
+        )
+        portfolio_repo = InMemoryPortfolioRepository()
+        recovery_snapshot = PortfolioSnapshot(
+            snapshot_ts=now,
+            decision_id="decision_recovery_snapshot",
+            snapshot_origin="recovery_auto_healed",
+            product_type="derivatives",
+            margin_mode="cross",
+            balances={"USDT": Decimal("10000.0")},
+            positions=[
+                Position(
+                    symbol="BTC-USDT-SWAP",
+                    position_key="BTC-USDT-SWAP:long",
+                    position_qty=Decimal("0.01"),
+                    position_notional=Decimal("650.0"),
+                    avg_entry_price=Decimal("65000.0"),
+                    unrealized_pnl=Decimal("0"),
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                )
+            ],
+            cost_basis={"BTC-USDT-SWAP:long": Decimal("65000.0")},
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            total_equity=Decimal("10000.0"),
+            gross_exposure=Decimal("650.0"),
+            net_exposure=Decimal("650.0"),
+            risk_budget_usage={},
+        )
+        portfolio_repo.save_snapshot(recovery_snapshot)
+        comparator = CapturingComparator()
+        service = ReconciliationService(
+            settings=settings,
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            fetcher=StaticExchangeFetcher(
+                ExchangeAccountSnapshot(
+                    account_source="okx",
+                    fetched_at=now,
+                    balances=[],
+                    positions=[],
+                    open_orders=[],
+                    fills=[],
+                    instruments=[],
+                )
+            ),
+            comparator=comparator,
+            repair_service=ReconciliationRepairService(),
+            reconciliation_repo=InMemoryReconciliationRepository(),
+            execution_repo=InMemoryExecutionRepository(),
+            portfolio_repo=portfolio_repo,
+            event_store=InMemoryEventStore(),
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            price_provider=lambda _symbol: Decimal("0"),
+            bootstrap_portfolio_from_exchange=True,
+            metrics=None,
+        )
+
+        service._build_report(
+            decision_id=None,
+            portfolio_snapshot_ref="manual_portfolio_snapshot:test",
+            stored_snapshot=recovery_snapshot,
+        )
+
+        self.assertEqual(len(comparator.calls), 1)
+        self.assertIs(comparator.calls[0]["trusted_exchange_portfolio_baseline"], False)
+        reconstructed_snapshot = comparator.calls[0]["reconstructed_snapshot"]
+        self.assertIsInstance(reconstructed_snapshot, PortfolioSnapshot)
+        self.assertEqual(reconstructed_snapshot.positions, [])
 
     async def test_local_only_snapshot_divergence_is_rebuilt_safely(self) -> None:
         event_store = InMemoryEventStore()
@@ -918,6 +1040,72 @@ class TestRepairBaselineAware(unittest.IsolatedAsyncioTestCase):
             f"Expected -0.002 (post-baseline only), got {btc_pos.position_qty}. "
             "Pre-baseline fill was incorrectly included in repair."
         )
+
+    async def test_repair_does_not_use_recovery_snapshot_as_trusted_baseline(self) -> None:
+        now = datetime.now(timezone.utc)
+        portfolio_repo = InMemoryPortfolioRepository()
+        portfolio_repo.save_snapshot(
+            PortfolioSnapshot(
+                snapshot_ts=now - timedelta(minutes=10),
+                decision_id="decision_recovery_auto_healed",
+                snapshot_origin="recovery_auto_healed",
+                product_type="derivatives",
+                margin_mode="cross",
+                balances={"USDT": Decimal("10000.0")},
+                positions=[
+                    Position(
+                        symbol="BTC-USDT-SWAP",
+                        position_key="BTC-USDT-SWAP:long",
+                        position_qty=Decimal("0.01"),
+                        position_notional=Decimal("650.0"),
+                        avg_entry_price=Decimal("65000.0"),
+                        unrealized_pnl=Decimal("0"),
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        position_mode="long_short_mode",
+                        pos_side="long",
+                    )
+                ],
+                cost_basis={"BTC-USDT-SWAP:long": Decimal("65000.0")},
+                realized_pnl=Decimal("0"),
+                unrealized_pnl=Decimal("0"),
+                total_equity=Decimal("10000.0"),
+                gross_exposure=Decimal("650.0"),
+                net_exposure=Decimal("650.0"),
+                risk_budget_usage={},
+            )
+        )
+        service = ReconciliationService(
+            settings=AATSSettings.model_validate(
+                {
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "default_symbol": "BTC-USDT-SWAP",
+                    "allowed_symbols": ("BTC-USDT-SWAP",),
+                    "bootstrap_portfolio_from_exchange": True,
+                }
+            ),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            fetcher=ExchangeStateFetcher(account_service=None),
+            comparator=StateComparator(),
+            repair_service=ReconciliationRepairService(),
+            reconciliation_repo=InMemoryReconciliationRepository(),
+            execution_repo=InMemoryExecutionRepository(),
+            portfolio_repo=portfolio_repo,
+            event_store=InMemoryEventStore(),
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            price_provider=lambda _symbol: Decimal("65000.0"),
+            bootstrap_portfolio_from_exchange=True,
+            metrics=None,
+        )
+
+        rebuilt = service.repair_service._rebuild_snapshot_baseline_aware(fills=[])
+
+        self.assertEqual(rebuilt.positions, [])
+        self.assertEqual(rebuilt.snapshot_origin, "fill_derived")
 
     async def test_repair_falls_back_to_full_replay_without_baseline(self) -> None:
         """Without a baseline snapshot, repair should fall back to full fill replay."""

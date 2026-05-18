@@ -315,6 +315,9 @@ class PortfolioRepository(Protocol):
     def latest_baseline_for_scope(self, *, scope: RuntimeStateScope) -> PortfolioSnapshot | None:
         ...
 
+    def latest_trusted_baseline_for_scope(self, *, scope: RuntimeStateScope) -> PortfolioSnapshot | None:
+        ...
+
 
 class FillOutcomeRepository(Protocol):
     def save_outcome(self, outcome: FillOutcomeRecord) -> FillOutcomeRecord:

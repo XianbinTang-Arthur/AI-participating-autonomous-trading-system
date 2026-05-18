@@ -113,6 +113,52 @@ class _CommandRepository:
 
 
 class TestStartupRecovery(unittest.TestCase):
+    def test_phase4_created_order_missing_submit_command_overrides_generic_open_order_action(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "spot",
+                "margin_mode": "cash",
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT",),
+            }
+        )
+        order_repo = _OpenOrderRepository(
+            [
+                {
+                    "order_id": "cl_missing_submit",
+                    "client_order_id": "cl_missing_submit",
+                    "intent_id": "intent_missing_submit",
+                    "state": "CREATED",
+                    "venue_order_id": None,
+                }
+            ]
+        )
+        service = ExecutionLedgerRecoveryService(
+            settings=settings,
+            base_recovery_service=None,  # type: ignore[arg-type]
+            reconciliation_repo=InMemoryReconciliationRepository(),
+            portfolio_repo=_EmptyPortfolioRepository(),
+            kill_switch=KillSwitch(),
+            reconciliation_classifier=RecoveryReconciliationClassifier(),
+            execution_order_repo=order_repo,
+            execution_command_repo=_CommandRepository({}),
+        )
+
+        status = service._phase4_status(
+            base_status=RecoveryStatus(
+                status="recovered_halted",
+                recovery_state="resume_blocked",
+                safe_startup=False,
+                recovery_action="halted_open_orders_require_review",
+            ),
+            latest_reconciliation=None,
+        )
+
+        self.assertTrue(status.halted)
+        self.assertEqual(status.recovery_action, "halted_created_orders_missing_submit_commands")
+        self.assertIn("created_orders_missing_submit_commands", status.resume_blocked_reasons)
+        self.assertIn("created_orders_missing_submit_commands:1", status.notes)
+
     def test_phase4_classifies_claimed_submit_as_exchange_reconcile_blocker(self) -> None:
         settings = AATSSettings.model_validate(
             {
