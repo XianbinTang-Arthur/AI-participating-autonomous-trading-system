@@ -61,6 +61,7 @@ from aats.services.execution_engine.orderbook_snapshot_refs import (
     parse_orderbook_snapshot_ref,
     resolve_orderbook_snapshot_ref_row,
 )
+from aats.services.execution_engine.state_machine import TERMINAL_ORDER_STATES
 from aats.services.execution_engine.state_writer import sync_execution_order_truth_direct_legacy_only
 from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.services.execution_engine.okx_account import derivatives_position_mode_contract
@@ -505,7 +506,11 @@ class OperatorQueryService:
         return execution_truth_repo_for_runtime(self.runtime)
 
     def _execution_read_truth_source(self) -> str:
-        return "execution_truth_repo" if getattr(self.runtime, "execution_truth_repo", None) is not None else "execution_repo"
+        if getattr(self.runtime, "execution_truth_repo", None) is not None:
+            return "execution_truth_repo"
+        if getattr(self.runtime, "reconciliation_execution_repo", None) is not None:
+            return "reconciliation_execution_repo"
+        return "execution_repo"
 
     def _scoped_order_states(self):
         return self._cached(
@@ -1346,7 +1351,13 @@ class OperatorQueryService:
             and self.runtime.ledger_entry_repo is not None
         )
 
-    def _phase5_order_rows(self, *, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
+    def _phase5_order_rows(
+        self,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        open_only: bool = False,
+    ) -> list[dict[str, Any]]:
         if not self._phase5_control_plane_enabled():
             return []
         normalized_offset = max(int(offset), 0)
@@ -1359,20 +1370,29 @@ class OperatorQueryService:
                 symbols=allowed_symbols,
                 limit=_LIVE_DASHBOARD_EVENT_LIMIT if limit is None else max(int(limit), 0),
                 offset=normalized_offset,
+                open_only=open_only,
             )
         if limit is None:
             repo_limit = _LIVE_DASHBOARD_EVENT_LIMIT
         else:
             fetch_limit = max(int(limit), 0) + normalized_offset
             repo_limit = max(fetch_limit * _PHASE5_SCOPE_FETCH_MULTIPLIER, fetch_limit)
-        rows = self.runtime.execution_order_repo.list_orders(limit=repo_limit, offset=0)
+        if open_only and hasattr(self.runtime.execution_order_repo, "open_orders"):
+            rows = self.runtime.execution_order_repo.open_orders()
+        else:
+            rows = self.runtime.execution_order_repo.list_orders(limit=repo_limit, offset=0)
         allowed_symbols = set(allowed_symbols)
+        terminal_states = {str(state).upper() for state in TERMINAL_ORDER_STATES}
         scoped = [
             row
             for row in rows
             if row.get("product_type") == self.state_scope.product_type
             and row.get("margin_mode") == self.state_scope.margin_mode
             and (not allowed_symbols or row.get("symbol") in allowed_symbols)
+            and (
+                not open_only
+                or str(row.get("state") or row.get("status") or "").upper() not in terminal_states
+            )
         ]
         if normalized_offset:
             scoped = scoped[normalized_offset:]

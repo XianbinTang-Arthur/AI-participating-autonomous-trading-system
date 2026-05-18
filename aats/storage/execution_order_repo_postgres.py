@@ -297,6 +297,7 @@ class PostgresExecutionOrderRepository:
         symbols: tuple[str, ...] = (),
         limit: int | None = None,
         offset: int = 0,
+        open_only: bool = False,
     ) -> list[dict]:
         query = (
             select(ExecutionOrderModel)
@@ -314,6 +315,8 @@ class PostgresExecutionOrderRepository:
         scoped_symbols = tuple(symbol for symbol in symbols if symbol)
         if scoped_symbols:
             query = query.where(ExecutionOrderModel.symbol.in_(scoped_symbols))
+        if open_only:
+            query = query.where(~ExecutionOrderModel.state.in_(_TERMINAL_ORDER_STATES))
         if limit is not None:
             query = query.limit(limit)
         with self.session_factory() as session:

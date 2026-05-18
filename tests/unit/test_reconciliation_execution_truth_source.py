@@ -144,3 +144,14 @@ def test_operator_scoped_execution_reads_use_execution_truth_repo() -> None:
     assert legacy_repo.order_calls == []
     assert legacy_repo.fill_calls == []
     assert legacy_repo.order_fills_calls == []
+
+
+def test_operator_truth_source_labels_reconciliation_execution_repo_fallback() -> None:
+    service = object.__new__(OperatorQueryService)
+    service.runtime = SimpleNamespace(
+        execution_repo=object(),
+        execution_truth_repo=None,
+        reconciliation_execution_repo=object(),
+    )
+
+    assert service._execution_read_truth_source() == "reconciliation_execution_repo"

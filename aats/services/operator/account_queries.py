@@ -413,7 +413,10 @@ class AccountQueryFacade:
     def account_open_orders(self) -> dict[str, Any]:
         exchange = self.owner.latest_exchange_snapshot()
         local_open_orders = (
-            [self.owner._execution_record_payload(order) for order in self.owner.runtime.execution_order_repo.open_orders()]
+            [
+                self.owner._execution_record_payload(order)
+                for order in self.owner._phase5_order_rows(open_only=True)
+            ]
             if self.owner._phase5_control_plane_enabled()
             else [order.model_dump(mode="json") for order in self.owner._scoped_open_order_states()]
         )

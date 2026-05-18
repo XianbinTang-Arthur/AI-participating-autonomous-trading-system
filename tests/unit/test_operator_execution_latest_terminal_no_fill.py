@@ -54,6 +54,9 @@ class _FakeOwner:
     def latest_fill(self):
         return self.fills[0] if self.fills else None
 
+    def latest_exchange_snapshot(self):
+        return SimpleNamespace(open_orders=[], fills=[])
+
     def _latest_scoped_reconciliation(self):
         self.reconciliation_calls += 1
         if self.reconciliation_raises:
@@ -99,9 +102,19 @@ class _FakeOwner:
     def _phase5_control_plane_enabled(self):
         return True
 
-    def _phase5_order_rows(self, *, limit=None, offset=0):
-        self.order_row_calls.append({"limit": limit, "offset": offset})
+    def _phase5_order_rows(self, *, limit=None, offset=0, open_only=False):
+        call = {"limit": limit, "offset": offset}
+        if open_only:
+            call["open_only"] = True
+        self.order_row_calls.append(call)
         rows = self.orders[offset:]
+        if open_only:
+            rows = [
+                row
+                for row in rows
+                if str(row.get("state") or row.get("status") or "").upper()
+                not in {"FILLED", "CANCELED", "REJECTED", "FAILED", "BLOCKED", "DRY_RUN", "EXPIRED"}
+            ]
         return rows[:limit] if limit is not None else rows
 
     def _phase5_fill_rows(self, *, limit=None, offset=0):
@@ -123,6 +136,7 @@ class _ScopedOrderRepo:
         symbols: tuple[str, ...] = (),
         limit: int | None = None,
         offset: int = 0,
+        open_only: bool = False,
     ) -> list[dict]:
         self.scoped_calls.append(
             {
@@ -131,6 +145,7 @@ class _ScopedOrderRepo:
                 "symbols": symbols,
                 "limit": limit,
                 "offset": offset,
+                "open_only": open_only,
             }
         )
         return self.rows
@@ -165,8 +180,37 @@ def test_phase5_order_rows_uses_scope_aware_repo_reader() -> None:
             "symbols": ("BTC-USDT-SWAP",),
             "limit": 1,
             "offset": 2,
+            "open_only": False,
         }
     ]
+
+
+def test_phase5_account_open_orders_uses_scoped_open_order_reader() -> None:
+    owner = _FakeOwner(
+        orders=[
+            {
+                "order_id": "order-open",
+                "client_order_id": "client-open",
+                "state": "SUBMITTED",
+                "product_type": "derivatives",
+                "margin_mode": "cross",
+                "symbol": "BTC-USDT-SWAP",
+            },
+            {
+                "order_id": "order-filled",
+                "client_order_id": "client-filled",
+                "state": "FILLED",
+                "product_type": "derivatives",
+                "margin_mode": "cross",
+                "symbol": "BTC-USDT-SWAP",
+            },
+        ]
+    )
+
+    payload = AccountQueryFacade(owner).account_open_orders()
+
+    assert owner.order_row_calls == [{"limit": None, "offset": 0, "open_only": True}]
+    assert [item["order_id"] for item in payload["local_open_orders"]] == ["order-open"]
 
 
 def test_execution_latest_exposes_terminal_no_fill_explanation_for_blocked_directional_decision() -> None:

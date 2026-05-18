@@ -59,6 +59,7 @@ class ExecutionOrderRepository(Protocol):
         symbols: tuple[str, ...] = (),
         limit: int | None = None,
         offset: int = 0,
+        open_only: bool = False,
     ) -> list[dict]:
         ...
 
