@@ -223,10 +223,29 @@ class StrategyProfileContextFacade:
                 else None
             )
             if snapshot is not None:
-                safe_to_trade = snapshot.safe_to_trade
-                review_required = snapshot.review_required
-                recovery_state = snapshot.recovery_state
-                resume_blocked_reasons = list(snapshot.resume_blocked_reasons_json)
+                snapshot_status = self.owner.runtime.recovery_status.model_copy(
+                    update={
+                        "recovery_source": "reconciliation_state_snapshot",
+                        "recovery_state": snapshot.recovery_state,
+                        "safe_to_trade": snapshot.safe_to_trade,
+                        "resume_eligible": snapshot.resume_eligible,
+                        "review_required": snapshot.review_required,
+                        "halt_required": snapshot.halt_required,
+                        "bundle_recovery_required": snapshot.bundle_recovery_required,
+                        "only_reduce_required": snapshot.only_reduce_required,
+                        "resume_blocked_reasons": list(snapshot.resume_blocked_reasons_json),
+                        "latest_reconciliation_id": snapshot.reconciliation_id,
+                        "recovered_reconciliation_available": True,
+                    }
+                )
+                recovery = RecoveryPostureEvaluator(self.owner.runtime).finalize_status(
+                    base_status=snapshot_status,
+                    latest_reconciliation=latest_reconciliation,
+                )
+                safe_to_trade = recovery.safe_to_trade
+                review_required = recovery.review_required
+                recovery_state = recovery.recovery_state
+                resume_blocked_reasons = list(recovery.resume_blocked_reasons)
 
         activation = self.owner._activation_state()
         live_guard_service = getattr(self.owner.runtime, "derivatives_live_guard_service", None)

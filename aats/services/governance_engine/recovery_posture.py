@@ -65,6 +65,10 @@ class RecoveryPostureEvaluator:
         "derivatives_exchange_position_without_local_execution_chain",
         *EXIT_EXECUTION_BLOCKER_KINDS,
     }
+    _BUNDLE_RECOVERY_BLOCKERS = {
+        "strategy_bundle_recovery_in_progress",
+        "strategy_bundle_recovery_requires_review",
+    }
 
     def __init__(self, runtime: ApplicationRuntime) -> None:
         self.runtime = runtime
@@ -150,7 +154,14 @@ class RecoveryPostureEvaluator:
             return False
         if status.baseline_requires_operator_review or ai_requires_manual_review or trial_guard_breached:
             return False
-        if any(blocker in self._PERSISTENT_STATUS_BLOCKERS for blocker in status.resume_blocked_reasons):
+        status_blockers = list(status.resume_blocked_reasons)
+        if not bundle_recovery.bundle_recovery_required and not bundle_recovery.recovery_blocking:
+            status_blockers = [
+                blocker
+                for blocker in status_blockers
+                if blocker not in self._BUNDLE_RECOVERY_BLOCKERS
+            ]
+        if any(blocker in self._PERSISTENT_STATUS_BLOCKERS for blocker in status_blockers):
             return False
         if bundle_recovery.bundle_recovery_required or bundle_recovery.recovery_blocking:
             return False
@@ -300,10 +311,6 @@ class RecoveryPostureEvaluator:
             bundle_recovery=bundle_recovery,
         )
         bundle_resume_blocked_reasons = list(status.resume_blocked_reasons)
-        _BUNDLE_RECOVERY_BLOCKERS = {
-            "strategy_bundle_recovery_requires_review",
-            "strategy_bundle_recovery_in_progress",
-        }
         if bundle_recovery.bundle_recovery_required:
             blocker = (
                 "strategy_bundle_recovery_requires_review"
@@ -319,7 +326,7 @@ class RecoveryPostureEvaluator:
             # 会在条件消失后永久残留，造成系统无限卡死。
             bundle_resume_blocked_reasons = [
                 r for r in bundle_resume_blocked_reasons
-                if r not in _BUNDLE_RECOVERY_BLOCKERS
+                if r not in self._BUNDLE_RECOVERY_BLOCKERS
             ]
 
         normalized = status.model_copy(

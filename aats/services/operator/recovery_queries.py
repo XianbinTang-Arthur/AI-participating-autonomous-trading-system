@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from aats.events import topics
+from aats.schemas.system import RecoveryStatus
 from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.services.operator._parallel import parallel_fetch
 from aats.services.runtime_scope import latest_topic_event_for_scope
@@ -12,6 +13,11 @@ if TYPE_CHECKING:
 
 
 class RecoveryQueryFacade:
+    _BUNDLE_RECOVERY_BLOCKERS = {
+        "strategy_bundle_recovery_in_progress",
+        "strategy_bundle_recovery_requires_review",
+    }
+
     def __init__(self, owner: "OperatorQueryService") -> None:
         self.owner = owner
 
@@ -110,6 +116,13 @@ class RecoveryQueryFacade:
             base_payload = self._dashboard_recovery_status_payload(
                 latest_state_snapshot=latest_state_snapshot,
             )
+            if self._state_snapshot_has_bundle_recovery_blocker(latest_state_snapshot):
+                latest_reconciliation = self._latest_reconciliation_for_snapshot_normalization()
+                if latest_reconciliation is not None:
+                    base_payload = self._normalized_state_snapshot_payload(
+                        latest_state_snapshot=latest_state_snapshot,
+                        latest_reconciliation=latest_reconciliation,
+                    )
         else:
             base = self.owner.recovery_posture.finalize_status(latest_reconciliation=latest_reconciliation)
             base_payload = base.model_dump(mode="json")
@@ -122,16 +135,16 @@ class RecoveryQueryFacade:
                 base_payload.get("recovery_state") == "multi_process_role_skip"
                 and latest_state_snapshot is not None
             ):
-                base_payload["recovery_state"] = latest_state_snapshot.recovery_state
-                base_payload["safe_to_trade"] = latest_state_snapshot.safe_to_trade
-                base_payload["resume_eligible"] = latest_state_snapshot.resume_eligible
-                base_payload["review_required"] = latest_state_snapshot.review_required
-                base_payload["halt_required"] = latest_state_snapshot.halt_required
-                base_payload["bundle_recovery_required"] = latest_state_snapshot.bundle_recovery_required
-                base_payload["only_reduce_required"] = latest_state_snapshot.only_reduce_required
-                base_payload["resume_blocked_reasons"] = list(
-                    latest_state_snapshot.resume_blocked_reasons_json
-                )
+                if latest_reconciliation is not None:
+                    base_payload = self._normalized_state_snapshot_payload(
+                        latest_state_snapshot=latest_state_snapshot,
+                        latest_reconciliation=latest_reconciliation,
+                    )
+                else:
+                    self._apply_state_snapshot_payload(
+                        base_payload=base_payload,
+                        latest_state_snapshot=latest_state_snapshot,
+                    )
 
         base_payload["independent_recovery_snapshots"] = self.owner._independent_recovery_snapshots_view(
             base_payload.get("independent_recovery_snapshots") or []
@@ -204,6 +217,83 @@ class RecoveryQueryFacade:
                 }
             )
         return payload
+
+    def _normalized_state_snapshot_payload(
+        self,
+        *,
+        latest_state_snapshot: Any,
+        latest_reconciliation: Any,
+    ) -> dict[str, Any]:
+        snapshot_status = self._recovery_status_from_state_snapshot(
+            latest_state_snapshot=latest_state_snapshot,
+        )
+        normalized = self.owner.recovery_posture.finalize_status(
+            base_status=snapshot_status,
+            latest_reconciliation=latest_reconciliation,
+        )
+        return normalized.model_dump(mode="json")
+
+    def _recovery_status_from_state_snapshot(
+        self,
+        *,
+        latest_state_snapshot: Any,
+    ) -> RecoveryStatus:
+        fallback = getattr(self.owner.runtime, "recovery_status", None)
+        updates = {
+            "status": str(getattr(fallback, "status", "") or "state_snapshot"),
+            "recovery_source": "reconciliation_state_snapshot",
+            "recovery_state": latest_state_snapshot.recovery_state,
+            "safe_to_trade": latest_state_snapshot.safe_to_trade,
+            "resume_eligible": latest_state_snapshot.resume_eligible,
+            "review_required": latest_state_snapshot.review_required,
+            "halt_required": latest_state_snapshot.halt_required,
+            "bundle_recovery_required": latest_state_snapshot.bundle_recovery_required,
+            "only_reduce_required": latest_state_snapshot.only_reduce_required,
+            "resume_blocked_reasons": list(latest_state_snapshot.resume_blocked_reasons_json),
+            "latest_reconciliation_id": getattr(latest_state_snapshot, "reconciliation_id", None),
+            "recovered_reconciliation_available": True,
+            "halted": bool(getattr(getattr(self.owner.runtime, "kill_switch", None), "halted", False)),
+        }
+        if hasattr(fallback, "model_copy"):
+            return fallback.model_copy(update=updates)
+        if hasattr(fallback, "model_dump"):
+            payload = fallback.model_dump(mode="json")
+            payload.update(updates)
+            return RecoveryStatus.model_validate(payload)
+        return RecoveryStatus.model_validate(updates)
+
+    def _apply_state_snapshot_payload(
+        self,
+        *,
+        base_payload: dict[str, Any],
+        latest_state_snapshot: Any,
+    ) -> None:
+        base_payload["recovery_state"] = latest_state_snapshot.recovery_state
+        base_payload["safe_to_trade"] = latest_state_snapshot.safe_to_trade
+        base_payload["resume_eligible"] = latest_state_snapshot.resume_eligible
+        base_payload["review_required"] = latest_state_snapshot.review_required
+        base_payload["halt_required"] = latest_state_snapshot.halt_required
+        base_payload["bundle_recovery_required"] = latest_state_snapshot.bundle_recovery_required
+        base_payload["only_reduce_required"] = latest_state_snapshot.only_reduce_required
+        base_payload["resume_blocked_reasons"] = list(latest_state_snapshot.resume_blocked_reasons_json)
+
+    def _state_snapshot_has_bundle_recovery_blocker(self, latest_state_snapshot: Any | None) -> bool:
+        if latest_state_snapshot is None:
+            return False
+        reasons = {
+            str(item)
+            for item in getattr(latest_state_snapshot, "resume_blocked_reasons_json", []) or []
+            if str(item or "").strip()
+        }
+        return bool(getattr(latest_state_snapshot, "bundle_recovery_required", False)) or bool(
+            reasons & self._BUNDLE_RECOVERY_BLOCKERS
+        )
+
+    def _latest_reconciliation_for_snapshot_normalization(self) -> Any | None:
+        try:
+            return self.owner._latest_scoped_reconciliation()
+        except Exception:  # pragma: no cover - defensive dashboard read path
+            return None
 
     def _dashboard_recovery_status_payload(
         self,

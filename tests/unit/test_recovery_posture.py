@@ -335,6 +335,64 @@ class TestRecoveryPostureEvaluator(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final.only_reduce_reasons, [])
         self.assertEqual(final.resume_blocked_reasons, [])
 
+    async def test_clean_reconciliation_clears_lingering_bundle_review_blocker_after_bundle_disappears(self) -> None:
+        runtime = await build_runtime(
+            AATSSettings.model_validate(
+                {
+                    "mode": "paper_live",
+                    "market_data_backend": "demo",
+                    "execution_backend": "paper",
+                    "account_backend": "disabled",
+                    "account_read_enabled": False,
+                    "storage_mode": "memory",
+                    "event_persistence_mode": "strict",
+                }
+            )
+        )
+        evaluator = RecoveryPostureEvaluator(runtime)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=runtime.settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        report = ReconciliationReport(
+            reconciliation_id="recon_clean_after_bundle_review",
+            as_of_ts=utc_now(),
+            exchange_comparison_enabled=True,
+            order_diff={},
+            fill_diff={},
+            balance_diff={},
+            position_diff={},
+            mismatch_categories=[],
+            mismatch_reasons=[],
+            safety_impacts=[],
+            severity="CLEAN",
+            review_required=False,
+            halt_required=False,
+            only_reduce_required=False,
+            only_reduce_reasons=[],
+            recovery_classification="clean",
+            recommended_operator_action="none",
+        )
+        base_status = RecoveryStatus(
+            status="review",
+            recovery_state="review_required",
+            review_required=True,
+            only_reduce_required=True,
+            resume_blocked_reasons=["strategy_bundle_recovery_requires_review"],
+            bundle_recovery_required=True,
+        )
+
+        final = evaluator.finalize_status(base_status=base_status, latest_reconciliation=report)
+
+        self.assertEqual(final.recovery_state, "normal_operation")
+        self.assertTrue(final.safe_to_trade)
+        self.assertTrue(final.resume_eligible)
+        self.assertFalse(final.review_required)
+        self.assertFalse(final.only_reduce_required)
+        self.assertFalse(final.bundle_recovery_required)
+        self.assertEqual(final.resume_blocked_reasons, [])
+
     async def test_finalize_status_tracks_dynamic_bundle_recovery_and_clears_after_orders_close(self) -> None:
         runtime = await build_runtime(
             AATSSettings.model_validate(

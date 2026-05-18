@@ -7,6 +7,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from aats.schemas.common import utc_now
+from aats.schemas.reconciliation import ReconciliationReport
+from aats.schemas.system import RecoveryStatus
 from aats.services.blocker_control import BlockerControlService
 from aats.services.operator.recovery_queries import RecoveryQueryFacade
 from aats.services.operator.runtime_queries import RuntimeQueryFacade
@@ -177,22 +180,6 @@ class _DashboardHealthOwner:
         raise AssertionError("dashboard health should not write blocker snapshots")
 
 
-class _RecoveryStatus:
-    def model_dump(self, *, mode: str = "json") -> dict:
-        return {
-            "recovery_state": "normal_operation",
-            "safe_to_trade": True,
-            "resume_eligible": True,
-            "review_required": False,
-            "halt_required": False,
-            "bundle_recovery_required": False,
-            "only_reduce_required": False,
-            "resume_blocked_reasons": [],
-            "rebaseline_available": False,
-            "independent_recovery_snapshots": [],
-        }
-
-
 class _DashboardStateSnapshot:
     recovery_state = "normal_operation"
     safe_to_trade = True
@@ -236,14 +223,41 @@ class _DashboardRebaselineStateSnapshot:
         }
 
 
+class _DashboardStaleBundleStateSnapshot:
+    reconciliation_id = "recon_old_bundle_snapshot"
+    recovery_state = "review_required"
+    safe_to_trade = False
+    resume_eligible = False
+    review_required = True
+    halt_required = False
+    bundle_recovery_required = True
+    only_reduce_required = True
+    resume_blocked_reasons_json = ["strategy_bundle_recovery_requires_review"]
+
+    def model_dump(self, *, mode: str = "json") -> dict:
+        return {
+            "snapshot_id": "snapshot_stale_bundle",
+            "reconciliation_id": self.reconciliation_id,
+            "details_json": {
+                "reconciliation_severity": "CLEAN",
+                "review_required": False,
+                "only_reduce_required": False,
+            },
+        }
+
+
 class _DashboardRecoveryOwner:
     def __init__(
         self,
         *,
         latest_state_snapshot=None,
+        latest_reconciliation=None,
+        recovery_posture=None,
         operator_rebaseline_supported: bool = False,
     ) -> None:
         latest_state_snapshot = latest_state_snapshot or _DashboardStateSnapshot()
+        self.latest_reconciliation = latest_reconciliation
+        self.latest_reconciliation_calls = 0
         self.state_scope = SimpleNamespace(
             product_type="derivatives",
             margin_mode="cross",
@@ -254,14 +268,17 @@ class _DashboardRecoveryOwner:
                 latest_state_snapshot_for_scope=lambda *, scope: latest_state_snapshot
             ),
             event_store=SimpleNamespace(),
-            recovery_status=_RecoveryStatus(),
+            recovery_status=RecoveryStatus(
+                status="multi_process_role_skip",
+                recovery_state="multi_process_role_skip",
+            ),
             kill_switch=SimpleNamespace(halted=False),
             recovery_policy=SimpleNamespace(
                 operator_rebaseline_supported=operator_rebaseline_supported,
             ),
         )
-        self.recovery_posture = SimpleNamespace(
-            finalize_status=lambda *, latest_reconciliation: (_ for _ in ()).throw(
+        self.recovery_posture = recovery_posture or SimpleNamespace(
+            finalize_status=lambda **_kwargs: (_ for _ in ()).throw(
                 AssertionError("dashboard recovery must not finalize full recovery posture")
             )
         )
@@ -273,7 +290,10 @@ class _DashboardRecoveryOwner:
         return loader()
 
     def _latest_scoped_reconciliation(self):
-        raise AssertionError("dashboard recovery must defer latest reconciliation")
+        if self.latest_reconciliation is None:
+            raise AssertionError("dashboard recovery must defer latest reconciliation")
+        self.latest_reconciliation_calls += 1
+        return self.latest_reconciliation
 
     def latest_account_baseline(self) -> dict:
         return {"baseline_id": "baseline_dashboard"}
@@ -367,6 +387,28 @@ class _DashboardModeOwner:
 
     def trial_guard(self) -> dict:
         return {"status": "monitoring"}
+
+
+def _clean_reconciliation_report(*, reconciliation_id: str = "recon_clean_dashboard") -> ReconciliationReport:
+    return ReconciliationReport(
+        reconciliation_id=reconciliation_id,
+        as_of_ts=utc_now(),
+        exchange_comparison_enabled=True,
+        order_diff={},
+        fill_diff={},
+        balance_diff={},
+        position_diff={},
+        mismatch_categories=[],
+        mismatch_reasons=[],
+        safety_impacts=[],
+        severity="CLEAN",
+        review_required=False,
+        halt_required=False,
+        only_reduce_required=False,
+        only_reduce_reasons=[],
+        recovery_classification="clean",
+        recommended_operator_action="none",
+    )
 
 
 class TestRuntimeQueryFacade(unittest.TestCase):
@@ -501,6 +543,41 @@ class TestRuntimeQueryFacade(unittest.TestCase):
             payload["resume_blocked_reasons"],
             ["reconciliation_halt_required", "operator_rebaseline_required"],
         )
+
+    def test_dashboard_recovery_summary_normalizes_stale_bundle_snapshot_with_latest_reconciliation(self) -> None:
+        def finalize_status(*, base_status, latest_reconciliation):
+            self.assertEqual(latest_reconciliation.reconciliation_id, "recon_clean_dashboard")
+            self.assertEqual(
+                base_status.resume_blocked_reasons,
+                ["strategy_bundle_recovery_requires_review"],
+            )
+            return base_status.model_copy(
+                update={
+                    "recovery_state": "normal_operation",
+                    "safe_to_trade": True,
+                    "resume_eligible": True,
+                    "review_required": False,
+                    "only_reduce_required": False,
+                    "bundle_recovery_required": False,
+                    "resume_blocked_reasons": [],
+                }
+            )
+
+        owner = _DashboardRecoveryOwner(
+            latest_state_snapshot=_DashboardStaleBundleStateSnapshot(),
+            latest_reconciliation=_clean_reconciliation_report(),
+            recovery_posture=SimpleNamespace(finalize_status=finalize_status),
+        )
+        facade = RecoveryQueryFacade(owner)
+
+        payload = facade.recovery_view_dashboard()
+
+        self.assertEqual(owner.latest_reconciliation_calls, 1)
+        self.assertEqual(payload["recovery_state"], "normal_operation")
+        self.assertTrue(payload["safe_to_trade"])
+        self.assertTrue(payload["resume_eligible"])
+        self.assertFalse(payload["bundle_recovery_required"])
+        self.assertEqual(payload["resume_blocked_reasons"], [])
 
     def test_dashboard_mode_synthesizes_readiness_and_defers_full_blockers(self) -> None:
         owner = _DashboardModeOwner()
