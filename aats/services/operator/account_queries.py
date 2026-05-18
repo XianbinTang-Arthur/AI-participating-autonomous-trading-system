@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Any
 from aats.services.execution_engine.okx_account import derivatives_position_mode_contract
 from aats.services.operator._parallel import parallel_fetch
 from aats.services.runtime_scope import (
+    execution_fill_row_matches_scope,
+    execution_order_row_matches_scope,
     funding_fee_records_for_scope,
     order_states_for_scope,
     snapshots_for_scope,
@@ -453,8 +455,8 @@ class AccountQueryFacade:
     def build_orders_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
         if self.owner._phase5_control_plane_enabled():
             orders = self.owner._phase5_order_rows(limit=limit, offset=offset)
-            count_orders = getattr(self.owner.runtime.execution_order_repo, "count_orders", None)
-            total_available = int(count_orders()) if callable(count_orders) else offset + len(orders)
+            phase5_count = getattr(self.owner, "_phase5_order_count", None)
+            total_available = int(phase5_count()) if callable(phase5_count) else offset + len(orders)
             return {
                 "orders": [self.owner._execution_record_payload(order) for order in orders],
                 "limit": limit,
@@ -481,7 +483,7 @@ class AccountQueryFacade:
     def order_detail(self, client_order_id: str) -> dict[str, Any]:
         if self.owner._phase5_control_plane_enabled():
             order = self.owner.runtime.execution_order_repo.get_order_by_client_order_id(client_order_id)
-            if order is None:
+            if order is None or not execution_order_row_matches_scope(order, self.owner.state_scope):
                 raise KeyError(f"order_not_found:{client_order_id}")
             fills = self.owner.runtime.execution_fill_repo_v2.fills_for_order(client_order_id)
             control_order = self.owner._control_plane_order_state(client_order_id)
@@ -534,8 +536,8 @@ class AccountQueryFacade:
     def build_fills_recent(self, *, limit: int, offset: int) -> dict[str, Any]:
         if self.owner._phase5_control_plane_enabled():
             fills = self.owner._phase5_fill_rows(limit=limit, offset=offset)
-            count_fills = getattr(self.owner.runtime.execution_fill_repo_v2, "count_fills", None)
-            total_available = int(count_fills()) if callable(count_fills) else offset + len(fills)
+            phase5_count = getattr(self.owner, "_phase5_fill_count", None)
+            total_available = int(phase5_count()) if callable(phase5_count) else offset + len(fills)
             return {
                 "fills": [self.owner._execution_record_payload(fill) for fill in fills],
                 "limit": limit,
@@ -559,7 +561,7 @@ class AccountQueryFacade:
     def fill_detail(self, fill_id: str) -> dict[str, Any]:
         if self.owner._phase5_control_plane_enabled():
             fill = self.owner.runtime.execution_fill_repo_v2.get_fill(fill_id)
-            if fill is None:
+            if fill is None or not execution_fill_row_matches_scope(fill, self.owner.state_scope):
                 raise KeyError(f"fill_not_found:{fill_id}")
             outcome = self.owner._fill_outcome_map().get(fill_id)
             return {

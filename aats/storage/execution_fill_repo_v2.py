@@ -37,5 +37,25 @@ class ExecutionFillRepositoryV2(Protocol):
     def recent_fills(self, *, limit: int, offset: int = 0) -> list[dict]:
         ...
 
+    def recent_fills_for_scope(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        symbols: tuple[str, ...] = (),
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict]:
+        ...
+
     def count_fills(self) -> int:
+        ...
+
+    def count_fills_for_scope(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        symbols: tuple[str, ...] = (),
+    ) -> int:
         ...

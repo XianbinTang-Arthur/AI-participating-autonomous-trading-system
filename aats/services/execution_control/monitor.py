@@ -8,7 +8,13 @@ from aats.storage.base import ExecutionObligationRepository, ExecutionRepository
 from aats.storage.execution_fill_repo_v2 import ExecutionFillRepositoryV2
 from aats.storage.execution_order_repo import ExecutionOrderRepository
 from aats.storage.reservation_repo import ReservationRepositoryV2
-from aats.services.runtime_scope import RuntimeStateScope, fills_for_scope, order_states_for_scope
+from aats.services.runtime_scope import (
+    RuntimeStateScope,
+    execution_fill_count_for_scope,
+    execution_order_count_for_scope,
+    fills_for_scope,
+    order_states_for_scope,
+)
 
 if TYPE_CHECKING:
     from aats.services.execution_engine.obligation_cache import ObligationHotStateCache
@@ -120,12 +126,20 @@ class Phase1ShadowMonitor:
         order_backlog = (
             None
             if self.execution_order_repo is None
-            else max(len(order_states_for_scope(self.execution_repo, self.state_scope)) - self.execution_order_repo.count_orders(), 0)
+            else max(
+                len(order_states_for_scope(self.execution_repo, self.state_scope))
+                - execution_order_count_for_scope(self.execution_order_repo, self.state_scope),
+                0,
+            )
         )
         fill_backlog = (
             None
             if self.execution_fill_repo is None
-            else max(len(fills_for_scope(self.execution_repo, self.state_scope)) - self.execution_fill_repo.count_fills(), 0)
+            else max(
+                len(fills_for_scope(self.execution_repo, self.state_scope))
+                - execution_fill_count_for_scope(self.execution_fill_repo, self.state_scope),
+                0,
+            )
         )
         # obligation backlog 比较必须与 reservation_repo（DB 来源）同源。
         # 旧逻辑用 cache.all_sync()，但 cache 从 Redis hydrate，重启后

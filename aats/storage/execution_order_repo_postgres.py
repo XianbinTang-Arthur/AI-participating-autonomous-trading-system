@@ -300,10 +300,11 @@ class PostgresExecutionOrderRepository:
         open_only: bool = False,
     ) -> list[dict]:
         query = (
-            select(ExecutionOrderModel)
-            .where(
-                ExecutionOrderModel.product_type == product_type,
-                ExecutionOrderModel.margin_mode == margin_mode,
+            self._orders_for_scope_query(
+                product_type=product_type,
+                margin_mode=margin_mode,
+                symbols=symbols,
+                open_only=open_only,
             )
             .order_by(
                 ExecutionOrderModel.updated_at.desc(),
@@ -312,11 +313,6 @@ class PostgresExecutionOrderRepository:
             )
             .offset(offset)
         )
-        scoped_symbols = tuple(symbol for symbol in symbols if symbol)
-        if scoped_symbols:
-            query = query.where(ExecutionOrderModel.symbol.in_(scoped_symbols))
-        if open_only:
-            query = query.where(~ExecutionOrderModel.state.in_(_TERMINAL_ORDER_STATES))
         if limit is not None:
             query = query.limit(limit)
         with self.session_factory() as session:
@@ -326,6 +322,44 @@ class PostgresExecutionOrderRepository:
     def count_orders(self) -> int:
         with self.session_factory() as session:
             return int(session.scalar(select(func.count()).select_from(ExecutionOrderModel)) or 0)
+
+    def count_orders_for_scope(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        symbols: tuple[str, ...] = (),
+        open_only: bool = False,
+    ) -> int:
+        query = select(func.count()).select_from(
+            self._orders_for_scope_query(
+                product_type=product_type,
+                margin_mode=margin_mode,
+                symbols=symbols,
+                open_only=open_only,
+            ).subquery()
+        )
+        with self.session_factory() as session:
+            return int(session.scalar(query) or 0)
+
+    def _orders_for_scope_query(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        symbols: tuple[str, ...] = (),
+        open_only: bool = False,
+    ):
+        query = select(ExecutionOrderModel).where(
+            ExecutionOrderModel.product_type == product_type,
+            ExecutionOrderModel.margin_mode == margin_mode,
+        )
+        scoped_symbols = tuple(symbol for symbol in symbols if symbol)
+        if scoped_symbols:
+            query = query.where(ExecutionOrderModel.symbol.in_(scoped_symbols))
+        if open_only:
+            query = query.where(~ExecutionOrderModel.state.in_(_TERMINAL_ORDER_STATES))
+        return query
 
 
 class PostgresExecutionOrderHistoryRepository:

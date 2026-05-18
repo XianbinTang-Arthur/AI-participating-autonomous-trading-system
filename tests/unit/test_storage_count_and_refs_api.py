@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.common import EventEnvelope, utc_now
-from aats.schemas.execution import FillEvent, OrderState
+from aats.schemas.execution import FillEvent, OrderIntent, OrderState
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.services.runtime_scope import RuntimeStateScope
@@ -30,6 +30,7 @@ from aats.storage.audit_repo_postgres import PostgresAuditRepository
 from aats.storage.event_store import InMemoryEventStore
 from aats.storage.event_store_postgres import PostgresEventStore
 from aats.storage.execution_fill_repo_v2_postgres import PostgresExecutionFillRepositoryV2
+from aats.storage.execution_order_repo_postgres import PostgresExecutionOrderRepository
 from aats.storage.execution_repo_postgres import PostgresExecutionRepository
 from aats.storage.portfolio_repo_postgres import PostgresPortfolioRepository
 from aats.storage.reconciliation_repo import InMemoryReconciliationRepository
@@ -198,6 +199,29 @@ def _order_state(
         requested_qty=Decimal("0.01"),
         filled_qty=Decimal("0"),
         remaining_qty=Decimal("0.01"),
+        product_type=product_type,  # type: ignore[arg-type]
+        margin_mode=margin_mode,  # type: ignore[arg-type]
+    )
+
+
+def _order_intent(
+    *,
+    order_id: str,
+    product_type: str = "spot",
+    margin_mode: str = "cash",
+    symbol: str = "BTC-USDT",
+) -> OrderIntent:
+    return OrderIntent(
+        intent_id=f"intent_{order_id}",
+        decision_id=f"decision_{order_id}",
+        symbol=symbol,
+        side="buy",
+        quantity=Decimal("0.01"),
+        execution_style="taker",
+        order_type="market",
+        urgency="medium",
+        time_in_force="IOC",
+        idempotency_key=f"idem_{order_id}",
         product_type=product_type,  # type: ignore[arg-type]
         margin_mode=margin_mode,  # type: ignore[arg-type]
     )
@@ -674,6 +698,48 @@ class TestPostgresScopedLimitSemantics(unittest.TestCase):
 
         self.assertEqual([row.client_order_id for row in rows], ["order_4", "order_3"])
 
+    def test_execution_order_v2_count_for_scope_uses_product_margin_symbol_and_open_state(self) -> None:
+        repo = PostgresExecutionOrderRepository(_session_factory())
+        base_ts = datetime(2026, 5, 7, tzinfo=timezone.utc)
+        for index, (order_id, product_type, margin_mode, symbol, state) in enumerate(
+            [
+                ("order_spot_open", "spot", "cash", "BTC-USDT", "SUBMITTED"),
+                ("order_spot_done", "spot", "cash", "BTC-USDT", "FILLED"),
+                ("order_other_symbol", "spot", "cash", "ETH-USDT", "SUBMITTED"),
+                ("order_derivatives", "derivatives", "cross", "BTC-USDT-SWAP", "SUBMITTED"),
+            ]
+        ):
+            repo.create_order(
+                order_id=order_id,
+                intent=_order_intent(
+                    order_id=order_id,
+                    product_type=product_type,
+                    margin_mode=margin_mode,
+                    symbol=symbol,
+                ),
+                initial_state=state,
+                created_at=base_ts + timedelta(minutes=index),
+                raw_payload={"client_order_id": order_id, "source_system": "test"},
+            )
+
+        self.assertEqual(
+            repo.count_orders_for_scope(
+                product_type="spot",
+                margin_mode="cash",
+                symbols=("BTC-USDT",),
+            ),
+            2,
+        )
+        self.assertEqual(
+            repo.count_orders_for_scope(
+                product_type="spot",
+                margin_mode="cash",
+                symbols=("BTC-USDT",),
+                open_only=True,
+            ),
+            1,
+        )
+
     def test_execution_fill_v2_fills_since_limit_returns_latest_rows_in_chronological_order(self) -> None:
         repo = PostgresExecutionFillRepositoryV2(_session_factory())
         base_ts = datetime(2026, 5, 7, tzinfo=timezone.utc)
@@ -692,6 +758,52 @@ class TestPostgresScopedLimitSemantics(unittest.TestCase):
         rows = repo.fills_since(limit=2)
 
         self.assertEqual([row["fill_id"] for row in rows], ["fill_v2_3", "fill_v2_4"])
+
+    def test_execution_fill_v2_recent_and_count_for_scope_use_payload_scope_and_symbol(self) -> None:
+        repo = PostgresExecutionFillRepositoryV2(_session_factory())
+        base_ts = datetime(2026, 5, 7, tzinfo=timezone.utc)
+        rows = [
+            ("fill_spot_old", "spot", "cash", "BTC-USDT"),
+            ("fill_derivatives", "derivatives", "cross", "BTC-USDT-SWAP"),
+            ("fill_other_symbol", "spot", "cash", "ETH-USDT"),
+            ("fill_spot_new", "spot", "cash", "BTC-USDT"),
+        ]
+        for index, (fill_id, product_type, margin_mode, symbol) in enumerate(rows):
+            fill = _fill_event(
+                fill_id=fill_id,
+                fill_ts=base_ts + timedelta(minutes=index),
+                product_type=product_type,
+                margin_mode=margin_mode,
+                symbol=symbol,
+            )
+            repo.save_fill(
+                fill=fill,
+                order_id=f"order_{fill_id}",
+                source="test",
+                raw_payload={
+                    "fill_id": fill.fill_id,
+                    "product_type": product_type,
+                    "margin_mode": margin_mode,
+                },
+            )
+
+        scoped_rows = repo.recent_fills_for_scope(
+            product_type="spot",
+            margin_mode="cash",
+            symbols=("BTC-USDT",),
+            limit=1,
+            offset=0,
+        )
+
+        self.assertEqual([row["fill_id"] for row in scoped_rows], ["fill_spot_new"])
+        self.assertEqual(
+            repo.count_fills_for_scope(
+                product_type="spot",
+                margin_mode="cash",
+                symbols=("BTC-USDT",),
+            ),
+            2,
+        )
 
 
 class TestAuditRepoBatchLatestLookup(unittest.TestCase):

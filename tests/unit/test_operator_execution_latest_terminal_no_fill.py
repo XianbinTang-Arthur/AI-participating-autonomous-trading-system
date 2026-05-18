@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from aats.services.operator.account_queries import AccountQueryFacade
 from aats.services.operator.query_service import OperatorQueryService
+from aats.services.runtime_scope import RuntimeStateScope
 
 
 class _FakeOwner:
@@ -20,8 +21,12 @@ class _FakeOwner:
     ) -> None:
         self.orders = orders
         self.fills = fills or []
+        self.order_count = len(orders) if order_count is None else order_count
+        self.fill_count = len(self.fills) if fill_count is None else fill_count
         self.order_row_calls: list[dict] = []
         self.fill_row_calls: list[dict] = []
+        self.order_count_calls = 0
+        self.fill_count_calls = 0
         self.current_runtime_timestamps = current_runtime_timestamps
         self.dashboard_recovery_calls = 0
         self.dashboard_mode_calls = 0
@@ -38,9 +43,15 @@ class _FakeOwner:
                 okx_simulated_trading=True,
             ),
             execution_adapter=SimpleNamespace(readiness=self.execution_readiness),
-            execution_order_repo=SimpleNamespace(count_orders=lambda: len(orders) if order_count is None else order_count),
-            execution_fill_repo_v2=SimpleNamespace(count_fills=lambda: len(self.fills) if fill_count is None else fill_count),
+            execution_order_repo=SimpleNamespace(count_orders=self._unscoped_order_count),
+            execution_fill_repo_v2=SimpleNamespace(count_fills=self._unscoped_fill_count),
         )
+
+    def _unscoped_order_count(self):
+        raise AssertionError("phase5 order pagination must not use unscoped count_orders")
+
+    def _unscoped_fill_count(self):
+        raise AssertionError("phase5 fill pagination must not use unscoped count_fills")
 
     def execution_readiness(self):
         self.execution_readiness_calls += 1
@@ -117,16 +128,34 @@ class _FakeOwner:
             ]
         return rows[:limit] if limit is not None else rows
 
+    def _phase5_order_count(self, *, open_only=False):
+        self.order_count_calls += 1
+        if open_only:
+            return len(
+                [
+                    row
+                    for row in self.orders
+                    if str(row.get("state") or row.get("status") or "").upper()
+                    not in {"FILLED", "CANCELED", "REJECTED", "FAILED", "BLOCKED", "DRY_RUN", "EXPIRED"}
+                ]
+            )
+        return self.order_count
+
     def _phase5_fill_rows(self, *, limit=None, offset=0):
         self.fill_row_calls.append({"limit": limit, "offset": offset})
         rows = self.fills[offset:]
         return rows[:limit] if limit is not None else rows
+
+    def _phase5_fill_count(self):
+        self.fill_count_calls += 1
+        return self.fill_count
 
 
 class _ScopedOrderRepo:
     def __init__(self, rows: list[dict]) -> None:
         self.rows = rows
         self.scoped_calls: list[dict] = []
+        self.count_calls: list[dict] = []
 
     def list_orders_for_scope(
         self,
@@ -152,6 +181,112 @@ class _ScopedOrderRepo:
 
     def list_orders(self, *, limit=None, offset=0):
         raise AssertionError("scoped dashboard order reads must not fall back to global list_orders")
+
+    def count_orders_for_scope(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        symbols: tuple[str, ...] = (),
+        open_only: bool = False,
+    ) -> int:
+        self.count_calls.append(
+            {
+                "product_type": product_type,
+                "margin_mode": margin_mode,
+                "symbols": symbols,
+                "open_only": open_only,
+            }
+        )
+        return len(self.rows)
+
+    def count_orders(self):
+        raise AssertionError("scoped dashboard order counts must not fall back to global count_orders")
+
+
+class _ScopedFillRepo:
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+        self.scoped_calls: list[dict] = []
+        self.count_calls: list[dict] = []
+
+    def recent_fills_for_scope(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        symbols: tuple[str, ...] = (),
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict]:
+        self.scoped_calls.append(
+            {
+                "product_type": product_type,
+                "margin_mode": margin_mode,
+                "symbols": symbols,
+                "limit": limit,
+                "offset": offset,
+            }
+        )
+        return self.rows
+
+    def count_fills_for_scope(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        symbols: tuple[str, ...] = (),
+    ) -> int:
+        self.count_calls.append(
+            {
+                "product_type": product_type,
+                "margin_mode": margin_mode,
+                "symbols": symbols,
+            }
+        )
+        return len(self.rows)
+
+    def recent_fills(self, *, limit, offset=0):
+        raise AssertionError("scoped dashboard fill reads must not fall back to global recent_fills")
+
+    def count_fills(self):
+        raise AssertionError("scoped dashboard fill counts must not fall back to global count_fills")
+
+
+class _DetailOrderRepo:
+    def __init__(self, row: dict | None) -> None:
+        self.row = row
+
+    def get_order_by_client_order_id(self, client_order_id: str):
+        return self.row
+
+
+class _DetailFillRepo:
+    def __init__(self, row: dict | None) -> None:
+        self.row = row
+
+    def get_fill(self, fill_id: str):
+        return self.row
+
+
+class _DetailOwner:
+    def __init__(self, *, order: dict | None = None, fill: dict | None = None) -> None:
+        self.state_scope = RuntimeStateScope(
+            product_type="derivatives",
+            margin_mode="cross",
+            allowed_symbols=("BTC-USDT-SWAP",),
+            default_symbol="BTC-USDT-SWAP",
+        )
+        self.runtime = SimpleNamespace(
+            execution_order_repo=_DetailOrderRepo(order),
+            execution_fill_repo_v2=_DetailFillRepo(fill),
+        )
+
+    def _phase5_control_plane_enabled(self):
+        return True
+
+    def _fill_outcome_map(self):
+        return {}
 
 
 def test_phase5_order_rows_uses_scope_aware_repo_reader() -> None:
@@ -183,6 +318,111 @@ def test_phase5_order_rows_uses_scope_aware_repo_reader() -> None:
             "open_only": False,
         }
     ]
+
+
+def test_phase5_order_count_uses_scope_aware_repo_counter() -> None:
+    repo = _ScopedOrderRepo(rows=[{"order_id": "order-scope"}])
+    service = object.__new__(OperatorQueryService)
+    service.runtime = SimpleNamespace(
+        settings=SimpleNamespace(operator_control_plane_execution_ledger_enabled=True),
+        execution_order_repo=repo,
+        execution_fill_repo_v2=object(),
+        ledger_account_repo=object(),
+        ledger_entry_repo=object(),
+    )
+    service.state_scope = SimpleNamespace(
+        product_type="derivatives",
+        margin_mode="cross",
+        allowed_symbols=("BTC-USDT-SWAP",),
+    )
+
+    count = service._phase5_order_count(open_only=True)
+
+    assert count == 1
+    assert repo.count_calls == [
+        {
+            "product_type": "derivatives",
+            "margin_mode": "cross",
+            "symbols": ("BTC-USDT-SWAP",),
+            "open_only": True,
+        }
+    ]
+
+
+def test_phase5_fill_rows_and_count_use_scope_aware_repo_methods() -> None:
+    repo = _ScopedFillRepo(rows=[{"fill_id": "fill-scope"}])
+    service = object.__new__(OperatorQueryService)
+    service.runtime = SimpleNamespace(
+        settings=SimpleNamespace(operator_control_plane_execution_ledger_enabled=True),
+        execution_order_repo=object(),
+        execution_fill_repo_v2=repo,
+        ledger_account_repo=object(),
+        ledger_entry_repo=object(),
+    )
+    service.state_scope = SimpleNamespace(
+        product_type="derivatives",
+        margin_mode="cross",
+        allowed_symbols=("BTC-USDT-SWAP",),
+    )
+
+    rows = service._phase5_fill_rows(limit=3, offset=2)
+    count = service._phase5_fill_count()
+
+    assert rows == [{"fill_id": "fill-scope"}]
+    assert count == 1
+    assert repo.scoped_calls == [
+        {
+            "product_type": "derivatives",
+            "margin_mode": "cross",
+            "symbols": ("BTC-USDT-SWAP",),
+            "limit": 3,
+            "offset": 2,
+        }
+    ]
+    assert repo.count_calls == [
+        {
+            "product_type": "derivatives",
+            "margin_mode": "cross",
+            "symbols": ("BTC-USDT-SWAP",),
+        }
+    ]
+
+
+def test_phase5_order_detail_rejects_order_outside_current_scope() -> None:
+    owner = _DetailOwner(
+        order={
+            "order_id": "order-spot",
+            "client_order_id": "client-spot",
+            "product_type": "spot",
+            "margin_mode": "cash",
+            "symbol": "BTC-USDT",
+            "state": "SUBMITTED",
+        }
+    )
+
+    try:
+        AccountQueryFacade(owner).order_detail("client-spot")
+    except KeyError as exc:
+        assert str(exc).strip("'") == "order_not_found:client-spot"
+    else:
+        raise AssertionError("cross-scope phase5 order detail must be hidden")
+
+
+def test_phase5_fill_detail_rejects_fill_outside_current_scope() -> None:
+    owner = _DetailOwner(
+        fill={
+            "fill_id": "fill-spot",
+            "symbol": "BTC-USDT",
+            "raw_payload": {"product_type": "spot", "margin_mode": "cash"},
+        }
+    )
+
+    try:
+        AccountQueryFacade(owner).fill_detail("fill-spot")
+    except KeyError as exc:
+        assert str(exc).strip("'") == "fill_not_found:fill-spot"
+    else:
+        raise AssertionError("cross-scope phase5 fill detail must be hidden")
 
 
 def test_phase5_account_open_orders_uses_scoped_open_order_reader() -> None:
@@ -381,6 +621,7 @@ def test_phase5_orders_recent_uses_bounded_page_fetch() -> None:
     payload = AccountQueryFacade(owner).build_orders_recent(limit=2, offset=3)
 
     assert owner.order_row_calls == [{"limit": 2, "offset": 3}]
+    assert owner.order_count_calls == 1
     assert [item["order_id"] for item in payload["orders"]] == ["order_3", "order_4"]
     assert payload["total_available"] == 123
     assert payload["has_more"] is True
@@ -405,6 +646,7 @@ def test_phase5_fills_recent_uses_bounded_page_fetch() -> None:
     payload = AccountQueryFacade(owner).build_fills_recent(limit=3, offset=2)
 
     assert owner.fill_row_calls == [{"limit": 3, "offset": 2}]
+    assert owner.fill_count_calls == 1
     assert [item["fill_id"] for item in payload["fills"]] == ["fill_2", "fill_3", "fill_4"]
     assert payload["total_available"] == 88
     assert payload["has_more"] is True

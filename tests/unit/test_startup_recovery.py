@@ -78,6 +78,59 @@ class _OpenOrderRepository:
         return list(self.rows)
 
 
+class _ScopeAwareOpenOrderRepository:
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+        self.list_calls: list[dict] = []
+        self.count_calls: list[dict] = []
+
+    def count_orders_for_scope(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        symbols: tuple[str, ...] = (),
+        open_only: bool = False,
+    ) -> int:
+        self.count_calls.append(
+            {
+                "product_type": product_type,
+                "margin_mode": margin_mode,
+                "symbols": symbols,
+                "open_only": open_only,
+            }
+        )
+        return len(self.rows)
+
+    def list_orders_for_scope(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        symbols: tuple[str, ...] = (),
+        limit: int | None = None,
+        offset: int = 0,
+        open_only: bool = False,
+    ) -> list[dict]:
+        self.list_calls.append(
+            {
+                "product_type": product_type,
+                "margin_mode": margin_mode,
+                "symbols": symbols,
+                "limit": limit,
+                "offset": offset,
+                "open_only": open_only,
+            }
+        )
+        return list(self.rows)
+
+    def count_orders(self) -> int:
+        raise AssertionError("startup recovery must not use unscoped count_orders")
+
+    def open_orders(self) -> list[dict]:
+        raise AssertionError("startup recovery must not use unscoped open_orders")
+
+
 class _CommandRepository:
     def __init__(self, rows: dict[str, dict]) -> None:
         self.rows = rows
@@ -130,6 +183,9 @@ class TestStartupRecovery(unittest.TestCase):
                     "intent_id": "intent_missing_submit",
                     "state": "CREATED",
                     "venue_order_id": None,
+                    "product_type": "spot",
+                    "margin_mode": "cash",
+                    "symbol": "BTC-USDT",
                 }
             ]
         )
@@ -159,6 +215,73 @@ class TestStartupRecovery(unittest.TestCase):
         self.assertIn("created_orders_missing_submit_commands", status.resume_blocked_reasons)
         self.assertIn("created_orders_missing_submit_commands:1", status.notes)
 
+    def test_phase4_execution_counts_use_scope_aware_execution_order_repo(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        order_repo = _ScopeAwareOpenOrderRepository(
+            [
+                {
+                    "order_id": "cl_derivatives_missing_submit",
+                    "client_order_id": "cl_derivatives_missing_submit",
+                    "intent_id": "intent_derivatives_missing_submit",
+                    "state": "CREATED",
+                    "venue_order_id": None,
+                    "product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "symbol": "BTC-USDT-SWAP",
+                }
+            ]
+        )
+        service = ExecutionLedgerRecoveryService(
+            settings=settings,
+            base_recovery_service=None,  # type: ignore[arg-type]
+            reconciliation_repo=InMemoryReconciliationRepository(),
+            portfolio_repo=_EmptyPortfolioRepository(),
+            kill_switch=KillSwitch(),
+            reconciliation_classifier=RecoveryReconciliationClassifier(),
+            execution_order_repo=order_repo,
+            execution_command_repo=_CommandRepository({}),
+        )
+
+        status = service._phase4_status(
+            base_status=RecoveryStatus(status="recovered", recovery_state="normal_operation", safe_startup=True),
+            latest_reconciliation=None,
+        )
+
+        self.assertTrue(status.halted)
+        self.assertEqual(status.recovered_order_count, 1)
+        self.assertEqual(status.open_order_count, 1)
+        self.assertEqual(
+            order_repo.count_calls,
+            [
+                {
+                    "product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "symbols": ("BTC-USDT-SWAP",),
+                    "open_only": False,
+                }
+            ],
+        )
+        self.assertEqual(
+            order_repo.list_calls,
+            [
+                {
+                    "product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "symbols": ("BTC-USDT-SWAP",),
+                    "limit": None,
+                    "offset": 0,
+                    "open_only": True,
+                }
+            ],
+        )
+
     def test_phase4_classifies_claimed_submit_as_exchange_reconcile_blocker(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -176,6 +299,9 @@ class TestStartupRecovery(unittest.TestCase):
                     "intent_id": "intent_claimed_submit",
                     "state": "SUBMITTING",
                     "venue_order_id": None,
+                    "product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "symbol": "BTC-USDT-SWAP",
                 }
             ]
         )

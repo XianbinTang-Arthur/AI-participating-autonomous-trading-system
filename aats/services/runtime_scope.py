@@ -253,6 +253,110 @@ def order_states_for_scope(
     return rows
 
 
+_TERMINAL_EXECUTION_ORDER_ROW_STATES = {
+    "FILLED",
+    "CANCELED",
+    "REJECTED",
+    "FAILED",
+    "BLOCKED",
+    "DRY_RUN",
+    "EXPIRED",
+}
+
+
+def execution_order_rows_for_scope(
+    repo,
+    scope: RuntimeStateScope,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
+    open_only: bool = False,
+) -> list[dict[str, Any]]:
+    if repo is None:
+        return []
+    normalized_offset = max(int(offset), 0)
+    normalized_limit = None if limit is None else max(int(limit), 0)
+    scoped_reader = getattr(repo, "list_orders_for_scope", None)
+    if callable(scoped_reader):
+        return scoped_reader(
+            product_type=scope.product_type,
+            margin_mode=scope.margin_mode,
+            symbols=tuple(scope.allowed_symbols),
+            limit=normalized_limit,
+            offset=normalized_offset,
+            open_only=open_only,
+        )
+    if open_only:
+        open_orders = getattr(repo, "open_orders", None)
+        rows = list(open_orders()) if callable(open_orders) else []
+    else:
+        list_orders = getattr(repo, "list_orders", None)
+        rows = list(list_orders(limit=None, offset=0)) if callable(list_orders) else []
+    rows = [row for row in rows if execution_order_row_matches_scope(row, scope, open_only=open_only)]
+    if normalized_offset:
+        rows = rows[normalized_offset:]
+    if normalized_limit is not None:
+        rows = rows[:normalized_limit]
+    return rows
+
+
+def execution_order_count_for_scope(
+    repo,
+    scope: RuntimeStateScope,
+    *,
+    open_only: bool = False,
+) -> int:
+    if repo is None:
+        return 0
+    scoped_counter = getattr(repo, "count_orders_for_scope", None)
+    if callable(scoped_counter):
+        return int(
+            scoped_counter(
+                product_type=scope.product_type,
+                margin_mode=scope.margin_mode,
+                symbols=tuple(scope.allowed_symbols),
+                open_only=open_only,
+            )
+        )
+    scoped_reader = getattr(repo, "list_orders_for_scope", None)
+    if callable(scoped_reader):
+        return len(execution_order_rows_for_scope(repo, scope, open_only=open_only))
+    if open_only and callable(getattr(repo, "open_orders", None)):
+        return len(execution_order_rows_for_scope(repo, scope, open_only=True))
+    if callable(getattr(repo, "list_orders", None)):
+        return len(execution_order_rows_for_scope(repo, scope, open_only=open_only))
+    rows = execution_order_rows_for_scope(repo, scope, open_only=open_only)
+    if rows:
+        return len(rows)
+    global_counter = getattr(repo, "count_orders", None)
+    return int(global_counter()) if callable(global_counter) and not open_only else 0
+
+
+def execution_order_row_matches_scope(
+    row: dict[str, Any],
+    scope: RuntimeStateScope,
+    *,
+    open_only: bool = False,
+) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if open_only:
+        state = str(row.get("state") or row.get("status") or "").upper()
+        if state in _TERMINAL_EXECUTION_ORDER_ROW_STATES:
+            return False
+    symbol = row.get("symbol")
+    if not isinstance(symbol, str) or not scope.symbol_allowed(symbol):
+        return False
+    raw_payload = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
+    product_type = row.get("product_type") or raw_payload.get("product_type")
+    if product_type is None:
+        product_type = infer_product_type_from_symbol(symbol)
+    margin_mode = row.get("margin_mode") or raw_payload.get("margin_mode")
+    if margin_mode is None:
+        margin_mode = "cross" if product_type == "derivatives" else "cash"
+    return product_type == scope.product_type and margin_mode == scope.margin_mode
+
+
 def fill_event_matches_scope(
     fill: FillEvent,
     scope: RuntimeStateScope,
@@ -282,6 +386,76 @@ def fills_for_scope(
     if limit is not None:
         rows = rows[-limit:]
     return rows
+
+
+def execution_fill_rows_for_scope(
+    repo,
+    scope: RuntimeStateScope,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    if repo is None:
+        return []
+    normalized_offset = max(int(offset), 0)
+    normalized_limit = None if limit is None else max(int(limit), 0)
+    scoped_reader = getattr(repo, "recent_fills_for_scope", None)
+    if callable(scoped_reader):
+        return scoped_reader(
+            product_type=scope.product_type,
+            margin_mode=scope.margin_mode,
+            symbols=tuple(scope.allowed_symbols),
+            limit=normalized_limit,
+            offset=normalized_offset,
+        )
+    fills_since = getattr(repo, "fills_since", None)
+    if not callable(fills_since):
+        return []
+    rows = [
+        row
+        for row in fills_since(limit=None)
+        if execution_fill_row_matches_scope(row, scope)
+    ]
+    rows.sort(
+        key=lambda row: (
+            row.get("ingestion_ts") or row.get("exchange_ts"),
+            row.get("exchange_ts") or row.get("ingestion_ts"),
+            str(row.get("fill_id") or ""),
+        ),
+        reverse=True,
+    )
+    if normalized_offset:
+        rows = rows[normalized_offset:]
+    if normalized_limit is not None:
+        rows = rows[:normalized_limit]
+    return rows
+
+
+def execution_fill_count_for_scope(repo, scope: RuntimeStateScope) -> int:
+    if repo is None:
+        return 0
+    scoped_counter = getattr(repo, "count_fills_for_scope", None)
+    if callable(scoped_counter):
+        return int(
+            scoped_counter(
+                product_type=scope.product_type,
+                margin_mode=scope.margin_mode,
+                symbols=tuple(scope.allowed_symbols),
+            )
+        )
+    return len(execution_fill_rows_for_scope(repo, scope, limit=None, offset=0))
+
+
+def execution_fill_row_matches_scope(row: dict[str, Any], scope: RuntimeStateScope) -> bool:
+    if not isinstance(row, dict):
+        return False
+    symbol = row.get("symbol")
+    if not isinstance(symbol, str) or not scope.symbol_allowed(symbol):
+        return False
+    raw_payload = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
+    product_type = row.get("product_type") or raw_payload.get("product_type") or scope.product_type
+    margin_mode = row.get("margin_mode") or raw_payload.get("margin_mode") or scope.margin_mode
+    return product_type == scope.product_type and margin_mode == scope.margin_mode
 
 
 def fill_outcome_matches_scope(

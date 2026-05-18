@@ -17,7 +17,13 @@ from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.services.execution_engine.recovery import ExecutionRecoveryService, RecoveryArtifacts
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.recovery_control.reconciliation_classifier import RecoveryReconciliationClassifier
-from aats.services.runtime_scope import latest_reconciliation_for_scope, latest_snapshot_for_scope, runtime_state_scope
+from aats.services.runtime_scope import (
+    execution_order_count_for_scope,
+    execution_order_rows_for_scope,
+    latest_reconciliation_for_scope,
+    latest_snapshot_for_scope,
+    runtime_state_scope,
+)
 
 STARTUP_EXIT_EXECUTION_PARENT_REFRESH_FAILED_PREFIX = "startup_exit_execution_parent_refresh_failed"
 STARTUP_EXIT_EXECUTION_PARENT_REFRESH_STAGE_PREFIX = "startup_exit_execution_parent_refresh_stage"
@@ -287,10 +293,11 @@ class ExecutionLedgerRecoveryService:
 
         if self.execution_order_repo is None:
             return []
-        open_orders_fn = getattr(self.execution_order_repo, "open_orders", None)
-        if not callable(open_orders_fn):
-            return []
-        scoped_open_orders = list(open_orders_fn())
+        scoped_open_orders = execution_order_rows_for_scope(
+            self.execution_order_repo,
+            self.runtime_scope,
+            open_only=True,
+        )
         resolved, _unreachable, notes = await reconcile_stuck_orders(
             open_orders=scoped_open_orders,
             exchange_client=self.exchange_order_client,
@@ -344,12 +351,16 @@ class ExecutionLedgerRecoveryService:
         stuck_sent_submit_order_count = 0
         claimed_submit_command_count = 0
         if self.execution_order_repo is not None:
-            count_orders = getattr(self.execution_order_repo, "count_orders", None)
-            open_orders = getattr(self.execution_order_repo, "open_orders", None)
-            if callable(count_orders):
-                recovered_order_count = max(recovered_order_count, int(count_orders()))
-            if callable(open_orders):
-                scoped_open_orders = list(open_orders())
+            recovered_order_count = max(
+                recovered_order_count,
+                execution_order_count_for_scope(self.execution_order_repo, self.runtime_scope),
+            )
+            scoped_open_orders = execution_order_rows_for_scope(
+                self.execution_order_repo,
+                self.runtime_scope,
+                open_only=True,
+            )
+            if scoped_open_orders:
                 open_order_count = max(open_order_count, len(scoped_open_orders))
                 (
                     stranded_submit_order_count,

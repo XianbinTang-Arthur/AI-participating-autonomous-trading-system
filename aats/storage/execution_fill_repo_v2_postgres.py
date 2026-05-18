@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import asc, desc, func, select
+from sqlalchemy import asc, desc, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -208,9 +208,75 @@ class PostgresExecutionFillRepositoryV2:
             rows = session.scalars(query).all()
         return [_fill_row_to_dict(row) for row in rows]
 
+    def recent_fills_for_scope(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        symbols: tuple[str, ...] = (),
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict]:
+        normalized_limit = None if limit is None else max(int(limit), 0)
+        if normalized_limit == 0:
+            return []
+        query = (
+            self._fills_for_scope_query(
+                product_type=product_type,
+                margin_mode=margin_mode,
+                symbols=symbols,
+            )
+            .order_by(
+                ExecutionFillModelV2.ingestion_ts.desc(),
+                ExecutionFillModelV2.exchange_ts.desc(),
+                ExecutionFillModelV2.fill_id.desc(),
+            )
+            .offset(max(int(offset), 0))
+        )
+        if normalized_limit is not None:
+            query = query.limit(normalized_limit)
+        with self.session_factory() as session:
+            rows = session.scalars(query).all()
+        return [_fill_row_to_dict(row) for row in rows]
+
     def count_fills(self) -> int:
         with self.session_factory() as session:
             return int(session.scalar(select(func.count()).select_from(ExecutionFillModelV2)) or 0)
+
+    def count_fills_for_scope(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        symbols: tuple[str, ...] = (),
+    ) -> int:
+        query = select(func.count()).select_from(
+            self._fills_for_scope_query(
+                product_type=product_type,
+                margin_mode=margin_mode,
+                symbols=symbols,
+            ).subquery()
+        )
+        with self.session_factory() as session:
+            return int(session.scalar(query) or 0)
+
+    def _fills_for_scope_query(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        symbols: tuple[str, ...] = (),
+    ):
+        payload_product_type = ExecutionFillModelV2.raw_payload["product_type"].as_string()
+        payload_margin_mode = ExecutionFillModelV2.raw_payload["margin_mode"].as_string()
+        query = select(ExecutionFillModelV2).where(
+            or_(payload_product_type == product_type, payload_product_type.is_(None)),
+            or_(payload_margin_mode == margin_mode, payload_margin_mode.is_(None)),
+        )
+        scoped_symbols = tuple(symbol for symbol in symbols if symbol)
+        if scoped_symbols:
+            query = query.where(ExecutionFillModelV2.symbol.in_(scoped_symbols))
+        return query
 
 
 def _fill_row_to_dict(row: ExecutionFillModelV2) -> dict:

@@ -61,7 +61,6 @@ from aats.services.execution_engine.orderbook_snapshot_refs import (
     parse_orderbook_snapshot_ref,
     resolve_orderbook_snapshot_ref_row,
 )
-from aats.services.execution_engine.state_machine import TERMINAL_ORDER_STATES
 from aats.services.execution_engine.state_writer import sync_execution_order_truth_direct_legacy_only
 from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.services.execution_engine.okx_account import derivatives_position_mode_contract
@@ -107,6 +106,10 @@ from aats.services.strategy_overlay_rollout import (
     overlay_runtime_stage,
 )
 from aats.services.runtime_scope import (
+    execution_fill_count_for_scope,
+    execution_fill_rows_for_scope,
+    execution_order_count_for_scope,
+    execution_order_rows_for_scope,
     execution_truth_repo_for_runtime,
     fill_outcomes_for_scope,
     fills_for_scope,
@@ -138,7 +141,6 @@ _ORDERBOOK_DIFF_SEQUENCE_MISSING_EVIDENCE = (
 _ORDERBOOK_DIFF_PAYLOAD_PERSISTED_STATUS = "local_snapshot_row_sequence_validated_diff_payload_persisted"
 _LIVE_DASHBOARD_EVENT_LIMIT = 5_000
 _LIVE_DASHBOARD_RECONCILIATION_REF_LIMIT = 1_000
-_PHASE5_SCOPE_FETCH_MULTIPLIER = 4
 _PAYLOAD_REF_CACHE_MAX_ENTRIES = 1_024
 _PAYLOAD_REF_CACHE_MAX_REPR_CHARS = 200_000
 
@@ -1360,77 +1362,40 @@ class OperatorQueryService:
     ) -> list[dict[str, Any]]:
         if not self._phase5_control_plane_enabled():
             return []
-        normalized_offset = max(int(offset), 0)
-        allowed_symbols = tuple(self.state_scope.allowed_symbols)
-        scoped_reader = getattr(self.runtime.execution_order_repo, "list_orders_for_scope", None)
-        if callable(scoped_reader):
-            return scoped_reader(
-                product_type=self.state_scope.product_type,
-                margin_mode=self.state_scope.margin_mode,
-                symbols=allowed_symbols,
-                limit=_LIVE_DASHBOARD_EVENT_LIMIT if limit is None else max(int(limit), 0),
-                offset=normalized_offset,
-                open_only=open_only,
-            )
-        if limit is None:
-            repo_limit = _LIVE_DASHBOARD_EVENT_LIMIT
-        else:
-            fetch_limit = max(int(limit), 0) + normalized_offset
-            repo_limit = max(fetch_limit * _PHASE5_SCOPE_FETCH_MULTIPLIER, fetch_limit)
-        if open_only and hasattr(self.runtime.execution_order_repo, "open_orders"):
-            rows = self.runtime.execution_order_repo.open_orders()
-        else:
-            rows = self.runtime.execution_order_repo.list_orders(limit=repo_limit, offset=0)
-        allowed_symbols = set(allowed_symbols)
-        terminal_states = {str(state).upper() for state in TERMINAL_ORDER_STATES}
-        scoped = [
-            row
-            for row in rows
-            if row.get("product_type") == self.state_scope.product_type
-            and row.get("margin_mode") == self.state_scope.margin_mode
-            and (not allowed_symbols or row.get("symbol") in allowed_symbols)
-            and (
-                not open_only
-                or str(row.get("state") or row.get("status") or "").upper() not in terminal_states
-            )
-        ]
-        if normalized_offset:
-            scoped = scoped[normalized_offset:]
-        if limit is not None:
-            scoped = scoped[:limit]
-        return scoped
+        return execution_order_rows_for_scope(
+            self.runtime.execution_order_repo,
+            self.state_scope,
+            limit=_LIVE_DASHBOARD_EVENT_LIMIT if limit is None else max(int(limit), 0),
+            offset=offset,
+            open_only=open_only,
+        )
+
+    def _phase5_order_count(self, *, open_only: bool = False) -> int:
+        if not self._phase5_control_plane_enabled():
+            return 0
+        return execution_order_count_for_scope(
+            self.runtime.execution_order_repo,
+            self.state_scope,
+            open_only=open_only,
+        )
 
     def _phase5_fill_rows(self, *, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
         if not self._phase5_control_plane_enabled():
             return []
-        normalized_offset = max(int(offset), 0)
-        if limit is None:
-            rows = self._phase5_recent_fill_repo_rows(limit=_LIVE_DASHBOARD_EVENT_LIMIT)
-        else:
-            fetch_limit = max(int(limit), 0) + normalized_offset
-            rows = self._phase5_recent_fill_repo_rows(
-                limit=max(fetch_limit * _PHASE5_SCOPE_FETCH_MULTIPLIER, fetch_limit),
-            )
-        allowed_symbols = set(self.state_scope.allowed_symbols)
-        scoped = [
-            row
-            for row in rows
-            if row.get("raw_payload", {}).get("product_type", self.state_scope.product_type) == self.state_scope.product_type
-            and row.get("raw_payload", {}).get("margin_mode", self.state_scope.margin_mode) == self.state_scope.margin_mode
-            and (not allowed_symbols or row.get("symbol") in allowed_symbols)
-        ]
-        if normalized_offset:
-            scoped = scoped[normalized_offset:]
-        if limit is not None:
-            scoped = scoped[:limit]
-        return scoped
+        return execution_fill_rows_for_scope(
+            self.runtime.execution_fill_repo_v2,
+            self.state_scope,
+            limit=_LIVE_DASHBOARD_EVENT_LIMIT if limit is None else max(int(limit), 0),
+            offset=offset,
+        )
 
-    def _phase5_recent_fill_repo_rows(self, *, limit: int) -> list[dict[str, Any]]:
-        repo = self.runtime.execution_fill_repo_v2
-        recent_fills = getattr(repo, "recent_fills", None)
-        if callable(recent_fills):
-            return recent_fills(limit=limit, offset=0)
-        return list(reversed(repo.fills_since(limit=limit)))
+    def _phase5_fill_count(self) -> int:
+        if not self._phase5_control_plane_enabled():
+            return 0
+        return execution_fill_count_for_scope(
+            self.runtime.execution_fill_repo_v2,
+            self.state_scope,
+        )
 
     def _phase5_balance_view(self) -> dict[str, Decimal]:
         if not self._phase5_control_plane_enabled():
@@ -11589,12 +11554,20 @@ class OperatorQueryService:
             order_backlog = (
                 None
                 if self.runtime.execution_order_repo is None
-                else max(len(self._scoped_order_states()) - self.runtime.execution_order_repo.count_orders(), 0)
+                else max(
+                    len(self._scoped_order_states())
+                    - execution_order_count_for_scope(self.runtime.execution_order_repo, self.state_scope),
+                    0,
+                )
             )
             fill_backlog = (
                 None
                 if self.runtime.execution_fill_repo_v2 is None
-                else max(len(self._scoped_fills()) - self.runtime.execution_fill_repo_v2.count_fills(), 0)
+                else max(
+                    len(self._scoped_fills())
+                    - execution_fill_count_for_scope(self.runtime.execution_fill_repo_v2, self.state_scope),
+                    0,
+                )
             )
             # Stage 6 Slice 6.5：cache 优先 + obligation_repo fallback。dashboard
             # 路径，读 hit 越多越省 PG QPS；cache 未接线 / 未 bootstrap 时退化

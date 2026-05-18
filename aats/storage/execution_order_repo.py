@@ -66,6 +66,16 @@ class ExecutionOrderRepository(Protocol):
     def count_orders(self) -> int:
         ...
 
+    def count_orders_for_scope(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        symbols: tuple[str, ...] = (),
+        open_only: bool = False,
+    ) -> int:
+        ...
+
 
 class ExecutionOrderHistoryRepository(Protocol):
     def append_transition(
