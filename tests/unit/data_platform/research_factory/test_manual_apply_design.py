@@ -10,7 +10,13 @@ import pytest
 from aats.data_platform.research_factory.manual_apply_design import (
     ManualApplyDesignPackage,
     ManualApplyDesignRecorder,
+    ManualApplyDesignReviewDecision,
+    ManualApplyDesignReviewRecorder,
+    ManualApplyDesignValidationReport,
     build_manual_apply_design_package,
+    build_manual_apply_design_review,
+    build_manual_apply_design_review_decision,
+    validate_manual_apply_design_domain,
 )
 from aats.data_platform.research_factory.preapply import (
     PreApplyEvidencePackage,
@@ -38,6 +44,10 @@ def dt(day: int, hour: int = 0) -> datetime:
 
 def manual_design_root(tmp_path: Path) -> Path:
     return tmp_path / "artifacts" / "research" / "research_factory" / "manual_apply_designs"
+
+
+def manual_design_review_root(tmp_path: Path) -> Path:
+    return tmp_path / "artifacts" / "research" / "research_factory" / "manual_apply_design_reviews"
 
 
 def evidence_refs() -> dict[str, str]:
@@ -121,6 +131,41 @@ def build_ready_design() -> ManualApplyDesignPackage:
         required_risk_guards=("position_limit_guard", "drawdown_guard"),
         required_dry_run_checks=("paper_replay_validation", "operator_review_checklist"),
         rollback_plan_ref="research_recommendation.json",
+        created_at=dt(15),
+    )
+
+
+def build_design(
+    *,
+    candidate_type: str,
+    delta: dict[str, object],
+    affected_runtime_components: tuple[str, ...] = ("decision_engine_research_config",),
+    required_risk_guards: tuple[str, ...] = ("position_limit_guard", "drawdown_guard"),
+    required_dry_run_checks: tuple[str, ...] = ("paper_replay_validation", "operator_review_checklist"),
+    extra_evidence_refs: dict[str, str] | None = None,
+) -> ManualApplyDesignPackage:
+    package = ready_preapply_package()
+    review, decision = approved_review_and_decision(package)
+    refs = {
+        "preapply_evidence_package": "preapply_evidence_package.json",
+        "preapply_review": "preapply_review.json",
+        "preapply_review_decision": "preapply_review_decision.json",
+        "rollback_plan": "research_recommendation.json",
+    }
+    if extra_evidence_refs:
+        refs.update(extra_evidence_refs)
+    return build_manual_apply_design_package(
+        preapply_package=package,
+        preapply_review=review,
+        preapply_review_decision=decision,
+        candidate_type=candidate_type,
+        proposed_change_summary=f"prepare a separate manual design draft for {candidate_type}",
+        parameter_or_config_delta=delta,
+        affected_runtime_components=affected_runtime_components,
+        required_risk_guards=required_risk_guards,
+        required_dry_run_checks=required_dry_run_checks,
+        rollback_plan_ref="research_recommendation.json",
+        evidence_refs=refs,
         created_at=dt(15),
     )
 
@@ -370,3 +415,224 @@ def test_manual_apply_design_recorder_root_must_be_under_research_artifacts(
 ) -> None:
     with pytest.raises(ValueError, match="under artifacts/research"):
         ManualApplyDesignRecorder(workspace_tmp_path / "configs")
+
+
+def test_manual_apply_design_factor_domain_validation() -> None:
+    design = build_ready_design()
+
+    report = validate_manual_apply_design_domain(design, evaluated_at=dt(16))
+
+    assert report.passed is True
+    assert report.failures == ()
+    assert report.runtime_mutation_allowed is False
+
+    bad_design = build_design(
+        candidate_type="factor",
+        delta={"factor_expression": "Return(close, 1)"},
+        required_dry_run_checks=("operator_review_checklist",),
+    )
+    bad_report = validate_manual_apply_design_domain(bad_design, evaluated_at=dt(16))
+    assert bad_report.passed is False
+    assert "paper or replay dry-run check" in bad_report.failures[0]
+
+
+def test_manual_apply_design_parameter_domain_validation_requires_changes_and_rollback() -> None:
+    valid_design = build_design(
+        candidate_type="parameter",
+        delta={
+            "parameter_changes": {
+                "signal_threshold": {
+                    "proposed_value": 0.42,
+                    "rollback_old_value_ref": "preapply_evidence_package.json",
+                }
+            }
+        },
+    )
+    valid_report = validate_manual_apply_design_domain(valid_design, evaluated_at=dt(16))
+
+    assert valid_report.passed is True
+
+    bad_design = build_design(
+        candidate_type="parameter",
+        delta={"parameter_changes": {"signal_threshold": {"proposed_value": 0.42}}},
+    )
+    bad_report = validate_manual_apply_design_domain(bad_design, evaluated_at=dt(16))
+    assert bad_report.passed is False
+    assert "rollback_old_value_ref" in bad_report.failures[0]
+
+
+def test_manual_apply_design_risk_budget_domain_validation_requires_hard_guards() -> None:
+    valid_design = build_design(
+        candidate_type="risk_budget",
+        delta={"max_exposure_multiplier": 0.8},
+        required_risk_guards=("max_exposure_guard", "drawdown_guard", "kill_switch_guard"),
+    )
+    valid_report = validate_manual_apply_design_domain(valid_design, evaluated_at=dt(16))
+
+    assert valid_report.passed is True
+
+    bad_design = build_design(
+        candidate_type="risk_budget",
+        delta={"max_exposure_multiplier": 0.8},
+        required_risk_guards=("drawdown_guard",),
+    )
+    bad_report = validate_manual_apply_design_domain(bad_design, evaluated_at=dt(16))
+    assert bad_report.passed is False
+    assert "exposure risk guard" in bad_report.failures[0]
+    assert any("kill switch guard" in failure for failure in bad_report.failures)
+
+
+def test_manual_apply_design_execution_policy_validation_requires_execution_evidence() -> None:
+    valid_design = build_design(
+        candidate_type="execution_policy",
+        delta={"execution_mode": "paper_only_split_execution"},
+        required_dry_run_checks=("paper_only_execution_validation",),
+        extra_evidence_refs={
+            "execution_evidence": "execution_evidence_report.json",
+            "slippage_evidence": "execution_cost_summary.json",
+            "fillability_evidence": "execution_cost_summary.json",
+        },
+    )
+    valid_report = validate_manual_apply_design_domain(valid_design, evaluated_at=dt(16))
+
+    assert valid_report.passed is True
+
+    bad_design = build_design(
+        candidate_type="execution_policy",
+        delta={"execution_mode": "paper_only_split_execution"},
+        required_dry_run_checks=("operator_review_checklist",),
+    )
+    bad_report = validate_manual_apply_design_domain(bad_design, evaluated_at=dt(16))
+    assert bad_report.passed is False
+    assert "execution_policy design missing evidence ref: execution_evidence" in bad_report.failures
+    assert "paper-only validation" in bad_report.failures[-1]
+
+
+def test_manual_apply_design_review_decision_requires_passing_validation() -> None:
+    design = build_ready_design()
+    mismatched_report = ManualApplyDesignValidationReport(
+        design_id="manual_design_other",
+        candidate_id=design.candidate_id,
+        candidate_type=design.candidate_type,
+        passed=False,
+        failures=("different design fixture",),
+        evaluated_at=dt(16),
+    )
+    review = build_manual_apply_design_review(
+        design,
+        validation_report=validate_manual_apply_design_domain(design, evaluated_at=dt(16)),
+        created_at=dt(16, 1),
+    )
+
+    with pytest.raises(ValueError, match="validation design_id must match"):
+        build_manual_apply_design_review_decision(
+            review=review,
+            design=design,
+            validation_report=mismatched_report,
+            decision="design_ready_for_dry_run_planning",
+            rationale="attempt to advance mismatched validation",
+            reviewed_by="operator_reviewer",
+            reviewed_at=dt(16, 2),
+        )
+
+    failed_design = build_design(
+        candidate_type="factor",
+        delta={"factor_expression": "Return(close, 1)"},
+        required_dry_run_checks=("operator_review_checklist",),
+    )
+    failed_report = validate_manual_apply_design_domain(failed_design, evaluated_at=dt(16))
+    failed_review = build_manual_apply_design_review(
+        failed_design,
+        validation_report=failed_report,
+        created_at=dt(16, 1),
+    )
+    with pytest.raises(ValueError, match="passing validation"):
+        build_manual_apply_design_review_decision(
+            review=failed_review,
+            design=failed_design,
+            validation_report=failed_report,
+            decision="design_ready_for_dry_run_planning",
+            rationale="attempt to advance a failed domain validation",
+            reviewed_by="operator_reviewer",
+            reviewed_at=dt(16, 2),
+        )
+
+    valid_report = validate_manual_apply_design_domain(design, evaluated_at=dt(16))
+    review = build_manual_apply_design_review(
+        design,
+        validation_report=valid_report,
+        created_at=dt(16, 1),
+    )
+    decision = build_manual_apply_design_review_decision(
+        review=review,
+        design=design,
+        validation_report=valid_report,
+        decision="design_ready_for_dry_run_planning",
+        rationale="design has enough evidence to prepare a dry-run planning review",
+        reviewed_by="operator_reviewer",
+        reviewed_at=dt(16, 2),
+    )
+
+    assert decision.decision == "design_ready_for_dry_run_planning"
+    assert decision.validation_passed is True
+    assert decision.runtime_mutation_allowed is False
+    assert decision.recommended_next_step == "prepare_research_only_dry_run_plan"
+
+
+def test_manual_apply_design_review_rejects_apply_language() -> None:
+    with pytest.raises(ValueError, match="manual apply design review decision must be one of"):
+        ManualApplyDesignReviewDecision(
+            review_id="manual_review_1",
+            design_id="manual_design_1",
+            candidate_id="cand_001",
+            candidate_type="factor",
+            decision="approved_for_apply",
+            rationale="invalid decision",
+            reviewed_by="operator_reviewer",
+        )
+
+
+def test_manual_apply_design_review_recorder_writes_validation_review_and_decision(
+    workspace_tmp_path: Path,
+) -> None:
+    root = manual_design_review_root(workspace_tmp_path)
+    recorder = ManualApplyDesignReviewRecorder(root, code_version="test-sha", clock=lambda: dt(16, 1))
+    design = build_ready_design()
+    validation = validate_manual_apply_design_domain(design, evaluated_at=dt(16))
+
+    review = recorder.start_review(design, validation_report=validation)
+    decision = build_manual_apply_design_review_decision(
+        review=review,
+        design=design,
+        validation_report=validation,
+        decision="design_ready_for_dry_run_planning",
+        rationale="design package is ready for research-only dry-run planning",
+        reviewed_by="operator_reviewer",
+        reviewed_at=dt(16, 2),
+    )
+    manifest = recorder.record_decision(decision)
+
+    review_dir = root / review.review_id
+    stored_review = read_json(review_dir / "manual_apply_design_review.json")
+    stored_validation = read_json(review_dir / "manual_apply_design_validation_report.json")
+    stored_decision = read_json(review_dir / "manual_apply_design_review_decision.json")
+    stored_manifest = read_json(review_dir / "manual_apply_design_review_manifest.json")
+
+    assert manifest["artifact_type"] == "manual_apply_design_review"
+    assert manifest["status"] == "succeeded"
+    assert stored_manifest["output_refs"]["manual_apply_design_review"] == "manual_apply_design_review.json"
+    assert stored_manifest["output_refs"]["manual_apply_design_validation_report"] == (
+        "manual_apply_design_validation_report.json"
+    )
+    assert stored_manifest["output_refs"]["manual_apply_design_review_decision"] == (
+        "manual_apply_design_review_decision.json"
+    )
+    assert stored_review["validation_passed"] is True
+    assert stored_validation["passed"] is True
+    assert stored_decision["decision"] == "design_ready_for_dry_run_planning"
+    assert stored_decision["runtime_mutation_allowed"] is False
+
+    with pytest.raises(ValueError, match="already exists"):
+        recorder.start_review(design, validation_report=validation)
+    with pytest.raises(ValueError, match="already terminal"):
+        recorder.record_decision(decision)

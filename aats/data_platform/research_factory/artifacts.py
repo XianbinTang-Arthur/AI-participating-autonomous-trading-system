@@ -22,6 +22,7 @@ ALLOWED_ARTIFACT_TYPES = frozenset(
         "preapply",
         "preapply_review",
         "manual_apply_design",
+        "manual_apply_design_review",
         "workflow",
     }
 )
