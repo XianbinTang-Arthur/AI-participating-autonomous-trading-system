@@ -20,6 +20,8 @@ _BLOCKER_PRIORITY: dict[str, int] = {
     "phase1_shadow_degraded": 25,
     "phase1_shadow_lagging": 26,
     "ai_degraded_requires_manual_review": 30,
+    "okx_system_status_incident": 35,
+    "account_state_unready": 38,
     "account_snapshot_missing": 40,
     "account_state_stale": 45,
     "market_connection_down": 50,

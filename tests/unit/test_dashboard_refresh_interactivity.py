@@ -83,6 +83,7 @@ try {
     def test_rebaseline_and_resume_actions_use_long_request_timeout(self) -> None:
         script = r"""
 import {
+  EXCHANGE_STATE_REFRESH_TIMEOUT_MS,
   REBASELINE_REQUEST_TIMEOUT_MS,
   RESUME_REQUEST_TIMEOUT_MS,
   createRiskActionHandlers,
@@ -125,8 +126,10 @@ await handlers['trigger-rebaseline']('', { dataset: {} });
 await handlers['trigger-blocker-action']('accept-rebaseline::operator_rebaseline_required', { dataset: {} });
 await handlers['trigger-resume']('', { dataset: {} });
 await handlers['trigger-blocker-action']('resume-system::', { dataset: {} });
+await handlers['trigger-blocker-action']('refresh-exchange-state::okx_system_status_incident', { dataset: {} });
 
 console.log(JSON.stringify({
+  exchangeRefreshTimeoutConstant: EXCHANGE_STATE_REFRESH_TIMEOUT_MS,
   timeoutConstant: REBASELINE_REQUEST_TIMEOUT_MS,
   resumeTimeoutConstant: RESUME_REQUEST_TIMEOUT_MS,
   directTimeout: dangerousCalls[0]?.requestOptions?.timeout,
@@ -136,11 +139,14 @@ console.log(JSON.stringify({
   directResumeTimeout: actionCalls[1]?.[3]?.requestOptions?.timeout,
   blockerResumePath: actionCalls[2]?.[0],
   blockerResumeTimeout: actionCalls[2]?.[3]?.requestOptions?.timeout,
+  exchangeRefreshPath: actionCalls[3]?.[0],
+  exchangeRefreshTimeout: actionCalls[3]?.[3]?.requestOptions?.timeout,
 }));
 """
         result = _run_node_module_script(script)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         payload = json.loads(result.stdout)
+        self.assertEqual(payload["exchangeRefreshTimeoutConstant"], 120_000)
         self.assertEqual(payload["timeoutConstant"], 120_000)
         self.assertEqual(payload["resumeTimeoutConstant"], 120_000)
         self.assertEqual(payload["directTimeout"], 120_000)
@@ -150,6 +156,8 @@ console.log(JSON.stringify({
         self.assertEqual(payload["directResumeTimeout"], 120_000)
         self.assertEqual(payload["blockerResumePath"], "/system/blocker-actions/resume-system")
         self.assertEqual(payload["blockerResumeTimeout"], 120_000)
+        self.assertEqual(payload["exchangeRefreshPath"], "/system/blocker-actions/refresh-exchange-state")
+        self.assertEqual(payload["exchangeRefreshTimeout"], 120_000)
 
     def test_app_action_runner_forwards_request_options_to_request_json(self) -> None:
         app_js = (REPO_ROOT / "aats" / "api" / "static" / "app.js").read_text(encoding="utf-8")

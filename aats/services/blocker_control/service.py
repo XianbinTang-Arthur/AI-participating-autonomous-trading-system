@@ -582,7 +582,7 @@ class BlockerControlService:
         if code.startswith("account_"):
             return "account_state"
         if code.startswith("okx_"):
-            return "execution_adapter"
+            return "exchange_state"
         if code.startswith("reconciliation_") or code.startswith("operator_rebaseline"):
             return "reconciliation"
         if code.startswith("ai_"):
@@ -619,6 +619,8 @@ class BlockerControlService:
         return code in {
             "market_data_stale",
             "market_connection_down",
+            "okx_system_status_incident",
+            "account_state_unready",
             "account_state_stale",
             "account_snapshot_missing",
             "derivatives_risk_snapshot_missing_grace_active",
@@ -1041,6 +1043,20 @@ class BlockerControlService:
                 "系统暂时拿不到可信的账户快照，因此无法确认余额、仓位和挂单状态。",
                 "在账户状态缺失时恢复自动交易，容易造成余额和风控判断错误。",
                 "先等待账户快照恢复或刷新当前状态，再决定是否继续。",
+            )
+        if code == "okx_system_status_incident":
+            return (
+                "OKX 系统状态异常",
+                "OKX 当前返回系统状态事件或维护信号，系统不能把交易所账户、挂单和风险状态视为完全可用。",
+                "在交易所系统状态未恢复前强行恢复自动交易，可能基于不完整的账户或成交反馈继续扩张风险。",
+                "先刷新交易所状态；如果阻断仍存在，等待 OKX 状态恢复后再重新评估恢复资格。",
+            )
+        if code == "account_state_unready":
+            return (
+                "账户状态尚未就绪",
+                "当前账户服务已连接但账户快照、风险快照或系统状态还没有达到可用于自动交易的 ready 条件。",
+                "在账户状态未就绪时恢复自动交易，余额、仓位、保证金和仅减仓判断都可能不可信。",
+                "先刷新交易所状态，确认账户快照和风险快照恢复 ready 后再继续。",
             )
         if code == "account_state_stale":
             return (

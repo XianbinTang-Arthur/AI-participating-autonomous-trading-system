@@ -10,6 +10,7 @@ import { localizeError } from "../terms.js";
 // field runs have been ~35-40s, so the 30s default request timeout is too low.
 export const REBASELINE_REQUEST_TIMEOUT_MS = 120_000;
 export const RESUME_REQUEST_TIMEOUT_MS = 120_000;
+export const EXCHANGE_STATE_REFRESH_TIMEOUT_MS = 120_000;
 
 export function createRiskActionHandlers({
   activeExitExecutionHistoryState,
@@ -474,6 +475,8 @@ export function createRiskActionHandlers({
       requestOptions.timeout = REBASELINE_REQUEST_TIMEOUT_MS;
     } else if (actionId === "resume-system") {
       requestOptions.timeout = RESUME_REQUEST_TIMEOUT_MS;
+    } else if (actionId === "refresh-exchange-state") {
+      requestOptions.timeout = EXCHANGE_STATE_REFRESH_TIMEOUT_MS;
     }
     await runAction(
       `/system/blocker-actions/${encodeURIComponent(actionId)}`,

@@ -389,6 +389,42 @@ class TestBlockerControlSummary(unittest.TestCase):
         self.assertIn("refresh-exchange-state", action_ids)
         self.assertFalse(any(action_id.startswith("inspect-reconciliation:") for action_id in action_ids))
 
+    def test_okx_system_incident_surfaces_exchange_refresh_action_and_copy(self) -> None:
+        owner = SimpleNamespace(
+            runtime=SimpleNamespace(
+                kill_switch=SimpleNamespace(halted=False),
+                health_service=SimpleNamespace(
+                    snapshot=lambda: SimpleNamespace(blockers=["okx_system_status_incident"])
+                ),
+                ai_service=SimpleNamespace(status=lambda: {}),
+            ),
+            recovery_view_dashboard=lambda: {
+                "safe_to_trade": False,
+                "review_required": False,
+                "resume_eligible": False,
+                "halted": False,
+                "rebaseline_available": False,
+                "resume_blocked_reasons": ["account_state_unready"],
+            },
+            recovery_view=lambda: (_ for _ in ()).throw(
+                AssertionError("dashboard blocker control must not build full recovery")
+            ),
+            _latest_scoped_reconciliation=lambda: None,
+            system_mode=lambda: {"submit_blocked_reasons": []},
+            ai_runtime=lambda: {},
+        )
+        service = BlockerControlService(owner)
+
+        snapshot = service.snapshot()
+
+        self.assertIsNotNone(snapshot.primary_blocker)
+        self.assertEqual(snapshot.primary_blocker.blocker, "okx_system_status_incident")
+        self.assertEqual(snapshot.primary_blocker.subsystem, "exchange_state")
+        self.assertIn("OKX 系统状态异常", snapshot.primary_task.title)
+        action_ids = [item.action_id for item in snapshot.primary_task.actions]
+        self.assertIn("refresh-exchange-state", action_ids)
+        self.assertNotIn("resume-system", action_ids)
+
     def test_primary_task_healthy_state_has_no_manual_buttons(self) -> None:
         service = BlockerControlService(SimpleNamespace())
         task = service._primary_task(  # type: ignore[attr-defined]
