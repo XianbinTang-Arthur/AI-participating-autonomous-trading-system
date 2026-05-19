@@ -332,6 +332,75 @@ The clean-window run produced one `keep_observing` candidate and two rejects.
 The `keep_observing` result still uses controlled observation artifacts, not a
 verified live shadow/paper source pipeline.
 
+## Clean Window Registry
+
+The current known-clean BTC Gold replay windows were recorded in:
+
+```text
+configs/research_factory/clean_windows.json
+```
+
+The config is research-only. It is not a runtime config and does not authorize
+active parameter writes, runtime config writes, OKX writes, dry-run execution,
+or production deployment.
+
+Current entries:
+
+```text
+BTC-USDT-SWAP 1h:
+  2026-01-15 00:00 Asia/Shanghai
+  -> 2026-04-17 14:00 Asia/Shanghai
+  rows: 2223
+  source versions: candle=v1.0, funding=v1.0
+
+BTC-USDT-SWAP 15m:
+  2026-01-15 00:00 Asia/Shanghai
+  -> 2026-04-17 15:30 Asia/Shanghai
+  rows: 8895
+  source versions: candle=v1.0, funding=v1.0
+```
+
+## BTC 15m ZScore Triage Update
+
+The BTC 15m ZScore clean-window failure was triaged in:
+
+```text
+artifacts/research/research_factory/diagnostics/btc_15m_zscore_failure_20260519.md
+```
+
+The initial diagnosis was:
+
+```text
+B. benchmark/input bug -> fix and rerun
+```
+
+Root cause: the parser accepted `ZScore(Return(close, 4), 20)`, but the factor
+evaluator treated rolling functions as field-only functions. That made the
+factor all-null and caused `candidate_generated=false`. The evaluator now
+supports safe nested expressions as rolling inputs, and the focused unit test
+confirms this expression produces non-null values after warmup.
+
+The workflow was rerun from WSL2 using the current `/mnt/d/...` worktree and the
+RDP database URL obtained from the running `aats-rdp-daemon` container. The URL
+was used only as a child-process environment variable and was not printed.
+
+Rerun result:
+
+```text
+workflow: wf_btc_15m_zscore_clean_evalfix4_20260519
+verdict: reject
+reason: candidate gate failed
+detail:
+  net_annualized_return=-4.064943 <= 0
+  max_drawdown=0.217968 > 0.2
+```
+
+Updated conclusion:
+
+```text
+A. candidate invalid -> keep reject
+```
+
 ## Operational Next Step
 
 Use the existing read-only observation summary generator only after a real

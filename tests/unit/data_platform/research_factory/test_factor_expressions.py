@@ -103,6 +103,16 @@ def test_evaluate_factor_expression_computes_return_mean_std_and_delta() -> None
     assert deltas.values == pytest.approx((None, None, 21.0))
 
 
+def test_evaluate_factor_expression_supports_nested_rolling_expression() -> None:
+    rows = [{"close": 100.0 + index} for index in range(30)]
+
+    result = evaluate_factor_expression("ZScore(Return(close, 4), 20)", rows)
+
+    assert result.values[:23] == (None,) * 23
+    assert result.values[23] is not None
+    assert any(value is not None for value in result.values)
+
+
 def test_evaluate_factor_expression_ref_uses_half_open_past_semantics() -> None:
     rows = [
         {"close": 100.0},

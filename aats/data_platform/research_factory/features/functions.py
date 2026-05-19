@@ -145,27 +145,27 @@ class _FactorRowEvaluator:
         return current - past
 
     def _zscore(self, node: ast.Call, row_index: int) -> float | None:
-        field_name = _field_arg(node, row_index, self._add_missing)
+        series_node = _series_arg(node, row_index, self._add_missing)
         window = _window_arg(node, row_index, self._add_missing)
-        if field_name is None or window is None:
+        if series_node is None or window is None:
             return None
-        current = self._field_value(field_name, row_index)
-        values = self._rolling_values(field_name, window, row_index)
+        current = self._series_value(series_node, row_index, reason_row_index=row_index)
+        values = self._rolling_values(series_node, window, row_index, function_name="ZScore")
         if current is None or values is None:
             return None
         std_value = _std(values)
         if std_value == 0:
-            self._add_missing(row_index, f"zero std in ZScore({field_name}, {window})")
+            self._add_missing(row_index, f"zero std in ZScore({_series_label(series_node)}, {window})")
             return None
         return (current - _mean(values)) / std_value
 
     def _rank(self, node: ast.Call, row_index: int) -> float | None:
-        field_name = _field_arg(node, row_index, self._add_missing)
+        series_node = _series_arg(node, row_index, self._add_missing)
         window = _window_arg(node, row_index, self._add_missing)
-        if field_name is None or window is None:
+        if series_node is None or window is None:
             return None
-        current = self._field_value(field_name, row_index)
-        values = self._rolling_values(field_name, window, row_index)
+        current = self._series_value(series_node, row_index, reason_row_index=row_index)
+        values = self._rolling_values(series_node, window, row_index, function_name="Rank")
         if current is None or values is None:
             return None
         if len(values) == 1:
@@ -174,11 +174,11 @@ class _FactorRowEvaluator:
         return (lower_or_equal - 1) / (len(values) - 1)
 
     def _rolling(self, node: ast.Call, row_index: int, function_name: str) -> float | None:
-        field_name = _field_arg(node, row_index, self._add_missing)
+        series_node = _series_arg(node, row_index, self._add_missing)
         window = _window_arg(node, row_index, self._add_missing)
-        if field_name is None or window is None:
+        if series_node is None or window is None:
             return None
-        values = self._rolling_values(field_name, window, row_index)
+        values = self._rolling_values(series_node, window, row_index, function_name=function_name)
         if values is None:
             return None
         if function_name == "Mean":
@@ -247,24 +247,44 @@ class _FactorRowEvaluator:
 
     def _rolling_values(
         self,
-        field_name: str,
+        series_node: ast.AST,
         window: int,
         row_index: int,
+        *,
+        function_name: str,
     ) -> tuple[float, ...] | None:
         if window <= 0:
             self._add_missing(row_index, "rolling window must be positive")
             return None
         start_index = row_index - window + 1
         if start_index < 0:
-            self._add_missing(row_index, f"insufficient history for {field_name} window {window}")
+            self._add_missing(
+                row_index,
+                f"insufficient history for {_series_label(series_node)} window {window}",
+            )
             return None
         values: list[float] = []
         for source_index in range(start_index, row_index + 1):
-            value = self._field_value(field_name, source_index, reason_row_index=row_index)
+            value = self._series_value(series_node, source_index, reason_row_index=row_index)
             if value is None:
+                self._add_missing(
+                    row_index,
+                    f"nested expression missing in {function_name}({_series_label(series_node)}, {window})",
+                )
                 return None
             values.append(value)
         return tuple(values)
+
+    def _series_value(
+        self,
+        series_node: ast.AST,
+        row_index: int,
+        *,
+        reason_row_index: int,
+    ) -> float | None:
+        if isinstance(series_node, ast.Name):
+            return self._field_value(series_node.id, row_index, reason_row_index=reason_row_index)
+        return self.evaluate(series_node, row_index)
 
     def _field_value(
         self,
@@ -305,6 +325,26 @@ def _field_arg(
         add_missing(row_index, "first function argument must be a field")
         return None
     return node.args[0].id
+
+
+def _series_arg(
+    node: ast.Call,
+    row_index: int,
+    add_missing: Any,
+) -> ast.AST | None:
+    if not node.args:
+        add_missing(row_index, "function requires a series argument")
+        return None
+    return node.args[0]
+
+
+def _series_label(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    try:
+        return ast.unparse(node)
+    except Exception:
+        return type(node).__name__
 
 
 def _window_arg(

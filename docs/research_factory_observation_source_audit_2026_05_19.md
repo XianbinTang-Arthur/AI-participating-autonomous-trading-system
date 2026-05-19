@@ -233,3 +233,84 @@ read shadow/paper evidence
 ```
 
 It must not write runtime config, active parameters, OKX orders, or paper orders.
+
+## Follow-up Probe: Candidate-bound Observation Source
+
+Follow-up date: 2026-05-19
+
+A second read-only probe was run against the local WSL2 Postgres container.
+Windows-local SQLAlchemy connectivity is not treated as a requirement here:
+the project data store lives in WSL2. No connection strings were printed. The
+WSL2 probe used `docker exec aats-postgres psql` for read-only schema/count
+checks.
+
+`aats_research` contains governance observation rows:
+
+```text
+governance.observation_results rows: 21
+status distribution:
+  completed: 21
+```
+
+Those rows remain release/family/timeframe/checklist records. Their payload keys
+are:
+
+```text
+checklist
+combo_key
+evaluated_at
+family
+observation_window_hours
+recommendation
+regression_count
+release_id
+started_at
+status
+timeframe
+warning_count
+window_active
+```
+
+They still do not contain Research Factory identity:
+
+```text
+recommendation_id
+candidate_id
+experiment_id
+```
+
+and they do not contain canonical observation metrics:
+
+```text
+fillable_ratio
+partial_fill_ratio
+fee_bps
+slippage_bps
+funding_bps
+cost_adjusted_edge_bps
+drawdown
+metric_drift
+```
+
+`aats_live_derivatives` does contain live decision/intention surfaces:
+
+```text
+public.strategy_sleeve_intents rows: 509913
+public.decision_audit_records rows: 1143948
+public.decision_audit_records with non-empty ai_shadow_decision_refs: 2388
+```
+
+These are useful runtime audit sources, but they are not yet candidate-bound
+Research Factory observation sources. The recent rows are strategy/family
+runtime decisions such as `advisory_only` or `hold_current`; they do not carry
+the current Research Factory `recommendation_id`, `candidate_id`, and
+`experiment_id` tuple.
+
+Current conclusion:
+
+```text
+Funding drift still lacks true candidate-bound shadow/paper observation events.
+The current keep_observing verdict must remain observation-limited until a
+read-only extractor can bind runtime shadow/paper evidence to the Research
+Factory candidate identity.
+```

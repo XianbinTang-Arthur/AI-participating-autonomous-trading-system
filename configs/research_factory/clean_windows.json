@@ -1,0 +1,42 @@
+{
+  "schema_version": "research_factory_clean_windows_v1",
+  "generated_at": "2026-05-19T00:00:00-04:00",
+  "runtime_mutation_allowed": false,
+  "active_parameter_write_allowed": false,
+  "runtime_config_write_allowed": false,
+  "okx_write_allowed": false,
+  "windows": {
+    "BTC-USDT-SWAP": {
+      "1h": {
+        "window_start": "2026-01-15T00:00:00+08:00",
+        "window_end": "2026-04-17T14:00:00+08:00",
+        "window_start_utc": "2026-01-14T16:00:00+00:00",
+        "window_end_utc": "2026-04-17T06:00:00+00:00",
+        "rows": 2223,
+        "source": "gold_replay_clean_funding_present",
+        "gold_table": "gold.market_swap_replay_bars_1h",
+        "source_candle_dataset_versions": ["v1.0"],
+        "source_funding_dataset_versions": ["v1.0"],
+        "notes": [
+          "funding-present closed run",
+          "use this window for current Research Factory BTC 1h verdict sprint reruns"
+        ]
+      },
+      "15m": {
+        "window_start": "2026-01-15T00:00:00+08:00",
+        "window_end": "2026-04-17T15:30:00+08:00",
+        "window_start_utc": "2026-01-14T16:00:00+00:00",
+        "window_end_utc": "2026-04-17T07:30:00+00:00",
+        "rows": 8895,
+        "source": "gold_replay_clean_funding_present",
+        "gold_table": "gold.market_swap_replay_bars_15m",
+        "source_candle_dataset_versions": ["v1.0"],
+        "source_funding_dataset_versions": ["v1.0"],
+        "notes": [
+          "funding-present closed run",
+          "use this window for current Research Factory BTC 15m verdict sprint reruns"
+        ]
+      }
+    }
+  }
+}
