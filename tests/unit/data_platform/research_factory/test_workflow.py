@@ -262,6 +262,10 @@ def test_governance_workflow_creates_review_pending_chain(workspace_tmp_path: Pa
         factory_root / "preapply_reviews" / result.preapply_review_id / "preapply_review_manifest.json"
     )
     assert checklist["runtime_mutation_allowed"] is False
+    assert checklist["active_parameter_write_allowed"] is False
+    assert checklist["runtime_config_write_allowed"] is False
+    assert checklist["okx_write_allowed"] is False
+    assert checklist["dry_run_execution_allowed"] is False
     assert checklist["failed_stage"] is None
     assert checklist["blocking_artifact"] is None
     assert checklist["schema_version"] == "research_operator_review_checklist_v2"
@@ -271,17 +275,28 @@ def test_governance_workflow_creates_review_pending_chain(workspace_tmp_path: Pa
     assert checklist["readiness"]["candidate_gate_passed"] is True
     assert checklist["readiness"]["runtime_mutation_allowed"] is False
     assert checklist["readiness"]["operator_decision_required"] is True
-    assert "review_preapply_evidence" in checklist["allowed_next_actions"]
+    assert checklist["allowed_next_actions"] == [
+        "review_preapply_evidence",
+        "request_more_observation",
+        "reject_candidate",
+        "archive_candidate",
+    ]
     assert "active_parameter_apply" in checklist["forbidden_next_actions"]
     assert "okx_write" in checklist["forbidden_next_actions"]
+    assert "runtime_config_write" in checklist["forbidden_next_actions"]
+    assert "auto_apply" in checklist["forbidden_next_actions"]
+    assert "dry_run_execute" in checklist["forbidden_next_actions"]
     assert checklist["stage_results"][0]["stage_name"] == "real_data_experiment"
     assert "does not authorize active parameter changes" in checklist["no_runtime_mutation_statement"]
     operator_summary = (
         factory_root / "workflows" / "wf_governance_success" / "preapply_review_summary.md"
     ).read_text(encoding="utf-8")
-    assert "## Candidate Overview" in operator_summary
-    assert "## Data Evidence" in operator_summary
-    assert "## Explicit Non-Authorization Statement" in operator_summary
+    assert "## 1. Candidate Overview" in operator_summary
+    assert "## 3. Data Evidence" in operator_summary
+    assert "## 9. Verdict" in operator_summary
+    assert "## 11. Forbidden Actions" in operator_summary
+    assert "## 12. Explicit Non-Authorization Statement" in operator_summary
+    assert "dry-run execution" in operator_summary
     assert review_manifest["output_refs"]["evidence_reference_integrity_report"] == (
         "evidence_reference_integrity_report.json"
     )

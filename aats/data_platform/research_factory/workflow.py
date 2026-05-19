@@ -63,6 +63,7 @@ from aats.data_platform.research_factory.registry import (
     default_research_memory_path_for_artifact_root,
 )
 from aats.data_platform.research_factory.specs import METRIC_FIELDS, MetricsSnapshot
+from aats.data_platform.research_factory.verdicts import build_candidate_verdict_from_payloads
 
 WORKFLOW_CODE_VERSION = "research_factory_governance_workflow_v1"
 WORKFLOW_SUMMARY_REF = "workflow_summary.json"
@@ -430,6 +431,23 @@ def run_research_governance_workflow(
             "operator_approval_required": True,
             "created_at": config.timestamp.isoformat(),
         }
+        candidate_verdict = build_candidate_verdict_from_payloads(
+            workflow_summary=summary,
+            candidate_artifact=_to_jsonable(candidate),
+            metrics_snapshot=_to_jsonable(candidate.metrics),
+            observation_gate_result=_to_jsonable(observation_gate),
+            observation_result=_to_jsonable(observation_result),
+            evidence_bundle=_to_jsonable(evidence_bundle),
+            preapply_evidence_package=_to_jsonable(package),
+            experiment_spec={
+                "dataset": {
+                    "symbol": config.experiment_config.symbol,
+                    "timeframe": config.experiment_config.timeframe,
+                }
+            },
+            created_at=config.timestamp,
+        )
+        summary["candidate_verdict"] = candidate_verdict.to_dict()
         operator_checklist = _operator_review_checklist(
             summary=summary,
             candidate=candidate,
@@ -640,6 +658,7 @@ def _preapply_evidence_refs(*, experiment_id: str, observation_id: str) -> dict[
         "metrics_snapshot": f"experiments/{experiment_id}/metrics_snapshot.json",
         "dataset_quality_report": f"experiments/{experiment_id}/dataset_quality_report.json",
         "source_integrity_report": f"experiments/{experiment_id}/source_integrity_report.json",
+        "experiment_spec": f"experiments/{experiment_id}/experiment_spec.json",
         "execution_evidence_report": f"experiments/{experiment_id}/execution_evidence_report.json",
         "evidence_bundle": f"experiments/{experiment_id}/evidence_bundle.json",
         "observation_result": f"observations/{observation_id}/observation_result.json",
@@ -1017,20 +1036,31 @@ def _operator_review_checklist(
         "next_debug_action": summary["next_debug_action"],
         "stage_results": summary["stage_results"],
         "readiness": readiness,
-        "allowed_next_actions": ("review_preapply_evidence", "request_more_evidence", "reject"),
+        "allowed_next_actions": (
+            "review_preapply_evidence",
+            "request_more_observation",
+            "reject_candidate",
+            "archive_candidate",
+        ),
         "forbidden_next_actions": (
             "active_parameter_apply",
-            "okx_write",
             "runtime_config_write",
+            "okx_write",
             "auto_apply",
+            "dry_run_execute",
         ),
         "checklist_items": checklist_items,
         "recommended_next_step": summary["next_step"],
+        "candidate_verdict": summary.get("candidate_verdict"),
         "runtime_mutation_allowed": False,
+        "active_parameter_write_allowed": False,
+        "runtime_config_write_allowed": False,
+        "okx_write_allowed": False,
+        "dry_run_execution_allowed": False,
         "operator_approval_required": True,
         "no_runtime_mutation_statement": (
             "This research governance workflow does not authorize active parameter changes, "
-            "runtime config mutation, live orders, or OKX writes."
+            "runtime config mutation, live orders, OKX writes, dry-run execution, or production deployment."
         ),
         "created_at": timestamp.isoformat(),
     }
@@ -1050,57 +1080,93 @@ def _operator_review_summary(
     factor_expression = candidate.payload.get("factor_expression", "n/a")
     dataset_fingerprint = candidate.payload.get("dataset_fingerprint", "n/a")
     novelty_decision = operator_checklist.get("novelty_gate_decision") or "not_recorded"
+    candidate_verdict = operator_checklist.get("candidate_verdict") or {}
+    verdict_text = candidate_verdict.get("verdict", "not_recorded")
+    verdict_reason = candidate_verdict.get("reason", "not_recorded")
+    verdict_next_action = candidate_verdict.get("next_action", "not_recorded")
+    symbol = candidate_verdict.get("symbol", "n/a")
+    timeframe = candidate_verdict.get("timeframe", "n/a")
     risk_flags = ", ".join(summary["risk_flags"]) if summary["risk_flags"] else "none"
     blocking_failures = summary["blocking_failures"]
     failure_text = "\n".join(f"- {failure}" for failure in blocking_failures) if blocking_failures else "- none"
     readiness = operator_checklist["readiness"]
+    execution_evidence = evidence_bundle.execution_evidence
+    execution_evidence_compatibility = (
+        execution_evidence.dataset_fingerprint_compatible if execution_evidence is not None else "not_recorded"
+    )
     return (
-        f"# Research Factory Pre-Apply Review Summary\n\n"
-        f"## Candidate Overview\n\n"
+        f"# Research Factory PreApply Review Summary\n\n"
+        f"## 1. Candidate Overview\n\n"
         f"- Workflow: `{summary['workflow_id']}`\n"
         f"- Status: `{summary['status']}`\n"
         f"- Profile: `{summary['profile']}`\n"
         f"- Candidate: `{candidate.candidate_id}`\n"
+        f"- Experiment: `{summary['experiment_id']}`\n"
+        f"- Symbol: `{symbol}`\n"
+        f"- Timeframe: `{timeframe}`\n"
         f"- Candidate type: `{candidate.candidate_type}`\n"
         f"- Recommendation: `{recommendation.recommendation_id}`\n"
         f"- PreApply package: `{package.package_id}`\n"
         f"- PreApply review: `{summary['preapply_review_id']}`\n"
         f"- Factor expression: `{factor_expression}`\n"
         f"- Dataset fingerprint: `{dataset_fingerprint}`\n\n"
-        f"## Data Evidence\n\n"
+        f"## 2. Research Profile\n\n"
+        f"- Profile name: `{summary['profile']}`\n"
+        f"- Dataset thresholds: inspect profile and dataset quality report refs\n"
+        f"- Observation thresholds: inspect observation gate result thresholds\n"
+        f"- Execution evidence policy: inspect execution evidence report and risk flags\n\n"
+        f"## 3. Data Evidence\n\n"
         f"- Dataset quality passed: `{readiness['dataset_quality_passed']}`\n"
-        f"- Source integrity passed: `{readiness['source_integrity_passed']}`\n\n"
-        f"## Execution Evidence\n\n"
+        f"- Source integrity passed: `{readiness['source_integrity_passed']}`\n"
+        f"- Dataset fingerprint: `{dataset_fingerprint}`\n\n"
+        f"- Candle source versions: `{tuple(evidence_bundle.source_integrity.source_candle_dataset_versions)}`\n"
+        f"- Funding source versions: `{tuple(evidence_bundle.source_integrity.source_funding_dataset_versions)}`\n"
+        f"- Build run ids: `{tuple(evidence_bundle.source_integrity.build_run_ids)}`\n\n"
+        f"## 4. Execution Evidence\n\n"
         f"- Execution evidence passed: `{readiness['execution_evidence_passed']}`\n"
+        f"- Execution evidence dataset compatibility mode: `{execution_evidence_compatibility}`\n"
+        f"- Cost-adjusted edge bps mean: `{candidate.metrics.cost_adjusted_edge_bps_mean}`\n"
+        f"- Fillable ratio: `{candidate.metrics.fillable_ratio}`\n"
+        f"- Partial fill ratio: `{candidate.metrics.partial_fill_ratio}`\n"
+        f"- Fee bps mean: `{candidate.metrics.fee_bps_mean}`\n"
+        f"- Slippage bps mean: `{candidate.metrics.slippage_bps_mean}`\n"
+        f"- Funding bps mean: `{candidate.metrics.funding_bps_mean}`\n"
         f"- Reference integrity passed: `{readiness['reference_integrity_passed']}`\n\n"
-        f"## Candidate Gate\n\n"
+        f"## 5. Gates\n\n"
         f"- Candidate gate passed: `{candidate.gate.passed}`\n"
         f"- Candidate gate failures: `{tuple(candidate.gate.failures)}`\n\n"
-        f"## Observation Gate\n\n"
         f"- Observation gate passed: `{observation_gate.passed}`\n"
         f"- Observation gate failures: `{tuple(observation_gate.failures)}`\n\n"
-        f"## PreApply Package\n\n"
+        f"- Reference integrity passed: `{readiness['reference_integrity_passed']}`\n\n"
         f"- Evidence bundle passed: `{evidence_bundle.passed}`\n"
         f"- PreApply package status: `{package.status}`\n"
         f"- PreApply package ready: `{readiness['preapply_package_ready']}`\n\n"
-        f"## Registry / Novelty Memory\n\n"
-        f"- Novelty gate decision: `{novelty_decision}`\n"
+        f"## 6. Risk Flags\n\n"
         f"- Risk flags: `{risk_flags}`\n\n"
-        f"## Required Followups\n\n"
+        f"## 7. Blocking Failures\n\n"
         f"{failure_text}\n\n"
+        f"## 8. Registry / Novelty Memory\n\n"
+        f"- Novelty gate decision: `{novelty_decision}`\n"
+        f"- Prior memory warnings: inspect registry refs if present\n\n"
+        f"## 9. Verdict\n\n"
+        f"- Verdict: `{verdict_text}`\n"
+        f"- Reason: `{verdict_reason}`\n"
+        f"- Next action: `{verdict_next_action}`\n\n"
+        f"## 10. Allowed Next Actions\n\n"
+        f"- Allowed next actions: `{tuple(operator_checklist['allowed_next_actions'])}`\n\n"
+        f"## 11. Forbidden Actions\n\n"
+        f"- Forbidden next actions: `{tuple(operator_checklist['forbidden_next_actions'])}`\n\n"
         f"## Review Controls\n\n"
         f"- Recommended next step: `{summary['next_step']}`\n"
         f"- Failed or blocking stage: `{summary['failed_stage'] or 'none'}`\n"
         f"- Blocking artifact: `{summary['blocking_artifact'] or 'none'}`\n"
         f"- Next debug action: `{summary['next_debug_action']}`\n"
-        f"- Allowed next actions: `{tuple(operator_checklist['allowed_next_actions'])}`\n"
-        f"- Forbidden next actions: `{tuple(operator_checklist['forbidden_next_actions'])}`\n"
         f"- Runtime mutation allowed: `False`\n"
         f"- Operator approval required: `True`\n"
         f"- Operator decision required: `{readiness['operator_decision_required']}`\n"
-        f"\n## Explicit Non-Authorization Statement\n\n"
-        f"- No runtime mutation authorized: this summary does not authorize active parameter changes, "
-        f"runtime config mutation, live orders, or OKX writes.\n\n"
+        f"\n## 12. Explicit Non-Authorization Statement\n\n"
+        f"- This summary does not authorize any live trading, runtime mutation, "
+        f"active parameter update, OKX write, dry-run execution, or production deployment.\n\n"
     )
 
 
