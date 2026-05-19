@@ -88,7 +88,9 @@ class FakeOperatorAccountService:
         self.private_ws_client = private_ws_client
         self._snapshot = self.SNAPSHOT
 
-    async def refresh(self, *, force: bool = False):
+    async def refresh(self, *, force: bool = False, force_account_state: bool = False):
+        _ = force
+        _ = force_account_state
         return self._snapshot
 
     def latest_snapshot(self):
@@ -312,9 +314,10 @@ class RefreshTestAccountService:
         self._snapshot = initial_snapshot
         self._refreshed_snapshot = refreshed_snapshot
         self.refresh_calls = 0
+        self.refresh_kwargs: list[dict[str, bool]] = []
 
-    async def refresh(self, *, force: bool = False):
-        _ = force
+    async def refresh(self, *, force: bool = False, force_account_state: bool = False):
+        self.refresh_kwargs.append({"force": force, "force_account_state": force_account_state})
         self.refresh_calls += 1
         if self.refresh_calls >= 2:
             self._snapshot = self._refreshed_snapshot
@@ -6138,6 +6141,10 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(attempts_executed, runtime.settings.operator_exchange_refresh_max_attempts)
         self.assertEqual(runtime.market_gateway.refresh_snapshot.await_count, attempts_executed)
         self.assertEqual(account_service.refresh_calls, attempts_executed)
+        self.assertEqual(
+            account_service.refresh_kwargs,
+            [{"force": False, "force_account_state": True}] * attempts_executed,
+        )
         self.assertTrue(refresh_action["details"]["market_refresh_completed"])
         self.assertTrue(refresh_action["details"]["account_refresh_completed"])
         self.assertTrue(refresh_action["details"]["blocker_cleared"])
@@ -6215,6 +6222,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             "从未真正运行，guard 重新评估永远不会执行。",
         )
         self.assertEqual(funding_spy.sync_recent_bills.call_count, 1)
+        mock_account_service.refresh.assert_awaited_once_with(force_account_state=True)
 
         # ── 异常路径: account_service.refresh 抛错时, finally 仍必须 await ──
         mock_account_service.refresh = AsyncMock(side_effect=RuntimeError("simulated"))
@@ -6231,6 +6239,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             "finally 分支中也必须被调用一次 (try/finally 一致性保证)。",
         )
         self.assertEqual(funding_spy.sync_recent_bills.call_count, 1)
+        mock_account_service.refresh.assert_awaited_once_with(force_account_state=True)
 
     async def test_provider_degraded_blocker_does_not_offer_manual_review_resolution_buttons(self) -> None:
         runtime = await self._runtime(

@@ -99,6 +99,10 @@ def derivatives_position_mode_contract(
 
 
 class OKXAccountService:
+    _NON_BLOCKING_SYSTEM_STATUS_TITLE_FRAGMENTS = (
+        "trailing stop",
+    )
+
     def __init__(
         self,
         *,
@@ -1937,15 +1941,54 @@ class OKXAccountService:
     def _system_status_blockers(snapshot: ExchangeAccountSnapshot) -> list[str]:
         blockers: list[str] = []
         rows = snapshot.system_status_items or [
-            ExchangeSystemStatusItem(state=str(row.get("state") or ""), raw=dict(row))
+            ExchangeSystemStatusItem(
+                state=str(row.get("state") or ""),
+                service_type=OKXAccountService._text_value(row, "serviceType"),
+                title=OKXAccountService._text_value(row, "title", "serviceName"),
+                description=OKXAccountService._text_value(row, "description", "msg", "scheDesc"),
+                begin_ts=OKXAccountService._timestamp_from_ms_optional(row.get("begin")),
+                end_ts=OKXAccountService._timestamp_from_ms_optional(row.get("end")),
+                raw=dict(row),
+            )
             for row in snapshot.system_status
         ]
+        now = utc_now()
         for row in rows:
-            state = str(row.state or "").strip().lower()
-            if state in {"scheduled", "ongoing"}:
+            if OKXAccountService._system_status_item_blocks_execution(row, now=now):
                 blockers.append("okx_system_status_incident")
                 break
         return blockers
+
+    @staticmethod
+    def _system_status_item_blocks_execution(
+        row: ExchangeSystemStatusItem,
+        *,
+        now: datetime,
+    ) -> bool:
+        state = str(row.state or "").strip().lower()
+        if state not in {"scheduled", "ongoing"}:
+            return False
+        if OKXAccountService._is_non_blocking_system_status_item(row):
+            return False
+        if state == "scheduled" and row.begin_ts is not None and row.begin_ts > now:
+            return False
+        if state == "scheduled" and row.begin_ts is None:
+            return False
+        return True
+
+    @staticmethod
+    def _is_non_blocking_system_status_item(row: ExchangeSystemStatusItem) -> bool:
+        text = " ".join(
+            str(value or "").strip().lower()
+            for value in (row.title, row.description)
+            if str(value or "").strip()
+        )
+        if not text:
+            return False
+        return any(
+            fragment in text
+            for fragment in OKXAccountService._NON_BLOCKING_SYSTEM_STATUS_TITLE_FRAGMENTS
+        )
 
     @staticmethod
     def _decimal_value(row: dict[str, Any], *keys: str) -> Decimal | None:

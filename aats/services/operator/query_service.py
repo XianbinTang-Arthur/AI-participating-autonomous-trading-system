@@ -14693,7 +14693,7 @@ class OperatorQueryService:
     async def _refresh_exchange_snapshot_for_resolution(self):
         if self.runtime.settings.account_backend != "okx" or not self.runtime.settings.account_read_enabled:
             return None
-        return await self.runtime.account_service.refresh(force=True)
+        return await self.runtime.account_service.refresh(force_account_state=True)
 
     async def _refresh_market_snapshot_for_operator_resolution(self):
         refresh = getattr(self.runtime.market_gateway, "refresh_snapshot", None)
@@ -14706,7 +14706,7 @@ class OperatorQueryService:
         if not callable(refresh):
             return None
         try:
-            snapshot = await refresh(force=True)
+            snapshot = await refresh(force_account_state=True)
         finally:
             sync_funding = getattr(self.runtime, "_sync_funding_fees_after_refresh", None)
             if callable(sync_funding):

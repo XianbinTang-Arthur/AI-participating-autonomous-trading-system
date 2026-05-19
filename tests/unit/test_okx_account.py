@@ -426,6 +426,54 @@ class _FakeSystemIncidentClient(_FakeOKXClient):
         return {"code": "0", "data": [{"state": "ongoing", "serviceType": "5"}]}
 
 
+class _FakeFutureScheduledSystemMaintenanceClient(_FakeOKXClient):
+    async def get_system_status(self):
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "state": "scheduled",
+                    "serviceType": "5",
+                    "title": "Trading Service Scheduled Maintenance",
+                    "begin": _ms_from_now(3600),
+                    "end": _ms_from_now(4800),
+                }
+            ],
+        }
+
+
+class _FakeDueScheduledSystemMaintenanceClient(_FakeOKXClient):
+    async def get_system_status(self):
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "state": "scheduled",
+                    "serviceType": "5",
+                    "title": "Trading Service Scheduled Maintenance",
+                    "begin": _ms_from_now(-60),
+                    "end": _ms_from_now(1200),
+                }
+            ],
+        }
+
+
+class _FakeTrailingStopSystemMaintenanceClient(_FakeOKXClient):
+    async def get_system_status(self):
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "state": "ongoing",
+                    "serviceType": "99",
+                    "title": "Trailing Stop Scheduled Maintenance ",
+                    "begin": _ms_from_now(-60),
+                    "end": _ms_from_now(1200),
+                }
+            ],
+        }
+
+
 class _FakeMultiSymbolOKXClient(_FakeOKXClient):
     def __init__(self) -> None:
         super().__init__()
@@ -1131,6 +1179,65 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(status["ready"])
         self.assertIn("okx_system_status_incident", status["blockers"])
         self.assertEqual(status["system_status_items"][0]["state"], "ongoing")
+
+    async def test_status_does_not_block_future_scheduled_okx_maintenance(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+            }
+        )
+        service = OKXAccountService(settings=settings, client=_FakeFutureScheduledSystemMaintenanceClient())
+
+        await service.refresh(force=True)
+        status = service.status()
+
+        self.assertTrue(status["ready"])
+        self.assertNotIn("okx_system_status_incident", status["blockers"])
+        self.assertTrue(status["system_status_ok"])
+        self.assertEqual(status["system_status_items"][0]["state"], "scheduled")
+
+    async def test_status_blocks_when_scheduled_okx_maintenance_is_due(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+            }
+        )
+        service = OKXAccountService(settings=settings, client=_FakeDueScheduledSystemMaintenanceClient())
+
+        await service.refresh(force=True)
+        status = service.status()
+
+        self.assertFalse(status["ready"])
+        self.assertIn("okx_system_status_incident", status["blockers"])
+        self.assertFalse(status["system_status_ok"])
+
+    async def test_status_does_not_block_trailing_stop_only_okx_maintenance(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+            }
+        )
+        service = OKXAccountService(settings=settings, client=_FakeTrailingStopSystemMaintenanceClient())
+
+        await service.refresh(force=True)
+        status = service.status()
+
+        self.assertTrue(status["ready"])
+        self.assertNotIn("okx_system_status_incident", status["blockers"])
+        self.assertTrue(status["system_status_ok"])
+        self.assertEqual(status["system_status_items"][0]["service_type"], "99")
 
     async def test_status_blocks_when_position_margin_mode_conflicts_with_runtime_margin_mode(self) -> None:
         settings = AATSSettings.model_validate(
