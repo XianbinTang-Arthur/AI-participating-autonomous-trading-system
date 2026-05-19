@@ -124,12 +124,105 @@ Therefore those rows should not be converted into
 `research_observation_summary_v1` for new Research Factory candidates without a
 separate, explicit mapping and metric extraction layer.
 
+The same read-only probe found only these shadow/paper/intent/observation
+candidate tables:
+
+```text
+bronze.market_orderbook_bbo
+bronze.market_orderbook_books5
+bronze.market_orderbook_payloads
+governance.observation_results
+silver.market_orderbook_metrics_15m
+```
+
+No candidate-bound shadow decision or paper intent table was found in the RDP
+database search path.
+
+Gold replay funding source lineage was repaired after the initial audit. It no
+longer blocks current real-factor workflows before observation:
+
+```text
+gold.market_swap_replay_bars_1h:
+  BTC-USDT-SWAP rows: 8133
+  source_funding_dataset_version non-null rows: 8133
+  source_funding_dataset_versions: v1.0
+
+  ETH-USDT-SWAP rows: 3765
+  source_funding_dataset_version non-null rows: 3765
+  source_funding_dataset_versions: v1.0
+
+gold.market_swap_replay_bars_15m:
+  BTC-USDT-SWAP rows: 6057
+  source_funding_dataset_version non-null rows: 6057
+  source_funding_dataset_versions: v1.0
+
+  ETH-USDT-SWAP rows: 6057
+  source_funding_dataset_version non-null rows: 6057
+  source_funding_dataset_versions: v1.0
+```
+
+Post-repair revalidation shows `SourceIntegrityReport.passed=true` and
+`source_funding_dataset_versions=('v1.0',)` for the tested BTC 1h and 15m
+candidate evidence bundles. The remaining blockers are dataset-quality issues:
+bar gaps, 1h funding missing ratio, and insufficient 15m valid/test segment
+rows.
+
+Follow-up historical backfill reduced the usable-window blocker:
+
+```text
+BTC-USDT-SWAP 15m candle backfill:
+  scripts/rdp_deep_backfill_api.py
+  pages: 91
+  staged/bronze/silver rows: 9100
+  rebuilt Gold rows: 15195
+
+BTC-USDT-SWAP / ETH-USDT-SWAP funding backfill:
+  scripts/rdp_deep_backfill_funding.py
+  target: 2025-12-13
+  rows added: 0
+  reason: OKX funding-rate-history returned no rows before 2026-01-15
+```
+
+The resulting clean funding-present windows are:
+
+```text
+BTC-USDT-SWAP 15m:
+  2026-01-15 00:00 Asia/Shanghai -> 2026-04-17 15:30 Asia/Shanghai
+  rows: 8895
+
+BTC-USDT-SWAP 1H:
+  2026-01-15 00:00 Asia/Shanghai -> 2026-04-17 14:00 Asia/Shanghai
+  rows: 2223
+```
+
+Research Factory revalidation on the clean window produced:
+
+```text
+wf_btc_1h_momentum_clean_20260519:
+  verdict: reject
+  reason: candidate gate failed
+
+wf_btc_15m_zscore_clean_20260519:
+  verdict: reject
+  reason: candidate gate failed
+
+wf_btc_1h_funding_drift_clean_obsfix_20260519:
+  verdict: keep_observing
+  reason: observation sample is still insufficient
+```
+
+The `keep_observing` result still uses a controlled observation artifact. The
+audit conclusion is unchanged: candidate-bound shadow/paper events must be
+connected before treating observation results as true production-derived
+evidence.
+
 ## Recommended Next Step
 
-Use the read-only JSONL exporter and generator for controlled artifact inputs.
-After the team identifies the authoritative shadow/paper stores, add a separate
-read-only extraction job that writes source JSONL artifacts for this exporter.
-That extractor should:
+Next repair the remaining Gold replay dataset-quality gaps. Then use the
+read-only JSONL exporter and generator for controlled artifact inputs. After the
+team identifies the authoritative shadow/paper stores, add a separate read-only
+extraction job that writes source JSONL artifacts for this exporter. That
+extractor should:
 
 ```text
 read shadow/paper evidence

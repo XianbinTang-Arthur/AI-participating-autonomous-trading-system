@@ -89,10 +89,20 @@ def build_gold_replay_bars(
 
         # Prepare funding alignment for swaps
         funding_map: dict[datetime, tuple] = {}
+        funding_dataset_versions: set[str] = set()
         if is_swap:
             funding_events = load_silver_funding(session, symbol, window_start, window_end)
+            funding_dataset_versions = {
+                str(event["dataset_version"])
+                for event in funding_events
+                if event.get("dataset_version") is not None
+            }
             bar_timestamps = [c[1] for c in candles]
             funding_map = align_funding_to_bars(bar_timestamps, funding_events)
+
+        funding_version_fallback = funding_dataset_version
+        if funding_version_fallback is None and len(funding_dataset_versions) == 1:
+            funding_version_fallback = next(iter(funding_dataset_versions))
 
         # Build and insert gold bars
         #
@@ -107,7 +117,12 @@ def build_gold_replay_bars(
         values: list[dict[str, Any]] = []
         for c in candles:
             sym, ts, o, h, low, cl, vol, qvol, confirm = c
-            aligned_rate, funding_ts = funding_map.get(ts, (None, None))
+            aligned_rate, funding_ts, aligned_funding_version = funding_map.get(ts, (None, None, None))
+            source_funding_dataset_version = (
+                (aligned_funding_version or funding_version_fallback)
+                if is_swap
+                else None
+            )
             # Gold is_closed derives from Silver confirm — explicit bool cast
             values.append(dict(
                 symbol=sym, ts=ts,
@@ -117,7 +132,7 @@ def build_gold_replay_bars(
                 aligned_funding_rate=aligned_rate,
                 funding_source_ts=funding_ts,
                 source_candle_dataset_version=candle_dataset_version,
-                source_funding_dataset_version=funding_dataset_version if is_swap else None,
+                source_funding_dataset_version=source_funding_dataset_version,
                 build_run_id=run_id,
                 now=now,
             ))

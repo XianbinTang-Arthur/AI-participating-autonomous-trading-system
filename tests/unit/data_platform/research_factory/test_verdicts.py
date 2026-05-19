@@ -9,6 +9,7 @@ import pytest
 
 from aats.data_platform.research_factory.verdicts import (
     CandidateVerdict,
+    build_candidate_verdict_from_workflow,
     build_candidate_verdict_from_payloads,
     update_candidate_verdict_board,
 )
@@ -171,6 +172,70 @@ def test_execution_compatibility_keeps_observing() -> None:
 
     assert verdict.verdict == "keep_observing"
     assert verdict.reason == "execution evidence uses dataset compatibility mode"
+
+
+def test_failed_workflow_without_candidate_artifact_still_builds_reject_verdict(
+    workspace_tmp_path: Path,
+) -> None:
+    root = research_factory_root(workspace_tmp_path)
+    experiment_dir = root / "experiments" / "exp_gate_failed"
+    workflow_dir = root / "workflows" / "wf_gate_failed"
+    experiment_dir.mkdir(parents=True)
+    workflow_dir.mkdir(parents=True)
+    (experiment_dir / "experiment_spec.json").write_text(
+        json.dumps(
+            {
+                "dataset": {
+                    "symbol": "BTC-USDT-SWAP",
+                    "timeframe": "15m",
+                },
+                "features": [{"name": "research_factor", "expression": "ZScore(Return(close, 4), 20)"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (experiment_dir / "metrics_snapshot.json").write_text(
+        json.dumps(
+            {
+                "net_annualized_return": -0.05,
+                "max_drawdown": 0.08,
+                "cost_adjusted_edge_bps_mean": 1.0,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (experiment_dir / "evidence_bundle.json").write_text(
+        json.dumps({"passed": True, "failures": []}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    summary_path = workflow_dir / "workflow_summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "workflow_id": "wf_gate_failed",
+                "status": "failed",
+                "profile": "real_factor_research",
+                "experiment_id": "exp_gate_failed",
+                "failed_stage": "real_data_experiment",
+                "blocking_failures": ["candidate gate failed: net_annualized_return <= 0"],
+                "artifact_refs": {
+                    "workflow_summary": "workflows/wf_gate_failed/workflow_summary.json",
+                    "experiment_manifest": "experiments/exp_gate_failed/experiment_manifest.json",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    verdict = build_candidate_verdict_from_workflow(summary_path)
+
+    assert verdict.candidate_id == "cand_exp_gate_failed"
+    assert verdict.factor_expression == "ZScore(Return(close, 4), 20)"
+    assert verdict.verdict == "reject"
+    assert verdict.reason == "candidate gate failed"
 
 
 def test_verdict_next_action_rejects_runtime_apply_text() -> None:

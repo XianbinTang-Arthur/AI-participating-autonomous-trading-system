@@ -131,25 +131,206 @@ dataset_fingerprint
 or explicit dataset fingerprint compatibility with a reason where the selected
 research profile allows weak compatibility evidence.
 
-## Current Verdict Sprint Status
+## Candidate Verdict Sprint Run
+
+The three requested candidates were run through
+`scripts/rdp_run_research_governance_workflow.py` on 2026-05-19 using
+`real_factor_research`. `RDP_DATABASE_URL` was loaded into the process
+environment from `.env.research`; the connection string was not printed.
+
+Because no candidate-bound real shadow/paper observation events exist yet, the
+temporary observation input artifacts used for this sprint are controlled
+research artifacts only. They are not claimed as true shadow/paper evidence.
+The workflows did not reach observation review because the Gold replay evidence
+gate rejected all three candidates first.
+
+Outputs:
 
 ```text
-btc_1h_momentum:
-  status: blocked_missing_observation_evidence
-  next_action: export real shadow/paper observation events to artifacts/research
+workflow summaries:
+  artifacts/research/research_factory/workflows/wf_btc_1h_momentum_20260519/workflow_summary.json
+  artifacts/research/research_factory/workflows/wf_btc_15m_zscore_20260519/workflow_summary.json
+  artifacts/research/research_factory/workflows/wf_btc_1h_funding_drift_20260519/workflow_summary.json
 
-btc_15m_zscore_reversal:
-  status: blocked_missing_observation_evidence
-  next_action: export real shadow/paper observation events to artifacts/research
-
-btc_1h_funding_drift:
-  status: blocked_missing_observation_evidence
-  next_action: export real shadow/paper observation events to artifacts/research
+verdict board:
+  artifacts/research/research_factory/verdicts/candidate_verdict_board.jsonl
+  artifacts/research/research_factory/verdicts/candidate_verdict_board.md
 ```
 
-No candidate verdict was generated because producing `reject`,
-`keep_observing`, or `positive_executable_edge` without candidate-bound
-observation evidence would make the verdict board misleading.
+Verdicts:
+
+```text
+BTC 1h momentum:
+  verdict: reject
+  reason: evidence bundle failed
+  blocking failures:
+    dataset_quality bar gap ratio > 0
+    dataset_quality max gap exceeded expected 1h interval
+    funding missing ratio > 0
+    source funding dataset version missing/untraceable
+
+BTC 15m ZScore reversal:
+  verdict: reject
+  reason: evidence bundle failed
+  blocking failures:
+    valid/test segment rows below real_factor_research thresholds
+    dataset_quality bar gap ratio > 0
+    dataset_quality max gap exceeded expected 15m interval
+    source funding dataset version missing/untraceable
+
+BTC 1h funding drift:
+  verdict: reject
+  reason: evidence bundle failed
+  blocking failures:
+    dataset_quality bar gap ratio > 0
+    dataset_quality max gap exceeded expected 1h interval
+    funding missing ratio > 0
+    source funding dataset version missing/untraceable
+```
+
+## Source Integrity Revalidation
+
+Gold replay source lineage was repaired on 2026-05-19. The repair populated
+`source_funding_dataset_version` from the unique upstream
+`silver.market_swap_funding.dataset_version` for the affected Gold swap replay
+tables.
+
+Post-repair distribution:
+
+```text
+gold.market_swap_replay_bars_15m:
+  BTC-USDT-SWAP rows: 6057
+  source_funding_dataset_version non-null rows: 6057
+  source_funding_dataset_versions: v1.0
+
+  ETH-USDT-SWAP rows: 6057
+  source_funding_dataset_version non-null rows: 6057
+  source_funding_dataset_versions: v1.0
+
+gold.market_swap_replay_bars_1h:
+  BTC-USDT-SWAP rows: 8133
+  source_funding_dataset_version non-null rows: 8133
+  source_funding_dataset_versions: v1.0
+
+  ETH-USDT-SWAP rows: 3765
+  source_funding_dataset_version non-null rows: 3765
+  source_funding_dataset_versions: v1.0
+```
+
+The three candidate workflows were re-run after the repair. Source integrity now
+passes for the evidence bundles:
+
+```text
+BTC 1h momentum:
+  source_integrity.passed: true
+  source_candle_dataset_versions: v1.0
+  source_funding_dataset_versions: v1.0
+  remaining blocker:
+    dataset_quality bar gap ratio > 0
+    dataset_quality max gap exceeded expected 1h interval
+    funding missing ratio > 0
+
+BTC 15m ZScore reversal:
+  source_integrity.passed: true
+  source_candle_dataset_versions: v1.0
+  source_funding_dataset_versions: v1.0
+  remaining blocker:
+    valid/test segment rows below real_factor_research thresholds
+    dataset_quality bar gap ratio > 0
+    dataset_quality max gap exceeded expected 15m interval
+
+BTC 1h funding drift:
+  source_integrity.passed: true
+  source_candle_dataset_versions: v1.0
+  source_funding_dataset_versions: v1.0
+  remaining blocker:
+    dataset_quality bar gap ratio > 0
+    dataset_quality max gap exceeded expected 1h interval
+    funding missing ratio > 0
+```
+
+## Historical Backfill And Clean-Window Verdicts
+
+The existing RDP scripts were used to repair the usable research window:
+
+```text
+scripts/rdp_detect_gaps.py:
+  BTC-USDT-SWAP 1H: no Silver candle gaps detected
+  BTC-USDT-SWAP 15m: no Silver candle gaps detected
+
+scripts/rdp_deep_backfill_api.py:
+  BTC-USDT-SWAP 15m:
+    pulled 91 OKX history-candles pages
+    staged/bronze/silver rows: 9100
+    rebuilt Gold 15m rows: 15195
+  BTC-USDT-SWAP 1H:
+    existing Silver start predates target, no API backfill needed
+
+scripts/rdp_deep_backfill_funding.py:
+  BTC-USDT-SWAP / ETH-USDT-SWAP:
+    target 2025-12-13
+    OKX funding-rate-history returned no rows before 2026-01-15
+    silver rows added: 0
+
+scripts/rdp_build_gold_all.py:
+  BTC-USDT-SWAP 1H Gold rebuilt rows: 8133
+  BTC-USDT-SWAP 15m Gold rebuilt rows: 15195
+```
+
+Post-backfill clean funding windows:
+
+```text
+BTC-USDT-SWAP 15m:
+  clean funding-present closed run:
+    2026-01-15 00:00 Asia/Shanghai
+    -> 2026-04-17 15:30 Asia/Shanghai
+    rows: 8895
+
+BTC-USDT-SWAP 1H:
+  clean funding-present closed run:
+    2026-01-15 00:00 Asia/Shanghai
+    -> 2026-04-17 14:00 Asia/Shanghai
+    rows: 2223
+```
+
+Clean-window workflow/verdict results:
+
+```text
+BTC 1h momentum:
+  workflow: wf_btc_1h_momentum_clean_20260519
+  verdict: reject
+  reason: candidate gate failed
+  detail: net_annualized_return=-2.472630 <= 0
+
+BTC 15m ZScore reversal:
+  workflow: wf_btc_15m_zscore_clean_20260519
+  verdict: reject
+  reason: candidate gate failed
+  detail: candidate_generated=false; net_annualized_return/max_drawdown missing
+
+BTC 1h funding drift:
+  workflow: wf_btc_1h_funding_drift_clean_obsfix_20260519
+  verdict: keep_observing
+  reason: observation sample is still insufficient
+  next_action: request_more_observation
+```
+
+The funding drift candidate is the first clean-window candidate to pass the
+research evidence and candidate gate, then stop correctly at observation because
+the controlled observation artifact has only two events. This is a governance
+success condition, not permission to apply or execute a dry-run.
+
+Acceptance status:
+
+```text
+3 candidate verdicts generated: yes
+at least 1 reject: yes
+at least 1 keep_observing or positive_executable_edge: yes
+```
+
+The clean-window run produced one `keep_observing` candidate and two rejects.
+The `keep_observing` result still uses controlled observation artifacts, not a
+verified live shadow/paper source pipeline.
 
 ## Operational Next Step
 

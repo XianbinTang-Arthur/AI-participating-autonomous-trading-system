@@ -137,8 +137,9 @@ def main(argv: list[str] | None = None) -> int:
         _print_failure(str(exc))
         return 2
 
-    print(result.to_json(), end="")
-    return 0 if result.status == "preapply_review_pending" else 1
+    payload = _result_payload(result)
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", end="")
+    return _workflow_exit_code(result.status)
 
 
 def _parse_utc_datetime(value: str) -> datetime:
@@ -155,6 +156,35 @@ def _parse_utc_datetime(value: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _workflow_exit_code(status: str) -> int:
+    """Return process status without treating candidate verdicts as program errors."""
+    if status in {"failed", "reference_integrity_failed"}:
+        return 1
+    return 0
+
+
+def _result_payload(result) -> dict:
+    raw = json.loads(result.to_json())
+    if not isinstance(raw, dict):
+        raise ValueError("workflow result JSON must be an object")
+    workflow_dir = str(raw.get("workflow_dir") or "").strip()
+    summary_ref = str(raw.get("workflow_summary_ref") or "workflow_summary.json").strip()
+    workflow_summary = f"{workflow_dir}/{summary_ref}" if workflow_dir else summary_ref
+    raw.setdefault("runtime_mutation_allowed", False)
+    raw.setdefault("active_parameter_write_allowed", False)
+    raw.setdefault("runtime_config_write_allowed", False)
+    raw.setdefault("okx_write_allowed", False)
+    raw.setdefault("dry_run_execution_allowed", False)
+    raw.setdefault(
+        "verdict_board_next_command",
+        (
+            "python scripts/rdp_update_candidate_verdict_board.py "
+            f"--workflow-summary {workflow_summary}"
+        ),
+    )
+    return raw
+
+
 def _print_failure(error: str) -> None:
     print(
         json.dumps(
@@ -165,6 +195,7 @@ def _print_failure(error: str) -> None:
                 "active_parameter_write_allowed": False,
                 "runtime_config_write_allowed": False,
                 "okx_write_allowed": False,
+                "dry_run_execution_allowed": False,
             },
             ensure_ascii=False,
             indent=2,

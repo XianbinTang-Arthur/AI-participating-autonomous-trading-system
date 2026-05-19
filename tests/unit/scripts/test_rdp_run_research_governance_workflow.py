@@ -149,7 +149,79 @@ def test_cli_success_prints_workflow_json_with_injected_workflow(
     assert payload["status"] == "preapply_review_pending"
     assert payload["next_step"] == "operator_preapply_review"
     assert payload["runtime_mutation_allowed"] is False
+    assert payload["dry_run_execution_allowed"] is False
+    assert "rdp_update_candidate_verdict_board.py" in payload["verdict_board_next_command"]
     assert captured["profile"] == "paper_review"
+
+
+def test_cli_completed_candidate_reject_status_is_not_program_failure(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    module = load_script_module()
+    monkeypatch.setenv("TEST_RDP_DATABASE_URL", "postgresql://example.invalid/db")
+    install_fake_db(monkeypatch, module)
+
+    class FakeResult:
+        status = "preapply_rejected"
+
+        def to_json(self):
+            return json.dumps(
+                {
+                    "workflow_id": "wf_cli_test_reject",
+                    "status": self.status,
+                    "workflow_dir": "artifacts/research/research_factory/workflows/wf_cli_test_reject",
+                    "workflow_summary_ref": "workflow_summary.json",
+                    "next_step": "archive_candidate",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ) + "\n"
+
+    monkeypatch.setattr(module, "run_research_governance_workflow", lambda *args, **kwargs: FakeResult())
+
+    code = module.main(base_args(tmp_path))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["status"] == "preapply_rejected"
+    assert payload["runtime_mutation_allowed"] is False
+    assert "wf_cli_test_reject/workflow_summary.json" in payload["verdict_board_next_command"]
+
+
+def test_cli_reference_integrity_failure_returns_artifact_failure_code(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    module = load_script_module()
+    monkeypatch.setenv("TEST_RDP_DATABASE_URL", "postgresql://example.invalid/db")
+    install_fake_db(monkeypatch, module)
+
+    class FakeResult:
+        status = "reference_integrity_failed"
+
+        def to_json(self):
+            return json.dumps(
+                {
+                    "workflow_id": "wf_cli_ref_failed",
+                    "status": self.status,
+                    "workflow_dir": "artifacts/research/research_factory/workflows/wf_cli_ref_failed",
+                    "next_step": "inspect_reference_integrity_report",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ) + "\n"
+
+    monkeypatch.setattr(module, "run_research_governance_workflow", lambda *args, **kwargs: FakeResult())
+
+    code = module.main(base_args(tmp_path))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert payload["status"] == "reference_integrity_failed"
+    assert payload["dry_run_execution_allowed"] is False
 
 
 def test_cli_does_not_load_dotenv() -> None:

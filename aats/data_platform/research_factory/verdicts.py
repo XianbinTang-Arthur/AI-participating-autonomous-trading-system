@@ -166,11 +166,18 @@ def build_candidate_verdict_from_workflow(
         root,
         artifact_refs.get("operator_review_checklist"),
     )
+    experiment_id = workflow_summary.get("experiment_id")
     candidate = _load_optional_json_ref(root, artifact_refs.get("candidate_artifact"))
-    metrics = _load_optional_json_ref(root, artifact_refs.get("metrics_snapshot"))
+    metrics = _load_optional_json_ref(
+        root,
+        _artifact_ref_or_default(artifact_refs, "metrics_snapshot", experiment_id),
+    )
     observation_gate = _load_optional_json_ref(root, artifact_refs.get("observation_gate_result"))
     observation_result = _load_optional_json_ref(root, artifact_refs.get("observation_result"))
-    evidence_bundle = _load_optional_json_ref(root, artifact_refs.get("evidence_bundle"))
+    evidence_bundle = _load_optional_json_ref(
+        root,
+        _artifact_ref_or_default(artifact_refs, "evidence_bundle", experiment_id),
+    )
     preapply_package = _load_optional_json_ref(root, artifact_refs.get("preapply_evidence_package"))
     experiment_spec = _load_optional_json_ref(
         root,
@@ -269,21 +276,25 @@ def build_candidate_verdict_from_payloads(
         observation_failures=observation_failures,
     )
 
+    experiment_id = _first_text(
+        workflow_summary.get("experiment_id"),
+        candidate_artifact.get("experiment_id") if isinstance(candidate_artifact, Mapping) else None,
+        field_name="experiment_id",
+    )
+    candidate_id = _first_text(
+        workflow_summary.get("candidate_id"),
+        candidate_artifact.get("candidate_id") if isinstance(candidate_artifact, Mapping) else None,
+        f"cand_{experiment_id}",
+        field_name="candidate_id",
+    )
+
     return CandidateVerdict(
-        candidate_id=_first_text(
-            workflow_summary.get("candidate_id"),
-            candidate_artifact.get("candidate_id") if isinstance(candidate_artifact, Mapping) else None,
-            field_name="candidate_id",
-        ),
-        experiment_id=_first_text(
-            workflow_summary.get("experiment_id"),
-            candidate_artifact.get("experiment_id") if isinstance(candidate_artifact, Mapping) else None,
-            field_name="experiment_id",
-        ),
+        candidate_id=candidate_id,
+        experiment_id=experiment_id,
         workflow_id=_require_mapping_text(workflow_summary, "workflow_id"),
         symbol=_symbol_from_payloads(experiment_spec),
         timeframe=_timeframe_from_payloads(experiment_spec),
-        factor_expression=str(candidate_payload.get("factor_expression") or "n/a"),
+        factor_expression=_factor_expression_from_payloads(candidate_payload, experiment_spec),
         research_profile=_require_mapping_text(workflow_summary, "profile"),
         net_annualized_return=_metric_value(
             metrics_snapshot,
@@ -434,6 +445,24 @@ def _experiment_spec_ref(
     return None
 
 
+def _artifact_ref_or_default(
+    artifact_refs: Mapping[str, Any],
+    ref_name: str,
+    experiment_id: Any,
+) -> str | None:
+    if artifact_refs.get(ref_name):
+        return str(artifact_refs[ref_name])
+    if isinstance(experiment_id, str) and experiment_id.strip():
+        default_names = {
+            "metrics_snapshot": "metrics_snapshot.json",
+            "evidence_bundle": "evidence_bundle.json",
+        }
+        filename = default_names.get(ref_name)
+        if filename is not None:
+            return f"experiments/{experiment_id}/{filename}"
+    return None
+
+
 def _resolve_research_factory_root(
     research_factory_root: str | Path | None,
     *,
@@ -508,6 +537,24 @@ def _timeframe_from_payloads(experiment_spec: Mapping[str, Any] | None) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return "unknown"
+
+
+def _factor_expression_from_payloads(
+    candidate_payload: Mapping[str, Any],
+    experiment_spec: Mapping[str, Any] | None,
+) -> str:
+    value = candidate_payload.get("factor_expression")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    features = experiment_spec.get("features") if isinstance(experiment_spec, Mapping) else None
+    if isinstance(features, Sequence) and not isinstance(features, str | bytes | bytearray):
+        for feature in features:
+            if not isinstance(feature, Mapping):
+                continue
+            expression = feature.get("expression")
+            if isinstance(expression, str) and expression.strip():
+                return expression.strip()
+    return "n/a"
 
 
 def _bool_from_sources(*values: Any, default: bool) -> bool:
