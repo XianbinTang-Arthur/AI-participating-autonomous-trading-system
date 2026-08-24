@@ -469,8 +469,15 @@ class RecoveryPostureEvaluator:
     ) -> None:
         if latest_reconciliation is None:
             return
-        # Stage 5d fix: gateway/market/decision 进程的 recovery_state 是占位符
-        # multi_process_role_skip，不能覆盖 execution 写入的真实快照。
+        # Reconciliation state snapshots are execution-owned truth.  In the
+        # four-process topology, gateway/market/decision only hold eventually
+        # consistent kill-switch replicas.  A gateway read immediately after a
+        # remote resume can therefore still observe ``halted=True`` and persist
+        # ``manually_halted`` over the execution process's newer
+        # ``normal_operation`` snapshot.  Keep monolith compatibility while
+        # enforcing execution as the sole writer in sliced runtimes.
+        if getattr(self.runtime, "process_role", None) not in {None, "monolith", "execution"}:
+            return
         if finalized.recovery_state == "multi_process_role_skip":
             return
         latest_snapshot_getter = getattr(

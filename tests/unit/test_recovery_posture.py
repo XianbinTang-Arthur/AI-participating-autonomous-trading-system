@@ -765,5 +765,72 @@ class TestPersistentStatusBlockersMembership(unittest.TestCase):
         self.assertTrue(expected_core.issubset(blockers))
 
 
+class TestRecoveryStateSnapshotSingleWriter(unittest.TestCase):
+    @staticmethod
+    def _evaluator(*, process_role: str | None):
+        saved = []
+        repo = SimpleNamespace(
+            latest_state_snapshot_for_scope=lambda **_kwargs: None,
+            save_state_snapshot=saved.append,
+        )
+        evaluator = RecoveryPostureEvaluator.__new__(RecoveryPostureEvaluator)
+        evaluator.runtime = SimpleNamespace(
+            process_role=process_role,
+            reconciliation_repo=repo,
+        )
+        evaluator.state_scope = SimpleNamespace(product_type="derivatives", margin_mode="cross")
+        return evaluator, saved
+
+    @staticmethod
+    def _report() -> SimpleNamespace:
+        return SimpleNamespace(
+            reconciliation_id="recon_resume",
+            product_type="derivatives",
+            margin_mode="cross",
+            allowed_symbols=["BTC-USDT-SWAP"],
+            severity="CLEAN",
+            recovery_classification=None,
+            finding_summary={},
+            review_required=False,
+            only_reduce_required=False,
+            halt_required=False,
+            baseline_generation_id="baselinegen_resume",
+            exchange_ack_watermark_id="watermark_resume",
+        )
+
+    @staticmethod
+    def _status() -> RecoveryStatus:
+        return RecoveryStatus(
+            status="resume_completed",
+            recovery_state="normal_operation",
+            safe_to_trade=True,
+            resume_eligible=True,
+        )
+
+    def test_gateway_cannot_overwrite_execution_recovery_snapshot(self) -> None:
+        evaluator, saved = self._evaluator(process_role="gateway")
+
+        evaluator._persist_state_snapshot_if_changed(
+            finalized=self._status(),
+            latest_reconciliation=self._report(),
+        )
+
+        self.assertEqual(saved, [])
+
+    def test_execution_and_monolith_remain_snapshot_writers(self) -> None:
+        for process_role in ("execution", "monolith", None):
+            with self.subTest(process_role=process_role):
+                evaluator, saved = self._evaluator(process_role=process_role)
+
+                evaluator._persist_state_snapshot_if_changed(
+                    finalized=self._status(),
+                    latest_reconciliation=self._report(),
+                )
+
+                self.assertEqual(len(saved), 1)
+                self.assertEqual(saved[0].recovery_state, "normal_operation")
+                self.assertTrue(saved[0].safe_to_trade)
+
+
 if __name__ == "__main__":
     unittest.main()
