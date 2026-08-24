@@ -1,225 +1,91 @@
-# 参数治理 (Parameter Governance)
+# 参数治理（Parameter Governance）
 
-> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+> 最后核对：2026-08-22（代码基线 `be9179e`）。本页区分候选参数 registry 与 live active parameter 真源，避免旧文档把 frozen、JSON 副本和 runtime 生效混为一谈。
 
+## 1. 三层对象
 
-## 1. 概述
+| 层 | 对象 | 是否影响 runtime |
+| --- | --- | --- |
+| 研究证据 | replay、round、candidate、artifact、verdict | 否 |
+| 候选治理 | parameter set、recommendation、active decision、readiness | 否；只是可审批对象 |
+| 生产生效 | `governance.active_parameter_sets` + apply history/release | 是；下次 `build_runtime()` 从 DB 注入 |
 
-研究平台产生的参数结论分散在:
-- `parameter_recommendations.json` (Step 1 单实验推荐)
-- `parameter_candidates.json` (Step 2 跨参数扫描推荐)
-- Round 结论文档中的建议
+`frozen` 只表示候选参数版本被冻结，绝不等价于 live 已生效。判断当前值只能查 `GET /rdp/parameters/active`、数据库 active set、apply history 和 runtime provenance。
 
-Phase 5 将这些分散结论收口到统一的 **Parameter Registry**。
+## 2. Parameter set 生命周期
 
-生产边界：Parameter Registry 本身只是候选池；参数只有在 approved recommendation + pre-apply gate + apply history 完成后，才允许成为 live active parameter。
-
----
-
-## 2. Parameter Set 生命周期
-
-```
-draft -> candidate -> frozen
-                   \-> deprecated
+```text
+draft -> candidate -> frozen -> released/deprecated
 ```
 
-| 状态 | 含义 |
-|------|------|
-| `draft` | 初始导入，未经验证 |
-| `candidate` | 经过初步验证的候选参数 |
-| `frozen` | 已确认为当前有效参数，不再修改 |
-| `deprecated` | 已过期或被替代 |
+具体状态约束以 `governance.parameter_sets` 的迁移/代码 allowlist 为准。候选版本应包含：family、timeframe、values、source round/evidence、confidence、创建/冻结/废弃信息。
 
----
+旧的 `scripts/rdp_freeze_parameter_set.py` 已被硬禁用，当前没有受支持的手工 import/freeze/deprecate CLI。若 UI/API 尚未覆盖需要的 registry 维护动作，不得直接改 DB；应先实现受控入口、权限、审计和测试。
 
-## 3. Registry 文件结构
+## 3. Recommendation 生命周期
 
-路径: `artifacts/governance/current_parameter_registry.json`
+Recommendation 聚合 parameter set 与跨阶段证据，常见动作：
 
-```json
-{
-  "generated_at": "2026-04-04T10:00:00+00:00",
-  "parameter_sets": [
-    {
-      "parameter_set_id": "ps_20260403_143052_a1b2c3",
-      "family": "independent",
-      "symbol": "BTC-USDT-SWAP",
-      "timeframe": "15m",
-      "source_round_id": null,
-      "source_phase": "phase2_step2",
-      "dataset_version": "v1.0",
-      "values": {
-        "signal_edge_scale_bps": 12.0,
-        "min_confirm_ticks": 2,
-        "min_safe_net_edge_bps": 0.0,
-        "score_stability_threshold": 2.0
-      },
-      "confidence": "medium",
-      "status": "frozen",
-      "created_at": "2026-04-03T14:30:52+00:00",
-      "frozen_at": "2026-04-03T15:00:00+00:00",
-      "deprecated_at": null,
-      "notes": "从 parameter_candidates.json 导入"
-    }
-  ]
-}
-```
+- draft → approve；
+- draft → reject；
+- draft/approved → supersede；
+- approved → release/apply。
 
-### 3.1 Parameter Set 字段
+当前 Operator API：
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `parameter_set_id` | string | 唯一标识 `ps_YYYYMMDD_HHMMSS_hex6` |
-| `family` | string | 策略族: independent / directional |
-| `symbol` | string | 交易对 |
-| `timeframe` | string | 时间框架: 15m / 1h |
-| `source_round_id` | string? | 来源 round ID |
-| `source_phase` | string? | 来源 phase |
-| `dataset_version` | string | 数据版本 |
-| `values` | object | 参数键值对 |
-| `confidence` | string? | high / medium / low |
-| `status` | string | draft / candidate / frozen / deprecated |
-| `created_at` | string | 创建时间 |
-| `frozen_at` | string? | 冻结时间 |
-| `deprecated_at` | string? | 废弃时间 |
-| `notes` | string? | 备注 |
+- `POST /rdp/recommendations/{id}/approve`
+- `POST /rdp/recommendations/{id}/reject`
+- `POST /rdp/recommendations/{id}/supersede`
+- `POST /rdp/recommendations/{id}/approve-and-release`
 
----
+认证开启时，审计 actor 来自 session principal，不信任 request body 的 actor。
 
-## 4. 操作指南
+## 4. 存储语义
 
-### 4.1 查看当前参数
+必须区分两类实现：
 
-```bash
-# 查看全部
-python scripts/rdp_freeze_parameter_set.py --action show --verbose
+1. `parameter_registry.py`、recommendation/snapshot 等治理模块仍可能采用 DB-first + 文件审计副本/故障降级读取。
+2. `aats/bootstrap/active_parameters.py` 的主交易 runtime loader 是 DB-only：只读 `governance.active_parameter_sets`，不会从 `configs/active_parameter_sets/*.json` fallback。
 
-# 只看 frozen
-python scripts/rdp_freeze_parameter_set.py --action show --status frozen
+因此：
 
-# 按 family 筛选
-python scripts/rdp_freeze_parameter_set.py --action show --family independent
-```
+- 文件副本不能证明 live 正在使用某参数；
+- DB active set 不可用时，runtime 退化到 managed/profile 参数并记录 error；
+- 禁止用旧 `seed-db` 命令或人工复制 JSON 作为恢复操作；
+- 恢复后必须核对 DB、apply history、release、runtime provenance。
 
-### 4.2 从实验结果导入
+## 5. 生产发布约束
 
-```bash
-# 从 parameter_candidates.json 导入（自动解析 family_tf）
-python scripts/rdp_freeze_parameter_set.py --action import \
-    --source path/to/parameter_candidates.json
+前向变更至少要求：
 
-# 从 parameter_recommendations.json 导入（需指定 family/tf）
-python scripts/rdp_freeze_parameter_set.py --action import \
-    --source path/to/parameter_recommendations.json \
-    --family independent --timeframe 15m
+- approved recommendation；
+- Step2 integrity 和 pre-apply gate；
+- actor、release、notes、observation plan；
+- previous target 和 rollback plan；
+- 主交易 health/recovery/reconciliation 可接受；
+- 发布后 runtime provenance 验证。
 
-# 导入时指定初始状态为 candidate
-python scripts/rdp_freeze_parameter_set.py --action import \
-    --source path/to/parameter_candidates.json \
-    --initial-status candidate
-```
+直接 `/rdp/parameters/apply` 需要 `action=apply` 的短时 HMAC token；直接 rollback 需要 `action=rollback` token。组合 release/approve-and-release 当前仅要求 write access + integrity/gate，没有额外 token，属于现行安全策略差异。
 
-### 4.3 冻结参数
+自动 `release_cycle` 当前 disabled 且禁止入队。
 
-冻结意味着该参数集被确认为当前有效版本:
+## 6. 证据与可审计性
 
-```bash
-python scripts/rdp_freeze_parameter_set.py --action freeze \
-    --parameter-set-id ps_20260403_143052_a1b2c3 \
-    --notes "Phase 3 归因验证通过"
-```
+任何 parameter set/recommendation 至少能追溯：
 
-### 4.4 废弃参数
+- 输入数据集版本与窗口；
+- replay 配置、成本模型和结果；
+- live attribution 和 execution realism；
+- quality/readiness/gate；
+- reviewer/actor 和状态转换；
+- release/apply/rollback history；
+- observation 与最终结论。
 
-当参数被新版本替代时:
+缺失上述证据时只能继续观察或拒绝，不得通过“最近 frozen”推断其可上线。
 
-```bash
-python scripts/rdp_freeze_parameter_set.py --action deprecate \
-    --parameter-set-id ps_20260403_143052_a1b2c3 \
-    --notes "被 ps_20260404 替代"
-```
+## 7. 操作入口
 
----
-
-## 5. 如何确认当前有效参数
-
-1. 查看 registry 中 `status: "frozen"` 的 parameter set
-2. 按 `frozen_at` 时间降序，最近冻结的为当前有效版本
-3. 如果没有 frozen 的，查看 `status: "candidate"` 的
-4. 如果都没有，需要重新运行 Step 2 研究
-
-注意：`frozen` 不等于 live 已生效。live 当前生效参数以 `governance.active_parameter_sets` 和 `configs/active_parameter_sets/active_parameter_registry.json` 为准，并且必须能关联 apply history。
-
----
-
-## 6. 数据库存储（DB-first + 文件 fallback）
-
-自 2026-04-11 起，Parameter Registry 采用 **DB 双写** 策略。
-
-### 6.1 存储架构
-
-```
-┌─────────────────────────────────────┐     ┌──────────────────────────────────┐
-│  governance.parameter_sets (DB)     │     │  current_parameter_registry.json  │
-│  ── 主存储 ──                       │     │  ── 文件备份 ──                   │
-│  add/freeze/deprecate 同步写入      │     │  同时写入,作为 DB 不可用时 fallback │
-└─────────────────────────────────────┘     └──────────────────────────────────┘
-          ↑ 写入                                      ↑ 写入
-          │                                           │
-    parameter_registry.py (每次操作同时写 DB + 文件)
-          │
-          ↓ 读取（DB 优先 → 文件 fallback）
-```
-
-### 6.2 DB 表结构（governance.parameter_sets）
-
-| 列 | 类型 | 说明 |
-|-----|------|------|
-| `parameter_set_id` | VARCHAR(128) PK | 唯一标识 |
-| `family` | VARCHAR(64) | 策略族 |
-| `symbol` | VARCHAR(32) | 交易对 |
-| `timeframe` | VARCHAR(16) | 时间框架 |
-| `values` | JSONB | 参数键值对 |
-| `status` | VARCHAR(32) | draft/candidate/frozen/deprecated |
-| `confidence` | VARCHAR(32) | high/medium/low |
-| `source_round_id` | VARCHAR(128) | 来源 round |
-| `source_phase` | VARCHAR(64) | 来源 phase |
-| `created_at` | TIMESTAMP TZ | 创建时间 |
-| `frozen_at` | TIMESTAMP TZ | 冻结时间 |
-| `deprecated_at` | TIMESTAMP TZ | 废弃时间 |
-
-### 6.3 DB 开关
-
-通过环境变量 `AATS_ACTIVE_PARAMETER_DB_URL` 控制:
-- **已设置**: DB 双写 + DB 优先读
-- **未设置**: 纯文件模式（向后兼容）
-
-### 6.4 全量种子（seed-db）
-
-将现有 JSON 注册表一次性写入 DB（幂等，可重复执行）:
-
-```bash
-python scripts/apply_active_parameter_set.py --action seed-db
-```
-
----
-
-## 7. 参数传递链路
-
-```
-Step 2 研究
-  -> parameter_candidates.json
-    -> 导入 Registry (draft)  ── 同时写 DB + JSON 文件
-      -> 验证提升为 candidate
-        -> Phase 3/4 验证通过 -> frozen  ── 同时写 DB + JSON 文件
-          -> Phase 3/4 round 通过 --params-json 使用
-            -> approve recommendation -> apply
-              -> 写入 active_parameter_sets DB + JSON
-```
-
-Phase 3/4 round runner 通过 `--params-json` 注入参数:
-```bash
-python scripts/rdp_run_phase3_round.py \
-    --start 2026-03-31 --end 2026-04-02 \
-    --params-json path/to/parameter_candidates.json
-```
+- 查询：`GET /rdp/parameters/active`、`GET /rdp/recommendations/latest`、`GET /rdp/readiness`、`GET /rdp/releases/latest`、`GET /rdp/releases/history`。
+- 审批：recommendation write API。
+- 发布/回滚：[Parameter Apply 与 Rollback](parameter_apply_and_rollback.md)。
+- 完整生产流程：[Production Parameter Change Runbook](production_parameter_change_runbook.md)。

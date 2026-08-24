@@ -1,5 +1,7 @@
 # Stage 7 WSL2 真跑 Runbook（4 进程拓扑 docker compose 实战验证）
 
+> **历史验收记录 / 禁止按本文部署（2026-08-22 核对）**：本文记录 2026-04 Stage 7 的一次性实跑与后续追加证据，包含已经失效的手工 Compose、两 stream、旧迁移和单容器 restart 做法。当前唯一部署入口是 `scripts/deploy.sh`，当前架构/容量见根目录 `ARCHITECTURE.md` 与 `DEPLOYMENT.md`。
+
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
 

@@ -41,7 +41,8 @@ from aats.services.runtime_scope import (
 from aats.storage.hot_state_store import HotStateStore, make_key
 
 # Redis key TTL（秒）。避免已终结的 order（FILLED / CANCELED 等）永驻
-# Redis 造成内存泄漏。7 天与 NATS JetStream 流保留期对齐。
+# Redis 造成内存泄漏。7 天是独立的热状态恢复窗口；当前 JetStream hot
+# buffer 为 1 天，Postgres 仍是 source of truth。
 _REDIS_TTL_SECONDS: int = 7 * 24 * 3600  # 7 days
 
 _NS_ORDER_STATE = "order_state"

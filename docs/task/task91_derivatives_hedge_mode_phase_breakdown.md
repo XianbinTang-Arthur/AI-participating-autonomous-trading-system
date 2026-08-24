@@ -5,7 +5,7 @@
 
 ## 1. 文档目的
 
-本文是 [`Task 90`](/D:/文件/project/AIParticipatingAutonomousTradingSystem/docs/task90_derivatives_hedge_mode_rearchitecture.md) 的施工拆解版，用于把“合约 hedge mode 彻底改造”落成可执行的阶段计划。
+本文是 [`Task 90`](task90_derivatives_hedge_mode_rearchitecture.md) 的施工拆解版，用于把“合约 hedge mode 彻底改造”落成可执行的阶段计划。
 
 这份文档回答 6 个问题：
 

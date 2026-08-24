@@ -1,357 +1,143 @@
 # Production Parameter Change Runbook
 
-> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+> 最后核对：2026-08-22（代码基线 `be9179e`）。这是 production 变更门禁；API payload 以运行时 `/openapi.json` 为准，基础 apply/rollback 语义见 [Parameter Apply 与 Rollback](parameter_apply_and_rollback.md)。
 
+## 1. 流程
 
-> 本文档定义参数变更进入生产的完整受控流程。
-> 涵盖从 recommendation 到 gate、release、observation、rollback 的全链路。
-
----
-
-## 1. 流程总览
-
-```
-recommendation (approved)
-    ↓
-Pre-Apply Gate
-    ↓ pass / warn → 继续
-    ↓ block → 停止，修复后重试
-Parameter Release
-    ↓
-Apply Active Parameter Set
-    ↓
-Observation Window (默认 24h)
-    ↓
-Post-Apply Assessment
-    ↓
-    ├── keep → 结束观察
-    ├── review → 人工审查
-    └── rollback_recommended → 执行回滚
+```text
+research evidence
+  -> recommendation draft
+  -> Operator approve
+  -> Step2 integrity + pre-apply gate
+  -> release + active parameter DB write
+  -> runtime rebuild/load
+  -> observation
+  -> keep / review / rollback recommendation
+  -> rollback（如需）
 ```
 
----
+生产环境不允许自动 release。`release_cycle` 的 JSON schedule 为 disabled，任务队列也阻止它入队；所有前向变更必须是可归因的 Operator 动作。
 
-## 2. Pre-Apply Gate
+## 2. 变更前硬门
 
-### 2.1 何时运行
+- [ ] recommendation 已批准且未被 supersede。
+- [ ] evidence lineage、研究数据版本、replay、attribution、execution realism 完整。
+- [ ] Step2 integrity 无 blocking reason。
+- [ ] pre-apply gate 为 pass，或 warn 已由 Operator 明确接受；block 不得继续。
+- [ ] `/rdp/health` 无不可接受降级。
+- [ ] `/system/health` 无 critical blocker。
+- [ ] recovery 无 ambiguous/stuck submit，reconciliation 无 unresolved high/critical finding。
+- [ ] 当前 active parameter set、previous target、actor、release id、notes 可追踪。
+- [ ] observation window、成功/失败指标和回滚触发条件已定义。
+- [ ] 代码版本、profile、交易数据库、research/governance 数据库边界已记录。
 
-- recommendation 被 approved 后、apply 前
-- 每次 apply 必须通过 gate
-- 生产环境不允许跳过 gate
+## 3. Gate
 
-### 2.2 检查项
+使用 `POST /rdp/gates/run`。服务端检查 recommendation/parameter set、quality、evidence freshness/completeness、decision、round、alerts、live DB health 和 workflow freshness 等条件。
 
-| 检查 | 类别 | 级别 | 说明 |
-|------|------|------|------|
-| recommendation_status | approval | block | 必须为 approved |
-| parameter_set_exists | approval | block | target PS 必须在 registry 中 |
-| quality_monitor_health | governance | block/warn | unhealthy=block, degraded=warn |
-| evidence_freshness | freshness | block/warn | >7d=block, >3d=warn |
-| evidence_completeness | freshness | block/warn | <0.25=block, <0.5=warn |
-| decision_consistency | decision | block/warn | pause=block, require_review=warn |
-| latest_round_health | round | block/warn | failed=block, partial=warn |
-| current_alerts | operations | block/warn | critical=block, warning=warn |
-| live_db_health | production | block/warn | staging/prod 下 live DB 不健康直接 block |
-| workflow_freshness | operations | block/warn | 关键 workflow 缺失/过旧 |
+| 结果 | 行为 |
+| --- | --- |
+| `pass` | 可继续 |
+| `warn` | Operator 记录接受理由后才可继续 |
+| `block` | 停止，修复后重新运行 gate |
 
-### 2.3 Gate 输出
+生产流程不使用 `skip_gate=true`。即使请求模型保留该字段，也不代表它是受支持的生产操作。
 
-| 状态 | 含义 | 操作 |
-|------|------|------|
-| **pass** | 所有检查通过 | 继续 apply |
-| **warn** | 有警告但无阻断 | 可继续，需关注 |
-| **block** | 有阻断条件 | 不允许 apply |
+## 4. Release 与 Apply
 
-### 2.4 运行方式
+当前组合入口：
+
+- `POST /rdp/releases/create`：对已批准 recommendation 执行 gate + release + apply；
+- `POST /rdp/recommendations/{id}/approve-and-release`：approve + gate + release + apply。
+
+两者当前依赖 Operator write access 和 Step2 integrity gate，但没有额外的 HMAC apply token。直接 `POST /rdp/parameters/apply` 则要求 `action=apply` 的 `X-Rdp-Apply-Token`。这是当前代码真实存在的策略差异；不要在文档中声称三条路径策略相同。
+
+发布响应必须检查：
+
+- `ok`；
+- release id；
+- gate result；
+- apply result（success/failed/blocked_by_gate）；
+- recommendation 权威状态；
+- previous/target parameter set。
+
+HTTP 200 不等于参数必然已生效：组合端点会用 `ok=false` 表达 integrity blocked、gate blocked 或 apply failed。
+
+## 5. Runtime 生效验证
+
+active parameter 写入数据库后，主交易 runtime 需要重新构建/启动才会通过 `build_runtime()` 注入；不要只重启一个错误的 slice 并假设四个进程一致。
+
+标准发布/重建使用唯一部署入口：
 
 ```bash
-# 脚本
-python scripts/rdp_run_pre_apply_gate.py --recommendation-id rec_xxx
-
-# API
-POST /rdp/gates/run {"recommendation_id": "rec_xxx"}
+bash scripts/deploy.sh --profile derivatives-live --skip-commit
 ```
 
-### 2.5 Gate 结果存储
+验证：
 
-```
-artifacts/production_workflow/gates/<gate_run_id>/
-  pre_apply_gate_result.json
-  pre_apply_gate_report.md
-```
+1. 所有主交易进程和 rdp-daemon 健康；两个 derivatives-live collector 单独验证。
+2. Settings Provenance 显示预期 active parameter 字段和来源。
+3. `GET /rdp/parameters/active` 与数据库 target 一致。
+4. `GET /rdp/parameters/apply-history` 与 release actor/gate/history 一致。
+5. `/system/health`、recovery、reconciliation、account freshness 和 kill switch 正常。
 
----
+runtime loader 数据库失败时会退化到 profile 参数并记录 error，不读取 JSON fallback。此时停止变更并恢复数据库真源。
 
-## 3. Parameter Release
+## 6. Observation
 
-### 3.1 何时创建
+使用 `POST /rdp/observations/run` 或启用中的 `observation_cycle`。默认请求模型窗口为 24 小时；具体生产窗口必须在变更记录中明确，不依赖旧文档中的固定 72 小时说法。
 
-- gate pass 或 warn 后
-- 每次 apply 都应通过 release 流程
+至少观察：
 
-### 3.2 Release 记录字段
+- 策略决策数量、entry/exit/reversal/scale-in 分布；
+- net edge、fee drag、slippage、fill ratio；
+- realized/unrealized PnL、drawdown、margin/liquidation buffer；
+- order/fill/obligation/ledger/reconciliation 一致性；
+- blocker、kill switch、recovery 和 alert；
+- RDP quality、attribution 和 execution realism 是否退化。
 
-| 字段 | 说明 |
-|------|------|
-| release_id | 唯一标识 |
-| created_at | 创建时间 |
-| family / timeframe | 目标 combo |
-| recommendation_id | 关联 recommendation |
-| parameter_set_id | 要应用的参数集 |
-| previous_parameter_set_id | 上一个参数集 |
-| actor | 操作人 |
-| gate_result_ref | 关联 gate 结果 |
-| gate_status | gate 状态 |
-| apply_result | pending / success / failed / blocked_by_gate |
-| observation_status | pending / observing / completed / rollback_recommended |
-| observation_window_hours | 观察窗口时长 |
+| 观察结论 | 后续 |
+| --- | --- |
+| `completed` / keep | 完成记录，保留参数 |
+| review | 冻结进一步变更，人工审查 |
+| `rollback_recommended` | 评估 target 后走受保护回滚 |
 
-### 3.3 运行方式
+## 7. Rollback
 
-```bash
-# 完整流程: gate + release + apply
-python scripts/rdp_create_parameter_release.py \
-    --recommendation-id rec_xxx --actor operator_name
+1. 通过 `POST /rdp/rollback-recommendation/evaluate` 获取建议和 target。
+2. 当前 Operator session 调用 `POST /rdp/operator-tokens`，action 为 `rollback`。
+3. 携带 token 调用 `POST /rdp/parameters/rollback`。
+4. 核对 active set、apply history、release/observation 和主交易 runtime。
+5. 通过标准部署重建受影响 runtime，并重复 trading-ready 检查。
 
-# 生产不提供跳过 gate 的标准流程
-# 如需真正执行 prod apply，必须额外显式设置:
-#   export RDP_PRODUCTION_APPLY_ENABLED=true
+Rollback 是安全动作，代码不会因为 Step2 integrity 降级而阻断；但仍会拒绝非法 target、无 active set、无 previous target 或环境不允许的请求。
 
-# API
-POST /rdp/releases/create {
-    "recommendation_id": "rec_xxx",
-    "actor": "operator_name",
-    "observation_window_hours": 72
-}
-```
+旧的 `scripts/rdp_rollback_active_parameter_set.py` 已禁用并退出 2，不得使用。
 
-### 3.4 Release 历史
+## 8. 失败与恢复
 
-```
-artifacts/production_workflow/parameter_release_history.json
-```
+| 故障 | 操作 |
+| --- | --- |
+| recommendation CAS race/409 | 刷新权威状态，不盲目重发 |
+| integrity blocked | 修复 evidence/Step2，不创建前向变更 |
+| gate blocked | 保留 gate/release 证据，修复后新一轮评估 |
+| apply failed | 核对 active DB/history/release，确认是否发生部分写入 |
+| runtime provenance 不匹配 | 保持/触发 halt，恢复 DB 真源并完整重建 |
+| observation 严重退化 | 停止新决策，评估并执行 rollback |
+| rollback 无合法 target | 不从 JSON 猜测；人工审查合法 parameter set |
 
-查看: `GET /rdp/releases/latest` 或 `GET /rdp/releases/history`
+任何 ambiguous 状态都先保护资金、保留证据，不能用重复 apply 掩盖。
 
----
+## 9. 审计记录
 
-## 4. Observation Window
+每次生产变更至少保留：
 
-### 4.0 生产硬约束
+- commit/profile/actor/time；
+- recommendation、parameter set、gate run、release id；
+- from/to 参数差异；
+- apply/rollback history；
+- runtime provenance；
+- observation 数据与结论；
+- 异常、处置和回滚结果。
 
-active parameter apply 会改变 live 策略行为，必须按生产变更处理：
-
-- 必须有 approved recommendation。
-- 必须有 pre-apply gate run id。
-- 必须有 release id、actor、notes。
-- 必须写入 DB + 文件 apply history。
-- 必须具备 rollback 目标。
-- 禁止在生产环境跳过 gate。
-- `prod` 观察窗口不得短于 72h，`staging` 不得短于 24h。
-
-### 4.1 何时运行
-
-- apply 成功后自动进入 observing 状态
-- 在观察窗口内定期运行观察检查
-
-### 4.2 建议观察时间表
-
-| 时间点 | 操作 |
-|--------|------|
-| Apply 后 1h | 首次观察检查 |
-| Apply 后 4h | 第二次观察检查 |
-| Apply 后 24h | 正式评估（默认窗口结束） |
-| Apply 后 48h | 延长观察（如需要） |
-
-### 4.3 观察指标
-
-| 类别 | 指标 | 触发条件 |
-|------|------|----------|
-| 治理层 | quality_monitor health | unhealthy → regression |
-| 决策层 | family/tf decision status | pause → regression |
-| 归因层 | attribution failure modes | 数据异常 → warn |
-| 执行层 | execution realism metrics | 数据异常 → warn |
-
-### 4.4 观察状态
-
-| 状态 | 含义 |
-|------|------|
-| observing | 窗口内，正在观察 |
-| completed | 窗口结束，无异常 |
-| rollback_recommended | 发现异常，建议回滚 |
-
-### 4.5 运行方式
-
-```bash
-# 脚本
-python scripts/rdp_run_post_apply_observation.py --release-id rel_xxx
-
-# API
-POST /rdp/observations/run {"release_id": "rel_xxx"}
-```
-
-### 4.6 观察结果存储
-
-```
-artifacts/production_workflow/observations/<release_id>/
-  observation_summary.json
-  observation_report.md
-```
-
----
-
-## 5. Rollback Recommendation
-
-### 5.1 触发条件
-
-| 条件 | 严重度 | 说明 |
-|------|--------|------|
-| Attribution 总失败率 > 80% | high | strategy + risk + execution 失败率过高 |
-| Execution fill_ratio < 0.5 | high/medium | 成交率过低 |
-| Execution cost > 10bps | high/medium | 执行成本过高 |
-| Execution edge_ratio < 0.3 | high/medium | 正向 edge 过低 |
-| QM unhealthy / critical > 0 | high | 治理层严重退化 |
-| QM degraded | medium | 治理层退化 |
-
-### 5.2 评估结果
-
-| 字段 | 说明 |
-|------|------|
-| rollback_recommended | 是否建议回滚 |
-| severity | none / medium / high |
-| reasons | 具体原因列表 |
-| suggested_target_parameter_set_id | 建议回滚到哪个版本 |
-
-### 5.3 运行方式
-
-```bash
-# 脚本
-python scripts/rdp_evaluate_rollback_recommendation.py --release-id rel_xxx
-
-# API
-POST /rdp/rollback-recommendation/evaluate {"release_id": "rel_xxx"}
-```
-
-### 5.4 结果存储
-
-```
-artifacts/production_workflow/rollback_recommendations/<release_id>/
-  rollback_recommendation.json
-  rollback_recommendation_report.md
-```
-
----
-
-## 6. 完整操作流程
-
-### Step 1: 审批 Recommendation
-
-```bash
-python scripts/rdp_approve_recommendation.py \
-    --recommendation-id rec_xxx --action approve --actor operator
-```
-
-### Step 2: 创建 Release（含 Gate + Apply）
-
-```bash
-python scripts/rdp_create_parameter_release.py \
-    --recommendation-id rec_xxx --actor operator
-```
-
-### Step 3: 重启系统
-
-重启 API gateway 使新参数生效。
-
-### Step 4: 观察检查（1h / 4h / 24h）
-
-```bash
-python scripts/rdp_run_post_apply_observation.py --release-id rel_xxx
-```
-
-### Step 5: Rollback 评估
-
-```bash
-python scripts/rdp_evaluate_rollback_recommendation.py --release-id rel_xxx
-```
-
-### Step 6: 如需回滚
-
-```bash
-python scripts/rdp_rollback_active_parameter_set.py \
-    --family independent --timeframe 15m --actor operator
-```
-
----
-
-## 7. 紧急操作
-
-### 7.1 禁止紧急跳过 Gate
-
-生产环境没有“紧急跳过 Gate”的标准路径。紧急场景只能做两类操作：
-
-1. 不 apply 新参数，先保持当前 active parameter。
-2. 对已经生效且表现异常的参数执行 rollback。
-
-如果本地开发/测试需要演练 gate 异常，应在隔离环境执行，不得使用 `spot_live` / `derivatives_live`。
-
-### 7.2 紧急回滚
-
-```bash
-python scripts/rdp_rollback_active_parameter_set.py \
-    --family independent --timeframe 15m --actor operator \
-    --notes "emergency rollback"
-```
-
----
-
-## 8. API 端点汇总
-
-### 只读（require_read_access）
-
-| 端点 | 说明 |
-|------|------|
-| `GET /rdp/releases/latest` | 最近 releases |
-| `GET /rdp/releases/history` | 完整 release 历史 |
-| `POST /rdp/gates/run` | 运行 gate 检查 |
-| `POST /rdp/observations/run` | 运行观察检查 |
-| `POST /rdp/rollback-recommendation/evaluate` | 评估回滚建议 |
-
-### 写入（require_write_access）
-
-| 端点 | 说明 |
-|------|------|
-| `POST /rdp/releases/create` | 创建 release（含 gate + apply） |
-
----
-
-## 9. 存储结构
-
-### 9.1 文件存储
-
-```
-artifacts/production_workflow/
-  parameter_release_history.json          # release 历史
-  gates/<gate_run_id>/                    # gate 结果
-    pre_apply_gate_result.json
-    pre_apply_gate_report.md
-  observations/<release_id>/              # 观察结果
-    observation_summary.json
-    observation_report.md
-  rollback_recommendations/<release_id>/  # 回滚建议
-    rollback_recommendation.json
-    rollback_recommendation_report.md
-```
-
-### 9.2 DB 存储（governance schema）
-
-> 设置 `AATS_ACTIVE_PARAMETER_DB_URL` 后，apply/rollback 操作同时写入 DB。
-
-| DB 表 | 对应文件 | 说明 |
-|------|---------|------|
-| `governance.active_parameter_sets` | `configs/active_parameter_sets/*.json` | 当前生效参数 |
-| `governance.parameter_apply_history` | `parameter_apply_history.json` | 操作审计日志 |
-| `governance.recommendations` | `recommendation_registry.json` | 建议审批状态 |
-| `governance.active_decisions` | `active_decision_registry.json` | combo 决策状态 |
-| `governance.parameter_sets` | `current_parameter_registry.json` | 参数集候选池 |
-
-DB 与文件始终双写同步，DB 不可用时静默回退到纯文件模式。
+数据库是 runtime active parameter 的唯一真源。artifact/JSON 是证据或审计副本，不保证能在 DB 故障时驱动 runtime。

@@ -1,5 +1,7 @@
 # P1-D Phase 1A 48h Stability Runbook
 
+> **历史观察窗口（2026-08-22 核对）**：本文只记录 2026-04 P1-D Phase 1A 首次上线后的 48 小时验收，时间、阈值和重启命令不代表当前操作规范。当前健康/恢复流程见 `platform_runbook.md`、`operator_checklist.md` 和根目录 `DEPLOYMENT.md`。
+
 > **目的**: 首次 deploy 之后的 48 小时观察窗口,机械化验证 §11 的 10 个 Phase 1A 验收 Gate,识别故障并有 playbook 应对。
 >
 > **适用**: P1-D Phase 1A 首次 deploy 后 T+0 ~ T+48h。之后 Phase 1A 宣告 "完成",进入日常运维 (由 operator_checklist.md 接棒)。

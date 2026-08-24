@@ -76,9 +76,9 @@ from aats.storage.hot_state_store import HotStateStore, make_key
 # NS_ACCOUNT / NS_SYSTEM 同一级。留在本文件而不外提，因为只有 obligation cache
 # 自己用。
 # Redis key TTL（秒）。避免已终结的 obligation（FILLED / CANCELED 等）永驻
-# Redis 造成内存泄漏。7 天与 NATS JetStream 流保留期对齐。bootstrap 时
-# 如果 per-coid key 已过期，get_many 返回空，不影响正确性（只是少了历史
-# 数据，系统从 PG 重建）。
+# Redis 造成内存泄漏。7 天是独立的热状态恢复窗口，不等同于当前 1 天的
+# JetStream hot-buffer retention。bootstrap 时如果 per-coid key 已过期，
+# get_many 返回空，不影响正确性（只是少了历史数据，系统从 PG 重建）。
 _REDIS_TTL_SECONDS: int = 7 * 24 * 3600  # 7 days
 
 _NS_OBLIGATION = "obligation"

@@ -3863,9 +3863,10 @@ def _construct_event_bus(
     # streams 字段通过 build_nats_streams_from_env(DEFAULT_STREAM_SPECS) 构造，
     # 支持通过 AATS_NATS_MARKET_MAX_* / AATS_NATS_EVENTS_MAX_* 环境变量覆盖
     # 单条 stream 的容量参数（max_bytes / max_msgs / max_msg_size /
-    # max_age_seconds）。默认两条 stream：
-    #   - AATS_EVENTS_MARKET  : 1 天 / 2 GB  承载 MARKET_SNAPSHOTS / FEATURE_SNAPSHOTS
-    #   - AATS_EVENTS         : 7 天 / 4 GB  承载其他 critical 事件
+    # max_age_seconds）。默认三条 stream，均以 1 天为时间上限/兜底：
+    #   - AATS_EVENTS_MARKET  : 2 GiB，承载 MARKET_SNAPSHOTS / FEATURE_SNAPSHOTS
+    #   - AATS_EVENTS         : 4 GiB，承载其他 critical 事件
+    #   - AATS_EVENTS_COMMANDS: 512 MiB，承载命令类事件
     # legacy 字段 stream_name / stream_max_age_seconds 不再被 runtime 路径
     # 读取，只有 ensure_stream(topics=...) legacy shim 会读（给单元测试用）。
     # 2026-04-20 code review Issue 2+3 fix:

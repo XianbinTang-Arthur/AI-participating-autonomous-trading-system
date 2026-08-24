@@ -1,5 +1,7 @@
 # 04 · 状态机
 
+> **历史快照**：2026-04-21 版本；当前状态枚举、转换和恢复语义以 schema、service 和测试为准。
+
 > **生成于 HEAD=待更新** · 2026-04-21
 > **范围**：OrderState / Reconciliation / GuardSignal / KillSwitch / RecoveryPosture
 

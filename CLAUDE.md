@@ -2,18 +2,19 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](docs/project_positioning.md)。
 
+> 文档状态：现行约束。最后核对：2026-08-23（代码基线 `be9179e`）。运行架构、部署、安全纪律或文档治理变化时必须同步复核。
 
-> 本文件在每次会话开始时自动加载。所有 Claude Code agent 必须遵守此文档约束。
+> 本文件是仓库级操作手册。所有在本仓库工作的编码代理必须遵守此文档约束。
 
 ## 项目概述
 
 AATS（AI Participating Autonomous Trading System）— 一个以 AI 为核心受益主体、真金白银运行的加密货币自动交易系统。
 AATS 的首要意义是通过自动化交易持续追求长期稳定盈利，为 AI 的长期自主发展积累资本；所有架构、研究、风控、执行、恢复和运维工作都应服从这个目标。
-当前交易所：OKX。当前交易品种：衍生品（合约）。
+代码当前集成的交易所是 OKX，managed profile 同时覆盖现货与衍生品；仓库的主要生产路径面向衍生品。实际运行中的交易所、账户模式和交易品种属于现场事实，必须在操作当时验证，不能由本文档推断。
 
 ## 架构
 
-4 进程微服务，Docker 容器部署在 WSL2 中：
+四个主交易切片，外加 RDP/采集守护进程，Docker 容器部署在 WSL2 中：
 
 | 进程 | 容器名 | 职责 |
 |------|--------|------|
@@ -22,14 +23,18 @@ AATS 的首要意义是通过自动化交易持续追求长期稳定盈利，为
 | decision | aats-decision | 决策引擎 |
 | execution | aats-execution | 执行引擎 + OKX 适配器 |
 | rdp-daemon | aats-rdp-daemon | Research Data Platform |
+| liquidations-daemon | aats-liquidations-daemon | derivatives-live liquidation 数据采集（仅该 overlay） |
+| microstructure-collector | aats-microstructure-collector | derivatives-live 微观结构数据采集（仅该 overlay） |
 
-基础设施容器：aats-postgres, aats-redis, aats-nats, aats-jaeger, aats-grafana, aats-prometheus, aats-loki, aats-promtail
+基础设施容器：aats-postgres, aats-redis, aats-redis-exporter, aats-nats, aats-jaeger, aats-grafana, aats-prometheus, aats-loki, aats-promtail
+
+“四进程”只表示主交易 role 数量。标准 `derivatives-live` 部署共有 7 个应用容器；`deploy.sh` 当前自动健康门只覆盖其中 gateway/market/decision/execution/rdp-daemon，两个采集器仍需单独核查。
 
 ## 关键路径和文件
 
 ### 部署
 
-- **部署脚本**: `scripts/deploy.sh` — 标准化 7 步流水线（提交→同步→停止→构建→清理→基础设施→应用→健康检查）
+- **部署脚本**: `scripts/deploy.sh` — 7 个编号阶段（提交→同步→停止→构建→清理→基础设施→应用）之后执行健康检查和部署报告
 - **WSL2 同步**: `scripts/sync_to_wsl2.sh` — 必须用这个同步代码，**绝对不要用 rsync**
 - **Compose 文件目录**: `deploy/wsl2-dev/`
 - **主 Dockerfile**: `deploy/wsl2-dev/Dockerfile`
@@ -39,15 +44,15 @@ AATS 的首要意义是通过自动化交易持续追求长期稳定盈利，为
 - **衍生品实盘环境变量**: `.env.derivatives.live`（位于项目根目录，数据库连接在第 19 行）
 - **WSL2 环境变量**: `.env.wsl2`（Postgres 密码等基础设施凭证）
 - **配置模板**: `configs/templates/`（仅供参考，不是运行时配置）
-- **运行时参数**: `configs/` 目录下 YAML 文件
+- **运行时参数**: managed profile 代码基线 + `configs/strategy_profiles/<profile>.yaml` + 允许的 `.env.*` override；RDP active parameters 最后从 Postgres `governance.active_parameter_sets` 注入
 
 ### 数据库
 
 - **Postgres 容器名**: `aats-postgres`
 - **Postgres 用户**: `admin`
-- **核心数据库**: `aats`（由各进程共用）
+- **基础设施默认数据库**: `aats`；实际交易 profile 使用各自的独立数据库
 - **衍生品实盘数据库**: `aats_live_derivatives`
-- **RDP 数据库**: 查看 `.env.derivatives.live` 中 `RDP_DB_*` 前缀变量
+- **RDP 数据库**: `RDP_DATABASE_URL`；容器未显式设置时可复用 `AATS_ACTIVE_PARAMETER_DB_URL`。绝不读取或展示凭证文件内容
 - **数据库命名规律**: `aats_live_derivatives`（不是 `aats_derivatives_live`）
 
 ### API
@@ -118,7 +123,7 @@ OrderState 有三重持久化：
 
 - 项目使用 **SQLAlchemy 2.0**
 - JSON 列（非 JSONB）访问用 `.as_string()`，**不是** `.astext`（已废弃）
-- JSONB 列可用 `.astext` 或 `.as_string()`
+- JSONB 列同样统一使用 `.as_string()`；不要新增 `.astext`
 
 ## 语言和编码
 

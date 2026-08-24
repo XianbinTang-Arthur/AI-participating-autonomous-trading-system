@@ -3,8 +3,8 @@
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](docs/project_positioning.md)。
 
 
-最后更新：2026-04-13
-适用范围：主交易系统、四进程运行时、订单/成交/资金/账本/对账链路、RDP 参数回灌边界
+最后核对：2026-08-23（代码基线 `be9179e`）
+适用范围：主交易系统、四个主交易切片、支持守护进程、订单/成交/资金/账本/对账链路、RDP 参数回灌边界
 
 本文档描述当前代码实际实现的系统结构和长期维护边界。
 
@@ -49,14 +49,14 @@ AATS 的目标不是只完成“能下单”的策略脚本，而是把以下能
 └──────────────────────────────────────────────────────┘
 ```
 
-| Role | 入口 | Slice | 启动的关键后台任务 |
+| 主交易 Role | 入口 | Slice | 启动的关键后台任务 |
 | --- | --- | --- | --- |
 | `gateway` | `apps/api_gateway/main.py` | API、Operator、只读查询、控制面代理 | FastAPI lifespan、必要的控制面 client |
 | `market` | `apps/market_gateway/main.py` | OKX public market、feature producer | market WebSocket、REST fallback、stream cache flush |
 | `decision` | `apps/decision_engine/main.py` | decision trigger、strategy、policy/risk | feature consumer、decision loop |
 | `execution` | `apps/execution_engine/main.py` | account、execution、portfolio、ledger、reconciliation | OKX private/account WS、account refresh、execution sync、outbox flush、command processor、reconciliation |
 
-单进程 monolith 仍用于开发和兜底，但多进程是 live 推荐拓扑。
+四个交易 role 之外还有支持进程：所有标准 profile 都包含 `aats-rdp-daemon`；`derivatives-live` overlay 还会启动 `aats-liquidations-daemon` 和 `aats-microstructure-collector`。因此“四进程”只表示主交易切片数，不表示完整部署只有四个应用容器。单进程 monolith 仍用于兼容/兜底；标准 live 路径是四个主交易切片加相应守护进程。
 
 ## 3. Runtime 构建
 
@@ -64,8 +64,8 @@ AATS 的目标不是只完成“能下单”的策略脚本，而是把以下能
 
 主要步骤：
 
-1. 加载 profile `.env.*` 和 settings。
-2. 合并 managed profile、strategy profile YAML、active parameters、环境变量。
+1. `start_api.py` 或容器入口加载选定 profile 的 `.env.*`。
+2. `load_settings()` 合并代码默认值、managed profile 基线、`configs/strategy_profiles/<profile>.yaml` 和允许覆盖的环境变量；managed profile 派生的身份字段即使出现在环境文件中也会被忽略并记录日志。
 3. 构建 storage backends：
    - memory：本地开发。
    - postgres：live / 多进程。
@@ -73,10 +73,10 @@ AATS 的目标不是只完成“能下单”的策略脚本，而是把以下能
    - `InMemoryEventBus`：单进程。
    - `HybridEventBus` / `NatsEventBus`：跨进程。
 5. 构建 shared slice：settings、bus、storage、hot state、kill switch、runtime mode。
-6. 按 role 构建 market / decision / execution / operator slice。
-7. 执行 live startup guards。
-8. 注册 event subscriptions。
-9. 启动后台任务。
+6. `runtime_profile_resolution()` 保持 `env_only`，不再从旧的 profile 管理控制面改写 settings。
+7. 从 Postgres `governance.active_parameter_sets` 加载 active parameters，并覆盖对应策略字段；数据库不可用时 fail-soft 为空集，退化到 profile 参数，不读取 JSON fallback。
+8. 按 role 构建 market / decision / execution / operator slice。
+9. 执行 live startup guards、注册 event subscriptions 并启动后台任务。
 
 live exchange runtime hardening 当前会拒绝以下配置：
 
@@ -104,6 +104,16 @@ live exchange runtime hardening 当前会拒绝以下配置：
 | `reconciliation.reports` | reconciliation service | operator/blocker | 对账报告 |
 
 NATS redelivery 意味着所有 critical consumers 必须幂等。当前 fill/portfolio consumer 仍需加强串行化和 DB-first 幂等。
+
+当前 JetStream 是三条 stream，而不是旧文档中的两条：
+
+| Stream | Retention | 默认上限 | 用途 |
+| --- | --- | --- | --- |
+| `AATS_EVENTS_MARKET` | limits，1 天 | 2 GiB | 高频 market/feature snapshots |
+| `AATS_EVENTS` | interest，1 天兜底 | 4 GiB | 其余可由热缓存/数据库恢复的跨进程事件 |
+| `AATS_EVENTS_COMMANDS` | limits，1 天 | 512 MiB | 7 类不可丢的交易/分配命令 |
+
+`audit.records` 不进入 JetStream，而是直接持久化到 Postgres `event_store`。三条 stream 的声明上限合计 6.5 GiB，NATS server 文件存储上限为 8 GiB。
 
 ## 5. 订单生命周期
 
@@ -255,7 +265,7 @@ Recovery 输入：
 
 - session cookie：HMAC-SHA256 签名、过期时间、session version。
 - API key：读 key / 写 key，live 写权限受限制。
-- Operator role：read / write / admin。
+- Operator role：viewer / operator / admin；具体读写权限由认证依赖按端点执行。
 
 live hardening：
 
@@ -276,15 +286,16 @@ historical data
   -> attribution / execution realism
   -> governance / recommendation
   -> pre-apply gate
-  -> active parameter set
+  -> active parameter set（Postgres）
   -> build_runtime 加载参数
 ```
 
 关键边界：
 
 - 主交易行情不读取 RDP Bronze/Silver/Gold。
-- RDP 参数只有 apply 后才影响 runtime。
-- active parameter DB 优先，JSON 文件 fallback。
+- RDP 参数只有通过受保护的 apply/release 路径写入数据库后才影响 runtime。
+- `governance.active_parameter_sets` 是 runtime active parameter 的唯一真源；`configs/active_parameter_sets/` 只保留兼容/审计用途，runtime 不做 JSON fallback。
+- `release_cycle` 与 `decision_cycle` 的调度配置当前禁用，其中 `release_cycle` 还被任务队列显式冻结；不得把历史文档中的自动发布描述当成当前行为。
 
 生产参数变更必须能追踪 recommendation、gate、release、actor、apply history 和 rollback target。
 
@@ -320,7 +331,8 @@ historical data
 | 主题 | 文档 |
 | --- | --- |
 | 部署与运行 | `DEPLOYMENT.md` |
-| 配置归属 | `configs/README.md`、`docs/configuration/managed-config-reference.md` |
-| RDP 模块 | `aats/data_platform/README.md`、`docs/rdp/module_reference.md` |
-| Operator 运维 | `docs/operations/operator_checklist.md` |
-| WSL2 基础设施 | `deploy/wsl2-dev/README.md`、`deploy/wsl2-dev/RUNBOOK.md` |
+| 配置归属 | `configs/README.md`、`docs/configuration/README.md` |
+| RDP 模块 | `aats/data_platform/README.md`、`docs/rdp/README.md` |
+| Operator 运维 | `docs/operations/README.md`、`docs/operations/operator_checklist.md` |
+| 测试与上线前验证 | `docs/testing/README.md` |
+| WSL2 基础设施 | `deploy/wsl2-dev/README.md`；`deploy/wsl2-dev/RUNBOOK.md` 仅为历史实跑记录 |

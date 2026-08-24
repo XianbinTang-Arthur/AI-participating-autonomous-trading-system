@@ -2,6 +2,8 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
+> 最后核对：2026-08-22。Artifact 是证据/审计产物，不等于 runtime 配置真源；尤其 active parameter JSON 不再被主交易 loader fallback 读取。
+
 
 ## 1. 目录结构
 
@@ -66,12 +68,11 @@ artifacts/
     parameter_apply_history.json          # → DB: governance.parameter_apply_history
 
 configs/active_parameter_sets/
-    active_parameter_registry.json        # → DB: governance.active_parameter_sets
-    <family>_<timeframe>.json             # per-combo 文件备份
+    active_parameter_registry.json        # 历史兼容/审计副本；runtime 不读取
+    <family>_<timeframe>.json             # 历史 per-combo 文件副本
 ```
 
-> 标注 `→ DB:` 的文件同时有 governance schema DB 表作为主存储。
-> 设置 `AATS_ACTIVE_PARAMETER_DB_URL` 后启用 DB 双写，读取 DB 优先。
+> 标注 `→ DB:` 的治理 registry 通常同时有 governance schema 表；具体读写/降级语义以对应模块为准。runtime active parameters 是例外：`governance.active_parameter_sets` 为唯一真源，不从上述 JSON fallback。
 
 ---
 

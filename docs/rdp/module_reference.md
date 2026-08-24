@@ -1,145 +1,149 @@
 # RDP 代码模块参考
 
-> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+> 最后核对：2026-08-22（代码基线 `be9179e`）。本页按当前目录和运行入口组织，不再沿用早期“少量 Phase 文件清单”。RDP 总览见 [`aats/data_platform/README.md`](../../aats/data_platform/README.md)。
 
+## 1. 根模块
 
-> 本文档从 README 抽出，汇总所有 RDP 代码模块的职责清单。
-> 概览请参阅 [README § 21](../../README.md)。
+| 文件 | 当前职责 |
+| --- | --- |
+| `config.py` | `ResearchPlatformSettings`；读取 `RDP_DATABASE_URL`、live 只读库、采集和 artifact 配置；容器中可复用 `AATS_ACTIVE_PARAMETER_DB_URL` |
+| `db.py` | Engine/Session、迁移入口和数据库生命周期 |
+| `rdp_models.py` | `RdpBase` 的 78 张 ORM 表，覆盖 staging/bronze/silver/gold/meta/research/governance |
+| `models.py` | 采集、replay 等轻量领域数据结构和表名解析 |
+| `live_query_adapter.py` | 主交易数据库只读查询适配层 |
+| `orderbook_diff_payload_contract.py` | orderbook diff payload 契约 |
 
-## Phase 1 数据仓库（`aats/data_platform/`）
+## 2. 目录总览
 
-| 文件 | 职责 |
-|------|------|
-| `config.py` | Pydantic 配置，从 `.env.research` 加载 `RDP_` 前缀环境变量 |
-| `db.py` | 连接池管理 (pool_size=5, max_overflow=10) + migration runner |
-| `models.py` | CandleRow / FundingRow / ReplayBarRow 数据类 + 表名解析器 |
-| `collectors/backfill/file_discovery.py` | ZIP 文件扫描、SHA256 去重、meta 注册、目录 timeframe 推断 |
-| `collectors/backfill/file_parser.py` | OKX CSV/ZIP 解析、header 标准化 (BOM/引号/空格容错) |
-| `collectors/backfill/candles_backfill_collector.py` | candle 历史回填编排 + timeframe 路由决策 |
-| `collectors/backfill/funding_backfill_collector.py` | funding 历史回填编排 |
-| `collectors/rolling/candles_api_collector.py` | OKX REST API candle 增量采集 + 去重 + checkpoint；入口 lowercase 归一化 + `_OKX_BAR` 映射确保 API 发送 OKX-native 格式 |
-| `collectors/rolling/funding_api_collector.py` | OKX REST API funding 增量采集 + 去重 + checkpoint |
-| `normalize/time_normalizer.py` | ms epoch -> UTC datetime 转换 |
-| `validate/candle_quality_checker.py` | candle 质量检查（重复/缺失/乱序/OHLC/volume） |
-| `validate/funding_quality_checker.py` | funding 质量检查（重复/乱序/null rate） |
-| `validate/report_writer.py` | 质量报告写入 `meta.quality_reports` |
-| `merge/bronze_merger.py` | staging -> bronze upsert |
-| `merge/silver_merger.py` | bronze -> silver upsert |
-| `merge/merge_pipeline.py` | 端到端编排：validate -> bronze -> silver + 质量门控 |
-| `gold/funding_aligner.py` | as-of join：funding rate 对齐到 candle bar |
-| `gold/replay_bar_builder.py` | Gold replay bar 构建 + upsert |
-| `jobs/checkpoint_manager.py` | checkpoint 水位线管理 (get/upsert/advance) |
-| `jobs/run_registry.py` | ingest_run / run_item 生命周期管理 |
-| `jobs/gap_repair.py` | Silver 层 gap 检测 + repair run 创建 |
+当前 `aats/data_platform/` 有 185 个 Python 文件。目录职责如下；数量用于发现明显漏扫，不是公共 API 保证。
 
-## Phase 2 参数研究（`aats/data_platform/replay/`）
+| 目录 | Python 文件数 | 职责 |
+| --- | ---: | --- |
+| `collectors/` | 12 | 历史 ZIP、OKX REST rolling、funding/candles/history 采集 |
+| `normalize/` | 3 | 时间与输入标准化 |
+| `validate/` | 4 | Candle/funding 质量检查和报告 |
+| `merge/` | 5 | staging→bronze→silver、microstructure Silver 合并 |
+| `gold/` | 3 | funding 对齐、replay bar 构建 |
+| `jobs/` | 4 | checkpoint、run registry、gap repair |
+| `replay/` | 26 | replay core、strategy adapters、diagnostics、scan、reports |
+| `attribution/` | 6 | live/replay 对齐、瀑布归因、聚合、报告 |
+| `execution_realism/` | 7 | fill feasibility、slippage、cost、market alignment |
+| `decision_system/` | 8 | evidence、candidate、decision、readiness、recommendation registry |
+| `governance/` | 27 | 参数/推荐/active set、任务队列、调度状态、snapshot、tuning 与 apply saga |
+| `production_workflow/` | 9 | gate、release、observation、rollback policy |
+| `operations/` | 11 | dispatcher、scheduler、failure/retry、reliability、daemon health、tuning review |
+| `metrics/` | 9 | 指标、baseline、release effectiveness、periodic review、backlog |
+| `live_facts/` | 4 | live 事实只读访问和模型 |
+| `research/` | 3 | profile research job 与结果 |
+| `research_factory/` | 42 | 证据契约、实验、verdict、治理 review、dry-run/manual apply design |
+| `migrations/` | 3 | RDP schema 版本化迁移 |
+| `gates/` | 2 | gate 相关共享能力 |
+| `runtime/` | 2 | RDP runtime 辅助能力 |
 
-| 文件 | 职责 |
-|------|------|
-| `core/replay_context.py` | 数据模型：ReplayBar, ReplayCostConfig, ReplayParameterOverrides, ReplayDecision, ReplayState（含统一 Edge Contract 定义） |
-| `core/replay_runner.py` | 逐 bar 重放引擎（读取 Gold bars -> 调用 adapter -> 输出决策列表） |
-| `core/replay_result_writer.py` | 产物写入器（CSV / JSON） |
-| `adapters/base_adapter.py` | 策略适配器抽象基类（统一 evaluate_bar 接口） |
-| `adapters/independent_adapter.py` | Independent 策略 replay 适配器（signal 来自 OHLCV 因子，edge 4 层分解） |
-| `adapters/directional_adapter.py` | Directional 策略 replay 适配器（signal 来自 SMA + return 混合，edge 4 层分解） |
-| `registry/experiment_registry.py` | 实验元数据 CRUD + summary upsert（写入 research schema） |
-| `diagnostics/replay_diagnostics.py` | 诊断计算 + 多组对比（含 edge 分解统计：signal / funding / cost） |
-| `scan/parameter_grid.py` | 参数网格定义与展开（DEFAULT_PARAMETER_GRID, build_grid） |
-| `scan/scan_runner.py` | 批量扫描引擎（支持 partial_success 状态 + failed_combos.json 产物） |
-| `reports/markdown_report_builder.py` | Markdown 报告生成（含 Edge Breakdown 表格 + edge 来源分析） |
+## 3. 数据采集与数仓
 
-## Phase 3 Live Attribution（`aats/data_platform/attribution/`）
+### `collectors/`
 
-| 文件 | 职责 |
-|------|------|
-| `taxonomy.py` | 统一归因分类（10 个 category, 30+ reason code, 严格瀑布顺序） |
-| `alignment.py` | Replay/live 事件按 bar 时间窗口对齐 + live DB SQL 查询（7 张表） |
-| `layer_classifier.py` | 瀑布式分层归因引擎（8 层 waterfall，停在第一层失败处） |
-| `aggregation.py` | category × reason 聚合 + top failure modes + layer analysis |
-| `report_builder.py` | Markdown 报告（单次 + 批量结论，含交叉 family/tf 比较） |
+- `backfill/`：发现和解析 OKX 文件、去重注册、candles/funding/history 回填。
+- `rolling/`：通过 OKX REST 增量采集 candles、funding 及历史市场指标。
+- 历史文件成功/失败路径和 checkpoint 由 settings、run registry 管理。
 
-## Phase 4 Execution Realism（`aats/data_platform/execution_realism/`）
+### `merge/` 与 `gold/`
 
-| 文件 | 职责 |
-|------|------|
-| `market_alignment.py` | Gold bar 查询 + replay decision → bar 对齐（OHLCV + volume 匹配） |
-| `fill_feasibility.py` | Volume-based 可成交性评估（4 类：fully/partially/not fillable, no data） |
-| `slippage_estimator.py` | V1 Bar-proxy 滑点模型（half-spread + sqrt impact, 成本调整后 edge） |
-| `execution_cost_model.py` | 执行成本汇总（分布统计 + Phase 2 比较 + edge 正负分析） |
-| `aggregation.py` | 跨 family/timeframe 比较表 + 交叉发现生成 |
-| `report_builder.py` | Markdown 报告（单次 realism report + Phase 4 conclusion） |
+- Merge pipeline 执行 validate→bronze→silver，并在质量失败时阻断不合格数据继续传播。
+- `microstructure_silver_merger.py` 构建 15m 微观结构事实。
+- Gold builder 生成 replay 消费数据和 funding 对齐结果。
 
-## Phase 5 Governance（`aats/data_platform/governance/`）
+### `jobs/`
 
-| 文件 | 职责 |
-|------|------|
-| `manifest_validation.py` | Round manifest 规范校验 + 旧版 manifest 自动补全（normalize_legacy_manifest） |
-| `artifact_index.py` | 全局 artifact 索引构建（experiments + rounds，含 diagnostics 摘要提取） |
-| `parameter_registry.py` | 参数版本治理 CRUD（draft/candidate/frozen/deprecated + 从 candidates/recommendations 导入）。DB 双写：每次 add/freeze/deprecate 同时写 `governance.parameter_sets` 表；load 时 DB 优先、文件 fallback |
-| `parameter_sets_db.py` | `governance.parameter_sets` 表 CRUD（upsert/update_status/find/get/load_full_registry），Session-based 接口 |
-| `recommendations_db.py` | `governance.recommendations` + `governance.active_decisions` 表 CRUD（upsert/update_status/find/load），Session-based 接口 |
-| `_db_util.py` | 治理层 DB 共享工具（`try_governance_db()` 连接检测、`parse_dt()` 时间解析、`json_dumps()` 序列化、状态/类型校验常量） |
-| `round_status.py` | Active round 索引构建（按 phase 分组 + latest round 提取） |
-| `retry_logic.py` | 失败 round 重跑计划生成（自动构建 per-combo / 整轮重跑命令） |
-| `quality_monitor.py` | 四维质量巡检（artifact/结果/参数/治理层 × critical/warning/info） |
-| `_atomic_io.py` | 原子 JSON 写入（tmpfile → fsync → replace，防并发损坏） |
+- `checkpoint_manager.py`：采集水位线。
+- `run_registry.py`：ingest run/item 生命周期。
+- `gap_repair.py`：gap 识别与 repair run。
 
-## Phase 6 Decision System（`aats/data_platform/decision_system/`）
+## 4. 研究与证据
 
-| 文件 | 职责 |
-|------|------|
-| `evidence_bundle.py` | 跨 Phase 2/3/4/5 证据统一收集与完整度评估 |
-| `candidate_selector.py` | 规则化参数评分：4 维度（研究/归因/执行/治理）→ promote/hold/reject |
-| `decision_engine.py` | Family/Timeframe 状态决策：keep_active/lower_priority/pause/require_review |
-| `readiness_evaluator.py` | 7 项 check 评估上线就绪度 |
-| `recommendation_registry.py` | Recommendation + Active Decision + Evidence Bundle 三个 registry 管理。DB 双写：每次 add/approve/reject/supersede/upsert_active_decision 同时写 `governance.recommendations` / `governance.active_decisions` 表；load 时 DB 优先、文件 fallback |
-| `report_builder.py` | 7 节结论文档生成 |
+### `replay/`
 
-## Production Workflow（`aats/data_platform/production_workflow/`）
+包含逐 bar replay、directional/independent adapter、参数网格、批量扫描、诊断和 Markdown/JSON/CSV 产物。Replay 结论必须结合 execution realism 和 live attribution，不能直接视为可发布参数。
+
+### `attribution/`
+
+通过 `live_query_adapter` 只读主交易事实，对 replay/live 事件做时间对齐、分类和瀑布归因。主交易数据库访问必须保持只读事务边界。
+
+### `execution_realism/`
+
+根据 Gold 市场数据评估 fill feasibility、bar-proxy slippage 和执行成本。该层是研究证据，不是交易所成交模拟的绝对真值。
+
+### `research_factory/`
+
+Research Factory 是当前最大的 RDP 子域，覆盖：
+
+- evidence manifest/bundle 和数据集契约；
+- experiment plan、执行、结果和 registry；
+- verdict board，标准结论为 `reject`、`keep_observing`、`positive_executable_edge`；
+- governance review、candidate lineage、quality status；
+- dry-run planning 和 manual apply design。
+
+硬边界：只生成证据与人工应用设计，不写 active parameters、runtime settings、managed profile、交易数据库或 OKX。
+
+## 5. Governance 与 Production Workflow
+
+### `governance/`
+
+重要模块：
 
 | 文件 | 职责 |
-|------|------|
-| `workflow_dispatcher.py` | JSON 配置驱动的工作流调度器（4 种 workflow type） |
-| `pre_apply_gate.py` | 参数应用前置门控（block/warn/pass）；生产 active parameter apply 必须引用 gate run id |
-| `environment_guard.py` | 环境隔离策略 |
+| --- | --- |
+| `parameter_registry.py` | 参数候选 registry；DB-first，保留文件降级/审计语义 |
+| `recommendations_db.py` / `parameter_sets_db.py` | recommendation、active decision 和参数版本表访问 |
+| `active_params_db.py` | `governance.active_parameter_sets` DB 操作 |
+| `profile_apply_saga.py` | 跨 research/live 边界的 profile apply saga 与补偿 |
+| `rdp_task_db.py` | 10 个 workflow allowlist、原子入队、SKIP LOCKED claim、状态与孤儿恢复 |
+| `operational_state_db.py` | scheduler 等运行状态真源 |
+| `snapshot_db.py` | 治理和 research round DB-first snapshot |
+| `quality_monitor.py` | 治理质量巡检 |
+| `strategy_tuning_db.py` / `system_config_db.py` | 策略 tuning 与系统配置治理数据 |
 
-## Operations（`aats/data_platform/operations/`）
+注意：部分 governance registry 仍是 DB-first + 文件副本/降级；主交易 bootstrap 的 active parameter loader 则是严格 DB-only。两者不能写成同一个“统一文件 fallback”规则。
 
-| 文件 | 职责 |
-|------|------|
-| `failure_registry.py` | 失败记录注册（record/find/retry/status lifecycle） |
-| `retry_manager.py` | 重试管理（单任务/整工作流重试 + 自动故障录入） |
-| `reliability_checks.py` | 7 项可靠性检查（质量监控/活跃决策/工作流/产物/故障/发布/参数） |
-| `alerting.py` | 告警摘要构建 + 历史管理 + 确认 |
-| `environment_guard.py` | 环境隔离策略（dev/staging/prod 权限矩阵） |
+### `production_workflow/`
 
-## Metrics（`aats/data_platform/metrics/`）
+- `pre_apply_gate.py` / `gate_rules.py`：发布前硬门和规则。
+- `release_cycle.py` / `release_registry.py`：release 生命周期。
+- `observation_cycle.py` / `observation_window.py`：发布后观察。
+- `rollback_policy.py`：回滚建议和保护。
 
-| 文件 | 职责 |
-|------|------|
-| `definitions.py` | 24 个指标定义（研究/归因/执行/运维/可靠性 5 层） |
-| `metric_calculator.py` | 指标计算器（从各 registry/artifact 聚合计算） |
-| `metric_registry.py` | 指标快照生成 + 滚动历史 + 快照比较 |
-| `baseline_comparison.py` | 基线比较（3 种策略：前版/同组合/冻结参数） |
-| `release_effectiveness.py` | 发布有效性评估（行为/执行/运维/治理 4 维度） |
-| `periodic_review.py` | 周期性评审（周/月，含 combo ranking + 改进建议） |
-| `backlog_builder.py` | 改进积压自动检测（6 个来源） + 合并管理 |
+当前调度层禁用 `release_cycle`，任务队列还在 `ENQUEUE_BLOCKED_WORKFLOWS` 中冻结它。保留代码不代表允许自动执行。
 
-## Integration Layer（主交易系统整合）
+## 6. Operations
 
 | 文件 | 职责 |
-|------|------|
-| `aats/data_platform/live_query_adapter.py` | Live DB 只读查询适配器（7 张表统一收口、时间窗口查询、健康检查） |
-| `aats/bootstrap/active_parameters.py` | Active Parameter Set 加载器（启动时注入 family/tf 参数，参数映射，原子写入）。DB 优先读：设置 `AATS_ACTIVE_PARAMETER_DB_URL` 后从 `governance.active_parameter_sets` 表加载 |
-| `aats/api/rdp_routes.py` | RDP 只读 API 路由（8 个 GET 端点） |
-| `aats/services/operator/rdp_queries.py` | RDP 查询服务（从治理/决策 artifact 读取结构化数据供 API 使用） |
+| --- | --- |
+| `workflow_dispatcher.py` | 加载 10 份 JSON 定义、校验任务并执行 |
+| `workflow_scheduler.py` | UTC slot 计算、bootstrap、数据库调度状态、到期入队 |
+| `rdp_daemon_health.py` | daemon heartbeat/healthcheck |
+| `failure_registry.py` / `retry_manager.py` | workflow failure 与补跑 |
+| `reliability_checks.py` / `alerting.py` | 可靠性检查和告警摘要 |
+| `strategy_tuning_registry.py` / `strategy_tuning_review.py` | tuning proposal/review 生命周期 |
 
-## 与主交易系统的风险边界
+RDP daemon 的标准容器入口是 `scripts/rdp_task_daemon.py --poll-interval 10 --enable-scheduler`。
 
-RDP 不参与实时撮合和订单执行，但 active parameter set 会改变主交易系统策略行为。当前必须遵守：
+## 7. 主交易整合层
 
-- RDP Bronze/Silver/Gold 只服务离线研究，主交易行情仍来自 OKX live market gateway。
-- recommendation 不会自动生效；只有 apply active parameter 后才影响 runtime。
-- 生产 apply 必须具备 approval、pre-apply gate、release/apply history、actor 和 rollback 目标。
-- 生产 apply 不应缺少 gate 记录。
-- 参数变更后要同时观察 RDP observation 和主交易系统 `/system/health`、reconciliation、decision/order intent 变化。
+| 文件 | 边界 |
+| --- | --- |
+| `aats/bootstrap/active_parameters.py` | runtime active parameter DB-only loader；数据库失败返回空 registry，不读 JSON fallback |
+| `aats/api/rdp_routes.py` | RDP 核心查询、审批、token、apply/rollback、workflow、workbench 和 tuning API |
+| `aats/api/rdp_profile_routes.py` | profile recommendation、profile type review、sleeve advice API |
+| `aats/api/rdp_apply_token.py` | v2 HMAC apply/rollback token 签发与验证 |
+| `aats/services/operator/rdp_queries.py` | Operator RDP 查询聚合 |
+
+FastAPI 当前共有 50 个 `/rdp/*` 路由。完整清单以运行时 `/openapi.json` 和 [项目代码审查与系统说明](../code_review/README.md) 为准。
+
+## 8. 维护规则
+
+1. 新增 ORM 表时同步迁移、模型计数和 RDP 总览。
+2. 新增 workflow JSON 时同步 `VALID_WORKFLOWS`、daemon timeout、文档和覆盖测试。
+3. 修改 active parameter 路径时必须明确“治理 registry 存储语义”和“runtime loader 真源语义”。
+4. 新增写 API 时必须有认证依赖、token/gate（如适用）、审计和负向测试。
+5. 带 Phase/Stage/日期的旧设计只作历史证据，不能覆盖本页当前边界。

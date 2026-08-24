@@ -2,6 +2,8 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
+> 最后核对：2026-08-22（代码基线 `be9179e`）。
+
 
 ## 日常巡检
 
@@ -21,20 +23,17 @@
   - 确认最近 round 是否 succeeded
   - 如有 failed/partial，查看失败原因
 
-- [ ] 检查参数注册表
-  ```bash
-  python scripts/rdp_freeze_parameter_set.py --action show
-  ```
-  - 确认是否有 frozen 参数
-  - 确认当前有效参数版本
+- [ ] 检查参数与发布状态
+  - 在 Operator 中查看 `GET /rdp/parameters/active`、`GET /rdp/recommendations/latest` 和 `GET /rdp/releases/latest`
+  - 确认当前 active 版本、推荐状态、gate/release/apply history 一致
 
-- [ ] 检查治理层 DB 连通性（如已启用 DB 模式）
+- [ ] 检查治理层 DB 连通性和 active parameters
   ```bash
-  # 确认 governance schema 表存在且 seed 数据一致
-  python scripts/apply_active_parameter_set.py --action seed-db --dry-run
+  python scripts/rdp_run_reliability_check.py
   ```
-  - 确认 DB 连接正常
-  - 确认 DB 与 JSON 文件数据一致
+  - 登录 Operator 后核对 `GET /rdp/health` 和 `GET /rdp/parameters/active`
+  - 确认 DB 连接正常、active combo/version/actor 可追踪
+  - runtime active parameters 以 Postgres 为唯一真源，不做 DB/JSON 一致性 seed
 
 ---
 
@@ -80,23 +79,12 @@
 
 ## 参数管理
 
-- [ ] 实验产出新参数时，导入到 registry
-  ```bash
-  python scripts/rdp_freeze_parameter_set.py --action import \
-      --source <path_to_candidates.json>
-  ```
+`rdp_freeze_parameter_set.py` 已被批次 A 硬化禁用，当前没有受支持的候选 registry 手工 freeze/import CLI。不要直接改数据库替代产品化入口。
 
-- [ ] 验证通过后，冻结参数
-  ```bash
-  python scripts/rdp_freeze_parameter_set.py --action freeze \
-      --parameter-set-id <id>
-  ```
-
-- [ ] 旧参数被替代后，标记废弃
-  ```bash
-  python scripts/rdp_freeze_parameter_set.py --action deprecate \
-      --parameter-set-id <id>
-  ```
+- [ ] recommendation 审批/拒绝/替代只走 Operator API。
+- [ ] apply/release/rollback 只走带认证、gate 和 `X-Rdp-Apply-Token` 的 API。
+- [ ] 若确需尚未 API 化的 registry 维护，停止操作并由维护者先设计、实现和审查受控入口。
+- [ ] 完整流程见 [参数应用与回滚](parameter_apply_and_rollback.md)。
 
 ---
 
@@ -149,7 +137,7 @@
 
 ### 必须确认的启动条件
 
-- [ ] 当前 profile 与账户一致：`spot_live` 只能跑现货账户语义，`derivatives_live` 只能跑合约/cross 语义。
+- [ ] 当前 profile 与账户一致：`spot_live` 是 spot/cash，`derivatives_live` 是 derivatives/cross/hedge。
 - [ ] `AATS_STORAGE_MODE=postgres`。
 - [ ] `AATS_DATABASE_URL` 指向对应 live 数据库，不与模拟盘/研究库混用。
 - [ ] `AATS_DATABASE_SINGLE_RUNTIME_GUARD_ENABLED=true`。
@@ -164,6 +152,7 @@
 
 - [ ] `/healthz` 返回 200，但不要把它当作 trading-ready 信号。
 - [ ] `/system/health` 无 critical blocker。
+- [ ] `aats-rdp-daemon` 健康；derivatives-live 额外确认 `aats-liquidations-daemon` 和 `aats-microstructure-collector` 健康、数据新鲜（部署脚本尚未自动 gate 这两个采集器）。
 - [ ] Kill switch 状态明确；如果打开，必须有 operator 记录说明原因。
 - [ ] account snapshot fresh，且账户产品类型、保证金模式、币种与 profile 一致。
 - [ ] reconciliation 最近报告无 unresolved high/critical finding。
@@ -202,7 +191,7 @@
 - `/system/health` blockers 里有 `okx_ws_down` / `execution_outbox_pending_*_minutes`
 - reason_codes 里出现 `execution_health_not_ok` / `kill_switch_engaged`
 - 最近 `decision_target_sizing_resolved` 日志里 `policy_blocked=True` 或 `risk_capped=True`
-- **操作**：立即按 `docs/operations/workflow_failure_recovery.md` 走故障恢复流程
+- **操作**：立即按根目录 `DEPLOYMENT.md` 的 trading-ready、recovery、reconciliation 和安全停机步骤处理；`workflow_failure_recovery.md` 只处理 RDP workflow，不处理交易执行故障。
 
 ### 快速辨别（一条命令）
 ```bash

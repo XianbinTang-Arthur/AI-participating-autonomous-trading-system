@@ -5,7 +5,7 @@
 
 ## 1. 目标与边界
 
-本阶段对应 [Task 91](/D:/文件/project/AIParticipatingAutonomousTradingSystem/docs/task91_derivatives_hedge_mode_phase_breakdown.md) 的 Phase 4，目标是把合约 `hedge mode` 的风控从单一净仓语义升级成：
+本阶段对应 [Task 91](task91_derivatives_hedge_mode_phase_breakdown.md) 的 Phase 4，目标是把合约 `hedge mode` 的风控从单一净仓语义升级成：
 
 - `long`
 - `short`

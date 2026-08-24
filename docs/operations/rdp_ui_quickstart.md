@@ -2,6 +2,8 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
+> 文档状态：现行 UI 速查。最后核对：2026-08-22（代码基线 `be9179e`）。`https://127.0.0.1:8011` 指标准 `derivatives-live` TLS 部署；本地 `start_api.py --profile derivatives` 默认是 `http://127.0.0.1:8001`。
+
 
 > 目标: 打开 `https://127.0.0.1:8011/ui/rdp` 后, 不用查文档就知道该看什么、该点什么。
 > 深入 SOP 请看 [rdp_operator_workflow.md](./rdp_operator_workflow.md) 和 [operator_checklist.md](./operator_checklist.md)。
@@ -10,7 +12,7 @@
 
 ## 1. RDP 在做什么?
 
-后台一直在跑研究流程 (拉数据 → 回测 → 归因 → 给出建议)。
+后台 scheduler 只运行 8 个 enabled workflow；`decision_cycle` 和 `release_cycle` 当前禁用，后者还禁止入队。研究与建议生成不是所有时刻都“自动一直跑”。
 **建议不会自动生效**, 必须 operator 在 UI 上点一下才会影响实盘。
 
 每条建议绑定一个 `(family, timeframe)` 组合, 例如 `DIRECTIONAL / 1H`。

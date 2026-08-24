@@ -18,7 +18,7 @@
 
 ### 2.1 Protective 评估逻辑迁出
 
-新增 [protective_family.py](/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/strategy_engines/families/protective_family.py)：
+当时新增 `protective_family.py`（该历史文件后续重构已移除）：
 
 - `evaluate_protective_overlay_decision(...)`
 - `protective_candidate_from_directional_target(...)`

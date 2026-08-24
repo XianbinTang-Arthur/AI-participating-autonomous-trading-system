@@ -2,6 +2,7 @@
 
 > 本文件约束**所有贡献者**（含 AI agent）在本仓库的工作行为。
 > 用户（XianbinTang-Arthur）已授权 AI agent 自主迭代；以下纪律是 AI agent 的**自律底线**，不得违反。
+> 文档状态：现行约束。最后核对：2026-08-23（代码基线 `be9179e`）。安全、测试、部署、数据库或文档纪律变化时必须同步复核。
 
 ---
 
@@ -60,15 +61,16 @@
 
 ### 文档
 - 所有**自主**的重大决策写进 `docs/autonomous_sessions/YYYY_MM_DD_<slot>.md`
-- 每周至少一次 weekly review 到 `docs/weekly_review/YYYY-MM-DD.md`（按 `_template.md`）
+- 每周至少一次 weekly review 到 `docs/weekly_review/YYYY_MM_DD.md`（按 `_template.md`）
 - 工作节奏 "假设 / 效果 / 验证 / rollback" 格式贯穿
+- 新文档先按 `docs/DOCUMENTATION_GOVERNANCE.md` 判断位置和状态；新任务/SOW 不得继续堆放到 `docs/` 根层
 
 ---
 
 ## 三、建议做法（best practice, 不强制）
 
-- 大改动前启动 Plan subagent 写出 plan，不要盲目直接动手
-- 复杂 bug 用 Explore subagent 做代码审查，但**结论必须自己核实**
+- 大改动前先写出短计划、风险与回滚边界，不要直接动手
+- 复杂 bug 可安排独立只读审查，但**结论必须由实施者和人工复核**
 - 性能类改动提供量化数据（before P95=X, after P95=Y）
 - 架构级重构先列"可逆点" / "不可逆点"，把不可逆的做得极慢
 - 借鉴业界经验（SQLAlchemy 官方 / Grafana OSS / Jane Street blog 等）但**必须证明适合我们的 stage**，不盲搬
@@ -78,7 +80,7 @@
 ## 四、Python / 代码规范
 
 - SQLAlchemy 2.0，`sessionmaker(expire_on_commit=False, future=True)`
-- JSON 列访问用 `.as_string()`，JSONB 列 `.astext` 或 `.as_string()`
+- JSON 与 JSONB 列访问统一用 `.as_string()`；不要新增已废弃的 `.astext`
 - `with session_factory() as session:` 标准 context manager
 - 所有 repo 方法加 `_for_scope` 变体（如果涉及跨 scope 可能全扫）
 - 避免 `select(Model).order_by(...)` 无 WHERE + 无 LIMIT

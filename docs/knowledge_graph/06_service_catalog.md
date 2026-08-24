@@ -1,5 +1,7 @@
 # 06 · Service 目录（系统的"动词"）
 
+> **历史快照**：2026-04-21 版本；当前 service/slice 归属以 `aats/services/` 和 `build_runtime()` 为准。
+
 > **生成于 HEAD=待更新** · 2026-04-21
 > **内容**：`aats/services/` 下的核心 service 类，按进程归类
 

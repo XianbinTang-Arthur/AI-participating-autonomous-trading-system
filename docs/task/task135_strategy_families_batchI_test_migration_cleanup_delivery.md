@@ -24,8 +24,8 @@ Batch I 的目标是完成 family refactor 的测试与清理收口：
 
 新增 3 组 family helper 单测：
 
-- [tests/unit/test_protective_family.py](/D:/文件/project/AIParticipatingAutonomousTradingSystem/tests/unit/test_protective_family.py)
-- [tests/unit/test_opportunistic_family.py](/D:/文件/project/AIParticipatingAutonomousTradingSystem/tests/unit/test_opportunistic_family.py)
+- `tests/unit/test_protective_family.py`（历史测试文件，后续重构已移除）
+- `tests/unit/test_opportunistic_family.py`（历史测试文件，后续重构已移除）
 - [tests/unit/test_independent_family.py](/D:/文件/project/AIParticipatingAutonomousTradingSystem/tests/unit/test_independent_family.py)
 
 覆盖的旧场景包括：

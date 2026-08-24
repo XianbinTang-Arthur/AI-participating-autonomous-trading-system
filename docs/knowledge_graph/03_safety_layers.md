@@ -1,5 +1,7 @@
 # 03 · 安全层（Fail-Closed 架构）
 
+> **历史快照**：2026-04-21 C2 审计版本；风险、恢复与 kill switch 修改前必须重新读当前代码，不能依赖本文的“已审计”状态。
+
 > **生成于 HEAD=待更新** · 2026-04-21
 > **基础**：本次 session C2 审计报告 `docs/autonomous_sessions/2026_04_21_safety_audit_report.md` 的知识图谱版本
 > **目标读者**：任何即将动 risk / recovery / kill switch 相关代码的人

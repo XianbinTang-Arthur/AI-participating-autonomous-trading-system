@@ -2,6 +2,8 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
+> 最后核对：2026-08-22（代码基线 `be9179e`）。本页详细说明最初的 8 个只读端点；当前 FastAPI 共注册 50 个 `/rdp/*` 路由，完整清单以 `/openapi.json` 为准。
+
 
 ## 1. 概述
 
@@ -230,19 +232,13 @@ Operator UI 展示 active parameters 时，建议同时展示：
 
 ## 5. 数据来源
 
-> 自 2026-04-11 起，治理层数据采用 **DB-first + 文件 fallback** 策略。
-> 设置 `AATS_ACTIVE_PARAMETER_DB_URL` 后，API 优先从 `governance` schema 读取。
+治理数据不能再用一条统一的“DB-first + 文件 fallback”概括：
 
-| 数据 | DB 表（主存储） | JSON 文件（fallback） |
-|------|------|---------|
-| Parameter Registry | `governance.parameter_sets` | `artifacts/governance/current_parameter_registry.json` |
-| Active Parameters | `governance.active_parameter_sets` | `configs/active_parameter_sets/*.json` |
-| Recommendations | `governance.recommendations` | `artifacts/decision_system/recommendation_registry.json` |
-| Active Decisions | `governance.active_decisions` | `artifacts/decision_system/active_decision_registry.json` |
-| Apply History | `governance.parameter_apply_history` | `artifacts/decision_system/parameter_apply_history.json` |
-| Artifact Index | （无 DB） | `artifacts/governance/artifact_index.json` |
-| Quality Monitor | （无 DB） | `artifacts/governance/quality_monitor_summary.json` |
-| Evidence Bundles | （无 DB） | `artifacts/decision_system/evidence_bundle_index.json` |
-| Decision Rounds | （无 DB） | `artifacts/decision_rounds/<round_id>/` |
-| Attribution Rounds | （无 DB） | `artifacts/research/attribution_rounds/<round_id>/` |
-| Execution Rounds | （无 DB） | `artifacts/research/execution_rounds/<round_id>/` |
+| 数据类别 | 当前读取语义 |
+| --- | --- |
+| Runtime Active Parameters | `governance.active_parameter_sets` 是唯一真源；主交易 loader 不读 JSON fallback |
+| Parameter/Recommendation 等 registry | 多数仍为 DB-first，并保留文件审计副本或故障降级；具体以对应模块为准 |
+| Scheduler/operational state | 正常路径以 governance DB 为真源，数据库失败时可能读 stale-risk 文件快照 |
+| Research artifacts | 文件/DB snapshot 并存，属于证据层，不直接驱动 runtime |
+
+设置 `AATS_ACTIVE_PARAMETER_DB_URL` 或 `RDP_DATABASE_URL` 后，API 通过 governance schema 查询。数据库不可用时，各模块降级行为不同；Operator 必须查看 response 的 data source/degraded 标记，不能假设一定有文件 fallback。

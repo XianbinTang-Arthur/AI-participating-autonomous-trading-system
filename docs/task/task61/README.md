@@ -5,7 +5,7 @@
 
 ## 目标
 
-在 [Task60](D:/文件/project/AIParticipatingAutonomousTradingSystem/docs/task60/README.md) 已有执行质量与收益归因报表的基础上，把近期成交按策略维度分层，识别：
+在 [Task60](../task60/README.md) 已有执行质量与收益归因报表的基础上，把近期成交按策略维度分层，识别：
 
 - 哪些市场状态在赚钱
 - 哪些方向在亏钱

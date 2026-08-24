@@ -1,403 +1,197 @@
-# Research Data Platform (RDP)
+# Research Data Platform（RDP）
 
-> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+> 项目定位声明：RDP 只在严格风控、可审计、可恢复、可治理的边界内为主交易系统提供研究证据和受控参数。完整定位见 [项目定位声明](../../docs/project_positioning.md)。
 
+最后核对：2026-08-22（代码基线 `be9179e`）
+适用范围：`aats/data_platform/`、`scripts/rdp_*.py`、`configs/rdp_workflows/`、RDP API 与任务守护进程。
 
-> 模块级 README。项目级概览见 [主 README §21](../../README.md#21-研究数据平台-research-data-platform)。
+本文是 RDP 当前入口。逐文件模块清单见 [RDP 代码模块参考](../../docs/rdp/module_reference.md)，日常操作见 [平台运行手册](../../docs/operations/platform_runbook.md)，完整系统边界见 [项目代码审查与系统说明](../../docs/code_review/README.md)。
 
-RDP 是 AATS 的**离线参数研究子系统**,与实时交易主链路完全解耦。它从市场数据采集开始,经过参数研究、归因分析、执行可行性验证,最终通过受控审批流程把研究结论回灌到主交易系统。
+## 1. 安全边界
 
-RDP 的存在不是为了做脱离收益目标的研究展示，而是为了持续提高主交易系统的真实净收益能力、风险收益比和稳定盈利证据质量，从而服务于 AI 资本的长期稳健增殖。完整定位见 [../../docs/project_positioning.md](../../docs/project_positioning.md)。
+RDP 是研究和治理子系统，不是实时交易执行器。
 
-- **数据库**: 独立的 `aats_research` PostgreSQL 库,6 schema 分层
-- **配置**: `.env.research`(`RDP_` 前缀),不与交易系统的 `.env.*` 混用
-- **不侵入主链**: 主交易引擎从 OKX websocket 直连市场数据,**从不读取 RDP 的 Bronze/Silver/Gold**
-- **回灌方式**: 人工审批后写入 `governance.active_parameter_sets` DB 表（主路径）+ `configs/active_parameter_sets/*.json` 文件（备份）
-- **治理层存储**: DB-first + 文件 fallback 双写模式，环境变量 `AATS_ACTIVE_PARAMETER_DB_URL` 控制 DB 开关
-
-## 安全边界（2026-04-13 更新）
-
-RDP 对主交易系统的唯一直接影响是 active parameter set。任何参数 apply 都应按生产变更处理：
-
-- 必须先有 approved recommendation。
-- 必须运行 pre-apply gate。
-- 必须记录 actor、gate run id、apply history 和 rollback 目标。
-- 生产环境不得跳过 gate。
-- apply 后必须检查主交易系统 `/system/health`、reconciliation、decision/order intent 变化。
-
----
-
-## 1. 目录结构
-
-```
-aats/data_platform/
-├── __init__.py
-├── config.py                  # Pydantic 配置 (env_prefix=RDP_)
-├── db.py                      # 连接池 + migration runner
-├── models.py                  # 数据类 + 表名解析器 (含白名单防 SQL 注入)
-├── live_query_adapter.py      # Live DB 只读查询 (供 Phase 3 归因用)
-│
-├── collectors/                # ── Phase 1: 数据采集 ──
-│   ├── backfill/              #   历史 ZIP/CSV 回填 (file_discovery + parser)
-│   └── rolling/               #   OKX REST API 增量采集
-├── normalize/                 #   时间标准化 (ms epoch → UTC)
-├── validate/                  #   质量门控 (candle/funding 检查 + 报告)
-├── merge/                     #   staging → bronze → silver upsert pipeline
-├── gold/                      #   funding aligner + replay bar builder
-├── jobs/                      #   checkpoint / run_registry / gap_repair
-│
-├── replay/                    # ── Phase 2: 参数研究 ──
-│   ├── core/                  #   replay engine + result writer
-│   ├── adapters/              #   independent / directional 策略适配器
-│   ├── registry/              #   experiment metadata
-│   ├── diagnostics/           #   edge breakdown 计算
-│   ├── scan/                  #   parameter grid scan
-│   └── reports/               #   markdown report builder
-│
-├── attribution/               # ── Phase 3: Live Attribution ──
-├── execution_realism/         # ── Phase 4: Execution Realism ──
-├── governance/                # ── Phase 5: 治理 (artifact / 参数 / 质量 / DB CRUD) ──
-│   ├── _db_util.py            #   治理层 DB 共享工具 (连接检测/时间解析/校验常量)
-│   ├── parameter_sets_db.py   #   governance.parameter_sets 表 CRUD
-│   ├── recommendations_db.py  #   governance.recommendations + active_decisions 表 CRUD
-├── decision_system/           # ── Phase 6: 闭环决策 ──
-│
-├── production_workflow/       # workflow_dispatcher + pre_apply_gate
-├── operations/                # failure_registry / retry / reliability / alerting
-├── metrics/                   # 24 个指标定义 + 历史 + 基线比较
-└── live_facts/                # 主系统事实数据查询适配器
-```
-
-每个文件的具体职责见 [`docs/rdp/module_reference.md`](../../docs/rdp/module_reference.md)。
-
----
+- Bronze/Silver/Gold 只服务离线研究，主交易行情来自 OKX market gateway。
+- RDP 对 live 交易库只读，写入集中在独立 research/governance 数据库。
+- recommendation、candidate、verdict 和 research artifact 都不会自行改变交易行为。
+- runtime active parameter 的唯一真源是 Postgres `governance.active_parameter_sets`。
+- 参数写入必须经受保护的 Operator API、权限校验、gate、actor 和 history；直接 apply/rollback 还要求短时 HMAC token。组合 release 端点当前没有 token 依赖，详见第 7 节的策略差异。旧的直写 CLI 已禁用并返回退出码 2。
+- Research Factory 只产出证据、结论和人工应用设计，不写 runtime、active parameters、managed config 或 OKX。
+- 当前不允许自动 release：`release_cycle` 配置禁用，且任务队列显式阻止它入队。
 
 ## 2. 数据架构
 
-### 6 schema 分层
+`aats/data_platform/rdp_models.py::RdpBase` 当前声明 78 张表：
 
-```
-meta       元数据    运行记录、checkpoint、质量报告、文件注册
-staging    原始入库  保留 raw_symbol / raw_ts / source_file_id 全链路溯源
-bronze     去重     PK=(symbol, ts) upsert,保留原始字段
-silver     标准化   质量验证后的规范数据
-gold       回放     candle + funding rate as-of join 对齐后的 replay bars
-research   研究     实验元数据、诊断摘要、扫描批次
-governance 治理     参数注册表、建议审批、活跃决策、活跃参数集、应用历史（6 张表）
-```
+| Schema | 表数 | 主要职责 |
+| --- | ---: | --- |
+| `staging` | 11 | 原始文件/API 落地、待校验输入 |
+| `bronze` | 17 | 标准化原始事实、采集历史 |
+| `silver` | 14 | 去重、质量门控和微观结构派生数据 |
+| `gold` | 8 | replay、对齐和研究消费数据集 |
+| `meta` | 6 | ingest run、checkpoint、quality、dataset 元数据 |
+| `research` | 3 | experiment 与研究结果 |
+| `governance` | 19 | 参数、推荐、发布、观察、任务队列、调度和运行状态 |
+| **合计** | **78** | — |
 
-共 42 张研究表 + 6 张治理表（合计 48 张，分布在 7 个 schema）。所有表通过 `rdp_models.py` ORM 定义，由 `create_rdp_schema()` 自动创建。
+迁移定义位于 `aats/data_platform/migrations/`。不能用旧文档中的“48 张表”判断 schema 是否完整。
 
-### governance schema（6 张治理表）
+### 数据流
 
-```
-governance.parameter_sets            参数集候选池（draft/candidate/frozen/deprecated）
-governance.recommendations           参数变更审批建议（draft/approved/rejected/superseded）
-governance.active_decisions           每个 family/timeframe 的当前决策状态
-governance.active_parameter_sets      已应用的生产参数快照
-governance.parameter_apply_history    参数应用/回滚审计日志
-governance.rdp_runtime_status         daemon / runtime 组件跨容器心跳
-```
-
-治理表采用 **DB-first + 文件 fallback** 双写策略:
-- **写入**: 同时写 DB + JSON 文件（DB 失败不阻塞文件写入）
-- **读取**: DB 优先 → JSON 文件 fallback
-- **DB 开关**: 环境变量 `AATS_ACTIVE_PARAMETER_DB_URL`（未设置时纯文件模式）
-
-### 数据流(2026-04-07 起)
-
-```
-                    ┌─────────────────────────────────┐
-                    │      OKX (REST API + ZIP)       │
-                    └─────────────┬───────────────────┘
-                                  │
-        ┌─────────────────────────┼──────────────────────────┐
-        │                         │                          │
-        ▼                         ▼                          ▼
-┌──────────────┐         ┌────────────────┐         ┌────────────────┐
-│ historical   │         │  daily_ingest  │         │  deep_backfill │
-│ daemon       │         │ (cron 04:00 UTC│         │  (一次性灾后    │
-│ (--once 模式 │         │  每天 1 次)    │         │   恢复)         │
-│  消费 ZIP)   │         │                │         │                │
-└──────┬───────┘         └────────┬───────┘         └───────┬────────┘
-       │                          │                         │
-       └──────────────────────────┼─────────────────────────┘
-                                  │
-                                  ▼
-                  ┌─────────────────────────────┐
-                  │  staging  →  bronze         │
-                  │            ↓                │
-                  │      silver (质量门控)      │
-                  │            ↓                │
-                  │      gold (replay bars)     │
-                  └─────────────┬───────────────┘
-                                │
-                                ▼
-                  ┌─────────────────────────────┐
-                  │  Phase 2-6 研究管线          │
-                  │  (replay / attribution /    │
-                  │   execution / governance /  │
-                  │   decision)                 │
-                  └─────────────────────────────┘
+```text
+OKX REST / 历史 ZIP / live 只读事实
+  -> staging
+  -> validate + normalize
+  -> bronze
+  -> silver
+  -> gold replay datasets
+  -> replay / attribution / execution realism
+  -> governance evidence / recommendation / verdict
+  -> 人工 gate + release/apply API
+  -> governance.active_parameter_sets
+  -> 主交易 build_runtime() 读取
 ```
 
-> **历史变更**: 2026-04-07 之前数据采集走 60s tick 常驻 daemon。该模式 99% 调用浪费(没有任何 RDP 消费方需要 intra-minute 数据),已退役为日批。详见 [`docs/operations/rdp_scheduling_strategy.md` § "数据采集迁移到日批"](../../docs/operations/rdp_scheduling_strategy.md#数据采集迁移到日批)。
+## 3. 当前运行组件
 
----
+| 组件 | 入口 | 职责 |
+| --- | --- | --- |
+| RDP task daemon | `scripts/rdp_task_daemon.py` | 在容器内启用 scheduler、轮询 `governance.rdp_task_queue`、领取并执行 workflow、写 heartbeat/status |
+| Workflow scheduler | `scripts/rdp_schedule_workflows.py` / `operations/workflow_scheduler.py` | 从数据库调度状态和 JSON 定义计算到期 slot，原子入队 |
+| Workflow dispatcher | `operations/workflow_dispatcher.py` | 校验 workflow 和任务、按顺序执行、写运行报告 |
+| Gateway RDP API | `aats/api/rdp_routes.py`、`rdp_profile_routes.py` | 查询、审批、gate、release/apply/rollback、任务触发、workbench、profile/sleeve 治理 |
+| Rolling collectors | `collectors/rolling/`、相关 `scripts/rdp_*` | Candle、funding、OI、mark、long/short 等增量采集 |
+| Research Factory | `research_factory/`、`research/` | 证据输入、实验、verdict、治理审查与人工应用设计 |
 
-## 3. 关键入口脚本
+标准 Compose 中 `aats-rdp-daemon` 随应用栈启动，命令为：
 
-> 完整脚本清单见 [主 README § scripts](../../README.md)。本节只列日常会用到的。
-
-### Phase 1 — 数据采集
-
-| 脚本 | 用途 | 调用频率 |
-|---|---|---|
-| **`scripts/rdp_run_daily_ingest.py`** ★ | 日批增量采集 (candles + funding + Gold + Gap) | cron 每天 1 次 |
-| `scripts/rdp_historical_daemon.py --once` | 消费 `incoming/` 目录的 ZIP | 拖完 ZIP 后手动 1 次 |
-| `scripts/rdp_init_db.py` | 初始化 schema (运行 migration 0001-0012) | 首次部署 1 次 |
-| `scripts/rdp_build_gold_all.py` | 全量重建 Gold replay bars | 灾后恢复或 schema 变更后 |
-| `scripts/rdp_detect_gaps.py` | Silver 层 gap 巡检 | 排查数据缺口时 |
-| `scripts/rdp_deep_backfill_api.py` | 指定时间区间深度回填 candles (REST API) | 初始建仓 / 灾后恢复 |
-| `scripts/rdp_deep_backfill_funding.py` | 指定时间区间深度回填 funding rate (REST API) | 初始建仓 / 灾后恢复 |
-
-**已退役为薄壳**(仍可调用,会打印 deprecation 警告并转发到 daily_ingest):
-
-- `scripts/rdp_realtime_daemon.py` → 转发 `daily_ingest`
-- `scripts/rdp_start.py` → 顺序调用 `daily_ingest` + `historical_daemon --once`
-
-### Phase 2-6 — 研究管线
-
-| 脚本 | 用途 |
-|---|---|
-| **`scripts/rdp_run_full_pipeline.py`** ★ | 一键编排 Phase 2 → 3 → 4 → 5 → Decision |
-| `scripts/rdp_run_replay.py` | 单次 replay 实验 |
-| `scripts/rdp_run_parameter_scan.py` | 参数网格批量扫描 |
-| `scripts/rdp_run_step2_research.py` | Step 2 完整研究闭环 |
-| `scripts/rdp_run_phase3_round.py` | Phase 3 归因批量轮次 |
-| `scripts/rdp_run_phase4_round.py` | Phase 4 执行可行性批量轮次 |
-| `scripts/rdp_run_decision_round.py` | Phase 6 闭环决策完整轮次 |
-
-### 调度入口
-
-| 脚本 | 用途 |
-|---|---|
-| **`scripts/rdp_run_scheduled_workflow.py`** ★ | 统一 workflow 入口 (`--workflow data_maintenance` 等) |
-
----
-
-## 4. 快速上手
-
-### 4.1 配置
-
-```bash
-cp configs/templates/.env.research.example .env.research
-# 编辑 .env.research, 至少填入 RDP_DATABASE_URL
+```text
+python scripts/rdp_task_daemon.py --poll-interval 10 --enable-scheduler
 ```
 
-### 4.2 初始化数据库
+它不是“宿主机手工维护的后台进程”。
 
-```bash
-# 自动建库 + schema 初始化 (48 张表)
-python scripts/rdp_init_db.py
-```
+## 4. Workflow 与调度真相
 
-### 4.3 拉取数据
+`configs/rdp_workflows/` 当前有 10 个有效 JSON。调度时间均为 UTC。
 
-**方式 A — 历史数据(从 ZIP)**:
+| Workflow | 当前调度 | Enabled | 主要任务 |
+| --- | --- | --- | --- |
+| `candles_rolling_15m` | 每 15 分钟 | 是 | 15m rolling candles |
+| `microstructure_silver_15m` | 每 15 分钟 | 是 | microstructure Silver 聚合 |
+| `okx_rest_history_rolling_1h` | 每小时第 20 分钟 | 是 | OI/mark/long-short 历史窗口 |
+| `reliability_cycle` | 每小时第 15 分钟 | 是 | 可靠性检查 |
+| `observation_cycle` | 每小时第 30 分钟 | 是 | release observation 推进 |
+| `data_maintenance` | 每日 04:00 | 是 | daily ingest、artifact index、retention |
+| `governance_cycle` | 每日 07:00 | 是 | quality、artifact validation、round/candidate 治理 |
+| `research_cycle` | 每周日 08:00 | 是 | 数据刷新和 full pipeline |
+| `decision_cycle` | 每周日 10:00 | **否** | 保留定义，不自动调度 |
+| `release_cycle` | 每小时整点 | **否** | 定义保留；任务队列还显式冻结入队 |
 
-```bash
-# 1. 把 OKX ZIP 放到约定目录, 子目录名决定 timeframe:
-#    data/historical/incoming/candles_swap/15m/BTC-USDT-SWAP-candles-2026-03-15.zip
+冷启动 bootstrap 顺序是 `data_maintenance → research_cycle`。数据库调度状态是正常路径真源；只有数据库不可达时才退化读取 artifact 状态文件，并记录 stale 风险。
 
-# 2. 消费一次 (扫描 → staging → bronze → silver → 自动 Gold)
-python scripts/rdp_historical_daemon.py --once
-```
+## 5. 任务队列并发与恢复
 
-**方式 B — 指定时间区间回填(API 深度拉取)**:
+Gateway 和 scheduler 都向 `governance.rdp_task_queue` 写任务，daemon 负责执行。
 
-```bash
-# ── Candles ──
+- `VALID_WORKFLOWS` 必须覆盖全部 10 个 JSON 定义。
+- 同一 workflow 只允许一条 `pending`/`running`：数据库 partial unique index 是最终约束。
+- `db_create_task_if_idle()` 使用 `INSERT ... ON CONFLICT DO NOTHING RETURNING` 原子吸收并发竞争。
+- daemon 用 `FOR UPDATE SKIP LOCKED` 领取最早且 `earliest_start_at <= now()` 的任务。
+- 延迟重试通过 `earliest_start_at` 生效，不会立即重新领取。
+- daemon 重启会把孤儿 `running` 任务收敛为 `failed`，特殊退出码为 `-3`。
+- `release_cycle` 位于 `ENQUEUE_BLOCKED_WORKFLOWS`；scheduler、API 和 daemon 都不得绕过冻结。
 
-# 回填到 90 天前 (所有默认 symbol × timeframe)
-python scripts/rdp_deep_backfill_api.py --days 90
+## 6. 配置与数据真源
 
-# 指定目标起始日期
-python scripts/rdp_deep_backfill_api.py --target-start 2025-12-01
+| 配置 | 当前真源 | 说明 |
+| --- | --- | --- |
+| RDP 数据库 | `RDP_DATABASE_URL` | 本地 `.env.research`；容器未显式设置时可复用 `AATS_ACTIVE_PARAMETER_DB_URL` |
+| Live 只读库 | `RDP_LIVE_DATABASE_URL` | 只读健康、归因和 gate 输入 |
+| Workflow 定义 | `configs/rdp_workflows/*.json` | 任务序列和 schedule 声明 |
+| Scheduler state | governance DB | 文件只作 DB 故障降级快照 |
+| Runtime active parameters | `governance.active_parameter_sets` | 主交易 loader DB-only；无 JSON fallback |
+| 参数/推荐等治理 registry | governance DB-first | 部分模块仍保留文件审计副本/降级读取；不能与 runtime active parameter 真源混为一谈 |
+| Research artifacts | `artifacts/` | 证据和报告，不是 live 配置 |
 
-# 只回填 15m, 完成后自动重建 Gold
-python scripts/rdp_deep_backfill_api.py --timeframes 15m --days 120 --build-gold
+不要在文档、日志或命令输出中打印数据库连接串、API key、session secret 或 token。
 
-# 试运行 (不写入数据库, 只显示将拉取多少数据)
-python scripts/rdp_deep_backfill_api.py --days 90 --dry-run
+## 7. Active parameter 受控变更
 
-# ── Funding Rate ──
+当前可执行写路径在 Operator API：
 
-# 回填 funding 到 365 天前
-python scripts/rdp_deep_backfill_funding.py --days 365
+1. 审阅并批准 recommendation。
+2. 运行 pre-apply gate。
+3. 若调用 `POST /rdp/parameters/apply`，先通过 `POST /rdp/operator-tokens` 获取 `action=apply` 的短时 token，并携带 `X-Rdp-Apply-Token`。
+4. 也可调用组合入口 `POST /rdp/releases/create`；当前代码只要求 write access + integrity/gate，不要求 token。这是现有安全策略差异，不应在文档中隐去。
+5. 核对 `GET /rdp/parameters/active`、apply history、release history 和主交易 `/system/health`。
+6. 观察失败时，通过携带 `action=rollback` token 的 `POST /rdp/parameters/rollback` 回滚。
 
-# 回填到指定日期, 多个交易对
-python scripts/rdp_deep_backfill_funding.py --target-start 2025-04-01 \
-    --symbols BTC-USDT-SWAP ETH-USDT-SWAP
+以下 CLI 已禁用，不能写进现行 runbook：
 
-# Funding 试运行
-python scripts/rdp_deep_backfill_funding.py --days 365 --dry-run
-```
+- `scripts/apply_active_parameter_set.py`
+- `scripts/approve_recommendation_and_apply.py`
+- `scripts/rdp_rollback_active_parameter_set.py`
+- `scripts/rdp_run_release_cycle.py`
 
-> 回填完成后如需重建 Gold: `python scripts/rdp_build_gold_all.py`
-> 或对单个 symbol/tf: `python scripts/rdp_build_gold.py --symbol BTC-USDT-SWAP --timeframe 15m --start 2025-12-01 --end 2026-04-01`
+它们只保留为明确报错的兼容桩。
 
-**方式 C — 增量日批(推荐生产)**:
+## 8. 常用只读/研究入口
 
-```bash
-# 直接调用 (单次)
-python scripts/rdp_run_daily_ingest.py
-
-# 或纳入 workflow (含后续 artifact 索引重建)
-python scripts/rdp_run_scheduled_workflow.py --workflow data_maintenance
-
-# Dry run 预览
-python scripts/rdp_run_daily_ingest.py --dry-run
-```
-
-**配置 cron**:
-
-```bash
-# Linux crontab — 每天 04:00 UTC 自动拉取昨日数据
-0 4 * * * cd /path/to/aats && python scripts/rdp_run_scheduled_workflow.py \
-    --workflow data_maintenance >> /var/log/rdp/data_maintenance.log 2>&1
-```
+使用项目 Python 运行；涉及数据库写入前先确认目标环境。
 
 ```powershell
-# Windows Task Scheduler
-schtasks /create /tn "RDP_DataMaintenance" `
-    /tr "python scripts/rdp_run_scheduled_workflow.py --workflow data_maintenance" `
-    /sc daily /st 04:00
+# 初始化/迁移 RDP schema
+.\.venv\Scripts\python.exe scripts\rdp_init_db.py
+
+# 单次日批采集
+.\.venv\Scripts\python.exe scripts\rdp_run_daily_ingest.py --ensure-schema
+
+# 完整研究管线
+.\.venv\Scripts\python.exe scripts\rdp_run_full_pipeline.py --start 2026-03-31 --end 2026-04-02 --ensure-schema
+
+# 只评估到期 workflow，不入队
+.\.venv\Scripts\python.exe scripts\rdp_schedule_workflows.py --dry-run --json
+
+# 可靠性与质量检查
+.\.venv\Scripts\python.exe scripts\rdp_run_reliability_check.py
+.\.venv\Scripts\python.exe scripts\rdp_run_quality_monitor.py
 ```
 
-### 4.4 运行研究管线
+`scripts/rdp_start.py`、`scripts/rdp_realtime_daemon.py` 是兼容入口；`rdp_start.py` 会转发到 daily ingest 和 historical `--once`。新自动化应直接调用目标脚本或任务队列，不应依赖这些 legacy shim。
 
-```bash
-# 完整 Phase 2 → 3 → 4 → 5 → Decision 一键串联
-python scripts/rdp_run_full_pipeline.py --start 2026-03-31 --end 2026-04-02
+## 9. API 与 Operator UI
 
-# 只跑某些阶段
-python scripts/rdp_run_full_pipeline.py --start 2026-03-31 --end 2026-04-02 \
-    --start-from phase3                  # 从 Phase 3 开始
-python scripts/rdp_run_full_pipeline.py --start 2026-03-31 --end 2026-04-02 \
-    --stop-after phase4                  # 只跑到 Phase 4
+FastAPI 当前注册 50 个 `/rdp/*` 端点，覆盖：
+
+- health、active parameters、apply history；
+- attribution、execution、decision、readiness；
+- recommendation 审批/拒绝/替代/批准并发布；
+- token、gate、release、apply、rollback、observation；
+- task trigger/status、control summary；
+- workbench、tuning proposal；
+- profile recommendation/type review；
+- sleeve advice。
+
+完整方法与路径以运行时 `/openapi.json` 和 [项目代码审查与系统说明](../../docs/code_review/README.md) 为准。`/healthz` 只表示 Gateway 存活，不代表 RDP、交易或参数发布已 ready。
+
+## 10. 测试
+
+```powershell
+# RDP 相关单元测试
+.\.venv\Scripts\python.exe -m pytest tests\unit -k "rdp or workflow or active_parameter" -x -q
+
+# 全部单元测试
+.\.venv\Scripts\python.exe -m pytest tests\unit -x -q
 ```
 
----
+需要真实 Postgres/NATS/Redis 的集成测试在 WSL2 环境运行。每次交付报告实际命令和结果，不在本页保存会失效的通过数。
 
-## 5. 配置一览
+## 11. 延伸阅读
 
-完整模板: `configs/templates/.env.research.example`
-
-| 环境变量 | 默认值 | 说明 |
-|---|---|---|
-| `RDP_DATABASE_URL` | `postgresql+psycopg://localhost:5432/aats_research` | Research DB 连接串 |
-| `RDP_LIVE_DATABASE_URL` | — | Production DB 只读(Phase 3+ 必需) |
-| `RDP_HISTORICAL_INCOMING_DIR` | `./data/historical/incoming` | ZIP 输入目录 |
-| `RDP_ROLLING_CANDLES_SYMBOLS` | `BTC-USDT,ETH-USDT,BTC-USDT-SWAP,ETH-USDT-SWAP` | 采集 symbol 列表 |
-| `RDP_ROLLING_CANDLES_TIMEFRAMES` | `15m,1H` | 采集 timeframe(1m/5m 已默认禁用) |
-| `RDP_ROLLING_FUNDING_SYMBOLS` | `BTC-USDT-SWAP,ETH-USDT-SWAP` | funding 采集 symbol |
-| `RDP_GAP_AUTO_DETECT_WINDOW_HOURS` | `24` | gap 检测回看窗口 |
-| `RDP_ENV` | `dev` | 环境标识 (dev/staging/prod) |
-| `AATS_ACTIVE_PARAMETER_DB_URL` | — | 治理层 DB 连接串（设置后启用 governance schema 双写） |
-
-> 1m / 5m timeframe 在 schema 中保留(`*_1m`/`*_5m` 表仍存在),只是默认不再增量采集。如需启用,设置 `RDP_ROLLING_CANDLES_TIMEFRAMES=1m,5m,15m,1H`。详见 `config.py` 的注释块。
-
----
-
-## 6. Workflow 调度
-
-`configs/rdp_workflows/` 下有 4 个 workflow JSON:
-
-| Workflow | 调度建议 | 任务数 | 说明 |
-|---|---|---|---|
-| `data_maintenance` | 每日 04:00 UTC | 2 | 日批采集 + artifact 索引重建 |
-| `governance_cycle` | 每日 07:00 UTC | 4 | 质量监控、产物验证、轮次刷新 |
-| `research_cycle` | 每周日 08:00 UTC | 3 | Step 2 研究、Phase 3 归因、Phase 4 执行 |
-| `decision_cycle` | 每周(研究后) | 3 | Decision round、可靠性检查、观察检查 |
-
-```bash
-# 列出所有 workflow
-python scripts/rdp_run_scheduled_workflow.py --list
-
-# Dry run 预览
-python scripts/rdp_run_scheduled_workflow.py --workflow governance_cycle --dry-run
-
-# 执行
-python scripts/rdp_run_scheduled_workflow.py --workflow governance_cycle
-```
-
-完整调度策略和依赖关系: [`docs/operations/rdp_scheduling_strategy.md`](../../docs/operations/rdp_scheduling_strategy.md)。
-
----
-
-## 7. 与主交易系统的整合
-
-| 整合点 | 文件 | 作用 |
-|---|---|---|
-| Live DB 只读访问 | `live_query_adapter.py` | RDP 读 production DB 7 张事实表 |
-| 参数加载器 | `aats/bootstrap/active_parameters.py` | 启动时注入 family/tf 参数 |
-| 只读 API 路由 | `aats/api/rdp_routes.py` | `/rdp/` 前缀 8 个 GET 端点 |
-| 受控应用流程 | `scripts/approve_recommendation_and_apply.py` | Recommendation → Gate → Approval → Apply |
-| 治理层 DB 种子 | `scripts/apply_active_parameter_set.py --action seed-db` | JSON 注册表一次性全量写入 governance schema |
-
-整合原则: **不侵入实时主链 · 旁路分析 + 受控回灌 · 研究与生产分库 · 建议与应用分离 · 第一版不做自动 apply · 治理数据 DB-first + 文件 fallback**
-
----
-
-## 8. 测试
-
-```bash
-# 单元测试 (本目录相关)
-python -m pytest tests/unit/ -k "data_platform or rdp" -q
-
-# 端到端集成 (需要 docker testcontainers)
-python -m pytest tests/integration/data_platform/ -q
-```
-
-测试用例位置:
-- `tests/unit/data_platform/` — 各模块单测
-- `tests/integration/data_platform/` — testcontainers 端到端
-- `tests/replay/` — Phase 2 replay engine 测试
-
----
-
-## 9. 进一步阅读
-
-| 文档 | 内容 |
-|---|---|
-| **架构概览** | |
-| [主 README §21](../../README.md#21-研究数据平台-research-data-platform) | RDP 全景 + 七阶段管线 + 整合架构 |
-| [`docs/rdp/module_reference.md`](../../docs/rdp/module_reference.md) | 全部代码模块职责清单 |
-| **Phase 详解** | |
-| [`docs/rdp/phase2_parameter_research_details.md`](../../docs/rdp/phase2_parameter_research_details.md) | Phase 2: Edge Contract、CLI、产物 |
-| [`docs/rdp/phase3_4_attribution_execution_details.md`](../../docs/rdp/phase3_4_attribution_execution_details.md) | Phase 3-4: 归因瀑布、滑点模型 |
-| **运营** | |
-| [`docs/operations/rdp_scheduling_strategy.md`](../../docs/operations/rdp_scheduling_strategy.md) | Workflow 调度 + cron + 日批迁移背景 |
-| [`docs/operations/platform_runbook.md`](../../docs/operations/platform_runbook.md) | 平台全景 + 日常操作 + 故障排查 |
-| [`docs/operations/operator_checklist.md`](../../docs/operations/operator_checklist.md) | 日常巡检 + 运行前后检查 |
-| [`docs/operations/rdp_reliability_runbook.md`](../../docs/operations/rdp_reliability_runbook.md) | 可靠性 Runbook + 异常 SOP |
-| [`docs/operations/rdp_environment_matrix.md`](../../docs/operations/rdp_environment_matrix.md) | 环境隔离权限矩阵 |
-| **参数治理** | |
-| [`docs/operations/parameter_governance.md`](../../docs/operations/parameter_governance.md) | 参数生命周期 (draft → frozen) |
-| [`docs/operations/parameter_apply_and_rollback.md`](../../docs/operations/parameter_apply_and_rollback.md) | 应用与回滚操作指南 |
-| [`docs/operations/parameter_mapping_reference.md`](../../docs/operations/parameter_mapping_reference.md) | RDP↔主系统参数映射 |
-
----
-
-## 10. 已知限制
-
-| 项目 | 说明 |
-|---|---|
-| Symbol 白名单 | 4 个 instrument 硬编码,后续需改为数据库驱动 |
-| Gold volume 语义 | spot vol = 基础币量,swap vol = 合约张数,未做跨类型统一 |
-| Replay 评分 | Phase 2 使用简化模型(不含 AI assessment),与生产存在偏差 |
-| Replay 撮合 | Phase 2 不含撮合仿真和 PnL accounting |
-| Signal 校准 | `signal_edge_scale_bps` 当前为经验默认值(10.0),尚未历史数据校准 |
-| Execution realism V1 | Phase 4 无 orderbook depth/trades,spread 和 impact 基于 OHLCV proxy |
-| 仓位极小 | BTC-USDT-SWAP 1 合约 = 0.01 BTC,小仓位下 feasibility 区分度有限 |
+- [RDP 代码模块参考](../../docs/rdp/module_reference.md)
+- [平台运行手册](../../docs/operations/platform_runbook.md)
+- [参数应用与回滚](../../docs/operations/parameter_apply_and_rollback.md)
+- [生产参数变更 Runbook](../../docs/operations/production_parameter_change_runbook.md)
+- [Managed Profile 配置说明](../../docs/configuration/managed-config-reference.md)
+- [项目代码审查与系统说明](../../docs/code_review/README.md)

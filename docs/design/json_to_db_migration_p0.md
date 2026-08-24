@@ -20,12 +20,12 @@
 
 ### 1.1 现状
 
-- 写：[pre_apply_gate.py:263](aats/data_platform/production_workflow/pre_apply_gate.py:263) `_save_gate_result`
+- 写：[pre_apply_gate.py:263](../../aats/data_platform/production_workflow/pre_apply_gate.py:263) `_save_gate_result`
   - 先写 JSON：`artifacts/production_workflow/gates/{gate_run_id}/pre_apply_gate_result.json`
   - 再 best-effort 写 DB：`governance.pre_apply_gate_results`（DB 异常 → `log.warning` 吞掉）
   - 再写 Markdown 报告 `pre_apply_gate_report.md`
 - 读：
-  - 控制台聚合 [rdp_control_summary.py:85](aats/api/rdp_control_summary.py:85) `_load_recent_gate_results`：DB 命中即返回；任何异常 → 扫 JSON 目录
+  - 控制台聚合 [rdp_control_summary.py:85](../../aats/api/rdp_control_summary.py:85) `_load_recent_gate_results`：DB 命中即返回；任何异常 → 扫 JSON 目录
   - 其他读路径：按 `recommendation_id` / `gate_run_id` 查 JSON 目录
 
 ### 1.2 目标
@@ -132,8 +132,8 @@ Release apply 流程成功后调用 `db_set_gate_result_release_id(gate_run_id, 
 
 ### 2.1 现状
 
-- `save_strategy_tuning_overrides` ([strategy_tuning_registry.py:143](aats/data_platform/operations/strategy_tuning_registry.py:143))：把 `overrides_path(project_root)` JSON 写盘。
-- `load_strategy_tuning_overrides` ([strategy_tuning_registry.py:108](aats/data_platform/operations/strategy_tuning_registry.py:108))：DB 成功 → 返回 DB；DB 不可达或异常 → 默默退化读 JSON。
+- `save_strategy_tuning_overrides` ([strategy_tuning_registry.py:143](../../aats/data_platform/operations/strategy_tuning_registry.py:143))：把 `overrides_path(project_root)` JSON 写盘。
+- `load_strategy_tuning_overrides` ([strategy_tuning_registry.py:108](../../aats/data_platform/operations/strategy_tuning_registry.py:108))：DB 成功 → 返回 DB；DB 不可达或异常 → 默默退化读 JSON。
 - 上游 `refresh_strategy_tuning_overrides` 从 approved proposals 推导出 `combo_overrides`，仍会写 JSON。
 - 消费方：`rdp_control_summary.py` `overrides = load_strategy_tuning_overrides(root)`；决策系统会把 `combo_overrides` 注入 runtime。
 

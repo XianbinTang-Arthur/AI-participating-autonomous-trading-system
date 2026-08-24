@@ -1,177 +1,89 @@
-# Workflow 失败恢复指南
+# RDP Workflow 失败恢复指南
 
-> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+> 最后核对：2026-08-22（代码基线 `be9179e`）。当前 Gateway/daemon 通过 `governance.rdp_task_queue` 协作；旧 `/rdp/operations/failures*` API 已不存在。
 
+## 1. 先区分故障域
 
-## 概述
+- RDP workflow 失败：影响采集、研究、治理、发布证据；按本页处理。
+- 主交易 execution/OKX/reconciliation 故障：按根目录 `DEPLOYMENT.md` 和 Operator trading-ready/recovery 流程处理，不能用 RDP retry 代替。
 
-当 RDP workflow 任务失败时，系统提供标准化的失败记录和补跑流程。
-所有失败记录保存在 `artifacts/operations/workflow_failures.json`。
+RDP 失败通常不直接改变订单状态，但 gate/apply/observation 相关失败可能造成生产参数证据或恢复链断裂，需升级处理。
 
-## 失败记录流程
+## 2. 当前状态入口
 
-### 自动记录
+- `GET /rdp/tasks/status`：队列任务、状态、时间、exit code、error/log tail。
+- `GET /rdp/health`：daemon、数据库、workflow、artifact 健康。
+- `GET /rdp/control-summary`：Operator 汇总与可用动作。
+- `artifacts/operations/workflow_failures.json`：legacy failure registry/审计输入，仍被部分 reliability 工具读取。
+- `governance.rdp_task_queue`：Gateway/daemon 执行状态真源。
 
-Workflow dispatcher 执行完毕后，可通过 `auto_record_failures_from_report()` 自动提取失败任务：
+当前没有 `/rdp/operations/failures`、`/open` 或 `/retry` 路由。
 
-```python
-from aats.data_platform.operations.retry_manager import auto_record_failures_from_report
+## 3. 状态语义
 
-failures = auto_record_failures_from_report(root, report)
-```
+| 状态 | 含义 |
+| --- | --- |
+| `pending` | 已入队，等待 `earliest_start_at` 和 daemon claim |
+| `running` | daemon 已领取 |
+| `done` | 退出 0，完成 |
+| `failed` | 非零退出、异常或孤儿恢复 |
 
-### 手动记录
+孤儿恢复 exit code `-3` 表示 daemon 在任务完成前重启/终止，旧 running 被回收为 failed，不是任务脚本自身返回 -3。
 
-```bash
-python scripts/rdp_record_workflow_failure.py \
-    --workflow governance_cycle \
-    --run-id wf_20260404_070000_abc \
-    --task quality_monitor \
-    --error "Connection timeout" \
-    --exit-code 1
-```
+## 4. 标准调查
 
-### 查看 open 失败
+记录以下证据后再操作：
 
-```bash
-python scripts/rdp_record_workflow_failure.py --list-open
-```
+- task id、workflow、requested_by、requested/started/finished 时间；
+- `earliest_start_at`；
+- exit code、error message、log tail；
+- daemon heartbeat 和部署版本；
+- workflow JSON 版本与输入数据窗口；
+- 相关 DB/artifact/OKX 可达性；
+- 同 workflow 是否还有 active task。
 
-## 失败记录格式
+常见分类：
 
-```json
-{
-  "failure_id": "fail_governance_cycle_quality_monitor_20260404_070000",
-  "workflow": "governance_cycle",
-  "run_id": "wf_20260404_070000_abc",
-  "task_name": "quality_monitor",
-  "error_message": "Connection timeout to PostgreSQL",
-  "exit_code": 1,
-  "recorded_at": "2026-04-04T07:05:00Z",
-  "status": "open",
-  "retry_count": 0,
-  "last_retry_at": null,
-  "last_retry_result": null,
-  "resolution_notes": ""
-}
-```
+| 类别 | 例子 | 处置 |
+| --- | --- | --- |
+| 输入质量 | gap、schema/manifest、数据不足 | 修复/补齐输入，再补跑 |
+| 数据库 | 连接、迁移、约束、锁 | 恢复 DB 和 schema，核对事务结果 |
+| 外部数据源 | OKX timeout/rate limit | 等待恢复并保留失败记录 |
+| 代码/配置 | 参数错误、workflow/allowlist 漂移 | 修复代码与测试后部署 |
+| 超时 | task 超出 daemon timeout | 先查慢因，不盲目调大 |
+| daemon 生命周期 | exit `-3` | 确认旧进程死亡和新 heartbeat，再 retry |
 
-### 状态流转
+## 5. 补跑
 
-```
-open ──→ retried (补跑成功)
-  │
-  ├──→ resolved (手动解决)
-  │
-  └──→ ignored (标记忽略)
-```
+修复根因后，通过 Operator UI 或 `POST /rdp/tasks/trigger` 创建新任务。数据库会阻止同 workflow 同时存在两条 pending/running。
 
-## 补跑流程
+- 不直接把 failed 改回 pending/running；
+- 不删除 active task 绕过 partial unique index；
+- 不绕开队列直接执行 scheduled workflow 来伪造成功状态；
+- 自动重试任务必须尊重 `earliest_start_at`；
+- `release_cycle` 当前禁止入队，不能通过 retry 绕过冻结。
 
-### 补跑单个任务
+旧 artifact-based retry 工具只用于它们明确支持的历史 round/failure registry；使用前先运行 `--help` 并确认不会与 DB task queue 产生双重执行。
 
-```bash
-python scripts/rdp_retry_workflow_failure.py \
-    --failure-id fail_governance_cycle_quality_monitor_20260404_070000 \
-    --mode task
-```
-
-### 补跑整个 workflow
-
-```bash
-python scripts/rdp_retry_workflow_failure.py \
-    --failure-id fail_governance_cycle_quality_monitor_20260404_070000 \
-    --mode workflow
-```
-
-### 预览补跑
-
-```bash
-python scripts/rdp_retry_workflow_failure.py \
-    --failure-id fail_governance_cycle_quality_monitor_20260404_070000 \
-    --dry-run
-```
-
-### 自定义超时
-
-```bash
-python scripts/rdp_retry_workflow_failure.py \
-    --failure-id fail_research_cycle_research_round_20260404_080000 \
-    --mode task \
-    --timeout 900
-```
-
-## 常见失败场景
-
-### 1. 数据库连接超时
-
-**症状**: `Connection timeout to PostgreSQL`
-**处理**:
-1. 检查数据库状态
-2. 确认连接参数（环境变量）
-3. 补跑失败任务
-
-### 2. 子进程超时
-
-**症状**: `timeout after Ns`
-**处理**:
-1. 检查任务是否正常但耗时过长
-2. 如果数据量增长导致超时，调整 workflow config 中的 `timeout_seconds`
-3. 补跑任务，可使用 `--timeout` 覆盖
-
-### 3. 依赖产物缺失
-
-**症状**: `FileNotFoundError` 或 `artifact not found`
-**处理**:
-1. 检查上游 workflow 是否执行成功
-2. 先补跑上游 workflow
-3. 再补跑当前失败任务
-
-### 4. 配置错误
-
-**症状**: 退出码 2
-**处理**:
-1. 检查对应 workflow JSON 配置
-2. 修复配置后重新执行
-
-## 补跑决策指南
-
-| 失败类型 | 建议操作 |
-|---------|---------|
-| 临时网络/连接问题 | 直接补跑单任务 |
-| 上游依赖缺失 | 先补跑上游，再补跑当前 |
-| 配置错误 | 修复配置后补跑整 workflow |
-| 数据异常 | 调查根因，手动解决后标记 resolved |
-| 已知非关键失败 | 标记 ignored |
-
-## API 集成
-
-失败记录也可通过 RDP API 访问：
-
-```
-GET /rdp/operations/failures          # 列出所有失败
-GET /rdp/operations/failures/open     # 列出 open 失败
-POST /rdp/operations/failures/retry   # 补跑失败任务
-```
-
----
-
-## 与交易系统安全相关的失败
-
-RDP workflow 失败通常只影响研究和参数治理，不应直接修改 live 交易状态。但以下失败需要按生产事件处理：
+## 6. 高风险失败
 
 | 失败 | 风险 | 处理 |
-|------|------|------|
-| pre-apply gate 失败或缺失 | 未验证参数进入 live | 阻止 apply，记录 failure，重新跑 gate |
-| apply history 写入失败 | 无法审计参数变更 | 停止后续 apply，修复 DB/文件双写后补录 |
-| active parameter DB 写入失败并 fallback 文件 | DB/JSON 可能漂移 | 恢复 DB 后运行 `seed-db` 并比对 active registry |
-| observation/rollback workflow 失败 | 异常参数可能继续生效 | 人工评估是否立即 rollback |
-| 生产 apply 缺少 gate 记录 | 绕过门控 | 视为流程违规，立即审计 active parameter 和 release history |
+| --- | --- | --- |
+| Gate 缺失/失败 | 未验证参数可能前向发布 | 阻止 apply，修复 evidence/gate |
+| Apply 返回失败或 history 不完整 | active/release 审计可能不一致 | 停止发布，核对 DB active/history/release |
+| Active parameter DB 不可用 | runtime 退化到 profile 参数 | 停止发布，恢复 DB；没有 JSON fallback |
+| Observation 失败 | 异常参数可能继续生效 | 人工检查主交易事实并评估 rollback |
+| Rollback 失败/无 target | 无法自动恢复 | 保持保护状态，人工审查合法 target |
+| Release cycle 被触发 | 违反冻结策略 | 立即审计触发源、任务表和 active history |
 
-如果上述失败发生在 `spot_live` 或 `derivatives_live` 期间，Operator 应同时检查主交易系统：
+高风险失败同时检查：`/system/health`、kill switch、recovery、reconciliation、active version、近期 decision/order intent、fee/slippage/PnL。
 
-1. `/system/health`
-2. kill switch 状态
-3. reconciliation 最新报告
-4. active parameter version
-5. 最近 decision / order intent 是否显著变化
+## 7. 恢复完成标准
+
+- 原 task 保留为 failed，原因和处置可追踪；
+- 新 task 是独立记录且成功；
+- daemon heartbeat 正常，无 orphan running；
+- scheduler state/slot 不重复、不漏跑；
+- 相关 artifact 与 DB snapshot 一致；
+- 涉及生产参数时，active/history/release/provenance 完整；
+- 没有通过直接 DB/JSON 编辑掩盖失败。

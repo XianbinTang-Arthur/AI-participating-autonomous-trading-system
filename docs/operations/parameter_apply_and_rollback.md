@@ -1,228 +1,155 @@
-# Parameter Apply & Rollback 操作指南
+# Parameter Apply 与 Rollback 操作指南
 
-> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+> 最后核对：2026-08-22（代码基线 `be9179e`）。本页描述当前 API 实现，不再使用已禁用的直写 CLI 或 JSON active parameter fallback。
 
+## 1. 关键事实
 
-> 本文档描述如何将已批准的 recommendation 受控地应用为 active parameter set，
-> 以及如何在出问题时回滚。
+- runtime active parameter 唯一真源：Postgres `governance.active_parameter_sets`。
+- recommendation 不会因为 approved 自动生效；只有 release/apply 成功才改变 active set。
+- `POST /rdp/parameters/apply` 和 `POST /rdp/parameters/rollback` 同时要求 Operator write access 与 action-bound `X-Rdp-Apply-Token`。
+- token actor 在启用认证时必须等于当前 session identity，且 token 受 HMAC、action 和 TTL 约束。
+- `POST /rdp/releases/create` 与 `POST /rdp/recommendations/{id}/approve-and-release` 当前只要求 write access + Step2 integrity gate，**没有额外要求 apply token**；这是代码中的真实策略差异，不得在 runbook 中误写为“所有 apply 路径都需要 token”。如果要统一安全策略，应先修改代码和测试。
+- `release_cycle` 自动调度已禁用且禁止任务入队。
 
----
+## 2. 变更前置条件
 
-## 1. 设计原则
+在任何前向参数变更前逐项确认：
 
-- **apply 必须是显式动作** — recommendation 不会自动生效
-- **apply 必须可审计** — 每次操作记录在 `parameter_apply_history.json`
-- **apply 必须可回滚** — 任何 apply 都可以被回滚到上一版本
-- **生产 apply 必须经过 gate** — live 不提供跳过 gate 的标准流程
-- **生产 direct apply 默认冻结** — `RDP_ENV=prod` 下应通过 release 流程触发，且需显式设置 `RDP_PRODUCTION_APPLY_ENABLED=true`
+1. recommendation 存在、状态可转换、证据 lineage 完整；
+2. Step2 integrity 没有 blocking reason；
+3. attribution、execution realism、readiness 支持该变更；
+4. `/rdp/health`、`/system/health`、recovery、reconciliation 可接受；
+5. pre-apply gate 允许；
+6. actor、notes、observation window 和 rollback target 已记录；
+7. 当前 active set 已备份为可审计数据库状态，不依赖本地 JSON。
 
----
+## 3. 推荐的 Operator 流程
 
-## 2. Apply 流程
+### 3.1 审批
 
-### 2.1 前置条件
+通过 Operator UI 或认证 API 调用：
 
-1. recommendation 状态必须为 `approved`
-2. recommendation 必须有 `target_parameter_set_id`
-3. target parameter set 必须在 `artifacts/governance/current_parameter_registry.json` 中存在
-
-### 2.2 Apply 行为
-
-```
-approved recommendation
-    ↓
-解析 target_parameter_set_id
-    ↓
-从 parameter_registry 获取 values（DB 优先 → 文件 fallback）
-    ↓
-写入 governance.active_parameter_sets (DB)          ← DB 双写
-    ↓
-写入 configs/active_parameter_sets/active_parameter_registry.json (文件备份)
-    ↓
-写入 configs/active_parameter_sets/<combo>.json (per-file 备份)
-    ↓
-写入 governance.parameter_apply_history (DB)        ← DB 双写
-    ↓
-写入 artifacts/decision_system/parameter_apply_history.json (文件备份)
-    ↓
-输出后续重启/reload 指令
+```text
+POST /rdp/recommendations/{recommendation_id}/approve
 ```
 
-> **DB 开关**: 当 `AATS_ACTIVE_PARAMETER_DB_URL` 环境变量未设置时，跳过 DB 写入，仅走文件路径。
+request body 的 actor 不是认证开启时的审计真源；服务端会使用 session principal identity。
 
-### 2.3 通过脚本 Apply
+### 3.2 Gate
 
-> 仅适用于 `dev`，或已准备好完整 gate/release 上下文的非生产调试场景。`prod` 下 direct apply 会被拒绝，请改走 `scripts/rdp_create_parameter_release.py`。
-
-```bash
-python scripts/rdp_apply_approved_recommendation.py \
-    --recommendation-id rec_xxx \
-    --actor operator_wang \
-    --notes "SOP 审批通过后应用"
+```text
+POST /rdp/gates/run
 ```
 
-### 2.4 通过 API Apply
+Body 使用 `recommendation_id`。Gate 返回 block 时停止；不得通过 `skip_gate=true` 把生产 gate 变成可选项。
 
-> 仅适用于 `dev`，或内部受控调用。`prod` 下 `/rdp/parameters/apply` 会被拒绝。
+### 3.3 选择发布入口
 
-```bash
-curl -X POST /rdp/parameters/apply \
-    -H "Content-Type: application/json" \
-    -d '{
-        "recommendation_id": "rec_xxx",
-        "actor": "operator_wang",
-        "notes": "SOP approved"
-    }'
+当前有三条前向路径：
+
+| 路径 | 认证 | Token | 行为 |
+| --- | --- | --- | --- |
+| `POST /rdp/parameters/apply` | write access | `action=apply` 必需 | 将已批准 recommendation 应用为 active set |
+| `POST /rdp/releases/create` | write access | 当前不要求 | gate + release + apply；支持 observation window |
+| `POST /rdp/recommendations/{id}/approve-and-release` | write access | 当前不要求 | approve + gate + release + apply 组合入口 |
+
+运维默认使用 UI 暴露的受控组合入口；如果直接调用 `/parameters/apply`，先由同一 Operator session 申请 token：
+
+```text
+POST /rdp/operator-tokens
+body: {"action": "apply"}
 ```
 
-### 2.5 Apply 后操作
+然后在短时有效期内调用：
 
-apply 只修改配置文件，不会自动重启系统。需要：
-
-- **方式 1**: 重启 API gateway（下次 `build_runtime()` 会加载新参数）
-- **方式 2**: 调用 `POST /system/rebaseline`（如果已实现热加载）
-
----
-
-## 3. Rollback 流程
-
-### 3.1 Rollback 行为
-
-```
-当前 active parameter set
-    ↓
-从 apply history 查找上一个版本（或指定版本）
-    ↓
-从 parameter_registry 获取该版本的 values
-    ↓
-重新写为 active
-    ↓
-写入 rollback history
-    ↓
-输出结果
+```text
+POST /rdp/parameters/apply
+header: X-Rdp-Apply-Token: <sensitive-short-lived-token>
+body: {"recommendation_id": "...", "notes": "..."}
 ```
 
-### 3.2 通过脚本 Rollback
+不要把 token 复制进文档、日志、工单或持久化 shell history。
 
-```bash
-# 自动回滚到上一版本
-python scripts/rdp_rollback_active_parameter_set.py \
-    --family independent --timeframe 15m \
-    --actor operator_wang
+### 3.4 发布后验证
 
-# 回滚到指定版本
-python scripts/rdp_rollback_active_parameter_set.py \
-    --family independent --timeframe 15m \
-    --to-parameter-set-id ps_20260403_xxx \
-    --actor operator_wang
+- `GET /rdp/parameters/active`：combo、parameter_set_id、version 符合预期；
+- `GET /rdp/parameters/apply-history`：actor、action、from/to、notes 可追踪；
+- `GET /rdp/releases/latest`：gate/apply/observation 状态一致；
+- 主交易进程重建后 Settings Provenance 显示 active parameter 注入；
+- `/system/health`、recovery、reconciliation、决策频率、订单、fee/slippage 无异常；
+- observation window 到期后运行/检查 observation。
 
-# 预览
-python scripts/rdp_rollback_active_parameter_set.py \
-    --family independent --timeframe 15m --dry-run
+## 4. Rollback
+
+### 4.1 何时回滚
+
+- gate 后才出现输入或 runtime 漂移；
+- observation 建议 rollback；
+- 交易行为、费用、滑点、回撤、reconciliation 或 blocker 明显退化；
+- active set 与 release/history 不一致；
+- Operator 无法解释当前 active 值来源。
+
+安全回滚路径即使 Step2 降级也必须可用；代码不会把前向变更的 Step2 integrity gate套到 rollback。
+
+### 4.2 获取 rollback token
+
+由当前 Operator session 调用：
+
+```text
+POST /rdp/operator-tokens
+body: {"action": "rollback"}
 ```
 
-### 3.3 通过 API Rollback
+### 4.3 执行
 
-```bash
-curl -X POST /rdp/parameters/rollback \
-    -H "Content-Type: application/json" \
-    -d '{
-        "family": "independent",
-        "timeframe": "15m",
-        "actor": "operator_wang",
-        "notes": "live behavior degraded"
-    }'
+```text
+POST /rdp/parameters/rollback
+header: X-Rdp-Apply-Token: <sensitive-short-lived-token>
+body:
+  family: independent | directional
+  timeframe: 15m | 1h
+  to_parameter_set_id: <optional-explicit-target>
+  notes: <required-operational-context>
 ```
 
----
+不指定 target 时服务会尝试上一版本。以下情况返回 422：validation failed、无上一目标、无 active set、环境禁止。
 
-## 4. Apply History
+### 4.4 回滚后验证
 
-所有 apply / rollback / clear 操作记录在：
+1. active set 已指向预期 target；
+2. apply history 出现 rollback 且 actor 正确；
+3. release/observation/rollback recommendation 关联可追踪；
+4. runtime 重建后实际生效值与数据库一致；
+5. 主交易 health、reconciliation、订单和风险恢复；
+6. 记录触发原因、影响窗口和后续修复。
 
-```
-artifacts/decision_system/parameter_apply_history.json
-```
+## 5. 已禁用入口
 
-### 记录格式
+以下脚本当前是硬禁用兼容桩，执行会打印替代路径并退出 2：
 
-```json
-{
-  "operation_id": "op_20260404_163000_abc123",
-  "operation_type": "apply",
-  "family": "independent",
-  "timeframe": "15m",
-  "from_parameter_set_id": "ps_old_xxx",
-  "to_parameter_set_id": "ps_new_yyy",
-  "recommendation_id": "rec_xxx",
-  "actor": "operator_wang",
-  "created_at": "2026-04-04T16:30:00+00:00",
-  "notes": "approved and applied"
-}
-```
+- `scripts/apply_active_parameter_set.py`
+- `scripts/approve_recommendation_and_apply.py`
+- `scripts/rdp_rollback_active_parameter_set.py`
+- `scripts/rdp_freeze_parameter_set.py`
+- `scripts/rdp_run_release_cycle.py`
 
-### 查看历史
+不得把它们的旧参数写入现行命令示例。`configs/active_parameter_sets/active_parameter_registry.json` 也不是 runtime fallback 或人工恢复入口。
 
-```bash
-# API
-curl GET /rdp/parameters/apply-history
+## 6. 失败语义
 
-# 脚本
-python scripts/apply_active_parameter_set.py --action show-active
+| 症状 | 处理 |
+| --- | --- |
+| `missing_apply_token` / `invalid_apply_token` | 重新由当前 session 申请正确 action 的 token；不要复用他人 token |
+| `actor_mismatch` | token actor 与 session identity 不一致，停止并重新签发 |
+| `integrity_blocked=true` | 修复 Step2 evidence/integrity，不能继续前向 apply |
+| `blocked_by_gate` | 保留 release 记录，修复 gate 原因后重新评估 |
+| apply failed | active/history/release 三方核对，禁止盲目重试 |
+| DB loader error | runtime 已退化到 profile 参数；停止发布，恢复 DB 真源后重建和核对 |
+| no previous rollback target | 不猜测、不从 JSON 导入；人工确认合法 parameter_set_id 后显式回滚 |
 
-# 全量种子到 DB（从 JSON 文件同步到 DB，幂等可重复）
-python scripts/apply_active_parameter_set.py --action seed-db
-```
+## 7. 相关文档
 
----
-
-## 5. Active Registry 更新逻辑
-
-apply 和 rollback 同时更新三层存储：
-
-1. **DB 表**（主）: `governance.active_parameter_sets`（设置 `AATS_ACTIVE_PARAMETER_DB_URL` 后启用）
-2. **Registry 格式**（文件备份）: `configs/active_parameter_sets/active_parameter_registry.json`
-3. **Per-file 格式**（兼容备份）: `configs/active_parameter_sets/<family>_<timeframe>.json`
-
-三层始终保持同步。主系统加载时优先读 DB → registry 文件 → per-file fallback。
-
-> **历史记录同理**: `governance.parameter_apply_history` DB 表 + `parameter_apply_history.json` 文件始终双写。
-
----
-
-## 6. 回滚触发条件
-
-以下情况建议立即回滚：
-
-| 条件 | 严重度 | 操作 |
-|------|--------|------|
-| live 行为明显恶化（PnL、成交率） | 高 | 立即回滚 |
-| attribution 出现新的主要失败类型 | 中 | 评估后回滚 |
-| execution realism 与预期偏差 > 2x | 中 | 评估后回滚 |
-| operator / reviewer 明确要求 | 高 | 立即回滚 |
-| quality monitor 报告 unhealthy | 中 | 评估后回滚 |
-
----
-
-## 7. 注意事项
-
-1. **不要跳过 approval 直接 apply** — 必须先 approve recommendation
-2. **不要在交易活跃期 apply** — 建议在低波动时段操作
-3. **apply 后观察至少 1 个交易周期** — 确认参数效果
-4. **回滚后也要重启** — rollback 同样需要重启/reload 使参数生效
-5. **保留 history** — 不要手动删除 `parameter_apply_history.json`
-6. **生产不要跳过 gate** — gate 记录缺失时，不应继续 apply
-
----
-
-## 8. 交易系统安全关联
-
-active parameter set 会在主交易系统 `build_runtime()` 期间注入策略参数。参数 apply 成功不等于 live 安全，apply 后必须检查：
-
-- active parameter registry 中 family/timeframe 指向的新版本。
-- apply history 中 actor、recommendation、gate status、notes。
-- 主交易系统 `/system/health`。
-- 最近 decision frequency、order intent 数量、reconciliation 状态。
-- 如果 live 行为异常，先执行 rollback，再调查 RDP evidence。
-
-相关流程见 [`production_parameter_change_runbook.md`](production_parameter_change_runbook.md)。
+- [平台运行手册](platform_runbook.md)
+- [生产参数变更 Runbook](production_parameter_change_runbook.md)
+- [Managed Profile 配置说明](../configuration/managed-config-reference.md)
+- [RDP 总览](../../aats/data_platform/README.md)

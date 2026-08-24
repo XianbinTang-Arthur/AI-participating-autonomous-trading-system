@@ -25,7 +25,7 @@
 
 ### 2. Lots 真相
 
-- 当前 PostgreSQL 基线 migration：[0001_postgres_latest_schema.sql](D:/文件/project/AIParticipatingAutonomousTradingSystem/migrations/0001_postgres_latest_schema.sql)
+- 当时的 PostgreSQL 基线 migration 为 `0001_postgres_latest_schema.sql`；该历史文件已被当前增量迁移集合替代，现状见 [`migrations/`](../../../migrations/)
 - 新增持久化 repo：
   - [lot_repo.py](D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/storage/lot_repo.py)
   - [lot_repo_postgres.py](D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/storage/lot_repo_postgres.py)

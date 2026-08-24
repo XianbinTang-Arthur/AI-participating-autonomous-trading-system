@@ -5,7 +5,7 @@
 
 ## 目标
 
-把 [Task59](D:/文件/project/AIParticipatingAutonomousTradingSystem/docs/task59/README.md) 切成可以连续实施的子任务，并按依赖顺序推进。
+把 [Task59](../task59/README.md) 切成可以连续实施的子任务，并按依赖顺序推进。
 
 ## 任务拆分
 

@@ -42,7 +42,7 @@ canonical 字段：
   - `ai_primary_max_uncertainty`
   - `ai_primary_min_directional_edge`
 - 运行时代码统一读取 canonical 字段
-- 根目录新增 [`.env.example`](D:\文件\project\AIParticipatingAutonomousTradingSystem\.env.example)，只展示 canonical 环境变量
+- 当时根目录新增 `.env.example`，只展示 canonical 环境变量（该历史文件当前已不存在，不应把它当作现行配置模板）
 - [configs/base.yaml](D:\文件\project\AIParticipatingAutonomousTradingSystem\configs\base.yaml) 已切换到 canonical 键名
 
 ## 旧 mode 可见性策略

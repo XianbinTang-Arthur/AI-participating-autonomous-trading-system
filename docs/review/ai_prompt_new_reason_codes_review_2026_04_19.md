@@ -50,7 +50,7 @@ prompt_builder.build() payload（prompt 旧版 / 0.2.0）:
 | `alpha_ls_contrarian_long` | 大户多空比偏低 → 反转多 | P2.7 |
 | `alpha_ls_contrarian_short` | 大户多空比偏高 → 反转空 | P2.7 |
 
-Source: [aats/services/decision_engine/baseline.py:343](aats/services/decision_engine/baseline.py:343)-373
+Source: [aats/services/decision_engine/baseline.py:343](../../aats/services/decision_engine/baseline.py:343)-373
 
 ### AI 误解点
 
@@ -96,7 +96,7 @@ docker logs aats-decision | grep api.openai.com
 ### 3.3 Shadow evaluation 持久化
 
 - `strategy.ai_*` topics 在 event_store 表 0 条。
-- [aats/services/ai_service/evaluator.py:11](aats/services/ai_service/evaluator.py:11) 的 `AIEvaluationTracker` 把 shadow 结果保存在 `dict`/`list` in-memory 内，只维护最近 500/200 条。
+- [aats/services/ai_service/evaluator.py:11](../../aats/services/ai_service/evaluator.py:11) 的 `AIEvaluationTracker` 把 shadow 结果保存在 `dict`/`list` in-memory 内，只维护最近 500/200 条。
 - 这意味着**无法用 SQL 对齐调研**历史 shadow 输出质量。但不影响风险判断：OpenAI 已调用 = prompt 已污染。
 
 ## 4. 风险评估
@@ -166,7 +166,7 @@ docker logs aats-decision | grep api.openai.com
 
 ### 5.3 测试
 
-新增 [tests/unit/test_prompt_builder_reason_code_glossary.py](tests/unit/test_prompt_builder_reason_code_glossary.py)，5 用例：
+新增 [tests/unit/test_prompt_builder_reason_code_glossary.py](../../tests/unit/test_prompt_builder_reason_code_glossary.py)，5 用例：
 
 1. `test_glossary_includes_only_codes_present_in_brief` — glossary 只含实际 reason_codes 对应条目
 2. `test_glossary_is_empty_when_no_new_codes_present` — 无新 code 时 glossary 为空 dict
@@ -197,8 +197,8 @@ docker logs aats-decision | grep api.openai.com
 
 | 文件 | 变更 |
 |---|---|
-| [aats/services/ai_service/prompt_builder.py](aats/services/ai_service/prompt_builder.py) | +35 行（glossary 常量 + 条件注入逻辑 + instructions 规则）|
-| [aats/bootstrap/settings.py:248](aats/bootstrap/settings.py:248) | `ai_prompt_version: str = "0.3.0"` |
-| [configs/base.yaml:128](configs/base.yaml:128) | `ai_prompt_version: 0.3.0` + 注释 |
-| [tests/unit/test_prompt_builder_reason_code_glossary.py](tests/unit/test_prompt_builder_reason_code_glossary.py) | 新增 5 用例，117 行 |
-| [docs/review/ai_prompt_new_reason_codes_review_2026_04_19.md](docs/review/ai_prompt_new_reason_codes_review_2026_04_19.md) | 本报告 |
+| [aats/services/ai_service/prompt_builder.py](../../aats/services/ai_service/prompt_builder.py) | +35 行（glossary 常量 + 条件注入逻辑 + instructions 规则）|
+| [aats/bootstrap/settings.py:248](../../aats/bootstrap/settings.py:248) | `ai_prompt_version: str = "0.3.0"` |
+| [configs/base.yaml:128](../../configs/base.yaml:128) | `ai_prompt_version: 0.3.0` + 注释 |
+| [tests/unit/test_prompt_builder_reason_code_glossary.py](../../tests/unit/test_prompt_builder_reason_code_glossary.py) | 新增 5 用例，117 行 |
+| [docs/review/ai_prompt_new_reason_codes_review_2026_04_19.md](ai_prompt_new_reason_codes_review_2026_04_19.md) | 本报告 |

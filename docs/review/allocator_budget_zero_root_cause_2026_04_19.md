@@ -18,14 +18,14 @@
 
 ### 1. 事件发射点
 
-`decision_target_sizing_resolved` 唯一源头：[aats/services/decision_engine/target_position.py:250](aats/services/decision_engine/target_position.py:250) `log_position_sizing_breakdown`。两处调用：
+`decision_target_sizing_resolved` 唯一源头：[aats/services/decision_engine/target_position.py:250](../../aats/services/decision_engine/target_position.py:250) `log_position_sizing_breakdown`。两处调用：
 
-- [target_position.py:536](aats/services/decision_engine/target_position.py:536) — DecisionEngine 内部 build 路径（首次发射，一般不在主线日志看到）
-- [bootstrap/config.py:1798](aats/bootstrap/config.py:1798) — `_publish_finalized_decision_outcome` 的最终发射（这是用户看到的日志）
+- [target_position.py:536](../../aats/services/decision_engine/target_position.py:536) — DecisionEngine 内部 build 路径（首次发射，一般不在主线日志看到）
+- [bootstrap/config.py:1798](../../aats/bootstrap/config.py:1798) — `_publish_finalized_decision_outcome` 的最终发射（这是用户看到的日志）
 
 ### 2. budgeted_notional / resolved_reference_qty 强制置零逻辑
 
-[target_position.py:187-241](aats/services/decision_engine/target_position.py:187) `finalize_position_sizing_breakdown`：
+[target_position.py:187-241](../../aats/services/decision_engine/target_position.py:187) `finalize_position_sizing_breakdown`：
 
 ```python
 if abs(normalized_target_qty) <= EPSILON_DECIMAL_12:   # L209
@@ -41,17 +41,17 @@ if abs(normalized_target_qty) <= EPSILON_DECIMAL_12:   # L209
 
 ### 3. target_qty 的上游管线
 
-[target_position.py:503](aats/services/decision_engine/target_position.py:503) `target_qty = self._target_quantity(...)` → [L639 `_target_quantity`](aats/services/decision_engine/target_position.py:639) → 按 `ai_operating_mode` dispatch：
+[target_position.py:503](../../aats/services/decision_engine/target_position.py:503) `target_qty = self._target_quantity(...)` → [L639 `_target_quantity`](../../aats/services/decision_engine/target_position.py:639) → 按 `ai_operating_mode` dispatch：
 
-- `baseline_only` → [`_target_quantity_baseline_only`](aats/services/decision_engine/target_position.py:714)
+- `baseline_only` → [`_target_quantity_baseline_only`](../../aats/services/decision_engine/target_position.py:714)
 - `ai_assisted` → `_target_quantity_ai_assisted`
 - `ai_decision_maker` → `_target_quantity_ai_decision_maker`
 
-三个分支前都统一做 [L660 `_apply_entry_edge_gate`](aats/services/decision_engine/target_position.py:1140)（内含 `_apply_trade_qualification_gate`）和 [L669 `_apply_strategy_execution_guards`](aats/services/decision_engine/target_position.py:1235)。任一门禁返回 `current_position_qty`，后续就是 `managed=0 → target=0`。
+三个分支前都统一做 [L660 `_apply_entry_edge_gate`](../../aats/services/decision_engine/target_position.py:1140)（内含 `_apply_trade_qualification_gate`）和 [L669 `_apply_strategy_execution_guards`](../../aats/services/decision_engine/target_position.py:1235)。任一门禁返回 `current_position_qty`，后续就是 `managed=0 → target=0`。
 
 ### 4. Allocator / 家族层的并行管线
 
-Allocator 在 DecisionEngine 之后跑，见 [`strategy_engines/families/independent_family.py:218`](aats/services/strategy_engines/families/independent_family.py:218) `evaluate_independent_books`，其入口质量门槛 [`strategy_engines/independent/gates.py:148`](aats/services/strategy_engines/independent/gates.py:148) `evaluate_entry_quality_gate`：
+Allocator 在 DecisionEngine 之后跑，见 [`strategy_engines/families/independent_family.py:218`](../../aats/services/strategy_engines/families/independent_family.py:218) `evaluate_independent_books`，其入口质量门槛 [`strategy_engines/independent/gates.py:148`](../../aats/services/strategy_engines/independent/gates.py:148) `evaluate_entry_quality_gate`：
 
 ```python
 if score + 1e-9 < entry_threshold:
@@ -114,7 +114,7 @@ flat         | flat      | hold   | reference_only | 111
 short        | flat      | hold   | reference_only |   5
 ```
 
-**116 条决策中 5 条 baseline 判 short，全部被下游降为 flat**。`decision_authority=reference_only` 仅是 `baseline_only` 模式的固定 label（见 `authority_map` [L1926-1930](aats/services/decision_engine/target_position.py:1926)），**不参与阻塞**。
+**116 条决策中 5 条 baseline 判 short，全部被下游降为 flat**。`decision_authority=reference_only` 仅是 `baseline_only` 模式的固定 label（见 `authority_map` [L1926-1930](../../aats/services/decision_engine/target_position.py:1926)），**不参与阻塞**。
 
 ### 3. 典型 short-bias 决策的 decision_blocker_chain
 
@@ -136,7 +136,7 @@ short        | flat      | hold   | reference_only |   5
 ]
 ```
 
-**target_gate 阻塞理由 = `short_entry_confidence_below_threshold`**。`baseline_target_not_promoted_to_actionable_target` 不是独立阻塞，而是 target_gate 把 qty 拉回 0 的派生标签（见 [L2060-2065](aats/services/decision_engine/target_position.py:2060)）。
+**target_gate 阻塞理由 = `short_entry_confidence_below_threshold`**。`baseline_target_not_promoted_to_actionable_target` 不是独立阻塞，而是 target_gate 把 qty 拉回 0 的派生标签（见 [L2060-2065](../../aats/services/decision_engine/target_position.py:2060)）。
 
 ### 4. baseline_reference 数值（5 条 short 样本完全一致，说明来自同一特征快照）
 
@@ -204,7 +204,7 @@ Reason codes：
 **根因：calibration 层刚下调 composite_alpha 阈值到 ±0.15（commit 6344f00）后，DecisionEngine 和 Allocator 两层的"下游门槛" 没同步下调**，导致：
 
 1. baseline 能产出 `direction_bias=short` 了（`|alpha|=0.153 > 0.15`），但
-2. `confidence`（另一套独立计算，[baseline.py:145](aats/services/decision_engine/baseline.py:145) `0.35 + |alpha|*0.35 + regime_conf*0.2 + pos_scale*0.1`）在 uncertain regime + 刚过阈值的 alpha 下**结构性在 0.50 附近**，触不到 DecisionEngine 的 `confidence_min=0.55`；
+2. `confidence`（另一套独立计算，[baseline.py:145](../../aats/services/decision_engine/baseline.py:145) `0.35 + |alpha|*0.35 + regime_conf*0.2 + pos_scale*0.1`）在 uncertain regime + 刚过阈值的 alpha 下**结构性在 0.50 附近**，触不到 DecisionEngine 的 `confidence_min=0.55`；
 3. Allocator 侧 `independent` family 的 `leg_score`（聚合 alpha/momentum/trend/microstructure 的独立评分）在当前弱信号下**结构性在 0.24–0.27**，触不到 `entry_threshold=0.30`。
 
 **类型：配置（不是代码 bug，不是设计意图）**。设计意图是信号强的时候才下单，当前问题是"信号强度的度量尺"（confidence 0.5 vs 0.55、leg_score 0.27 vs 0.30）和"信号强度的定义"（composite_alpha 0.15 阈值）**不同步**。

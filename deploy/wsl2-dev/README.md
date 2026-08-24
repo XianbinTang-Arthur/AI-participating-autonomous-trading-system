@@ -11,6 +11,8 @@
 
 > 当前约定：`.env.wsl2` 的单一真相放在仓库根目录，例如 `~/aats/.env.wsl2`。
 > `scripts/deploy.sh` 仍兼容旧位置 `deploy/wsl2-dev/.env.wsl2`，但只建议作为迁移期兼容路径。
+>
+> 最后核对：2026-08-22（代码基线 `be9179e`）。本页说明基础设施构成；部署唯一入口仍是仓库根目录的 `scripts/deploy.sh`。
 
 ## 拓扑
 
@@ -36,9 +38,10 @@
               └──────────────────────┬─────────────────────────────┘
                                      │ 127.0.0.1 端口转发
                           ┌──────────┴──────────┐
-                          │  AATS 4 个进程       │
-                          │  gateway / market   │
-                          │  decision / exec    │
+                          │ AATS 主交易切片      │
+                          │ gateway / market   │
+                          │ decision / exec    │
+                          │ + RDP/采集 daemons │
                           └─────────────────────┘
 ```
 
@@ -61,7 +64,7 @@
 ## 前置要求
 
 1. **Windows 11 已启用 WSL2**
-2. **已安装 Docker Desktop** 并在 Settings → Resources → WSL Integration 里把目标 Ubuntu 发行版打开
+2. WSL2 Ubuntu 内 Docker Engine/Compose 可用；本仓库当前以独立 WSL2 Docker 环境为准，不要求通过 Docker Desktop 管理
 3. **磁盘可用空间 ≥ 5GB**
 4. WSL2 内已经能 `docker compose version`
 
@@ -69,20 +72,27 @@
 
 ## 第一次拉起
 
-```bash
-# 1. 进入目录（用 WSL2 路径，不要用 /mnt/d/...）
-cd ~/aats
+先在 WSL2 native checkout 中准备基础设施环境文件：
 
-# 2. 复制环境变量模板并修改密码
+```bash
+cd ~/aats
 cp configs/templates/.env.wsl2.example .env.wsl2
 $EDITOR .env.wsl2     # 把 *_change_me 改成你自己的值
+```
 
-# 3. 从 Windows repo root 走标准部署入口拉起基础设施和应用服务
+然后回到 Windows 工作区根目录，通过唯一部署入口执行：
+
+```bash
 bash scripts/deploy.sh --profile derivatives-live --skip-commit
+```
 
-# 4. 查看部署报告中的健康检查结果；必要时再跑 scripts/sync_to_wsl2.sh check 对齐 HEAD
+部署报告完成后可做只读验证：
 
-# 5. 验证关键端口
+```bash
+# 必要时确认 Windows 与 WSL2 checkout 对齐
+bash scripts/sync_to_wsl2.sh check
+
+# 基础设施探针
 docker exec aats-postgres pg_isready -U aats  # Postgres
 docker exec aats-redis redis-cli ping         # Redis
 curl http://localhost:8222/healthz             # NATS
@@ -108,29 +118,12 @@ bash scripts/sync_to_wsl2.sh check
 
 ---
 
-## 连接信息（AATS 进程侧 .env）
+## 连接配置边界
 
 这些连接信息由 `scripts/deploy.sh` 通过根目录 `.env.wsl2` 和 profile env 文件注入。
 不要再维护单独的旧式 WSL2 dev env 文件或手动启动 4 个进程。
 
-```bash
-# Postgres
-AATS_STORAGE_MODE=postgres
-AATS_DATABASE_URL=postgresql+psycopg://aats:aats_dev_change_me@127.0.0.1:5432/aats?options=-csearch_path%3Dpublic
-AATS_DATABASE_AUTO_CREATE_SCHEMA=true
-AATS_DATABASE_SINGLE_RUNTIME_GUARD_ENABLED=true
-
-# Redis（Stage 6 引入）
-AATS_REDIS_URL=redis://127.0.0.1:6379/0
-
-# NATS（Stage 4 引入）
-AATS_NATS_URL=nats://127.0.0.1:4222
-AATS_EVENT_BUS_BACKEND=hybrid       # in_memory | hybrid | nats
-
-# OpenTelemetry（Stage 8 引入）
-OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
-OTEL_SERVICE_NAME=aats
-```
+当前 Compose 公共环境使用 `AATS_DATABASE_URL`、`AATS_HOT_STATE_REDIS_URL`、`AATS_NATS_URL`、`AATS_ACTIVE_PARAMETER_DB_URL` 和 `AATS_OTEL_*`。连接串可能包含凭证，本文不复制示例值；以 `configs/templates/` 的无密钥模板和 Compose 声明为字段参考，以根目录受忽略的真实环境文件为运行输入。
 
 > 注意：`AATS_DATABASE_SINGLE_RUNTIME_GUARD_ENABLED=true` 是允许打开的 ——
 > 改造后的 `scoped_runtime_lock_key` 会按 `AATS_PROCESS_ROLE` 派生不同的 advisory lock，
@@ -159,18 +152,17 @@ OTEL_SERVICE_NAME=aats
 
 ## 数据备份
 
-参见 `../scripts/backup_postgres.sh`（Stage 1 同步交付的另一脚本）。
-
-简易手动备份：
+使用随栈提供的脚本：
 
 ```bash
-docker exec aats-postgres pg_dump -U aats -F c -d aats > backup_$(date +%F).dump
+cd ~/aats/deploy/wsl2-dev
+RETENTION_DAYS=14 ./scripts/backup_postgres.sh
 ```
 
-恢复：
+恢复前必须先保留当前备份并按 [部署与运行说明](../../DEPLOYMENT.md) 停止应用，再执行：
 
 ```bash
-cat backup_2026-04-07.dump | docker exec -i aats-postgres pg_restore -U aats -d aats --clean --if-exists
+./scripts/restore_postgres.sh latest
 ```
 
 ---
@@ -180,9 +172,9 @@ cat backup_2026-04-07.dump | docker exec -i aats-postgres pg_restore -U aats -d 
 | 现象 | 排查 |
 |------|------|
 | `port is already allocated` | Windows 上已经有进程占用对应 127.0.0.1 端口；用 `netstat -ano \| findstr :5432` 找到并停止 |
-| Postgres 健康检查失败 | `docker compose logs postgres`，常见原因：上次 `down -v` 没干净，留有旧 volume 残文件 |
-| NATS JetStream 报 `no space left` | 编辑 `nats/nats-server.conf`，调小 `max_file_store` 或 `down -v` 重置 |
-| Grafana 看不到数据源 | 容器启动顺序问题；`docker compose restart grafana` |
+| Postgres 健康检查失败 | 查看 `aats-postgres` 容器状态/日志并核对磁盘与 volume；不要删除 volume |
+| NATS JetStream 报 `no space left` | 先检查三条 stream 和 8 GiB server 容量；运行 `scripts/nats_stream_migrate.py --dry-run` 评估配置漂移。不得通过调小上限或删除 volume 处置 |
+| Grafana 看不到数据源 | 查看 `aats-grafana` 日志和 provisioning 文件；修复后通过 `scripts/deploy.sh` 重建，不手动 restart Compose 服务 |
 | Loki 报 `entry too far behind` | 主机时间不同步，进 WSL2 `sudo ntpdate ntp.aliyun.com` |
 
 ---
@@ -208,7 +200,7 @@ cat backup_2026-04-07.dump | docker exec -i aats-postgres pg_restore -U aats -d 
 | Stage 1 | Postgres | 把 Postgres 搬到 WSL2，替代旧的 host 进程 |
 | Stage 2 | Postgres | 加 per-role advisory lock，准备多进程启动 |
 | Stage 4 | NATS | 引入 HybridEventBus，逐步把 in_memory 事件迁过去 |
-| Stage 5 | NATS | 全量切到 file storage，关键 topic 持久化 |
+| Stage 5 | NATS | 三条 JetStream 分层：MARKET、EVENTS、COMMANDS；`audit.records` 直接持久化到 Postgres |
 | Stage 6 | Redis | 跨进程热状态缓存 + WebSocket session |
 | Stage 8 | Loki + Jaeger + Grafana | 4 进程统一可观测性（OTel trace + 结构化日志）|
 | Stage 9 | Prometheus + Promtail + Redis-Exporter | 指标采集 + 5 条告警规则 + 2 仪表盘 |

@@ -3,12 +3,17 @@
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
 
+> 最后核对：2026-08-22（代码基线 `be9179e`）。本文只描述 managed profile 当前路径；legacy `config_profile` YAML 是 deprecated 兼容路径，不应新增依赖。
+
 ## 生效顺序
 
 1. `settings.py` 默认值
 2. managed profile 代码基线（运行时语义，不建议在 `.env` 重复）
 3. `configs/strategy_profiles/<profile>.yaml` 策略调参
-4. 对应 `.env` 里的最小 override
+4. 对应 `.env` 里允许覆盖的最小环境字段
+5. `build_runtime()` 从 Postgres `governance.active_parameter_sets` 注入的 active parameters
+
+managed profile 派生字段（环境、mode、storage/backend、产品/保证金/持仓模式、模拟/实盘标识、Operator auth/secure cookie、主副 timeframe 等）即使写入 `.env` 也会被忽略并记录日志。`runtime_profile_resolution()` 当前是 `env_only`，不会从旧管理控制面再次覆盖。
 
 > live profile 还会受到 startup hardening 约束。即使配置文件能被解析，exchange-coupled runtime 也必须满足 Postgres、OKX account/execution、Operator auth、single runtime guard 等硬条件才允许启动。
 
@@ -36,6 +41,7 @@
 - 策略调参文件：`configs/strategy_profiles/derivatives.yaml`
 - 默认产品类型：`derivatives`
 - 默认保证金模式：`cross`
+- 默认持仓模式：`net`
 - 默认 OKX 模式：`模拟盘`
 
 ### `derivatives_live`
@@ -44,16 +50,17 @@
 - 策略调参文件：`configs/strategy_profiles/derivatives_live.yaml`
 - 默认产品类型：`derivatives`
 - 默认保证金模式：`cross`
+- 默认持仓模式：`hedge`
 - 默认 OKX 模式：`实盘`
 
 ## `.env` 里应该保留什么
 
-- 标的与资金规模
+- 标的与本地 paper/demo 规模；exchange-coupled 可用余额必须来自账户快照
 - 数据库、端口、日志目录
 - 交易所与 OpenAI 凭证
 - 账户级仓位/杠杆/风控上限
 
-## live profile 安全必填项
+## live profile 有效安全约束
 
 | 字段 | 要求 |
 |------|------|
@@ -68,7 +75,7 @@
 | `AATS_OPERATOR_SESSION_SECRET` | 长随机 secret，不能提交 |
 | `AATS_OPERATOR_SESSION_COOKIE_SECURE` | live 环境为 `true` |
 
-live 环境还应确认 active parameter version、gate history、reconciliation 状态和 recovery status。
+这些是 runtime 必须满足的有效状态，其中 managed 派生字段不应重新写入 `.env`。live 环境还应确认 active parameter version、gate history、reconciliation 状态和 recovery status。
 
 ## 按字段分组的修改指南
 
@@ -101,6 +108,7 @@ live 环境还应确认 active parameter version、gate history、reconciliation
 ### 想改仓位 / 杠杆 / 名义金额上限去哪
 
 - 改根目录对应 profile 的 `.env.*` 文件。
+- 这些值是风险上限或本地规模种子，不能代替 OKX account snapshot；active parameter 映射字段若在数据库中有 active set，最终以数据库注入值为准。
 - 现货常改：
   - `AATS_DEFAULT_ORDER_QTY`
   - `AATS_MAX_ABS_POSITION_QTY`
@@ -313,17 +321,26 @@ live 环境还应确认 active parameter version、gate history、reconciliation
 - `trial_guard_max_high_slippage_ratio`
 - `trial_guard_max_slow_submit_to_fill_ratio`
 
-## 已标记为 deprecated / 不建议继续写入 managed `.env` 的字段
+## managed `.env` 中会被忽略的派生字段
 
 | 字段 | 说明 |
 | --- | --- |
-| `AATS_CONFIG_PROFILE` | managed profile 启动时不再建议写进 `.env`；由代码按 profile 自动派生。 |
-| `AATS_MARKET_DATA_BACKEND / AATS_EXECUTION_BACKEND / AATS_ACCOUNT_BACKEND` | managed profile 启动时由代码自动派生，不建议继续在 `.env` 里覆盖。 |
-| `AATS_TRADING_PRODUCT_TYPE / AATS_MARGIN_MODE / AATS_OKX_SIMULATED_TRADING` | managed profile 启动时由代码自动派生，不建议继续在 `.env` 里覆盖。 |
-| `AATS_PRIMARY_TIMEFRAME / AATS_SECONDARY_TIMEFRAME` | 当前实现固定为 15m + 1h；保留字段仅为兼容旧配置，不建议继续写入 `.env`。 |
+| `AATS_CONFIG_PROFILE / AATS_ENVIRONMENT / AATS_STARTUP_PROFILE / AATS_MODE` | 由 managed profile 自动派生；环境 override 被忽略。 |
+| `AATS_STORAGE_MODE / AATS_MARKET_DATA_BACKEND / AATS_EXECUTION_BACKEND / AATS_ACCOUNT_BACKEND / AATS_ACCOUNT_READ_ENABLED` | 由 managed profile 自动派生；环境 override 被忽略。 |
+| `AATS_LIVE_SUBMIT_ENABLED / AATS_GUARDED_EXECUTION_DRY_RUN / AATS_BOOTSTRAP_PORTFOLIO_FROM_EXCHANGE` | 由 managed profile 自动派生；环境 override 被忽略。 |
+| `AATS_TRADING_PRODUCT_TYPE / AATS_MARGIN_MODE / AATS_DERIVATIVES_POSITION_MODE / AATS_DERIVATIVES_HEDGE_TRANSITION_MODE / AATS_DERIVATIVES_REQUIRE_EXCHANGE_POS_MODE_MATCH` | 产品身份由 managed profile 自动派生；环境 override 被忽略。 |
+| `AATS_OKX_SIMULATED_TRADING / AATS_OPERATOR_AUTH_ENABLED / AATS_OPERATOR_SESSION_COOKIE_SECURE` | 模拟/实盘与认证身份由 managed profile 自动派生；环境 override 被忽略。 |
+| `AATS_PRIMARY_TIMEFRAME / AATS_SECONDARY_TIMEFRAME` | 当前实现固定为 15m + 1h；环境 override 被忽略。 |
 
 ## legacy `configs/*.yaml` 当前职责
 
 - 仍保留给非托管/manual `config_profile` 路径与测试使用
 - 托管 profile（`spot/derivatives/spot_live/derivatives_live`）不再叠加这些 YAML
 - 新的策略调参统一走 `configs/strategy_profiles/*.yaml`
+
+## Active parameter 真源与故障语义
+
+- 主交易 runtime 只读取 Postgres `governance.active_parameter_sets`。
+- `active_parameter_registry_path` 和 `configs/active_parameter_sets/*.json` 只保留兼容 API/审计用途，加载路径不再使用文件 fallback。
+- 数据库 URL 已配置但加载失败时，loader 返回带 `db_load_failed` 的空 registry 并记录 error；系统退化到 managed/profile 参数。Operator 必须把这种退化当作配置漂移处理。
+- active parameters 在普通环境 override 之后注入，因此映射字段的最终值以 active set 为准。

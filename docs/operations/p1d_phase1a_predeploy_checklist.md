@@ -1,5 +1,7 @@
 # P1-D Phase 1A Pre-Deploy Checklist (Stage 4 runbook)
 
+> **历史首次上线清单（2026-08-22 核对）**：只适用于 2026-04 P1-D Phase 1A 首次部署，不是当前通用 pre-deploy checklist。commit、容器、scheduler 和 gate 状态可能已变化；当前操作以根目录 `DEPLOYMENT.md` 与 `operator_checklist.md` 为准。
+
 > **目的**: 在用户按下 `bash scripts/deploy.sh --profile derivatives-live --skip-commit` 之前,机械化地跑完这份清单,排除 6 类 known risk (OKX 连接上限 / scheduler 识别 / migration 就绪 / monitoring 就绪 / DB 连通 / 滚回 SOP)。
 >
 > **适用**: P1-D Phase 1A (Stage 1-4 全量),本文档仅覆盖首次上线的预检;deploy 之后的 48h 监控见 `p1d_phase1a_48h_stability_runbook.md`。

@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""RDP Task Daemon — 宿主机侧轮询 governance.rdp_task_queue 并执行 workflow.
+"""RDP Task Daemon — 轮询 governance.rdp_task_queue 并执行 workflow.
 
-在 WSL2 宿主机上运行，桥接 Docker 容器内 Gateway UI 的任务触发和实际脚本执行。
+标准部署把本脚本作为 ``aats-rdp-daemon`` 容器入口，桥接 Gateway UI 的任务
+触发和容器内 workflow 执行。直接前台运行仅用于受控开发/诊断，不是第二套
+生产部署或后台进程管理入口。
 
 用法:
     # 前台运行（开发调试）
     python scripts/rdp_task_daemon.py
-
-    # 后台运行
-    nohup python scripts/rdp_task_daemon.py &
 
     # 指定轮询间隔（默认 10 秒）
     python scripts/rdp_task_daemon.py --poll-interval 5

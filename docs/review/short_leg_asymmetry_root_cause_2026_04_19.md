@@ -25,23 +25,23 @@
 
 ## 2. Long vs Short 逐分量对比表（含 `file:line`）
 
-生产入口 `compute_raw_book_score` ([aats/services/strategy_engines/independent/scoring.py:124-181](aats/services/strategy_engines/independent/scoring.py:124))：
+生产入口 `compute_raw_book_score` ([aats/services/strategy_engines/independent/scoring.py:124-181](../../aats/services/strategy_engines/independent/scoring.py:124))：
 
 | 分量 | Long leg 公式 | Short leg 公式 | 是否对称 | 权重 (Mode A) | 对 slope 影响 |
 |---|---|---|---|---|---|
-| `alpha_component` ([scoring.py:137](aats/services/strategy_engines/independent/scoring.py:137)) | `clamp(max(0, +composite_alpha), 0, 1)` | `clamp(max(0, -composite_alpha), 0, 1)` | ✅ | 0.34 | 方向驱动 |
-| `ai_component` ([scoring.py:138](aats/services/strategy_engines/independent/scoring.py:138)) | `clamp(max(0, +ai_edge), 0, 1)` | `clamp(max(0, -ai_edge), 0, 1)` | ✅ | 0.0 (Mode A) | 方向驱动（Mode A 无贡献） |
-| `momentum_component` ([scoring.py:139](aats/services/strategy_engines/independent/scoring.py:139)) | `clamp(max(0, +momentum_alpha), 0, 1)` | `clamp(max(0, -momentum_alpha), 0, 1)` | ✅ | 0.24 | 方向驱动 |
-| `trend_component` ([scoring.py:140](aats/services/strategy_engines/independent/scoring.py:140)) | `clamp(max(0, +trend_alpha), 0, 1)` | `clamp(max(0, -trend_alpha), 0, 1)` | ✅ | 0.18 | 方向驱动 |
-| `microstructure_component` ([scoring.py:141](aats/services/strategy_engines/independent/scoring.py:141)) | `clamp(max(0, +micro_alpha), 0, 1)` | `clamp(max(0, -micro_alpha), 0, 1)` | ✅ | 0.12 | 方向驱动 |
-| **`confidence` ★** ([scoring.py:142](aats/services/strategy_engines/independent/scoring.py:142)) | `clamp(baseline.confidence, 0, 1)` | `clamp(baseline.confidence, 0, 1)` **（相同值）** | ❌ **方向无关** | **0.12** | **反方向污染 short** |
-| `regime_bonus` ([scoring.py:175-176](aats/services/strategy_engines/independent/scoring.py:175)) | `+0.04 if regime ∈ {range,uncertain}` | 同上，**两腿同加** | ❌ 方向无关 | 0.04 bonus | 稀释 short slope |
-| `direction_bias_bonus` ([scoring.py:177-178](aats/services/strategy_engines/independent/scoring.py:177)) | `+0.06 if bias == "long"` | `+0.06 if bias == "short"` | ✅ | 0.06 bonus | 方向驱动 |
-| `volatility_bonus` ([scoring.py:179-180](aats/services/strategy_engines/independent/scoring.py:179)) | `+0.03 if vol == high` | 同上，**两腿同加** | ❌ 方向无关 | 0.03 bonus | 稀释 short slope |
+| `alpha_component` ([scoring.py:137](../../aats/services/strategy_engines/independent/scoring.py:137)) | `clamp(max(0, +composite_alpha), 0, 1)` | `clamp(max(0, -composite_alpha), 0, 1)` | ✅ | 0.34 | 方向驱动 |
+| `ai_component` ([scoring.py:138](../../aats/services/strategy_engines/independent/scoring.py:138)) | `clamp(max(0, +ai_edge), 0, 1)` | `clamp(max(0, -ai_edge), 0, 1)` | ✅ | 0.0 (Mode A) | 方向驱动（Mode A 无贡献） |
+| `momentum_component` ([scoring.py:139](../../aats/services/strategy_engines/independent/scoring.py:139)) | `clamp(max(0, +momentum_alpha), 0, 1)` | `clamp(max(0, -momentum_alpha), 0, 1)` | ✅ | 0.24 | 方向驱动 |
+| `trend_component` ([scoring.py:140](../../aats/services/strategy_engines/independent/scoring.py:140)) | `clamp(max(0, +trend_alpha), 0, 1)` | `clamp(max(0, -trend_alpha), 0, 1)` | ✅ | 0.18 | 方向驱动 |
+| `microstructure_component` ([scoring.py:141](../../aats/services/strategy_engines/independent/scoring.py:141)) | `clamp(max(0, +micro_alpha), 0, 1)` | `clamp(max(0, -micro_alpha), 0, 1)` | ✅ | 0.12 | 方向驱动 |
+| **`confidence` ★** ([scoring.py:142](../../aats/services/strategy_engines/independent/scoring.py:142)) | `clamp(baseline.confidence, 0, 1)` | `clamp(baseline.confidence, 0, 1)` **（相同值）** | ❌ **方向无关** | **0.12** | **反方向污染 short** |
+| `regime_bonus` ([scoring.py:175-176](../../aats/services/strategy_engines/independent/scoring.py:175)) | `+0.04 if regime ∈ {range,uncertain}` | 同上，**两腿同加** | ❌ 方向无关 | 0.04 bonus | 稀释 short slope |
+| `direction_bias_bonus` ([scoring.py:177-178](../../aats/services/strategy_engines/independent/scoring.py:177)) | `+0.06 if bias == "long"` | `+0.06 if bias == "short"` | ✅ | 0.06 bonus | 方向驱动 |
+| `volatility_bonus` ([scoring.py:179-180](../../aats/services/strategy_engines/independent/scoring.py:179)) | `+0.03 if vol == high` | 同上，**两腿同加** | ❌ 方向无关 | 0.03 bonus | 稀释 short slope |
 
 **方向无关部分总权重**：`W_CONFIDENCE (0.12) + regime_bonus (0.04) + volatility_bonus (0.03) = 0.19`（占最大可能 score 的 ~19%）。
 
-`baseline.confidence` 的公式 ([aats/services/decision_engine/baseline.py:145-154](aats/services/decision_engine/baseline.py:145))：
+`baseline.confidence` 的公式 ([aats/services/decision_engine/baseline.py:145-154](../../aats/services/decision_engine/baseline.py:145))：
 ```python
 confidence = min(max(0.35 + abs(alpha_score)*0.35 + regime_confidence*0.2 + position_scale*0.1, 0.4), 0.96)
 ```
@@ -53,7 +53,7 @@ confidence = min(max(0.35 + abs(alpha_score)*0.35 + regime_confidence*0.2 + posi
 
 ### H1 — `alpha_component` 符号处理不对称 → ❌ 不成立
 
-[scoring.py:137](aats/services/strategy_engines/independent/scoring.py:137)：
+[scoring.py:137](../../aats/services/strategy_engines/independent/scoring.py:137)：
 ```python
 side_sign = 1.0 if leg == "long" else -1.0
 alpha_component = _clamp(max(0.0, side_sign * float(baseline.composite_alpha_score)), 0.0, 1.0)
@@ -62,7 +62,7 @@ alpha_component = _clamp(max(0.0, side_sign * float(baseline.composite_alpha_sco
 
 ### H2 — `ai_component` long/short 派生不对称 → ❌ 不成立
 
-[scoring.py:138](aats/services/strategy_engines/independent/scoring.py:138)：`ai_component = _clamp(max(0, side_sign * _ai_directional_edge(ai_assessment)), 0, 1)`。`AIMarketAssessment.directional_edge` ([aats/schemas/decision.py:163](aats/schemas/decision.py:163)) 是 float 有符号量，与 composite_alpha 处理方式完全一致。**且生产当前 `ai_operating_mode = baseline_only` (Mode A, W_AI=0)**，AI 分量对 R² 无贡献。
+[scoring.py:138](../../aats/services/strategy_engines/independent/scoring.py:138)：`ai_component = _clamp(max(0, side_sign * _ai_directional_edge(ai_assessment)), 0, 1)`。`AIMarketAssessment.directional_edge` ([aats/schemas/decision.py:163](../../aats/schemas/decision.py:163)) 是 float 有符号量，与 composite_alpha 处理方式完全一致。**且生产当前 `ai_operating_mode = baseline_only` (Mode A, W_AI=0)**，AI 分量对 R² 无贡献。
 
 ### H3 — regime_bonus / direction_bias_bonus / volatility_bonus → 🟡 部分成立
 
@@ -94,7 +94,7 @@ H3 不会使 slope 翻转为负（它们是 binary term 且期望值相对稳定
 
 ### H5 — `microstructure_alpha` 方向继承 → ❌ 不成立
 
-[scoring.py:141](aats/services/strategy_engines/independent/scoring.py:141)：和 H1/H2 完全同构，`max(0, side_sign * microstructure_alpha)`，数学对称。
+[scoring.py:141](../../aats/services/strategy_engines/independent/scoring.py:141)：和 H1/H2 完全同构，`max(0, side_sign * microstructure_alpha)`，数学对称。
 
 ### H6 — 采样偏差（数据问题） → 🟡 共犯但非主因
 
@@ -157,9 +157,9 @@ H3 不会使 slope 翻转为负（它们是 binary term 且期望值相对稳定
 ### 推荐方案 A.1：方向门控 confidence + 方向门控 regime/volatility bonus
 
 **变更范围**：
-1. [aats/services/strategy_engines/independent/scoring.py:142](aats/services/strategy_engines/independent/scoring.py:142)
-2. [aats/services/strategy_engines/independent/scoring.py:175-180](aats/services/strategy_engines/independent/scoring.py:175)
-3. [aats/data_platform/replay/adapters/independent_adapter.py:245-259](aats/data_platform/replay/adapters/independent_adapter.py:245)（同步 replay）
+1. [aats/services/strategy_engines/independent/scoring.py:142](../../aats/services/strategy_engines/independent/scoring.py:142)
+2. [aats/services/strategy_engines/independent/scoring.py:175-180](../../aats/services/strategy_engines/independent/scoring.py:175)
+3. [aats/data_platform/replay/adapters/independent_adapter.py:245-259](../../aats/data_platform/replay/adapters/independent_adapter.py:245)（同步 replay）
 
 **scoring.py diff**（示意）：
 ```python

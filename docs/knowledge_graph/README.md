@@ -1,6 +1,8 @@
 # AATS 系统知识图谱
 
-> **定位**：AATS 的**全新**系统知识图谱，取代过时/碎片化的旧文档。
+> **历史快照（2026-08-22 核对）**：本目录固定反映 2026-04-21、HEAD `0ef6f1c` 附近的系统，不再承诺“当前”。其中账户数值、运行模式、拓扑、配置、表/Topic/API 和 findings 状态都可能过期。当前入口见 [`docs/README.md`](../README.md) 和 [完整代码审查说明](../code_review/README.md)。
+
+> **原始定位（历史）**：AATS 在 2026-04-21 建立的系统知识图谱。
 >
 > **建立时间**：2026-04-21 autonomous session
 > **维护责任**：发现和实际行为不一致时，**改本知识图谱而不是让它腐烂**。
@@ -71,13 +73,9 @@ agent 可以重跑相同的 grep / 查询命令确认图谱是否仍然对得上
 
 ## AATS 是什么（3 行版本）
 
-1. **AI Participating Autonomous Trading System** — AI 为主受益者的加密
-   货币自动交易系统。当前实盘 OKX BTC-USDT-SWAP 衍生品，账户权益
-   ~$393 USDT。
-2. **4 进程微服务架构**（gateway / market / decision / execution）+
-   PostgreSQL / Redis / NATS / Grafana / Prometheus / Loki / Jaeger。
-3. **当前运行模式 `baseline_only`**（AI 完全 short-circuit，纯规则策略
-   `independent` family），所有 fail-closed 路径已 C2 审计。
+1. 这是 2026-04-21 的系统快照，不应从其中推断当前账户、仓位或 live 状态。
+2. 当前主交易仍按 gateway/market/decision/execution 四个 slice 理解，但完整部署还包括 RDP 和 profile-specific collectors。
+3. 当前有效运行模式、策略和参数必须从现场 runtime、数据库和 Settings Provenance 获取。
 
 ---
 
@@ -107,4 +105,4 @@ agent 可以重跑相同的 grep / 查询命令确认图谱是否仍然对得上
 - `docs/weekly_review/` — 每周复盘（自省）
 - `docs/audit/` / `docs/review/` — 历史审计（可能已过时）
 
-**本图谱与上述并存**，但只有本图谱承诺"描述当前是什么"。
+**本图谱与上述并存，现仅承担历史解释作用；不再承诺描述当前。**

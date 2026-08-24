@@ -1,5 +1,7 @@
 # Grafana Alert Rules 推荐清单
 
+> **历史建议清单（2026-08-22 核对）**：当前仓库已经通过 `deploy/wsl2-dev/grafana/provisioning/alerting/rules.yml`、`contactpoints.yml` 和 `policies.yml` 配置告警。本文保存 2026-04-22 的设计建议，阈值和 LF 状态使用前必须与当前 provisioning/metrics 核对。
+
 > **生成于**：2026-04-22 autonomous session
 > **背景**：LF-001 / LF-020 最初被标 "heartbeat 看不到 GIL 卡死 / decision idleness 无告警"，
 > 后发现心跳和 decision_cycles metric 都已就位，缺的只是 **Grafana alert rule 配置**。
@@ -145,9 +147,11 @@ Grafana UI 路径：
 2. 按本文档表格填写 Query / Condition / For / Severity
 3. 建议先用 "Pending" 状态观察一周再开正式通知
 
-如果用 Grafana Provisioning（IaC）：
-- 把规则写进 `deploy/wsl2-dev/grafana/provisioning/alerting/aats_alerts.yml`
-- 下次 grafana container 重启自动加载
+当前 Grafana Provisioning（IaC）路径：
+- 规则：`deploy/wsl2-dev/grafana/provisioning/alerting/rules.yml`
+- Contact points：`deploy/wsl2-dev/grafana/provisioning/alerting/contactpoints.yml`
+- Policies：`deploy/wsl2-dev/grafana/provisioning/alerting/policies.yml`
+- 修改后通过标准 `scripts/deploy.sh` 重建/验证，不手工重启单个 Compose 服务
 
 ---
 

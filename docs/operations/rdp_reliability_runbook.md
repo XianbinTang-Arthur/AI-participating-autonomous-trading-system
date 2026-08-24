@@ -2,6 +2,8 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
+> 最后核对：2026-08-22（代码基线 `be9179e`）。当前 scheduler/daemon 在容器内运行，workflow 共 10 个；`decision_cycle`、`release_cycle` disabled，旧 active JSON seed 和直写 rollback CLI 不可用。
+
 
 ## 概述
 
@@ -15,7 +17,7 @@
 |------|------|------|------|
 | 06:30 UTC | 确认 data_maintenance 完成 | 检查 `artifacts/operations/workflow_runs/` 最新报告 | overall_status = success |
 | 07:30 UTC | 确认 governance_cycle 完成 | 同上 | overall_status = success |
-| 08:00 UTC | 运行可靠性检查 | `python scripts/rdp_run_reliability_check.py` | 退出码 0 |
+| 每小时 :15 后 | 确认 reliability_cycle | `/rdp/tasks/status` + reliability output | 最近 slot 完成 |
 | 08:05 UTC | 检查告警摘要 | `python scripts/rdp_build_alert_summary.py --current` | 无 critical |
 | 08:10 UTC | 检查 daemon 心跳 | 查看 `/rdp/health` 中 `rdp-daemon` 项 | `status=ok` 且 heartbeat < 45s |
 | 随时 | 检查 open 失败 | `python scripts/rdp_record_workflow_failure.py --list-open` | 无 open 失败 |
@@ -25,7 +27,7 @@
 | 任务 | 命令 | 预期 |
 |------|------|------|
 | 确认 research_cycle 完成 | 检查周日运行报告 | overall_status = success |
-| 确认 decision_cycle 完成 | 检查周日运行报告 | overall_status = success |
+| 确认 decision_cycle 保持禁用 | 检查 workflow 定义/调度状态 | 不应自动入队 |
 | 审核告警历史 | 查看 `artifacts/operations/alerts/history/` | 趋势稳定 |
 | 审核失败历史 | 查看 `artifacts/operations/workflow_failures.json` | 无长期 open |
 | 检查 release 观察状态 | 查看 release history | 无异常 observing |
@@ -73,8 +75,8 @@
 3. 评估 rollback:
    python scripts/rdp_evaluate_rollback_recommendation.py --release-id <ID>
 4. 如果建议 rollback:
-   python scripts/rdp_rollback_active_parameter_set.py \
-     --family <FAMILY> --timeframe <TF> --actor operator
+   由当前 Operator session 申请 action=rollback token，
+   调用 POST /rdp/parameters/rollback，并核对 active/history/provenance
 ```
 
 ### Scenario 4: 治理层 DB 连接失败
@@ -83,35 +85,24 @@
 日志中出现: "parameter_registry: DB 写入失败" 或 "DB 读取失败，fallback 到文件"
 ```
 
-**影响**: 数据仍然写入 JSON 文件，系统正常运行，但 DB 数据会滞后。
+**影响**: 不同治理模块的降级语义不同。主交易 runtime active parameter loader 不读 JSON fallback，会退化到 profile 参数并记录 error；不能声称“系统正常运行”。
 
 **处理**:
 ```
-1. 检查 PostgreSQL 容器状态:
-   docker ps | grep aats-postgres
-2. 检查环境变量:
-   echo $AATS_ACTIVE_PARAMETER_DB_URL
-3. 测试 DB 连接:
-   psql $AATS_ACTIVE_PARAMETER_DB_URL -c "SELECT 1"
-4. 检查 governance schema 是否存在:
-   psql ... -c "\dt governance.*"
-5. 如果 schema 丢失，重新建表:
-   python -c "from aats.data_platform.rdp_models import create_rdp_schema; create_rdp_schema()"
-6. DB 恢复后，从 JSON 文件重新种子:
-   python scripts/apply_active_parameter_set.py --action seed-db
-7. 验证 DB 数据完整性:
-   psql ... -c "SELECT count(*) FROM governance.parameter_sets"
+1. 停止新的参数发布，查看 /rdp/health 和数据库容器健康/日志。
+2. 不输出连接串或环境文件内容；使用项目健康检查确认 research/governance DB。
+3. 核对 governance migrations 和 78 表 schema，不用临时 Python 建表替代迁移。
+4. 恢复数据库真源；不得从 active JSON 人工 seed runtime 状态。
+5. 核对 active parameter sets、apply history、release、scheduler state 和 runtime provenance。
 ```
 
 ### Scenario 5: 长时间无 workflow 执行
 
 ```
-1. 检查调度器状态 (cron / Task Scheduler)
-2. 手动执行一轮:
-   python scripts/rdp_run_scheduled_workflow.py --workflow governance_cycle --dry-run
-3. 确认 dry-run 正常后实际执行:
-   python scripts/rdp_run_scheduled_workflow.py --workflow governance_cycle
-4. 恢复调度器配置
+1. 检查 rdp-daemon heartbeat、scheduler state 和 /rdp/tasks/status。
+2. 用 scripts/rdp_schedule_workflows.py --dry-run --json 查看应到期 slot。
+3. 需要补跑时通过 POST /rdp/tasks/trigger 入队，不绕开任务队列直接执行。
+4. 确认同 workflow active 唯一约束和 earliest_start_at。
 ```
 
 ### Scenario 6: `rdp-daemon` 心跳陈旧或丢失
@@ -122,8 +113,7 @@
    psql ... -c "SELECT component, status, heartbeat_at FROM governance.rdp_runtime_status"
 3. 检查 daemon 容器日志:
    docker logs aats-rdp-daemon --tail 200
-4. 如 daemon 已停止或报错，重启容器并确认 heartbeat 恢复:
-   docker restart aats-rdp-daemon
+4. 如 daemon 已停止或报错，修复原因后通过 bash scripts/deploy.sh --skip-commit 重建/恢复，禁止手工 restart 单个 Compose 服务。
 5. 再次确认 /rdp/health 中 heartbeat 已恢复 < 45s
 ```
 

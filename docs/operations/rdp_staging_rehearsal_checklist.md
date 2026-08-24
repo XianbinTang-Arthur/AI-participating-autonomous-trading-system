@@ -2,6 +2,8 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
+> 文档状态：现行 staging 演练清单。最后核对：2026-08-22（代码基线 `be9179e`）。当前共有 10 个 workflow 定义，其中 8 个 enabled；`decision_cycle`、`release_cycle` disabled，后者还禁止入队。
+
 
 > 目的：在 `RDP_ENV=staging` 下完整验证 recommendation → gate → release → observation → rollback 链路，再允许进入 `prod` 试运行。
 
@@ -11,7 +13,6 @@
 
 - [ ] `RDP_ENV=staging`
 - [ ] staging 使用独立的 governance DB / live DB 只读连接 / artifacts 目录
-- [ ] `RDP_PRODUCTION_APPLY_ENABLED` 在 staging 环境保持显式配置
 - [ ] `python scripts/rdp_run_reliability_check.py` 返回 0
 - [ ] `/rdp/health` 显示 `overall_health` 为 `healthy` 或可接受的 `degraded`
 
@@ -20,8 +21,8 @@
 - [ ] `data_maintenance` 成功执行
 - [ ] `governance_cycle` 成功执行
 - [ ] `research_cycle` 成功执行
-- [ ] `decision_cycle` 成功执行
-- [ ] `artifacts/operations/workflow_runs/` 中可看到上述 4 个 workflow 的最新成功报告
+- [ ] 8 个 enabled workflow 在各自合理窗口内有成功 task/run 证据
+- [ ] `decision_cycle` 与 `release_cycle` 没有意外自动入队
 
 ## 3. Recommendation 到 Release
 

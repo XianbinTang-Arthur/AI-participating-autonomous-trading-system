@@ -55,7 +55,7 @@
 
 ## 4. §9.2 CI 守门落地
 
-- 位置：[scripts/precommit.sh](scripts/precommit.sh)
+- 位置：[scripts/precommit.sh](../../scripts/precommit.sh)
 - 触发：默认扫 `git diff --cached`（可 argv 覆盖为任意 ref pair 供 CI 调用）
 - 守门模式：5 条 forbidden_patterns 中任一在 `+` 侧命中即 exit 1
   - `bypassed_frozen`

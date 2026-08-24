@@ -1,5 +1,7 @@
 # 08 · 配置体系
 
+> **历史快照**：2026-04-21 版本；当前 managed profile、派生字段和 DB active parameter 优先级见 `docs/configuration/managed-config-reference.md`。
+
 > **生成于 HEAD=待更新** · 2026-04-21
 > **内容**：AATS 的所有配置来源 / 优先级 / 核心字段
 

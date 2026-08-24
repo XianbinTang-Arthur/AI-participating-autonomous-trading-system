@@ -323,15 +323,13 @@ class UnroutedTopicError(KeyError):
 #
 # 设计依据：docs/task/slice_nats_jetstream_capacity_fix_design.md §4 + §7
 #
-# 核心动机：pre-slice 单 stream AATS_EVENTS 只设 max_age=7d，不设 max_bytes/
-# max_msgs，结果 market.snapshots/feature.snapshots 高频写入把 stream 写到
-# server max_file_store=1GB 硬上限，NATS 抛 err_code=10023 "insufficient
-# resources" publish 永久失败，决策链路饿死无法下单。
-#
-# 修复方向：分层 2 stream
-#   - AATS_EVENTS_MARKET: 1 day / 2 GB 承载 market.snapshots + feature.snapshots
-#   - AATS_EVENTS      : 7 day / 4 GB 承载其他 critical events（合规保留窗口）
-#   - server max_file_store 升 8 GB 留 25% headroom
+# 历史动机：pre-slice 单 stream 未设 max_bytes/max_msgs，高频 snapshots 曾把
+# server file store 写满。当前实现已经演进为 3 stream：
+#   - AATS_EVENTS_MARKET : limits / 1 day / 2 GiB，高频行情与特征
+#   - AATS_EVENTS        : interest / 1 day fallback / 4 GiB，其余可恢复事件
+#   - AATS_EVENTS_COMMANDS: limits / 1 day / 512 MiB，不可丢交易指令
+#   - audit.records      : 不进 JetStream，直接持久化到 Postgres event_store
+#   - server max_file_store: 8 GiB，3 stream 声明上限合计 6.5 GiB
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -701,7 +699,7 @@ def build_nats_streams_from_env(
 class NatsBusConfig:
     """NatsEventBus 实例化所需的配置。
 
-    slice nats-capacity 双路径说明：
+    slice nats-capacity 多 stream 双路径说明：
     - **runtime 路径**（生产 + 集成测试）：读 ``self.streams``，由
       ``_construct_event_bus`` 传入 ``build_nats_streams_from_env(DEFAULT_STREAM_SPECS)``，
       通过 ``NatsEventBus.ensure_streams()`` 无参方法完成多 stream upsert。
@@ -718,7 +716,7 @@ class NatsBusConfig:
     # ── slice nats-capacity 新字段：runtime 分层 stream 拓扑 ──────────
     # runtime 代码路径（_construct_event_bus + HybridEventBus.start）只读
     # 这个字段，通过 ensure_streams() 无 topics 参数完成 upsert。
-    # 默认是两条 stream（MARKET + EVENTS），caller 可以传
+    # 默认是三条 stream（MARKET + EVENTS + COMMANDS），caller 可以传
     # ``build_nats_streams_from_env(DEFAULT_STREAM_SPECS)`` 开启 env 覆盖。
     streams: tuple[StreamSpec, ...] = DEFAULT_STREAM_SPECS
     # ── Legacy 字段（只给 ensure_stream(topics=...) shim 用） ─────────
@@ -727,8 +725,8 @@ class NatsBusConfig:
     # 新代码应直接用 ``streams`` 字段。
     stream_name: str = "AATS_EVENTS"
     # JetStream stream 内消息最大保留时间（秒），过期消息会被自动丢弃。
-    # 默认 7 天足够 Stage 4 集成回放，生产可调长（30/90 天）。
-    # 1 天 hot buffer retention（长期存档由 PG event_store 承担）。详见
+    # 当前 legacy shim 默认也是 1 天 hot-buffer retention；长期存档由
+    # Postgres event_store 承担。详见
     # DEFAULT_AATS_EVENTS_SPEC 注释和
     # docs/task/aats_events_stream_retention_root_fix_sow.md。
     stream_max_age_seconds: float = 24 * 60 * 60
@@ -1067,7 +1065,7 @@ class NatsEventBus(EventBus):
         # 容量默认值的选取原则（设计文档 §7.4）：
         #   - max_bytes=128 MB   够单元测试假 publish 用，远低于 server 硬限
         #   - max_msgs=10_000    够单元测试假 publish 用
-        #   - max_msg_size=4 MB  与 runtime 两条 stream 对称
+        #   - max_msg_size=4 MB  与 runtime 三条 stream 对称
         legacy_spec = StreamSpec(
             name=self._config.stream_name,
             topics=frozenset(topics),
@@ -1792,8 +1790,8 @@ class HybridEventBus(EventBus):
         现在 ``critical_start()`` **不再传 topics**，走的是 ``ensure_streams()``
         新路径，从 ``NatsBusConfig.streams``（由 ``_construct_event_bus``
         传入 ``build_nats_streams_from_env(DEFAULT_STREAM_SPECS)``）遍历完成
-        多条 stream 的 upsert。分层后 MARKET 走独立短保留 stream，EVENTS 保留
-        7 天长保留，互不挤占。
+        多条 stream 的 upsert。分层后 MARKET、EVENTS 和 COMMANDS 各自使用
+        独立的 1 天 bounded stream，按流量与职责设置不同容量，互不挤占。
 
         这一层是为了让 build_runtime 调用方只需要 ``await bus.start()``
         即可，不必关心底层是 InMemoryEventBus（无 start）还是 NatsEventBus

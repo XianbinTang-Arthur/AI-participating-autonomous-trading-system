@@ -113,7 +113,7 @@ async def lifespan(app: FastAPI):
     app.state.runtime = runtime
     await start_dashboard_snapshot_plane(app, runtime)
     try:
-        # RDP schema 初始化：确保 governance.rdp_task_queue 等 47 张 RDP 表存在。
+        # RDP schema 初始化：确保 governance.rdp_task_queue 等当前 RDP schema 对象存在。
         # 放在 try 内部：即使建表失败也不阻断启动、不泄漏后台任务。
         # 复用 data_platform.db.run_migrations()，不另建 engine。
         try:

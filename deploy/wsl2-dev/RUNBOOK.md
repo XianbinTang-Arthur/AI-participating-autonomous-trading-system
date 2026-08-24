@@ -1,5 +1,7 @@
 # AATS WSL2 部署 Runbook（从零到全套）
 
+> **历史文档 / 禁止按本文部署（2026-08-22 核对）**：本文记录早期 Stage 1-9 的搭建与实跑过程，包含已失效的手工 Compose 命令、两条 JetStream/7 天保留、旧容量和旧容器数量。当前部署唯一入口是根目录 `scripts/deploy.sh`，当前操作规范见 [`DEPLOYMENT.md`](../../DEPLOYMENT.md) 和 [`deploy/wsl2-dev/README.md`](README.md)。以下命令只作历史证据，不得直接执行。
+
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
 

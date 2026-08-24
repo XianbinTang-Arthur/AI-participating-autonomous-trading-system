@@ -610,9 +610,9 @@ Blocker Control Plane 不是独立的新子系统，它必须建立在现有接�
 
 对应现有后端逻辑主要在：
 
-- [reconciliation_system_queries.py](/abs/path/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/operator/reconciliation_system_queries.py)
-- [query_service.py](/abs/path/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/operator/query_service.py)
-- [routes.py](/abs/path/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/api/routes.py)
+- [reconciliation_system_queries.py](../../aats/services/operator/reconciliation_system_queries.py)
+- [query_service.py](../../aats/services/operator/query_service.py)
+- [routes.py](../../aats/api/routes.py)
 
 ### 10.4.2 可复用但不应直接暴露给前端主流程的接口
 
@@ -729,7 +729,7 @@ Blocker control 本质上已经是一个独立子系统，应该获得独立边�
 
 ## 11.1 Query 层
 
-建议在 [query_service.py](/abs/path/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/operator/query_service.py) 中新增：
+建议在 [query_service.py](../../aats/services/operator/query_service.py) 中新增：
 
 - `blocker_control_panel()`
 - `_rank_blocker(...)`
@@ -746,7 +746,7 @@ Blocker control 本质上已经是一个独立子系统，应该获得独立边�
 
 ## 11.2 AI 服务层
 
-在 [inference.py](/abs/path/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/ai_service/inference.py) 中增加：
+在 [inference.py](../../aats/services/ai_service/inference.py) 中增加：
 
 - outcome-review 明确确认接口
 - outcome-review 拒绝并降为 `baseline_only` 接口
@@ -836,7 +836,7 @@ Blocker control 本质上已经是一个独立子系统，应该获得独立边�
 
 ## 11.3 Recovery / Query 层新增职责
 
-建议在 [query_service.py](/abs/path/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/operator/query_service.py) 和相关 facade 中新增以下职责：
+建议在 [query_service.py](../../aats/services/operator/query_service.py) 和相关 facade 中新增以下职责：
 
 ### 新增聚合函数
 
@@ -875,7 +875,7 @@ Blocker control 本质上已经是一个独立子系统，应该获得独立边�
 
 ## 11.4 路由层新增职责
 
-建议在 [routes.py](/abs/path/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/api/routes.py) / [auth_routes.py](/abs/path/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/api/auth_routes.py) 中新增：
+建议在 [routes.py](../../aats/api/routes.py) / [auth_routes.py](../../aats/api/auth_routes.py) 中新增：
 
 - `GET /system/blocker-control`
 - `POST /system/ai-review/restore`

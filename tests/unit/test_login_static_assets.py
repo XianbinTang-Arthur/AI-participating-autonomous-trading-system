@@ -49,9 +49,11 @@ def test_login_script_surfaces_form_validation_in_page_notice() -> None:
     assert "请先填写密码。" in text
 
 
-def test_readme_points_local_operator_ui_to_https() -> None:
+def test_readme_distinguishes_local_http_from_live_https() -> None:
     text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
+    assert "http://127.0.0.1:8001/ui" in text
+    assert "http://127.0.0.1:8001/healthz" in text
     assert "https://127.0.0.1:8011/ui" in text
     assert "https://127.0.0.1:8011/healthz" in text
     assert "http://127.0.0.1:8011/ui" not in text

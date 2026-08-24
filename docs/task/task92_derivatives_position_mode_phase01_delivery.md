@@ -5,7 +5,7 @@
 
 ## 1. 业务目标与边界
 
-本次只实现 [Task 91](/D:/文件/project/AIParticipatingAutonomousTradingSystem/docs/task91_derivatives_hedge_mode_phase_breakdown.md) 的 `Phase 0 + Phase 1`：
+本次只实现 [Task 91](task91_derivatives_hedge_mode_phase_breakdown.md) 的 `Phase 0 + Phase 1`：
 
 - 新增显式配置 `derivatives_position_mode`
 - 补齐 `derivatives_hedge_transition_mode`

@@ -71,8 +71,8 @@
 新增文件：
 
 - [legacy_adapters.py](/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/strategy_engines/families/legacy_adapters.py)
-- [protective_family.py](/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/strategy_engines/families/protective_family.py)
-- [opportunistic_family.py](/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/strategy_engines/families/opportunistic_family.py)
+- `protective_family.py`（历史文件，后续重构已移除）
+- `opportunistic_family.py`（历史文件，后续重构已移除）
 - [independent_family.py](/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/strategy_engines/families/independent_family.py)
 
 当前 skeleton family 的行为：

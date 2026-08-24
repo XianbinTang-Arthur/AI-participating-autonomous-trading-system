@@ -1,5 +1,7 @@
 # 02 · 核心数据流
 
+> **历史快照**：基于 2026-04-21 HEAD `0ef6f1c`；当前链路以根目录 `ARCHITECTURE.md` 和 `docs/code_review/README.md` 为准。
+
 > **生成于 HEAD=0ef6f1c** · 2026-04-21
 > **范围**：market tick → FeatureSnapshot → Decision → PositionTarget → OrderIntent → OKX → FillEvent → OrderState 更新 → Portfolio → Reconciliation
 

@@ -1,283 +1,206 @@
-# 平台运行手册 (Platform Runbook)
+# RDP 平台运行手册
 
-> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+> 最后核对：2026-08-22（代码基线 `be9179e`）。本手册面向当前 task-daemon、数据库队列和 10 个 workflow；早期仅含 4 个 workflow、JSON active parameter fallback 或直写 CLI 的说明均已失效。
 
+## 1. 运行边界
 
-## 1. 平台概览
+- RDP 写 research/governance 数据库，对主交易数据库保持只读。
+- 主交易 runtime active parameter 只从 `governance.active_parameter_sets` 加载。
+- 参数变更只能通过认证后的 RDP API 和 gate；直接 apply/rollback 还要求短时 token。组合 release 端点当前不要求 token，属于需要明确知晓的现行策略差异。旧直写脚本已禁用。
+- `release_cycle` 当前禁用且禁止入队；不要通过手工改任务表绕过。
+- 标准 `aats-rdp-daemon` 随部署启动，不需要在宿主机另起 nohup 进程。
+- 不在终端、文档、工单或聊天中显示 `.env.*` 内容、连接串、token 或交易所凭证。
 
-AATS Research Data Platform (RDP) 是一个多阶段研究平台，用于评估自主交易策略。
+## 2. 每日/每次部署后检查
 
-### 1.1 Phase 架构
+### 2.1 主系统与 RDP 健康
 
-| Phase | 名称 | 目标 | 入口脚本 |
-|-------|------|------|----------|
-| Phase 2 Step 1 | 校准 | 单组合单参数校准 replay | `scripts/rdp_run_step1_calibration.py` |
-| Phase 2 Step 2 | 研究 | 跨参数扫描+推荐 | `scripts/rdp_run_step2_research.py` |
-| Phase 3 | 归因 | Replay vs Live 对照归因 | `scripts/rdp_run_phase3_round.py` |
-| Phase 4 | 执行评估 | 执行代理 realism | `scripts/rdp_run_phase4_round.py` |
-| Phase 5 | 治理 | Governance / 产品化 | 见下方治理脚本 |
+1. 确认部署报告中的 gateway、market、decision、execution、rdp-daemon 健康。
+2. derivatives-live 额外确认 liquidations-daemon 与 microstructure-collector 健康和数据 freshness；它们尚未进入 `deploy.sh` required health list。
+3. 登录 Operator UI，检查：
+   - `/system/health` 无 critical blocker；
+   - `/system/recovery` 无未处理 stuck/ambiguous submit；
+   - `/reconciliation/latest` 无 unresolved high/critical finding；
+   - `/rdp/health` 的数据库、artifact、workflow 和 daemon 状态；
+   - `/rdp/tasks/status` 无异常长期 running/pending；
+   - `/rdp/parameters/active` 的 version、combo、actor 和缺失情况。
 
-### 1.2 固定范围
+`/healthz` 只表示 Gateway 进程存活，不能代替上述检查。
 
-- **Symbol**: BTC-USDT-SWAP
-- **Families**: independent, directional
-- **Timeframes**: 15m, 1h
-- **Combos**: 4 (independent_15m, independent_1h, directional_15m, directional_1h)
+### 2.2 只读 CLI 检查
 
-### 1.3 关键目录与 DB 表
+```powershell
+# 到期 slot 评估：不写队列/状态
+.\.venv\Scripts\python.exe scripts\rdp_schedule_workflows.py --dry-run --json
 
+# 可靠性和质量
+.\.venv\Scripts\python.exe scripts\rdp_run_reliability_check.py
+.\.venv\Scripts\python.exe scripts\rdp_run_quality_monitor.py
+
+# Active rounds
+.\.venv\Scripts\python.exe scripts\rdp_list_active_rounds.py
 ```
-artifacts/
-  research/
-    experiments/          # Step 1/2 单实验和参数扫描
-    calibration_batches/  # Step 1 批量校准
-    calibration_rounds/   # Step 2 研究 round
-    attribution_rounds/   # Phase 3 归因 round
-    execution_rounds/     # Phase 4 执行评估 round
-  governance/
-    artifact_index.json              # 全局 artifact 索引
-    active_round_index.json          # 当前 active round 索引
-    current_parameter_registry.json  # 参数注册表（文件备份）
-    quality_monitor_summary.json     # 最近巡检结果
+
+先确认命令使用的环境和数据库，再执行任何非 dry-run 操作。
+
+## 3. Workflow 日历
+
+所有时间为 UTC：
+
+| Workflow | 周期 | Enabled | 备注 |
+| --- | --- | --- | --- |
+| `candles_rolling_15m` | 每 15 分钟 | 是 | rolling candles |
+| `microstructure_silver_15m` | 每 15 分钟 | 是 | Silver 聚合 |
+| `reliability_cycle` | 每小时 :15 | 是 | 可靠性 |
+| `okx_rest_history_rolling_1h` | 每小时 :20 | 是 | OI/mark/long-short |
+| `observation_cycle` | 每小时 :30 | 是 | release observation |
+| `data_maintenance` | 每日 04:00 | 是 | ingest/index/retention |
+| `governance_cycle` | 每日 07:00 | 是 | quality/validation/candidate |
+| `research_cycle` | 周日 08:00 | 是 | refresh/full pipeline |
+| `decision_cycle` | 周日 10:00 | 否 | 仅保留定义 |
+| `release_cycle` | 每小时 :00 | 否 | 冻结，禁止入队 |
+
+首次调度 bootstrap 固定为 `data_maintenance → research_cycle`，之后才进入常规 slot 评估。
+
+## 4. 手工触发 Workflow
+
+推荐通过 Operator UI 或 `POST /rdp/tasks/trigger` 触发，状态通过 `GET /rdp/tasks/status` 查询。请求必须经过 Operator 认证；workflow 名必须属于当前 10 项 allowlist，且不能是冻结的 `release_cycle`。
+
+触发前：
+
+1. 检查同一 workflow 是否已有 pending/running；
+2. 确认目标环境允许该 workflow；
+3. 确认数据库和 OKX REST（若使用）可达；
+4. 记录 actor 和原因。
+
+任务队列保证：
+
+- 同一 workflow 最多一个 active task；
+- 并发触发通过数据库 partial unique index 和原子 `INSERT ... ON CONFLICT` 收敛；
+- daemon 通过 `FOR UPDATE SKIP LOCKED` 领取；
+- 延迟重试必须等 `earliest_start_at`；
+- daemon 重启遗留的 running 任务会以 exit `-3` 标记 failed。
+
+## 5. 研究脚本
+
+### 5.1 数据采集与 schema
+
+```powershell
+.\.venv\Scripts\python.exe scripts\rdp_init_db.py
+.\.venv\Scripts\python.exe scripts\rdp_run_daily_ingest.py --ensure-schema
+.\.venv\Scripts\python.exe scripts\rdp_detect_gaps.py
 ```
 
-**governance schema DB 表**（DB-first + 文件 fallback 双写，`AATS_ACTIVE_PARAMETER_DB_URL` 控制）:
+`rdp_init_db.py` 对应当前 78 张 RDP ORM 表；不要按旧的 48 表清单验收。
 
-| DB 表 | 对应 JSON 文件 | 说明 |
-|------|------|------|
-| `governance.parameter_sets` | `current_parameter_registry.json` | 参数集候选池 |
-| `governance.recommendations` | `recommendation_registry.json` | 建议审批记录 |
-| `governance.active_decisions` | `active_decision_registry.json` | combo 决策状态 |
-| `governance.active_parameter_sets` | `active_parameter_registry.json` | 当前生效参数 |
-| `governance.parameter_apply_history` | `parameter_apply_history.json` | 应用审计日志 |
+### 5.2 Replay 与研究
 
-全量种子: `python scripts/apply_active_parameter_set.py --action seed-db`
+```powershell
+.\.venv\Scripts\python.exe scripts\rdp_run_replay.py --help
+.\.venv\Scripts\python.exe scripts\rdp_run_parameter_scan.py --help
+.\.venv\Scripts\python.exe scripts\rdp_run_full_pipeline.py --help
+.\.venv\Scripts\python.exe scripts\rdp_run_research_factory_experiment.py --help
+```
 
----
+先用 `--help` 核对当前参数，不复制历史任务文档中的固定日期/批次命令。Research Factory 结论只有 `reject`、`keep_observing`、`positive_executable_edge` 三类，且只生成证据，不自动 apply。
 
-## 1.4 与主交易系统的边界
+## 6. 参数审批、发布与回滚
 
-RDP 是离线研究与参数治理平台，不是实时交易链路的一部分。主交易系统不会读取 RDP Bronze/Silver/Gold 行情表；RDP 对主交易系统的影响只发生在 active parameter set 被 apply 并由 runtime 加载之后。
+### 6.1 发布前条件
 
-因此，RDP 运维需要遵守以下边界：
+- recommendation 已批准且未 supersede；
+- evidence、execution realism、live attribution 可追踪；
+- pre-apply gate 允许；
+- 主交易 health/recovery/reconciliation 可接受；
+- actor、release id、observation plan、rollback target 齐全；
+- 若选择 `/parameters/apply`，具有 `action=apply` 的短时 `X-Rdp-Apply-Token`；组合 release 入口当前只要求 write access + integrity/gate。
 
-- RDP workflow 失败不会自动停止主交易；需要通过 Operator/reliability 告警和人工流程处理。
-- active parameter apply 是生产行为变更，必须经过 recommendation approval、pre-apply gate、release 记录、apply history 和 rollback plan。
-- 生产环境不得跳过 pre-apply gate。
-- 如果 active parameter DB 写入失败而 fallback 到文件，必须在恢复 DB 后运行 `seed-db` 并验证 DB/JSON 一致性。
+### 6.2 当前写入口
 
-## 2. 日常操作
+| 动作 | API |
+| --- | --- |
+| 批准 recommendation | `POST /rdp/recommendations/{id}/approve` |
+| 拒绝 recommendation | `POST /rdp/recommendations/{id}/reject` |
+| 替代 recommendation | `POST /rdp/recommendations/{id}/supersede` |
+| Gate | `POST /rdp/gates/run` |
+| 获取 Operator token | `POST /rdp/operator-tokens` |
+| 创建 release + apply | `POST /rdp/releases/create`（当前不要求 apply token） |
+| 单独 apply | `POST /rdp/parameters/apply` |
+| 观察 | `POST /rdp/observations/run` |
+| 回滚评估 | `POST /rdp/rollback-recommendation/evaluate` |
+| 执行回滚 | `POST /rdp/parameters/rollback` |
 
-### 2.1 运行 Step 1 单实验
+`/parameters/apply` 与 `/parameters/rollback` 的 token 属于敏感短期凭证，不写入 shell history、文档或工单。完整 payload 契约以 `/openapi.json` 为准。
+
+以下脚本已禁用，运行会退出 2：
+
+- `scripts/apply_active_parameter_set.py`
+- `scripts/approve_recommendation_and_apply.py`
+- `scripts/rdp_rollback_active_parameter_set.py`
+- `scripts/rdp_run_release_cycle.py`
+
+### 6.3 发布后核对
+
+1. `GET /rdp/parameters/active` 显示预期 combo/version；
+2. `GET /rdp/parameters/apply-history` 有 actor/action/gate/release；
+3. `GET /rdp/releases/latest` 与 history 一致；
+4. 重建 runtime 后 Settings Provenance 显示 active parameter 注入；
+5. `/system/health`、reconciliation、order intent、fee/slippage 和风险指标无退化；
+6. observation 到期后记录 keep/review/rollback 结论。
+
+数据库加载失败时 runtime 会 fail-soft 到 profile 参数并记录 error，不会从 JSON 文件恢复。该状态必须按配置漂移处理。
+
+## 7. 故障处理
+
+### 7.1 Task 长期 pending
+
+- 检查 rdp-daemon heartbeat/health；
+- 检查 `earliest_start_at` 是否尚未到；
+- 检查是否已有同 workflow running；
+- 检查数据库连接和队列约束；
+- 不要直接改成 running，也不要删除 active task 绕过唯一约束。
+
+### 7.2 Task 长期 running
+
+- 查看 task status 的 started_at/log tail；
+- 检查 daemon 是否仍有 heartbeat；
+- daemon 已重启时，确认 orphan recovery 是否把旧任务标为 failed/-3；
+- 只通过标准 retry 路径补跑，保留原失败记录。
+
+### 7.3 Workflow 失败
+
+1. 保存 workflow、task id、exit code、log tail 和输入版本；
+2. 判断是输入质量、数据库、OKX、timeout、schema 还是代码错误；
+3. 修复原因后使用 retry manager/Operator 任务入口补跑；
+4. 验证新任务与旧失败记录可关联；
+5. 不通过重复直接执行脚本掩盖队列状态。
+
+### 7.4 Active parameter 数据库失败
+
+- 停止任何新发布动作；
+- 检查 `/rdp/health` 和 active parameter loader error；
+- 以数据库为真源恢复，不把 `configs/active_parameter_sets/*.json` 人工灌回 runtime；
+- 恢复后核对 active set、history、gate、release 与 Settings Provenance。
+
+## 8. 停机、备份与恢复
+
+系统级停机使用：
 
 ```bash
-python scripts/rdp_run_step1_calibration.py \
-    --family independent \
-    --timeframe 15m \
-    --symbol BTC-USDT-SWAP \
-    --start 2026-03-31 --end 2026-04-02
+# 默认只读预检
+bash scripts/ops/safe_shutdown.sh --reason "planned_maintenance"
+
+# 人工确认后执行
+bash scripts/ops/safe_shutdown.sh --apply --confirm --reason "planned_maintenance"
 ```
 
-### 2.2 运行 Step 2 参数扫描
+数据库备份/恢复使用 `deploy/wsl2-dev/scripts/backup_postgres.sh` 和 `restore_postgres.sh`。恢复前记录 commit/profile、先备份当前库并停止应用；恢复后先做 RDP schema、task queue、active parameters 和主交易一致性核对。
 
-```bash
-python scripts/rdp_run_step2_research.py \
-    --family independent \
-    --timeframe 15m \
-    --symbol BTC-USDT-SWAP \
-    --start 2026-03-31 --end 2026-04-02
-```
+## 9. 相关文档
 
-### 2.3 运行 Phase 3 归因 Round
-
-```bash
-python scripts/rdp_run_phase3_round.py \
-    --start 2026-03-31 --end 2026-04-02
-
-# 使用 Phase 2 推荐参数
-python scripts/rdp_run_phase3_round.py \
-    --start 2026-03-31 --end 2026-04-02 \
-    --params-json artifacts/research/experiments/.../parameter_candidates.json
-```
-
-### 2.4 运行 Phase 4 执行评估 Round
-
-```bash
-python scripts/rdp_run_phase4_round.py \
-    --start 2026-03-31 --end 2026-04-02
-
-# 使用自定义 taker fee
-python scripts/rdp_run_phase4_round.py \
-    --start 2026-03-31 --end 2026-04-02 \
-    --taker-fee-bps 3.0
-```
-
-### 2.5 退出码含义
-
-| 退出码 | 含义 |
-|--------|------|
-| 0 | 全部成功 |
-| 2 | 部分成功（有 combo 失败） |
-| 3 | 全部失败 |
-
----
-
-## 3. 治理操作
-
-### 3.1 构建 Artifact 索引
-
-```bash
-python scripts/rdp_build_artifact_index.py
-# 输出: artifacts/governance/artifact_index.json
-```
-
-### 3.2 校验 Manifest 规范
-
-```bash
-# 全部校验
-python scripts/rdp_validate_artifacts.py
-
-# 只校验 Phase 3
-python scripts/rdp_validate_artifacts.py --phase phase3
-
-# 自动补全缺失字段
-python scripts/rdp_validate_artifacts.py --fix
-```
-
-### 3.3 查看参数注册表
-
-```bash
-python scripts/rdp_freeze_parameter_set.py --action show --verbose
-
-# 按条件筛选
-python scripts/rdp_freeze_parameter_set.py --action show --family independent --status frozen
-```
-
-### 3.4 导入参数到注册表
-
-```bash
-# 从 parameter_candidates.json 导入
-python scripts/rdp_freeze_parameter_set.py --action import \
-    --source artifacts/research/experiments/.../parameter_candidates.json
-
-# 从 parameter_recommendations.json 导入
-python scripts/rdp_freeze_parameter_set.py --action import \
-    --source artifacts/research/experiments/.../parameter_recommendations.json \
-    --family independent --timeframe 15m
-```
-
-### 3.5 冻结参数
-
-```bash
-python scripts/rdp_freeze_parameter_set.py --action freeze \
-    --parameter-set-id ps_20260403_123456_abc123
-```
-
-### 3.6 列出 Active Rounds
-
-```bash
-python scripts/rdp_list_active_rounds.py
-
-# 包含 experiments
-python scripts/rdp_list_active_rounds.py --include-experiments
-
-# 只看失败的
-python scripts/rdp_list_active_rounds.py --status failed
-```
-
-### 3.7 失败 Round 重跑
-
-```bash
-# 查看可重跑列表
-python scripts/rdp_retry_failed_round.py --action list
-
-# 生成重跑计划
-python scripts/rdp_retry_failed_round.py --action plan \
-    --round-dir artifacts/research/attribution_rounds/<round_id> \
-    --phase phase3
-
-# 执行重跑
-python scripts/rdp_retry_failed_round.py --action rerun \
-    --round-dir artifacts/research/attribution_rounds/<round_id> \
-    --phase phase3
-```
-
-### 3.8 运行质量巡检
-
-```bash
-python scripts/rdp_run_quality_monitor.py
-# 输出: artifacts/governance/quality_monitor_summary.json
-
-# 退出码: 0=healthy, 1=unhealthy(critical), 2=degraded(warning)
-```
-
----
-
-## 4. 判断结果是否成功
-
-### 4.1 单实验（Step 1）
-
-查看 `diagnostics.json`:
-- `opening_count > 0`：有开仓信号
-- `positive_edge_ratio > 0`：有正 edge
-- `execution_compatible_ratio > 0.05`：有足够的执行兼容 bar
-
-### 4.2 Round（Phase 3/4）
-
-查看 `round_manifest.json`:
-- `combos[].status` 逐个检查
-- 全部 `succeeded` = 成功
-- 有 `partial_success` = 需要调查
-- 有 `failed` = 需要重跑或排查
-
-### 4.3 质量巡检
-
-运行 `rdp_run_quality_monitor.py`，检查:
-- `health: "healthy"` = 平台正常
-- `health: "degraded"` = 有 warning
-- `health: "unhealthy"` = 有 critical 问题
-
----
-
-## 5. 数据异常排查
-
-### 5.1 先看哪里
-
-1. 运行 `rdp_run_quality_monitor.py`，看有哪些 check 失败
-2. 检查 `quality_monitor_summary.json` 中 `passed: false` 的项
-3. 按 category 分类排查:
-   - `artifact`: 文件缺失/目录问题
-   - `result`: 结果异常（全 0、全失败）
-   - `parameter`: 参数文件不可解析
-   - `governance`: 治理文件缺失
-
-### 5.2 常见问题
-
-| 现象 | 可能原因 | 处理 |
-|------|---------|------|
-| opening_count 全 0 | 参数过严 | 放宽 min_safe_net_edge_bps |
-| 全部 combo failed | 数据库连接问题 | 检查 DB URL 和网络 |
-| no_bar_data | Gold 表为空 | 运行 backfill |
-| manifest 缺失 | 脚本异常退出 | 查 stderr，重跑 |
-
----
-
-## 6. 当前有效结论
-
-要找到当前有效结论，按以下顺序检查:
-
-1. **参数注册表**: `artifacts/governance/current_parameter_registry.json`
-   - 找 `status: "frozen"` 的 parameter set
-2. **Active rounds**: `artifacts/governance/active_round_index.json`
-   - 找 `latest_by_phase` 中各 phase 的最近成功 round
-3. **质量报告**: `artifacts/governance/quality_monitor_summary.json`
-   - 确认 health 状态
-
----
-
-## 7. 参考文档
-
-- [Artifact 规范](artifact_conventions.md)
-- [参数治理](parameter_governance.md)
-- [Round 生命周期](round_lifecycle.md)
-- [运维检查清单](operator_checklist.md)
+- [RDP 总览](../../aats/data_platform/README.md)
+- [RDP 模块参考](../rdp/module_reference.md)
+- [参数应用与回滚](parameter_apply_and_rollback.md)
+- [生产参数变更](production_parameter_change_runbook.md)
+- [Operator 检查清单](operator_checklist.md)
+- [完整代码审查与系统说明](../code_review/README.md)

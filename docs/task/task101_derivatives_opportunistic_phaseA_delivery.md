@@ -5,7 +5,7 @@
 
 ## 1. 交付目标
 
-本阶段落实 [`task100_derivatives_opportunistic_independent_overlay_sow.md`](/D:/文件/project/AIParticipatingAutonomousTradingSystem/docs/task100_derivatives_opportunistic_independent_overlay_sow.md) 中的 `Phase A：Opportunistic 决策与配置`。
+本阶段落实 [`task100_derivatives_opportunistic_independent_overlay_sow.md`](task100_derivatives_opportunistic_independent_overlay_sow.md) 中的 `Phase A：Opportunistic 决策与配置`。
 
 本阶段只做 4 件事：
 

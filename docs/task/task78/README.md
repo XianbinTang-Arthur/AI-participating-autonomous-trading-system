@@ -13,7 +13,7 @@
 - `strategy_sleeve_id / allocation_id / strategy_bundle_id` 真相链
 - `sleeve inventory / sleeve pnl / bundle recovery / operator strategy runtime`
 
-但当前 [smart_arbitrage.py](/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/strategy_engines/smart_arbitrage.py) 仍然存在明显边界：
+但当时的 `smart_arbitrage.py` 仍然存在明显边界：
 
 - 机会识别、能力判断、状态控制、仓位恢复、预算 sizing、双腿生成全部耦合在一个文件内
 - 当前自动执行本质上只支持“正基差，做多现货并做空合约”
@@ -194,7 +194,7 @@ flowchart TD
 
 ## 6. 模块拆分方案
 
-建议将 [smart_arbitrage.py](/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/strategy_engines/smart_arbitrage.py) 拆成包：
+建议将当时的 `smart_arbitrage.py` 拆成包：
 
 - `aats/services/strategy_engines/smart_arbitrage/__init__.py`
 - `aats/services/strategy_engines/smart_arbitrage/engine.py`
@@ -209,7 +209,7 @@ flowchart TD
 
 兼容策略：
 
-- 原 [smart_arbitrage.py](/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/strategy_engines/smart_arbitrage.py) 先保留为 facade
+- 原 `smart_arbitrage.py` 先保留为 facade
 - `coordinator.py` 继续从原入口导入，待重构稳定后再切换到新包入口
 
 ## 7. 数据模型与配置扩展
@@ -600,7 +600,7 @@ flowchart TD
 
 核心代码：
 
-- [smart_arbitrage.py](/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/strategy_engines/smart_arbitrage.py)
+- [smart_arbitrage/](../../../aats/services/strategy_engines/smart_arbitrage/)（当前已完成包化；原单文件入口不再存在）
 - [coordinator.py](/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/strategy_engines/coordinator.py)
 - [allocator.py](/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/strategy_engines/allocator.py)
 - [sleeve_inventory.py](/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/strategy_engines/sleeve_inventory.py)

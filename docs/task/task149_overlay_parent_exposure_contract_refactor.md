@@ -8,7 +8,7 @@
 - 保持 allocator / apply / execution 主链不变，不改 overlay family 依附主腿的业务边界。
 
 ## What changed
-- 在 [protective_family.py](/D:/文件/project/AIParticipatingAutonomousTradingSystem/aats/services/strategy_engines/families/protective_family.py) 新增 `OverlayParentExposureContract`。
+- 当时在 `protective_family.py` 新增 `OverlayParentExposureContract`；该历史文件后续被移除，当前兼容类型位于 [overlay_parent_exposure.py](../../aats/services/strategy_engines/overlay_parent_exposure.py)。
 - 新增 `_resolve_overlay_parent_exposure_contract(...)`，集中解析：
   - `symbol`
   - `target_leverage`

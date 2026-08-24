@@ -2,6 +2,8 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
+> 最后核对：2026-08-22。下表描述 metrics calculator 的研究/审计输入，不代表主交易 runtime 的 fallback 规则。
+
 
 ## 概述
 
@@ -119,8 +121,10 @@ diff = compare_snapshots(current_snapshot, baseline_snapshot)
 | Research | `governance.recommendations`, `governance.parameter_sets` | recommendation_registry.json, current_parameter_registry.json, decision_rounds/ |
 | Attribution | — | evidence_summary.json (phase3) |
 | Execution | — | evidence_summary.json (phase4) |
-| Operations | `governance.parameter_apply_history`, `governance.active_parameter_sets` | parameter_apply_history.json, parameter_release_history.json |
+| Operations | `governance.parameter_apply_history`, `governance.active_parameter_sets` | parameter_apply_history.json, parameter_release_history.json（仅指标/审计输入） |
 | Reliability | — | workflow_runs/, workflow_failures.json, current_alerts.json |
+
+主交易 `active_parameters.py` 只读数据库 active set；即使 metrics 层能从 artifact 计算历史指标，也不能据此认定 runtime 会从文件恢复参数。
 
 ## 扩展指标
 

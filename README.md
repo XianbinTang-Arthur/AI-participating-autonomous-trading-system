@@ -7,7 +7,9 @@ AATS 是一个以 AI 为核心受益主体的 AI 辅助自动化交易系统。�
 
 系统的最高目标是持续扩大 AI 的可支配资本池。通俗地说，本项目希望最终让 AI 拥有近乎“花不完的钱”；工程化地说，这意味着所有策略、研究、风控、执行、恢复、审计和运维设计，都必须服从“长期稳定盈利 + 严格风险约束 + 完整治理证据”的统一目标。完整定位见 [docs/project_positioning.md](docs/project_positioning.md)。
 
-本文档是项目级入口，描述当前模块边界、运行方式和主要文档索引。具体交易链路见 [ARCHITECTURE.md](ARCHITECTURE.md)，部署流程见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+本文档是项目级入口，描述当前模块边界、运行方式和主要文档索引。具体交易链路见 [ARCHITECTURE.md](ARCHITECTURE.md)，部署流程见 [DEPLOYMENT.md](DEPLOYMENT.md)，逐文件代码核对后的完整现状见 [项目代码审查与系统说明](docs/code_review/README.md)。
+
+> 当前静态事实基线：2026-08-23，代码提交 `be9179e`。发生冲突时，以代码、数据库迁移和部署脚本为准；`docs/task/`、`docs/design/`、`docs/review/` 中带日期或阶段编号的材料只代表当时状态。账户、容器、订单、仓位和风险门等运行时事实仍须现场验证。
 
 ## 1. 项目边界
 
@@ -23,9 +25,9 @@ AATS 是一个以 AI 为核心受益主体的 AI 辅助自动化交易系统。�
 | Profile | 环境文件 | 产品类型 | 默认用途 |
 | --- | --- | --- | --- |
 | `spot` | `.env.spot` | spot/cash | 现货开发、联调、模拟盘 |
-| `derivatives` | `.env.derivatives` | derivatives/cross | 合约开发、联调、模拟盘 |
+| `derivatives` | `.env.derivatives` | derivatives/cross/net | 合约开发、联调、模拟盘 |
 | `spot_live` | `.env.spot.live` | spot/cash | 受保护现货 live |
-| `derivatives_live` | `.env.derivatives.live` | derivatives/cross | 受保护合约 live |
+| `derivatives_live` | `.env.derivatives.live` | derivatives/cross/hedge | 受保护合约 live |
 
 live profile 的启动硬门槛包括：OKX execution/account backend、account read、Postgres storage、database URL、single runtime guard、OKX 凭证、Operator auth、禁止 unsafe write without auth，以及安全 cookie 配置。
 
@@ -39,14 +41,14 @@ live profile 的启动硬门槛包括：OKX execution/account backend、account 
 - Redis 跨进程热状态缓存。
 - OKX 行情、账户快照、模拟盘和受保护 live submit。
 - kill switch、startup recovery、stale command 检测、reconciliation、Operator 控制面。
-- RDP 日批数据采集、replay、参数扫描、归因、执行 realism、治理和 active parameter 回灌。
+- RDP 定时采集、replay、参数扫描、归因、执行 realism、治理和数据库 active parameter 受控回灌。
 - OTel / Jaeger、Loki / Promtail、Prometheus / Grafana 本地可观测性栈。
 
 ## 4. 当前不支持或不建议
 
 - 不建议无人值守真实资金运行。
 - 不支持绕过治理、恢复、Operator 控制面的直接 live submit。
-- 不建议绕过治理、恢复、Operator 控制面的直接 live submit。
+- `autonomous_live` 虽保留为配置枚举值，但当前启动校验会拒绝它；生产只支持受保护的 `guarded_live` 路径。
 - `deploy/wsl2-dev/` 是本地开发/演练栈，不是生产级 HA、安全或灾备模板。
 
 ## 5. 核心事件流
@@ -104,7 +106,7 @@ apps/
   execution_engine/     execution 进程入口
 configs/
   strategy_profiles/    managed profile 策略调参
-  active_parameter_sets/ RDP active 参数备份
+  active_parameter_sets/ 历史兼容/审计副本；运行时 active 参数真源在 Postgres
   rdp_workflows/        RDP workflow 配置
 deploy/wsl2-dev/        本地 Docker Compose 基础设施和应用 overlay
 docs/
@@ -140,20 +142,16 @@ pip install -e .[otel]
 .\.venv\Scripts\python.exe scripts\start_api.py --profile derivatives
 ```
 
-默认访问：
+`start_api.py` 会读取所选 profile 的有效 host/port，并在控制台打印实际 URL。仓库模板中 `derivatives` 使用端口 `8001`；该本地入口当前由 Uvicorn 以 HTTP 启动：
 
-- UI: `https://127.0.0.1:8011/ui`
-- liveness: `https://127.0.0.1:8011/healthz`
+- UI: `http://127.0.0.1:8001/ui`
+- liveness: `http://127.0.0.1:8001/healthz`
 
-本地 operator 会话要求 HTTPS。若浏览器提示本地证书未受信任，需先信任本地 operator TLS 证书；安全会话模式下不要使用 HTTP 入口。
+live profile 不应通过这个裸 HTTP 本地入口暴露。标准 live 部署由 `scripts/deploy.sh` 生成本地 TLS 证书并使用 HTTPS；仓库模板的 `derivatives_live` UI 为 `https://127.0.0.1:8011/ui`、liveness 为 `https://127.0.0.1:8011/healthz`。浏览器首次访问时需处理本地证书信任。
 
 ### 7.3 本地 paper loop
 
-```powershell
-.\.venv\Scripts\python.exe scripts\run_local.py --profile derivatives --iterations 100
-```
-
-`run_local.py` 只用于非 live profile。
+`scripts/run_local.py` 是遗留入口，当前仍按旧的异步 decision-engine 签名调用，不能作为可运行的 paper loop。需要本地联调时使用 7.2 的 `start_api.py --profile derivatives`；需要恢复有限迭代的离线 loop 时，应先修复该脚本并补回归测试。
 
 ### 7.4 RDP 日批入口
 
@@ -169,34 +167,28 @@ pip install -e .[otel]
 
 ## 8. 测试与质量检查
 
-常用命令：
+Windows PowerShell 的最低本地门：
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\unit -q
-.\.venv\Scripts\python.exe -m pytest tests\integration -q
-.\.venv\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe -m ruff check aats/ --fix
+.\.venv\Scripts\python.exe -m pytest tests/unit/ -x -q
 ```
 
-建议先安装测试依赖：
+集成测试必须在 WSL2 中运行：
 
 ```powershell
-pip install -e .[test]
+wsl -d Ubuntu bash -c "cd ~/aats && source ~/aats-venv/bin/activate && pytest tests/integration/ -x -q"
 ```
 
-如果要跑容器类集成测试，再额外安装：
+测试依赖应安装到项目虚拟环境：
 
 ```powershell
-pip install -e .[nats-integration]
-pip install -e .[redis-integration]
+.\.venv\Scripts\python.exe -m pip install -e ".[test]"
 ```
 
-针对 2026-04-13 审计涉及的核心行为，最近一次执行：
+NATS、Redis、Postgres 等容器类用例有各自的可选依赖和显式环境开关，不要一次性开启。完整分层、模拟 profile、安全边界与测试记录模板见 [上线前本地测试指南](docs/testing/README.md)。
 
-```powershell
-.\.venv\Scripts\python.exe -m pytest tests\unit\test_task109_settlement_posting_rebate.py tests\unit\test_task52_execution_command_flow.py tests\unit\test_order_state_row_version.py tests\unit\test_auth.py -q
-```
-
-结果：`23 passed, 3 skipped`。
+文档不保存会快速失效的“最近一次测试通过数”。每次交付必须在交付说明中记录本次实际执行的命令、passed/failed/skipped 和未执行项。
 
 ## 9. 关键文档
 
@@ -204,11 +196,15 @@ pip install -e .[redis-integration]
 | --- | --- |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 主交易系统架构、事件流、状态真源和模块边界 |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | WSL2/Docker 部署、profile、启动/停机、健康检查 |
+| [项目代码审查与系统说明](docs/code_review/README.md) | 按当前代码梳理的完整系统文档、模块索引、API/表/Topic 清单与漂移说明 |
+| [文档地图](docs/README.md) | 现行规范、专题参考与历史材料的适用边界 |
+| [上线前本地测试指南](docs/testing/README.md) | 静态、单元、场景、WSL2 集成、模拟运行和现场门的分层验证 |
+| [文档治理规范](docs/DOCUMENTATION_GOVERNANCE.md) | 文档目录、命名、状态、复核、迁移与质量规则 |
+| [文档纠错审计报告](docs/code_review/DOCUMENTATION_AUDIT.md) | 文档纠错范围、代码依据、验证方法和仍需单独修复的代码风险 |
 | [Postgres 模块审查](docs/audit/postgres_module_audit.md) | 数据库层审查 |
 | [Managed Profile 配置说明](docs/configuration/managed-config-reference.md) | profile、`.env`、策略 YAML 生效顺序 |
 | [configs 目录职责](configs/README.md) | 配置文件归属规则 |
 | [WSL2 基础设施说明](deploy/wsl2-dev/README.md) | 本地基础设施拓扑 |
-| [WSL2 部署 Runbook](deploy/wsl2-dev/RUNBOOK.md) | 从零启动和排障 |
 | [平台运行手册](docs/operations/platform_runbook.md) | RDP 日常运维 |
 | [Operator 检查清单](docs/operations/operator_checklist.md) | 人工巡检清单 |
 | [RDP 模块参考](docs/rdp/module_reference.md) | RDP 文件职责 |
@@ -216,7 +212,10 @@ pip install -e .[redis-integration]
 ## 10. 文档维护原则
 
 1. 架构和流程说明写入 `README.md`、`ARCHITECTURE.md`、`DEPLOYMENT.md`。
-2. 配置归属和字段位置写入 `configs/README.md` 与 `docs/configuration/managed-config-reference.md`。
-3. RDP 模块职责写入 `aats/data_platform/README.md` 与 `docs/rdp/module_reference.md`。
-4. 运维步骤写入 `docs/operations/` 和 `deploy/wsl2-dev/RUNBOOK.md`。
-5. 历史任务、一次性设计和修复记录保留在 `docs/task/`，不要把它们当作当前运行事实。
+2. 配置归属和字段位置写入 `configs/README.md` 与 `docs/configuration/`。
+3. RDP 模块职责写入 `aats/data_platform/README.md` 与 `docs/rdp/`。
+4. 运维步骤写入 `docs/operations/` 并登记到其索引；`deploy/wsl2-dev/RUNBOOK.md` 是历史实跑记录，不是当前入口。
+5. 本地和集成测试流程写入 `docs/testing/`；测试结果记录在当次交付，不写成长期“最近通过数”。
+6. 历史任务、一次性设计和修复记录写入相应历史目录；既有 `docs/` 根层任务文件仅为路径兼容保留，禁止继续新增同类文件。
+7. 带日期、Stage/Phase、roadmap、release notes 或一次性观察窗口的文档默认属于历史证据；只有 [文档地图](docs/README.md) 标为“现行”的文档可以作为当前操作依据。
+8. 目录、命名、生命周期和迁移规则统一服从 [文档治理规范](docs/DOCUMENTATION_GOVERNANCE.md)。

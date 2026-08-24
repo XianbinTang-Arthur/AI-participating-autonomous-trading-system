@@ -2,6 +2,7 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](docs/project_positioning.md)。
 
+> 文档状态：现行约束。最后核对：2026-08-23（代码基线 `be9179e`）。代理权限、实施、验证或部署纪律变化时必须同步复核。
 
 > **重要**：先阅读项目根目录的 `CLAUDE.md` 获取完整操作手册。
 
@@ -11,7 +12,7 @@ This is a **live trading system** handling real money — every change must be d
 
 ## Before editing
 1. 先阅读 `CLAUDE.md` 了解项目架构和操作约束。
-2. 阅读相关设计文档（`docs/task/` 或 `docs/design/`）。
+2. 先从 `docs/README.md` 判断文档状态，再阅读相关 `docs/task/` 或 `docs/design/` 历史材料；历史内容必须与当前代码复核。
 3. Summarize the current behavior briefly.
 4. If the task is non-trivial, propose a short plan before making changes.
 5. Avoid unrelated refactors.
@@ -25,6 +26,7 @@ This is a **live trading system** handling real money — every change must be d
 - All text displayed on the front end must be written in clean UTF-8 Chinese; be sure to avoid encoding issues.
 - OrderState 持久化涉及三层（Postgres 列 + JSON payload + Redis），修改时三者必须同步。
 - SQLAlchemy 2.0: JSON 列用 `.as_string()`，不要用已废弃的 `.astext`。
+- 文档放置、命名、状态与迁移服从 `docs/DOCUMENTATION_GOVERNANCE.md`；新任务/SOW 不得写入 `docs/` 根层兼容区。
 
 ## Validation
 After making code changes, run:
