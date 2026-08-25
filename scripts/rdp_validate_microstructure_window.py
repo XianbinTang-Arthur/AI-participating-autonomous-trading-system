@@ -66,7 +66,10 @@ _QUERY = text(
     LEFT JOIN silver.market_liquidation_metrics_15m AS liq
         ON liq.symbol = ob.symbol AND liq.ts = ob.ts
     WHERE ob.symbol = :symbol
-      AND (:window_start IS NULL OR ob.ts = :window_start)
+      AND (
+          CAST(:window_start AS TIMESTAMPTZ) IS NULL
+          OR ob.ts = :window_start
+      )
     ORDER BY ob.ts DESC
     LIMIT 1
     """

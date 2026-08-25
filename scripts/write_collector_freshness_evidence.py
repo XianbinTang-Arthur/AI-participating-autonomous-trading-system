@@ -7,7 +7,7 @@ import argparse
 import json
 import pathlib
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 _SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent
@@ -29,7 +29,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=pathlib.Path, required=True)
     args = parser.parse_args()
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
     containers = [_container_fact(name, _run_command) for name in _COLLECTORS]
     freshness = [
         _collector_heartbeat_fact(name, run=_run_command, now=now)

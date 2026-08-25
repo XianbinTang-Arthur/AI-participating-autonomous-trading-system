@@ -294,6 +294,24 @@ class MicrostructurePipelineE2ETests(unittest.TestCase):
             for t in tables:
                 conn.execute(text(f"TRUNCATE TABLE {t}"))
 
+    def test_latest_eligibility_query_accepts_null_window_start(self) -> None:
+        """The latest-window query must type its nullable PostgreSQL bind.
+
+        psycopg cannot infer the type of an uncast ``NULL`` used by
+        ``:window_start IS NULL``.  SQLite substitutes used by unit tests do
+        not expose that production-dialect failure, so keep this contract on
+        real PostgreSQL.
+        """
+        from scripts.rdp_validate_microstructure_window import _QUERY
+
+        with self.engine.connect() as connection:  # type: ignore[union-attr]
+            row = connection.execute(
+                _QUERY,
+                {"symbol": _SYMBOL, "window_start": None},
+            ).mappings().first()
+
+        self.assertIsNone(row)
+
     # ─────────────────────────────────────────────────────────────────
     # Case 1: happy path — full Bronze + Silver ETL
     # ─────────────────────────────────────────────────────────────────

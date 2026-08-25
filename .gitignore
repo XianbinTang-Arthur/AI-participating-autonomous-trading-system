@@ -26,6 +26,7 @@ dist/
 *.egg-info/
 
 .pytest_cache/
+.pytest_workspace_tmp/
 /.pytest_tmp/
 /.pytest-basetemp-*/
 /audit/full_system_*/pytest-*/
