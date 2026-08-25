@@ -60,6 +60,10 @@ class _FakeConnection:
                 raise RuntimeError(f"simulated stage failure: {stage}")
         return _RowsResult()
 
+    def exec_driver_sql(self, statement):
+        self.engine.executed_driver_sql.append(str(statement))
+        return self.execute(statement)
+
 
 class _FakeEngine:
     dialect = SimpleNamespace(name="sqlite")
@@ -68,6 +72,7 @@ class _FakeEngine:
         self.ledger: dict[str, str] = {}
         self.fail_stages: set[str] = set()
         self.executed_sql: list[str] = []
+        self.executed_driver_sql: list[str] = []
         self.executed_transactions: list[tuple[str, int | None]] = []
         self.transaction_count = 0
 
@@ -122,6 +127,20 @@ def test_batch_b_schema_change_and_ledger_row_share_one_transaction() -> None:
         if "INSERT INTO governance.rdp_schema_migrations" in sql
     )
     assert stage_transaction == ledger_transaction
+
+
+def test_batch_b_migration_script_bypasses_sqlalchemy_bind_parsing() -> None:
+    engine = _FakeEngine()
+    stage = _batch_b.BATCH_B_STAGES[0]
+    sql = "BEGIN;\n-- documentation:sleeve\nSELECT 1;\nCOMMIT;"
+
+    with patch.object(_batch_b, "_load_sql", return_value=sql):
+        report = _batch_b.run_batch_b_migrations(engine, stages=[stage])
+
+    assert report.ok is True
+    assert engine.executed_driver_sql == [
+        "-- documentation:sleeve\nSELECT 1;"
+    ]
 
 
 def test_batch_b_rejects_sql_without_one_outer_transaction_wrapper() -> None:

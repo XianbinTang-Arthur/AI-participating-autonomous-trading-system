@@ -274,7 +274,13 @@ def run_batch_b_migrations(
 
                 sql = _without_outer_transaction(_load_sql(stage), stage=stage)
                 with engine.begin() as conn:
-                    conn.execute(text(sql))
+                    # Migration files are trusted, versioned SQL scripts rather
+                    # than SQLAlchemy statements.  ``text(sql)`` scans comments
+                    # for ``:name`` bind markers (for example ``:sleeve`` in
+                    # Stage 04) and can therefore fail before PostgreSQL sees
+                    # otherwise-valid SQL.  Execute the script at the driver
+                    # layer; keep the ledger write parameterized below.
+                    conn.exec_driver_sql(sql)
                     conn.execute(
                         text(
                             f"""
@@ -351,7 +357,7 @@ def run_batch_b_rollback(
                     stage=f"{stage}:rollback",
                 )
                 with engine.begin() as conn:
-                    conn.execute(text(sql))
+                    conn.exec_driver_sql(sql)
                     conn.execute(
                         text(
                             f"DELETE FROM {RDP_SCHEMA_MIGRATIONS_TABLE} "
