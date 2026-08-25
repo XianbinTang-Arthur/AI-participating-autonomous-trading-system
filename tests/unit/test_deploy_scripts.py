@@ -35,6 +35,13 @@ def test_deploy_script_commit_only_uses_precisely_staged_files() -> None:
     assert "repo_has_unstaged_or_untracked_changes()" in text
 
 
+def test_runtime_evidence_directories_are_gitignored() -> None:
+    text = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+
+    assert "deploy/wsl2-dev/runtime/deployment-evidence/" in text
+    assert "deploy/wsl2-dev/runtime/execution-funnel-evidence/" in text
+
+
 def test_deploy_script_health_check_covers_current_topology() -> None:
     text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
 
