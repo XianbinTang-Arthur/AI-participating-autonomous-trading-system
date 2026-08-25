@@ -107,12 +107,18 @@ class MicrostructureEligibilityPolicy:
     min_books5_samples: int = 720
     min_trade_count: int = 1
     min_oi_samples: int = 1
+    max_window_age_seconds: int | None = None
+    max_future_clock_skew_seconds: int = 5
 
     def __post_init__(self) -> None:
         if not self.policy_version.strip():
             raise ValueError("policy_version_required")
         if self.window_seconds <= 0:
             raise ValueError("window_seconds_must_be_positive")
+        if self.max_window_age_seconds is not None and self.max_window_age_seconds <= 0:
+            raise ValueError("max_window_age_seconds_must_be_positive")
+        if self.max_future_clock_skew_seconds < 0:
+            raise ValueError("max_future_clock_skew_seconds_must_be_non_negative")
         for name in (
             "min_bbo_samples",
             "min_books5_samples",
@@ -233,6 +239,10 @@ def evaluate_microstructure_window(
     """Evaluate one window without mutating storage or runtime state."""
 
     selected_policy = policy or MicrostructureEligibilityPolicy()
+    now = _utc_datetime(
+        evaluated_at or datetime.now(_UTC),
+        field_name="evaluated_at",
+    )
     reasons: set[str] = set()
     expected_end = observation.window_start + timedelta(
         seconds=selected_policy.window_seconds
@@ -241,6 +251,14 @@ def evaluate_microstructure_window(
         reasons.add("window_duration_mismatch")
     if int(observation.window_start.timestamp()) % selected_policy.window_seconds:
         reasons.add("window_not_utc_aligned")
+    window_age_seconds = (now - observation.window_end).total_seconds()
+    if window_age_seconds < -selected_policy.max_future_clock_skew_seconds:
+        reasons.add("window_end_in_future")
+    if (
+        selected_policy.max_window_age_seconds is not None
+        and window_age_seconds > selected_policy.max_window_age_seconds
+    ):
+        reasons.add("window_stale")
 
     threshold_checks = (
         ("bbo_samples_below_minimum", observation.bbo_samples_n, selected_policy.min_bbo_samples),
@@ -293,10 +311,6 @@ def evaluate_microstructure_window(
         observation=observation,
         eligible=eligible,
         reason_codes=ordered_reasons,
-    )
-    now = _utc_datetime(
-        evaluated_at or datetime.now(_UTC),
-        field_name="evaluated_at",
     )
     return MicrostructureEligibilityReport(
         format_version=1,

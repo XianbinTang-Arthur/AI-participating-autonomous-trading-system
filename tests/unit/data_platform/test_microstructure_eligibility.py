@@ -123,7 +123,10 @@ def test_fatal_quality_flags_and_lineage_mismatch_fail_closed() -> None:
 
 def test_fingerprint_is_stable_and_excludes_evaluation_clock() -> None:
     observation = _observation()
-    first = evaluate_microstructure_window(observation, evaluated_at=_START)
+    first = evaluate_microstructure_window(
+        observation,
+        evaluated_at=_START + timedelta(minutes=20),
+    )
     second = evaluate_microstructure_window(
         observation,
         evaluated_at=_START + timedelta(days=1),
@@ -141,6 +144,34 @@ def test_fingerprint_is_stable_and_excludes_evaluation_clock() -> None:
 def test_naive_window_timestamp_is_rejected() -> None:
     with pytest.raises(ValueError, match="window_start_must_be_timezone_aware"):
         _observation(window_start=datetime(2026, 8, 25, 12, 0))
+
+
+def test_latest_window_policy_rejects_stale_or_future_data() -> None:
+    policy = replace(
+        MicrostructureEligibilityPolicy(),
+        max_window_age_seconds=1_800,
+    )
+    stale = evaluate_microstructure_window(
+        _observation(),
+        policy=policy,
+        evaluated_at=_START + timedelta(minutes=46),
+    )
+    future = evaluate_microstructure_window(
+        _observation(),
+        policy=policy,
+        evaluated_at=_START + timedelta(minutes=14, seconds=54),
+    )
+    assert "window_stale" in stale.reason_codes
+    assert "window_end_in_future" in future.reason_codes
+
+
+def test_explicit_historical_window_can_disable_age_limit() -> None:
+    report = evaluate_microstructure_window(
+        _observation(),
+        policy=MicrostructureEligibilityPolicy(max_window_age_seconds=None),
+        evaluated_at=_START + timedelta(days=30),
+    )
+    assert report.eligible_for_research is True
 
 
 def test_collector_packet_freshness_is_recomputed_not_trusted(

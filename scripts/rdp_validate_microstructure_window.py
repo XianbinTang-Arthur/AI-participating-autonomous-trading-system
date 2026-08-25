@@ -179,7 +179,15 @@ def main() -> int:
     parser.add_argument("--min-books5-samples", type=int, default=720)
     parser.add_argument("--min-trade-count", type=int, default=1)
     parser.add_argument("--min-oi-samples", type=int, default=1)
+    parser.add_argument(
+        "--max-latest-window-age-seconds",
+        type=int,
+        default=1_800,
+        help="省略 --window-start 时，最新 Silver 窗口结束时间允许的最大年龄",
+    )
     args = parser.parse_args()
+    if args.max_latest_window_age_seconds <= 0:
+        parser.error("--max-latest-window-age-seconds must be positive")
 
     database_url = os.environ.get("RDP_DATABASE_URL", "").strip()
     if not database_url:
@@ -215,6 +223,11 @@ def main() -> int:
             min_books5_samples=args.min_books5_samples,
             min_trade_count=args.min_trade_count,
             min_oi_samples=args.min_oi_samples,
+            max_window_age_seconds=(
+                args.max_latest_window_age_seconds
+                if window_start is None
+                else None
+            ),
         )
         report = evaluate_microstructure_window(
             observation,

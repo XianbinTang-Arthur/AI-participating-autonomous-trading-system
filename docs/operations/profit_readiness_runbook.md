@@ -58,7 +58,8 @@ python scripts/rdp_validate_microstructure_window.py \
 
 连续频道的缺样本、必填值空、fatal quality flag、混合 lineage 都失败。强平窗口内零事件可通过，
 但 heartbeat 必须在资格判定时重新计算且小于 60 秒；脚本不会信任旧 packet 中遗留的
-`fresh=true`。输出不可覆盖并包含确定性 fingerprint。
+`fresh=true`。省略 `--window-start` 时，“最新”Silver 窗口结束时间还必须在 30 分钟内；显式
+指定历史窗口才关闭当前时效限制。输出不可覆盖并包含确定性 fingerprint。
 
 ## 4. 历史候选与 v2 复跑
 
