@@ -585,6 +585,30 @@ class TestExecutionPlanner(unittest.TestCase):
 
         self.assertIsNone(plan)
 
+    def test_build_plan_treats_flat_derivatives_target_as_debug_not_warning(self) -> None:
+        planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
+
+        with self.assertLogs(
+            "aats.services.execution_engine.planner", level="DEBUG"
+        ) as captured:
+            plan = planner.build_plan(
+                decision_id="decision_flat_target",
+                symbol="BTC-USDT-SWAP",
+                current_position_qty=Decimal("0"),
+                target_position_qty=Decimal("0"),
+                approved_target_position_qty=Decimal("0"),
+                delta_qty=Decimal("0"),
+                urgency="medium",
+                max_slippage_tolerance_bps=25,
+                product_type="derivatives",
+                margin_mode="cross",
+                instrument_rule=self._swap_instrument(),
+            )
+
+        self.assertIsNone(plan)
+        self.assertTrue(any("量化后 delta 为零" in message for message in captured.output))
+        self.assertFalse(any(message.startswith("WARNING:") for message in captured.output))
+
     def test_build_plan_quantizes_derivatives_delta_to_exchange_step_before_intent(self) -> None:
         planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
 

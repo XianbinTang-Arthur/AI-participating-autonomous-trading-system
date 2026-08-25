@@ -268,7 +268,11 @@ class ExecutionPlanner:
             instrument=instrument_rule,
         )
         if abs(normalized_delta_qty) < EPSILON_DECIMAL_12:
-            log.warning(
+            # A flat target is a normal decision outcome.  Keeping this at
+            # warning level floods the operator signal with non-actionable
+            # messages during quiet markets; sub-minimum non-zero deltas below
+            # remain warnings because they can indicate a sizing mismatch.
+            log.debug(
                 "normalize_delta skip: 量化后 delta 为零 | symbol=%s raw_delta=%s normalized=%s",
                 symbol, delta_qty, normalized_delta_qty,
             )
