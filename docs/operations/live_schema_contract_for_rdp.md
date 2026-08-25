@@ -2,8 +2,12 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
+> 文档状态：现行专题参考
+> 最后核对：2026-08-24（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；未提交 Phase 3E schema 整改工作区）
+> 核对范围：RDP 读取主交易库的静态契约；不证明当前 live 库、账户或表内数据健康
 
-RDP 读取主交易系统 production DB 的表结构契约文档。
+
+RDP 读取主交易系统 production DB 的表结构契约文档。这里的 `RDP_LIVE_DATABASE_URL` 是**只读主交易库**，与 RDP 自身可写的 `RDP_DATABASE_URL`/`aats_research` 不是同一边界。RDP 自身 schema 的迁移由部署期 `scripts/apply_schema_migrations.py` 所有；运行进程只读校验。
 
 ## 1. 总则
 
@@ -231,24 +235,9 @@ RDP 读取主交易系统 production DB 的表结构契约文档。
 - 连接字符串存储在 `.env.research`（已被 .gitignore 覆盖）
 - live_query_adapter 逻辑层强制 session.rollback()
 
-## 9. 配置示例
+## 9. 配置与权限边界
 
-在 `.env.research` 中添加:
-
-```env
-RDP_LIVE_DATABASE_URL=postgresql+psycopg://rdp_readonly:password@localhost:5432/aats_production
-RDP_LIVE_DB_READONLY=true
-```
-
-建议在 PostgreSQL 创建只读用户:
-
-```sql
-CREATE ROLE rdp_readonly WITH LOGIN PASSWORD 'secure_password';
-GRANT CONNECT ON DATABASE aats_production TO rdp_readonly;
-GRANT USAGE ON SCHEMA public TO rdp_readonly;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO rdp_readonly;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO rdp_readonly;
-```
+`RDP_LIVE_DATABASE_URL` 与 `RDP_LIVE_DB_READONLY=true` 由受控环境配置注入。本文不复制 DSN、用户名或密码示例；也不建议把创建角色/GRANT 语句当作日常操作命令。权限应由数据库管理流程在明确目标库上建立，并独立验证该身份只能 `CONNECT`/`USAGE`/`SELECT`，不能 `INSERT`/`UPDATE`/`DELETE`/DDL。
 
 ## 10. Contract 维护注意事项
 

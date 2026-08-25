@@ -123,9 +123,10 @@ def _reconciliation_report(
     )
 
 
-def _session_factory() -> sessionmaker[Session]:
+def _session_factory(owner: unittest.TestCase) -> sessionmaker[Session]:
     engine = create_engine("sqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
+    owner.addCleanup(engine.dispose)
     return sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
 
@@ -280,7 +281,7 @@ class TestEventStoreCountByTopicScoped(unittest.TestCase):
         )
 
     def test_postgres_count_limit_caps_latest_window(self) -> None:
-        store = PostgresEventStore(_session_factory())
+        store = PostgresEventStore(_session_factory(self))
         scope = _spot_scope()
         for _ in range(5):
             store.append(_event(
@@ -368,7 +369,7 @@ class TestEventStoreCountByTopicScoped(unittest.TestCase):
         self.assertEqual(store.count_by_topic_scoped("strategy.decision_context", scope=scope, limit=0), 0)
 
     def test_postgres_count_limit_matches_limited_scoped_rows(self) -> None:
-        store = PostgresEventStore(_session_factory())
+        store = PostgresEventStore(_session_factory(self))
         scope = _spot_scope()
         for symbol, product_type, margin_mode in [
             ("BTC-USDT", "spot", "cash"),
@@ -389,7 +390,7 @@ class TestEventStoreCountByTopicScoped(unittest.TestCase):
         self.assertEqual(store.count_by_topic_scoped("strategy.decision_context", scope=scope, limit=0), 0)
 
     def test_postgres_count_limit_matches_derivatives_smart_arbitrage_scope(self) -> None:
-        store = PostgresEventStore(_session_factory())
+        store = PostgresEventStore(_session_factory(self))
         scope = RuntimeStateScope(
             product_type="derivatives",
             margin_mode="cross",
@@ -452,7 +453,7 @@ class TestEventStoreBatchGet(unittest.TestCase):
         self.assertEqual(rows["event_a"].event_id, "event_a")
 
     def test_postgres_get_many_returns_existing_events_by_id(self) -> None:
-        store = PostgresEventStore(_session_factory())
+        store = PostgresEventStore(_session_factory(self))
         store.append(_event_with_id(event_id="event_a"))
         store.append(_event_with_id(event_id="event_b"))
 
@@ -605,7 +606,7 @@ class TestReconciliationRepoPortfolioSnapshotRefs(unittest.TestCase):
         )
 
     def test_postgres_has_portfolio_snapshot_ref_uses_scoped_exists(self) -> None:
-        repo = PostgresReconciliationRepository(_session_factory())
+        repo = PostgresReconciliationRepository(_session_factory(self))
         repo.save_report(_reconciliation_report(
             reconciliation_id="recon_spot",
             product_type="spot",
@@ -641,7 +642,7 @@ class TestReconciliationRepoPortfolioSnapshotRefs(unittest.TestCase):
 
 class TestPostgresScopedLimitSemantics(unittest.TestCase):
     def test_portfolio_history_for_scope_limit_returns_latest_rows_in_chronological_order(self) -> None:
-        repo = PostgresPortfolioRepository(_session_factory())
+        repo = PostgresPortfolioRepository(_session_factory(self))
         base_ts = datetime(2026, 5, 7, tzinfo=timezone.utc)
         for index in range(4):
             repo.save_snapshot(_portfolio_snapshot(
@@ -654,7 +655,7 @@ class TestPostgresScopedLimitSemantics(unittest.TestCase):
         self.assertEqual([row.decision_id for row in rows], ["decision_3", "decision_4"])
 
     def test_reconciliation_history_for_scope_limit_returns_latest_rows_in_chronological_order(self) -> None:
-        repo = PostgresReconciliationRepository(_session_factory())
+        repo = PostgresReconciliationRepository(_session_factory(self))
         base_ts = datetime(2026, 5, 7, tzinfo=timezone.utc)
         for index in range(4):
             repo.save_report(_reconciliation_report(
@@ -670,7 +671,7 @@ class TestPostgresScopedLimitSemantics(unittest.TestCase):
         self.assertEqual([row.reconciliation_id for row in rows], ["recon_3", "recon_4"])
 
     def test_legacy_execution_fills_for_scope_limit_returns_latest_rows_in_chronological_order(self) -> None:
-        repo = PostgresExecutionRepository(_session_factory())
+        repo = PostgresExecutionRepository(_session_factory(self))
         base_ts = datetime(2026, 5, 7, tzinfo=timezone.utc)
         for index in range(4):
             repo.save_fill(_fill_event(
@@ -683,7 +684,7 @@ class TestPostgresScopedLimitSemantics(unittest.TestCase):
         self.assertEqual([row.fill_id for row in rows], ["fill_3", "fill_4"])
 
     def test_legacy_execution_order_states_for_scope_limit_uses_update_or_created_time(self) -> None:
-        repo = PostgresExecutionRepository(_session_factory())
+        repo = PostgresExecutionRepository(_session_factory(self))
         base_ts = datetime(2026, 5, 7, tzinfo=timezone.utc)
         repo.save_order_state(_order_state(client_order_id="order_1", created_at=base_ts))
         repo.save_order_state(_order_state(client_order_id="order_2", created_at=base_ts + timedelta(minutes=1)))
@@ -699,7 +700,7 @@ class TestPostgresScopedLimitSemantics(unittest.TestCase):
         self.assertEqual([row.client_order_id for row in rows], ["order_4", "order_3"])
 
     def test_execution_order_v2_count_for_scope_uses_product_margin_symbol_and_open_state(self) -> None:
-        repo = PostgresExecutionOrderRepository(_session_factory())
+        repo = PostgresExecutionOrderRepository(_session_factory(self))
         base_ts = datetime(2026, 5, 7, tzinfo=timezone.utc)
         for index, (order_id, product_type, margin_mode, symbol, state) in enumerate(
             [
@@ -741,7 +742,7 @@ class TestPostgresScopedLimitSemantics(unittest.TestCase):
         )
 
     def test_execution_fill_v2_fills_since_limit_returns_latest_rows_in_chronological_order(self) -> None:
-        repo = PostgresExecutionFillRepositoryV2(_session_factory())
+        repo = PostgresExecutionFillRepositoryV2(_session_factory(self))
         base_ts = datetime(2026, 5, 7, tzinfo=timezone.utc)
         for index in range(4):
             fill = _fill_event(
@@ -760,7 +761,7 @@ class TestPostgresScopedLimitSemantics(unittest.TestCase):
         self.assertEqual([row["fill_id"] for row in rows], ["fill_v2_3", "fill_v2_4"])
 
     def test_execution_fill_v2_recent_and_count_for_scope_use_payload_scope_and_symbol(self) -> None:
-        repo = PostgresExecutionFillRepositoryV2(_session_factory())
+        repo = PostgresExecutionFillRepositoryV2(_session_factory(self))
         base_ts = datetime(2026, 5, 7, tzinfo=timezone.utc)
         rows = [
             ("fill_spot_old", "spot", "cash", "BTC-USDT"),
@@ -820,7 +821,7 @@ class TestAuditRepoBatchLatestLookup(unittest.TestCase):
         self.assertEqual(by_id["decision_a"].decision_context_ref, "ctx_a_new")
 
     def test_postgres_get_many_latest_returns_one_latest_revision_per_decision(self) -> None:
-        repo = PostgresAuditRepository(_session_factory())
+        repo = PostgresAuditRepository(_session_factory(self))
         repo.upsert(_audit_record(decision_id="decision_a", decision_context_ref="ctx_a_old"))
         repo.upsert(_audit_record(decision_id="decision_b", decision_context_ref="ctx_b"))
         repo.upsert(_audit_record(decision_id="decision_a", decision_context_ref="ctx_a_new"))
@@ -832,7 +833,7 @@ class TestAuditRepoBatchLatestLookup(unittest.TestCase):
         self.assertEqual(by_id["decision_a"].decision_context_ref, "ctx_a_new")
 
     def test_postgres_recent_orders_by_payload_created_at_not_insert_time(self) -> None:
-        repo = PostgresAuditRepository(_session_factory())
+        repo = PostgresAuditRepository(_session_factory(self))
         base_ts = datetime(2026, 5, 7, tzinfo=timezone.utc)
         repo.upsert(
             _audit_record(decision_id="decision_new", decision_context_ref="ctx_new")
@@ -854,7 +855,7 @@ class TestAuditRepoBatchLatestLookup(unittest.TestCase):
         self.assertEqual(repo.latest().decision_id, "decision_new")
 
     def test_postgres_count_cache_is_invalidated_by_writes(self) -> None:
-        repo = PostgresAuditRepository(_session_factory())
+        repo = PostgresAuditRepository(_session_factory(self))
         repo.upsert(_audit_record(decision_id="decision_a", decision_context_ref="ctx_a"))
         self.assertEqual(repo.count(), 1)
 

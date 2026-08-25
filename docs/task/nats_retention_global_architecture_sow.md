@@ -7,6 +7,8 @@
 > **关联**：取代 [`aats_events_stream_retention_root_fix_sow.md`](aats_events_stream_retention_root_fix_sow.md)（那份是局部方案 C，本 SOW 是全局根治）
 > **用户要求**：路线 β — "从全局思考，让优化真正实现全局优化"，不做局部补丁
 
+> **2026-08-24 现行替代说明**：本文保留为 2026-04-20 历史设计证据，其固定 `aats:runtime:ready:{role}`、readiness fallback 和通过开关绕过 barrier 的内容不是当前行为。现行 FS-016 契约见 [`fs_016_nats_peer_readiness_fail_closed_sow_2026_08_24.md`](fs_016_nats_peer_readiness_fail_closed_sow_2026_08_24.md)：四主进程 NATS/hybrid 必须使用部署 generation 的 strict barrier，Redis 异常或超时不得继续 publisher。当前验证边界见 [`../../audit/full_system_2026_08_24/30-fs-016-nats-peer-readiness-remediation.md`](../../audit/full_system_2026_08_24/30-fs-016-nats-peer-readiness-remediation.md)。
+
 ---
 
 ## 1. 背景 & 为什么要"全局治理"

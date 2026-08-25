@@ -1,6 +1,12 @@
 # Parameter Apply 与 Rollback 操作指南
 
-> 最后核对：2026-08-22（代码基线 `be9179e`）。本页描述当前 API 实现，不再使用已禁用的直写 CLI 或 JSON active parameter fallback。
+> 最后核对：2026-08-24（起始 HEAD `00b6df0` + 未提交 Phase 3M 覆盖层）。本页描述 combo active-parameter API；不再使用已禁用的直写 CLI 或 JSON active parameter fallback。
+
+> **Scope 边界：**本页的 `POST /rdp/parameters/apply|rollback` 是 combo
+> `family + timeframe` 流程，不能类推到 `profile-recommendations/{id}`。Phase 3M 后
+> profile apply 与 rollback 均在授权/状态/双签检查后无写入 `501`；approve/release
+> 只推进研究治理状态。真实 execution-owned profile activation/readback 完成前，
+> 不得用 profile endpoint 改变运行参数。
 
 ## 1. 关键事实
 

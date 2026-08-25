@@ -410,7 +410,7 @@ export function createRiskActionHandlers({
     scrollExitExecutionWorkspaceIntoView(target);
   }
 
-  async function inspectReconciliation(reconciliationId) {
+  async function inspectReconciliation(reconciliationId, triggerElement = null) {
     if (!reconciliationId) return;
     try {
       const detail = await requestJson(`/reconciliation/${encodeURIComponent(reconciliationId)}`);
@@ -423,6 +423,7 @@ export function createRiskActionHandlers({
             controlPermissionMessage: controlPermissionMessage(),
           },
         }),
+        triggerElement,
       );
     } catch (error) {
       setFlash(state, "danger", error instanceof Error ? error.message : String(error));
@@ -430,7 +431,7 @@ export function createRiskActionHandlers({
     }
   }
 
-  async function inspectPhase1Shadow() {
+  async function inspectPhase1Shadow(triggerElement = null) {
     try {
       const [detailResult, historyResult] = await Promise.allSettled([
         requestJson("/system/shadow"),
@@ -451,6 +452,7 @@ export function createRiskActionHandlers({
           },
           history: history?.history || [],
         }),
+        triggerElement,
       );
       if (detailResult.status === "rejected" || historyResult.status === "rejected") {
         setFlash(state, "warning", "已打开当前已缓存的影子兼容层状态，部分历史详情暂时没有返回。");
@@ -496,8 +498,8 @@ export function createRiskActionHandlers({
 
   return {
     "apply-exit-execution-history-workspace": (_value, target) => applyExitExecutionHistoryWorkspaceFilters(target),
-    "inspect-reconciliation": (value) => inspectReconciliation(value),
-    "inspect-shadow": () => inspectPhase1Shadow(),
+    "inspect-reconciliation": (value, target) => inspectReconciliation(value, target),
+    "inspect-shadow": (_value, target) => inspectPhase1Shadow(target),
     "paginate-exit-execution-history": (value, target) => paginateExitExecutionHistory(value, target),
     "record-scaling-review": (value, target) => recordScalingReview(value, target),
     "record-trial-review": (_value, target) => recordTrialReview(target),

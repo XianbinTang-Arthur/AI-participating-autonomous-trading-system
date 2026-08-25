@@ -87,30 +87,33 @@ _SYMBOL = "BTC-USDT-SWAP"
 
 
 def _apply_migrations(engine, rollback: bool = False) -> None:
-    """Forward-apply or rollback only batch_b_05 + batch_b_06 migrations.
+    """Directly exercise only the stage 05/06 SQL on an isolated fresh DB.
 
     We deliberately do NOT run the full `create_rdp_schema` path — this test
     exists to verify the batch_b_05/06 *SQL migrations themselves* deploy
-    cleanly on a fresh Postgres, so we invoke them directly.
+    cleanly on a fresh Postgres.  The production runner now requires the full
+    predecessor ledger, so a standalone SQL contract test must not call that
+    production entrypoint or fabricate predecessor ledger rows.
 
-    Stage 05/06 SQL files are self-contained (BEGIN/COMMIT + CREATE SCHEMA
-    IF NOT EXISTS), so running them standalone on an empty DB is safe.
+    The production runner strips each legacy outer BEGIN/COMMIT and owns the
+    transaction; this test uses the same normalization before direct execute.
     """
+    from sqlalchemy import text
+
     from aats.data_platform.migrations._batch_b import (
-        run_batch_b_migrations,
-        run_batch_b_rollback,
+        _load_sql,
+        _without_outer_transaction,
     )
 
     target = ("batch_b_05_microstructure", "batch_b_06_silver_microstructure")
-    if rollback:
-        report = run_batch_b_rollback(engine, stages=tuple(reversed(target)))
-    else:
-        report = run_batch_b_migrations(engine, stages=target)
-    if not report.ok:
-        raise RuntimeError(
-            f"migration {'rollback' if rollback else 'forward'} failed: "
-            f"{report.error_message}"
+    ordered = tuple(reversed(target)) if rollback else target
+    for stage in ordered:
+        sql = _without_outer_transaction(
+            _load_sql(stage, rollback=rollback),
+            stage=f"{stage}:rollback" if rollback else stage,
         )
+        with engine.begin() as connection:
+            connection.execute(text(sql))
 
 
 def _sample_trades(n_buy: int, n_sell: int, ingest_run_id: str):

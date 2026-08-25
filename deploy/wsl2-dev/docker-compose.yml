@@ -10,9 +10,9 @@
 #   - 持久化卷使用 docker named volume，便于 docker volume ls 管理
 #   - 资源限制按 32GB 开发机实测 docker stats 调优（2026-04 优化）
 #
-# 启动：cd deploy/wsl2-dev && docker compose --env-file ../../.env.wsl2 up -d
-# 停止：docker compose down            （保留数据）
-# 清理：docker compose down -v         （删除全部数据，慎用）
+# 运维入口：只允许从仓库根执行 scripts/deploy.sh --profile <spot|derivatives> --skip-commit。
+# 本文件是标准部署脚本管理的基础设施实现细节，不是独立启动/停止/清理入口；不得手工执行
+# docker compose，尤其不得对持久化卷执行 down -v。参见 DEPLOYMENT.md。
 # =============================================================================
 
 name: aats-dev
@@ -36,7 +36,7 @@ services:
   # Postgres 16 — AATS 主存储
   # ---------------------------------------------------------------------------
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
     container_name: aats-postgres
     restart: unless-stopped
     environment:
@@ -49,7 +49,9 @@ services:
     command:
       - "postgres"
       - "-c"
-      - "max_connections=200"          # 4 进程 × pool_size 10 + 余量
+      - "max_connections=200"          # FS-008 单一预算：声明池上限 150 + 普通连接余量 47
+      - "-c"
+      - "superuser_reserved_connections=3"
       - "-c"
       - "shared_buffers=768MB"
       - "-c"
@@ -96,7 +98,7 @@ services:
   #     （需额外 --tls-port / --tls-cert-file / --tls-key-file 参数）
   # ---------------------------------------------------------------------------
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     container_name: aats-redis
     restart: unless-stopped
     command:
@@ -137,7 +139,7 @@ services:
   # Stage 9 §3.1 要求：Redis latency p99 < 10ms
   # ---------------------------------------------------------------------------
   redis-exporter:
-    image: oliver006/redis_exporter:v1.58.0-alpine
+    image: oliver006/redis_exporter:v1.58.0-alpine@sha256:f8b9ce3393afb619696f43e000c93369258109b0ea82a37ba4d29d000c277f2f
     container_name: aats-redis-exporter
     restart: unless-stopped
     environment:
@@ -167,7 +169,7 @@ services:
   # 这里 server 同时支持两种 storage，由 stream 配置决定
   # ---------------------------------------------------------------------------
   nats:
-    image: nats:2.10-alpine
+    image: nats:2.10-alpine@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
     container_name: aats-nats
     restart: unless-stopped
     command:
@@ -195,7 +197,7 @@ services:
   # Loki — 集中日志存储
   # ---------------------------------------------------------------------------
   loki:
-    image: grafana/loki:3.0.0
+    image: grafana/loki:3.0.0@sha256:757b5fadf816a1396f1fea598152947421fa49cb8b2db1ddd2a6e30fae003253
     container_name: aats-loki
     restart: unless-stopped
     command:
@@ -223,7 +225,7 @@ services:
   # 使用 Badger 内嵌存储，开发足够
   # ---------------------------------------------------------------------------
   jaeger:
-    image: jaegertracing/all-in-one:1.57
+    image: jaegertracing/all-in-one:1.57@sha256:8f165334f418ca53691ce358c19b4244226ed35c5d18408c5acf305af2065fb9
     container_name: aats-jaeger
     restart: unless-stopped
     # ── 权限处理 ──────────────────────────────────────────────────
@@ -284,7 +286,7 @@ services:
   # Grafana Prometheus datasource 指向此处
   # ---------------------------------------------------------------------------
   prometheus:
-    image: prom/prometheus:v2.51.0
+    image: prom/prometheus:v2.51.0@sha256:5ccad477d0057e62a7cd1981ffcc43785ac10c5a35522dc207466ff7e7ec845f
     container_name: aats-prometheus
     restart: unless-stopped
     command:
@@ -319,7 +321,7 @@ services:
     # setMaxDatapoints 对 nil modelProps map 写入 panic,导致容器无限 Restart。
     # 12.4.0 的 PR #115239 给 setModelProps 加了 aq.Model == nil 的保护,
     # 升级到 12.4.3 (最新补丁版) 修复该 panic 并恢复 17 条告警规则。
-    image: grafana/grafana:12.4.3
+    image: grafana/grafana:12.4.3@sha256:2e986801428cd689c2358605289c90ab37d2b39e24808874971f54c99bcdc412
     container_name: aats-grafana
     restart: unless-stopped
     environment:
@@ -364,7 +366,7 @@ services:
   # 从 /var/lib/docker/containers 读 json-file 日志，解析后推送 Loki
   # ---------------------------------------------------------------------------
   promtail:
-    image: grafana/promtail:3.0.0
+    image: grafana/promtail:3.0.0@sha256:d3de3da9431cfbe74a6a94555050df5257f357e827be8e63f8998d509c37af8b
     container_name: aats-promtail
     restart: unless-stopped
     command:

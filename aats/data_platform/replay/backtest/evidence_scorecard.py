@@ -238,6 +238,16 @@ def _build_meta(
         "dataset_version": cfg.dataset_version,
         "family": cfg.family,
         "order_type": cfg.order_type,
+        "execution_model_version": cfg.execution_model_version,
+        "fill_model_version": cfg.fill_model_version,
+        "market_data_granularity": "ohlcv",
+        "execution_realism_limitations": [
+            "no_l2_depth",
+            "no_spread_or_queue_position",
+            "no_market_impact_calibration",
+            "fixed_slippage_bps",
+            "volume_participation_proxy_only",
+        ],
         "contract_multiplier": str(cfg.contract_multiplier),
         "start_ts": _to_utc_iso(result.start_ts),
         "end_ts": _to_utc_iso(result.end_ts),
@@ -360,7 +370,9 @@ def _cost_bucket(
 ) -> dict[str, Any]:
     """单个 diagnostics 分桶的 5 字段 cost 结构; 空桶返回稳定零值。
 
-    ``slip_bps`` 沿用 order_type 决定的全局假设, 不随桶内样本变化。
+    新版 harness 会把实际 fee/slippage 分项写入 diagnostic；历史 artifact
+    没有分项时，保留旧行为：actual_cost 作为 fee、``slip_bps`` 使用调用方
+    根据 order type 提供的固定值。
     """
     if not diagnostics:
         return {
@@ -371,15 +383,32 @@ def _cost_bucket(
             "net_edge_bps": 0.0,
         }
     n = len(diagnostics)
-    fee_bps = sum(d.actual_cost_bps for d in diagnostics) / n
+    fee_bps = (
+        sum(
+            d.actual_cost_bps
+            if d.actual_fee_bps is None
+            else d.actual_fee_bps
+            for d in diagnostics
+        )
+        / n
+    )
+    actual_slip_bps = (
+        sum(
+            slip_bps
+            if d.actual_slippage_bps is None
+            else d.actual_slippage_bps
+            for d in diagnostics
+        )
+        / n
+    )
     assumed_cost = sum(d.assumed_cost_bps for d in diagnostics) / n
     assumed_net = sum(d.assumed_net_edge_bps for d in diagnostics) / n
     actual_net = sum(d.actual_net_edge_bps for d in diagnostics) / n
     return {
         "realized_edge_bps": assumed_net + assumed_cost,
         "fee_bps": fee_bps,
-        "slip_bps": slip_bps,
-        "exec_buffer_bps": assumed_cost - fee_bps - slip_bps,
+        "slip_bps": actual_slip_bps,
+        "exec_buffer_bps": assumed_cost - fee_bps - actual_slip_bps,
         "net_edge_bps": actual_net,
     }
 
@@ -454,13 +483,14 @@ def _build_cost_adjusted(
 
     字段语义:
         * ``fee_bps``        — 每笔 fill 的实际 fee_bps 均值 (FillResult.fee_bps)
-        * ``slip_bps``       — 与 FillSimulator 当前 order_type 语义对齐的滑点假设:
-          ``ioc`` → ``config.ioc_slippage_bps``; ``post_only`` / ``bounded_limit`` → 0
+        * ``slip_bps``       — 新 artifact 取每笔 fill 实际记录值；历史 artifact
+          回退到 order_type 固定值（``ioc`` / ``bounded_limit`` 使用
+          ``config.ioc_slippage_bps``，``post_only`` 为 0）
         * ``exec_buffer_bps``— 策略 per-decision 假设 cost 减去 (fee + slip) 剩余
           部分, 代表"决策端为兜底保留的 execution buffer"
         * ``realized_edge_bps`` — 决策层估的 gross 信号 edge =
           mean(assumed_net_edge_bps) + mean(assumed_cost_bps)
-        * ``net_edge_bps``   — 套用实际 fee 后的 net edge =
+        * ``net_edge_bps``   — 套用实际 fee + fixed slippage 后的 net edge =
           mean(actual_net_edge_bps) (来自 CostValidator)
 
     顶层保留既有 5 字段 (overall aggregate) 以维持向后兼容; 另外挂
@@ -469,7 +499,7 @@ def _build_cost_adjusted(
     """
     slip_bps = (
         float(result.config.ioc_slippage_bps)
-        if result.config.order_type == "ioc"
+        if result.config.order_type in {"ioc", "bounded_limit"}
         else 0.0
     )
     overall = _cost_bucket(diagnostics, slip_bps)

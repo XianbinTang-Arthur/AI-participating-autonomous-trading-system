@@ -813,9 +813,8 @@ class ExecutionRecoveryService:
             return False
         if not safe_startup or open_order_count or bundle_recovery_required or bundle_recovery_blocking:
             return False
-        self.kill_switch.resume()
-        notes.append("recovery_reconciliation_stale_halt_cleared_after_fresh_nonblocking_reconciliation")
-        return True
+        notes.append("recovery_reconciliation_fresh_explicit_operator_resume_required")
+        return False
 
     @staticmethod
     def _dedupe_notes(notes: list[str]) -> list[str]:

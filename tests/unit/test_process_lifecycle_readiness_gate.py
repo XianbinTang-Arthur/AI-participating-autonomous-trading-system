@@ -6,7 +6,8 @@ build_runtime 完成后（subscribe 全部就位）与 start_background_tasks �
 
 覆盖语义：
 - _announce_runtime_ready 写 Redis key aats:runtime:ready:{role}
-- _wait_for_peer_roles_ready 等所有 peer 都写完 key，或超时 fallback
+- optional/in-memory 调用超时可兼容返回；四主进程 NATS/hybrid 严格调用失败关闭
+- Phase 3J 由独立 FS-016 测试覆盖 generation、Redis failure 与 strict timeout
 - 无 peer（monolith）路径立即返回
 - hot_state_store=None 场景（测试 InMemory）直接 no-op
 - Redis 异常时 fallback（不硬失败，允许 LIMITS 向前兼容）
@@ -77,8 +78,7 @@ class TestAnnounceRuntimeReady(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_redis_set_exception_does_not_raise(self) -> None:
-        """Redis set 失败时 announce 不硬失败（warn log + 继续），保证
-        build_runtime → start_background_tasks 路径不被 Redis outage 打死。"""
+        """Optional/in-memory 兼容调用的 Redis set 失败仍可 warning 返回。"""
         store = MagicMock()
         store.set = AsyncMock(side_effect=RuntimeError("redis down"))
         logger = logging.getLogger("test.announce.fail")
@@ -129,8 +129,7 @@ class TestWaitForPeerRolesReady(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_timeout_falls_back_without_raising(self) -> None:
-        """Peer 一直没 ready 时超时 fallback，不 raise——保证 LIMITS
-        retention 下的向前兼容。"""
+        """Optional/in-memory 兼容调用可在 peer timeout 后返回。"""
         store = _RecordingHotStateStore()
         logger = logging.getLogger("test.wait.timeout")
         # store 是空的，peer 永远没 ready
@@ -170,7 +169,7 @@ class TestWaitForPeerRolesReady(unittest.IsolatedAsyncioTestCase):
             await writer_task
 
     async def test_get_many_exception_falls_back(self) -> None:
-        """Redis 轮询异常时 fallback 不硬失败。"""
+        """Optional/in-memory 兼容调用的 Redis 轮询异常可返回。"""
         store = MagicMock()
         store.get_many = AsyncMock(side_effect=ConnectionError("redis unreachable"))
         logger = logging.getLogger("test.wait.redis_err")

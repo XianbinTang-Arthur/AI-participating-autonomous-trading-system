@@ -187,6 +187,7 @@ class ExecutionEvidenceReport:
     passed: bool
     failures: Sequence[str]
     created_at: datetime
+    benchmark_segment: str | None = None
     schema_version: str = EVIDENCE_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -210,6 +211,8 @@ class ExecutionEvidenceReport:
             raise ValueError("dataset_fingerprint_compatible must be a bool")
         if self.compatibility_reason is not None:
             _require_non_empty(self.compatibility_reason, "compatibility_reason")
+        if self.benchmark_segment is not None:
+            _require_non_empty(self.benchmark_segment, "benchmark_segment")
         _require_aware_datetime(self.created_at, "created_at")
         object.__setattr__(self, "failures", _normalize_failures(self.failures, self.passed))
 
@@ -399,6 +402,9 @@ def build_execution_evidence_report(
     dataset_fingerprint: str,
     evidence_ref: str,
     created_at: datetime,
+    benchmark_segment: str | None = None,
+    expected_window_start: datetime | None = None,
+    expected_window_end: datetime | None = None,
 ) -> ExecutionEvidenceReport:
     """Verify execution evidence is aligned with the experiment dataset."""
     if not isinstance(summary, Mapping):
@@ -412,8 +418,23 @@ def build_execution_evidence_report(
     summary_dataset_fingerprint = _optional_text(summary.get("dataset_fingerprint"))
     compatibility_marker = _optional_text(summary.get("dataset_fingerprint_compatibility"))
     compatibility_reason = _optional_text(summary.get("compatibility_reason"))
+    summary_benchmark_segment = _optional_text(summary.get("benchmark_segment"))
     dataset_fingerprint_compatible = compatibility_marker == "compatible"
     failures: list[str] = []
+    if (expected_window_start is None) != (expected_window_end is None):
+        raise ValueError("expected execution evidence window must define both start and end")
+    required_window_start = expected_window_start or dataset_spec.window_start
+    required_window_end = expected_window_end or dataset_spec.window_end
+    if required_window_end <= required_window_start:
+        raise ValueError("expected execution evidence window end must be after start")
+    if benchmark_segment is not None:
+        _require_non_empty(benchmark_segment, "benchmark_segment")
+        if summary_benchmark_segment is None:
+            failures.append("execution evidence benchmark_segment is required")
+        elif summary_benchmark_segment != benchmark_segment:
+            failures.append(
+                f"execution evidence benchmark_segment must be {benchmark_segment}"
+            )
     if contract_schema_version is None:
         failures.append("execution evidence schema_version is required")
     elif contract_schema_version != EXECUTION_EVIDENCE_CONTRACT_SCHEMA_VERSION:
@@ -433,12 +454,12 @@ def build_execution_evidence_report(
         failures.append("execution evidence timeframe must match dataset timeframe")
     if window_start is None:
         failures.append("execution evidence window_start is required")
-    elif window_start != dataset_spec.window_start:
-        failures.append("execution evidence window_start must match dataset window_start")
+    elif window_start != required_window_start:
+        failures.append("execution evidence window_start must match benchmark window_start")
     if window_end is None:
         failures.append("execution evidence window_end is required")
-    elif window_end != dataset_spec.window_end:
-        failures.append("execution evidence window_end must match dataset window_end")
+    elif window_end != required_window_end:
+        failures.append("execution evidence window_end must match benchmark window_end")
     if summary_dataset_fingerprint is None and not dataset_fingerprint_compatible:
         failures.append(
             "execution evidence dataset_fingerprint or explicit compatibility is required"
@@ -463,6 +484,7 @@ def build_execution_evidence_report(
         passed=not failures,
         failures=tuple(failures),
         created_at=created_at,
+        benchmark_segment=summary_benchmark_segment,
     )
 
 

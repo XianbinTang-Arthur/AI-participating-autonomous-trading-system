@@ -81,14 +81,17 @@ def main() -> None:
     parser.add_argument("--end", required=True, help="YYYY-MM-DD (UTC)")
     parser.add_argument("--dataset-version", default="v1.0")
     parser.add_argument("--param", action="append", default=[], help="key=value parameter override")
-    parser.add_argument("--ensure-schema", action="store_true",
-                        help="Run DB migrations before replay (default: assume schema ready)")
+    parser.add_argument(
+        "--ensure-schema",
+        action="store_true",
+        help="Legacy name: validate schema before replay; does not run DDL",
+    )
     args = parser.parse_args()
     args.dataset_version = _normalize_dataset_version(args.dataset_version)
 
     # 延迟导入
     from aats.data_platform.config import get_settings
-    from aats.data_platform.db import get_session, run_migrations
+    from aats.data_platform.db import get_session, validate_rdp_schema
     from aats.data_platform.operations.strategy_tuning_registry import (
         get_combo_tuning_overrides,
     )
@@ -112,8 +115,8 @@ def main() -> None:
 
     settings = get_settings()
     if args.ensure_schema:
-        log.info("Running migrations (--ensure-schema)...")
-        run_migrations(settings)
+        log.info("Validating schema contract (--ensure-schema legacy flag)...")
+        validate_rdp_schema(settings)
 
     # 创建 adapter
     if args.family == "independent":

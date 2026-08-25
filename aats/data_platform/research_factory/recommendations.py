@@ -222,6 +222,41 @@ def build_research_recommendation(
         require_execution_realism or candidate.payload.get("execution_cost_summary_ref") is not None
     )
 
+    selection_limitations: list[str] = []
+    holdout_status = candidate.payload.get("holdout_status")
+    if holdout_status is not None:
+        if holdout_status != "sealed_not_evaluated":
+            raise ValueError("candidate holdout_status must be sealed_not_evaluated")
+        if (
+            candidate.payload.get("selection_protocol_version")
+            != "train_valid_selection_test_holdout_v2"
+        ):
+            raise ValueError("sealed holdout candidate selection protocol is invalid")
+        if tuple(candidate.payload.get("development_segments", ())) != ("train", "valid"):
+            raise ValueError("sealed holdout candidate development_segments must be train/valid")
+        if benchmark_segment != "valid":
+            raise ValueError("sealed holdout candidate benchmark_segment must be valid")
+        if candidate.payload.get("holdout_segment") != "test":
+            raise ValueError("sealed holdout candidate holdout_segment must be test")
+        holdout_content_fingerprint = _require_non_empty_text(
+            candidate.payload.get("holdout_content_fingerprint"),
+            "candidate.payload.holdout_content_fingerprint",
+        )
+        if not (
+            holdout_content_fingerprint.startswith("rfseg_")
+            and len(holdout_content_fingerprint) == len("rfseg_") + 64
+        ):
+            raise ValueError("sealed holdout candidate content fingerprint is invalid")
+        development_evidence_ref = _require_non_empty_text(
+            candidate.payload.get("development_evidence_ref"),
+            "candidate.payload.development_evidence_ref",
+        )
+        if evidence_refs.get("development_evidence") != development_evidence_ref:
+            raise ValueError("sealed holdout candidate requires matching development_evidence ref")
+        selection_limitations.append(
+            "sealed test holdout has not been evaluated; metrics are development evidence"
+        )
+
     evidence = PreApplyEvidence(
         candidate_id=candidate.candidate_id,
         experiment_id=candidate.experiment_id,
@@ -234,6 +269,7 @@ def build_research_recommendation(
         limitations=(
             "research recommendation is evidence only",
             "future promotion requires separate governance approval",
+            *selection_limitations,
         ),
     )
     return ResearchRecommendation(

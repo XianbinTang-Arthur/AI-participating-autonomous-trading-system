@@ -2,10 +2,10 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
-> 文档状态：现行 UI 速查。最后核对：2026-08-22（代码基线 `be9179e`）。`https://127.0.0.1:8011` 指标准 `derivatives-live` TLS 部署；本地 `start_api.py --profile derivatives` 默认是 `http://127.0.0.1:8001`。
+> 文档状态：现行 UI 速查。最后核对：2026-08-24（起始 HEAD `00b6df0` + 未提交 Phase 3F 覆盖层）。当前只使用 `derivatives` 模拟入口 `http://127.0.0.1:8001`；旧 `https://127.0.0.1:8011` live 路径已被标准部署入口禁用。
 
 
-> 目标: 打开 `https://127.0.0.1:8011/ui/rdp` 后, 不用查文档就知道该看什么、该点什么。
+> 目标: 打开 `http://127.0.0.1:8001/ui/rdp` 后，不用查文档就知道该看什么、该点什么。
 > 深入 SOP 请看 [rdp_operator_workflow.md](./rdp_operator_workflow.md) 和 [operator_checklist.md](./operator_checklist.md)。
 
 ---
@@ -88,7 +88,7 @@
 
 ## 4. 典型一天 —— 5 分钟节奏
 
-1. 打开 `https://127.0.0.1:8011/ui/rdp`
+1. 打开 `http://127.0.0.1:8001/ui/rdp`
 2. **看 ① Hero 四个数字**:
    - 阻断 > 0 → 先去 ② 看阻断, 处理完再审批
    - 待审批 > 0 → 去 ③ 逐个审批

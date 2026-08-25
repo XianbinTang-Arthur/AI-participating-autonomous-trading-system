@@ -140,7 +140,7 @@ class TestExecutionRecovery(unittest.TestCase):
             only_reduce_required=only_reduce_required,
         )
 
-    def test_recovery_clears_stale_reconciliation_halt_after_fresh_nonblocking_report(self) -> None:
+    def test_recovery_requires_explicit_resume_after_fresh_nonblocking_report(self) -> None:
         reconciliation_repo = InMemoryReconciliationRepository()
         reconciliation_repo.save_report(
             self._scoped_reconciliation_report(
@@ -163,15 +163,14 @@ class TestExecutionRecovery(unittest.TestCase):
 
         artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=10_000.0))
 
-        self.assertFalse(kill_switch.halted)
-        self.assertFalse(artifacts.status.halted)
-        self.assertTrue(artifacts.status.safe_startup)
+        self.assertTrue(kill_switch.halted)
+        self.assertTrue(artifacts.status.halted)
         self.assertIn(
-            "recovery_reconciliation_stale_halt_cleared_after_fresh_nonblocking_reconciliation",
+            "recovery_reconciliation_fresh_explicit_operator_resume_required",
             artifacts.status.notes,
         )
 
-    def test_reconciliation_report_callback_clears_stale_halt_with_recovery_guards(self) -> None:
+    def test_reconciliation_callback_requires_explicit_resume_with_recovery_guards(self) -> None:
         reconciliation_repo = InMemoryReconciliationRepository()
         report = self._scoped_reconciliation_report(
             reconciliation_id="recon_callback_fresh_nonblocking",
@@ -193,8 +192,8 @@ class TestExecutionRecovery(unittest.TestCase):
 
         cleared = recovery.clear_stale_reconciliation_halt_if_resolved(report)
 
-        self.assertTrue(cleared)
-        self.assertFalse(kill_switch.halted)
+        self.assertFalse(cleared)
+        self.assertTrue(kill_switch.halted)
 
     def test_recovery_does_not_clear_non_reconciliation_stale_halt_reason(self) -> None:
         reconciliation_repo = InMemoryReconciliationRepository()

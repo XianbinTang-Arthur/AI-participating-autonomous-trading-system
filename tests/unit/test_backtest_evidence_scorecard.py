@@ -142,6 +142,19 @@ class TestScorecardShape(unittest.TestCase):
         meta = sc["meta"]
         self.assertEqual(meta["symbol"], "BTC-USDT-SWAP")
         self.assertEqual(meta["timeframe"], "1h")
+        self.assertEqual(meta["execution_model_version"], "next_bar_event_v2")
+        self.assertEqual(meta["fill_model_version"], "ohlcv_participation_cap_v2")
+        self.assertEqual(meta["market_data_granularity"], "ohlcv")
+        self.assertEqual(
+            meta["execution_realism_limitations"],
+            [
+                "no_l2_depth",
+                "no_spread_or_queue_position",
+                "no_market_impact_calibration",
+                "fixed_slippage_bps",
+                "volume_participation_proxy_only",
+            ],
+        )
         self.assertEqual(meta["total_bars"], 8)
         self.assertEqual(meta["total_fills"], 4)
         # UTC ISO boundaries
@@ -465,8 +478,8 @@ class TestScorecardCostAdjusted(unittest.TestCase):
             sc["cost_adjusted"]["exec_buffer_bps"], 1.0, places=6
         )
 
-    def test_slip_bps_bounded_limit_is_zero(self) -> None:
-        """bounded_limit 当前模拟无独立 slippage — slip_bps 必须为 0.0。"""
+    def test_slip_bps_bounded_limit_uses_taker_fallback(self) -> None:
+        """历史 bounded_limit diagnostic 回退到当前固定 taker slippage。"""
         curve = tuple(_mk_point(i, str(i)) for i in range(3))
         config = BacktestConfig(
             order_type="bounded_limit",
@@ -476,7 +489,36 @@ class TestScorecardCostAdjusted(unittest.TestCase):
         diagnostics = (_mk_diagnostic(0, assumed_cost=6.0, actual_cost=5.0),)
         result = _mk_result(curve=curve, diagnostics=diagnostics, config=config)
         sc = build_scorecard(result)
-        self.assertEqual(sc["cost_adjusted"]["slip_bps"], 0.0)
+        self.assertEqual(sc["cost_adjusted"]["slip_bps"], 1.5)
+
+    def test_actual_cost_components_override_legacy_order_type_fallback(self) -> None:
+        curve = tuple(_mk_point(i, str(i)) for i in range(3))
+        diagnostic = CostDiagnostic(
+            decision_id=_BASE_TS.isoformat(),
+            assumed_cost_bps=8.0,
+            actual_cost_bps=6.25,
+            cost_diff_bps=-1.75,
+            assumed_net_edge_bps=10.0,
+            actual_net_edge_bps=11.75,
+            edge_flipped_negative=False,
+            actual_fee_bps=4.75,
+            actual_slippage_bps=1.5,
+        )
+        config = BacktestConfig(
+            order_type="ioc",
+            ioc_slippage_bps=99.0,
+            assumed_cost_bps=8.0,
+        )
+        result = _mk_result(
+            curve=curve,
+            diagnostics=(diagnostic,),
+            config=config,
+        )
+
+        cost = build_scorecard(result)["cost_adjusted"]
+        self.assertEqual(cost["fee_bps"], 4.75)
+        self.assertEqual(cost["slip_bps"], 1.5)
+        self.assertEqual(cost["exec_buffer_bps"], 1.75)
 
     def test_slip_bps_post_only_empty_diagnostics(self) -> None:
         """empty diagnostics path 也应遵守 order_type 决定 slip_bps 的规则。"""

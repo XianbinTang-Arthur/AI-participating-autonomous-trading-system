@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidateSet('spot', 'spot-live', 'derivatives', 'derivatives-live', 'derivatives-live-monolith')]
-    [string]$Profile = 'derivatives-live',
+    [string]$Profile = 'derivatives',
     [string]$TaskName = '',
     [int]$DelaySeconds = 30,
     [switch]$Remove,
@@ -10,6 +10,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if (-not $Remove -and $Profile -in @('spot-live', 'derivatives-live', 'derivatives-live-monolith')) {
+    throw "Live profile '$Profile' is disabled while REAL-MONEY PRODUCTION is NO-GO. Use spot or derivatives for local testing."
+}
 
 function Write-StartupTaskInfo {
     param([string]$Message)

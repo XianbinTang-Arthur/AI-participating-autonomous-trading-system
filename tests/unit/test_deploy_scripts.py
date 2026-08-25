@@ -38,8 +38,9 @@ def test_deploy_script_commit_only_uses_precisely_staged_files() -> None:
 def test_deploy_script_health_check_covers_current_topology() -> None:
     text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
 
-    assert 'echo "aats-gateway aats-rdp-daemon"' in text
+    assert 'echo "aats-gateway aats-rdp-daemon aats-liquidations-daemon aats-microstructure-collector"' in text
     assert 'echo "aats-gateway aats-market aats-decision aats-execution aats-rdp-daemon"' in text
+    assert 'echo "aats-gateway aats-market aats-decision aats-execution aats-rdp-daemon aats-liquidations-daemon aats-microstructure-collector"' in text
     assert "all_required_app_containers_healthy" in text
 
 
@@ -63,11 +64,13 @@ def test_deploy_script_health_check_logs_progress_and_gateway_state() -> None:
     assert "容器=${container_states}" in text
 
 
-def test_deploy_script_compose_up_nonzero_falls_through_to_health_check() -> None:
+def test_deploy_script_compose_failures_are_not_swallowed() -> None:
     text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
 
-    assert "基础设施 docker compose up 返回非零；继续检查实际容器状态" in text
-    assert "应用 docker compose up 返回非零；继续进入健康检查确认实际容器状态" in text
+    assert "基础设施 docker compose up 返回非零；继续检查实际容器状态" not in text
+    assert "应用 docker compose up 返回非零；继续进入健康检查确认实际容器状态" not in text
+    assert "docker compose $COMPOSE_CMD_ARGS down --timeout 5\" ||" not in text
+    assert "up -d --wait --wait-timeout 90" in text
     assert "应用服务启动命令已返回，等待健康检查确认" in text
     assert "step_app_up" in text
     assert "step_health" in text
@@ -136,4 +139,4 @@ def test_deploy_runbook_no_longer_points_to_stale_sync_or_bootstrap_paths() -> N
     assert "docker compose down -v" not in readme
     assert "envs/.env.wsl2-dev" not in readme
     assert "docker compose --env-file .env.wsl2 up -d" not in sync_workflow
-    assert "bash scripts/deploy.sh --profile derivatives-live --skip-commit" in sync_workflow
+    assert "bash scripts/deploy.sh --profile derivatives --skip-commit" in sync_workflow

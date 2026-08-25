@@ -215,6 +215,7 @@ class SilverTestEnv:
 
 def make_env(
     *,
+    owner: Any | None = None,
     symbol: str = "BTC-USDT-SWAP",
     bar_start: _dt.datetime | None = None,
 ) -> SilverTestEnv:
@@ -223,13 +224,16 @@ def make_env(
     if bar_start is None:
         bar_start = _dt.datetime(2026, 4, 20, 12, 0, 0, tzinfo=_dt.timezone.utc)
     bar_end = bar_start + _dt.timedelta(minutes=15)
-    return SilverTestEnv(
+    env = SilverTestEnv(
         engine=make_silver_sqlite_engine(),
         symbol=symbol,
         bar_start=bar_start,
         bar_end=bar_end,
         ingest_run_id=str(uuid4()),
     )
+    if owner is not None:
+        owner.addCleanup(env.engine.dispose)
+    return env
 
 
 # ─────────────────────────────────────────────────────────────────────

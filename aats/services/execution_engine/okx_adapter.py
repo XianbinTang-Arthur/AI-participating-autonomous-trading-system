@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import Callable
+from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -40,6 +41,7 @@ from aats.services.execution_engine.quantity_rules import (
 )
 from aats.services.execution_engine.okx_rest import OKXRESTClient, OKXRequestError, infer_okx_derivatives_inst_type
 from aats.services.governance_engine.health import SystemHealthService
+from aats.services.governance_engine.kill_switch import KillSwitchSubmissionBlocked
 from aats.services.governance_engine.mode import RuntimeModeController
 from aats.services.governance_engine.runtime_layers import EnvironmentCapabilities, PolicyProfile
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
@@ -287,6 +289,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
         return await self.submit(order_intent_from_leg_order_intent(leg_intent))
 
     async def submit(self, intent: OrderIntent) -> tuple[OrderState, list[FillEvent]]:
+        kill_switch = self.mode_controller.kill_switch
+        admission_generation = kill_switch.generation
         snapshot = await self._refresh_account_snapshot_for_balance_check()
         instrument = self.account_service.instrument_metadata(intent.symbol)
         if snapshot is None or instrument is None:
@@ -340,8 +344,19 @@ class OKXExecutionAdapter(ExchangeAdapter):
             self._log_blocked_submit(intent=intent, reason=slippage_error)
             return self._blocked_state(intent=intent, payload=payload, reason=slippage_error), []
 
+        trusted_risk_reducing = bool(
+            self._is_risk_reducing_intent(intent)
+            and str(payload.get("reduceOnly", "false")).lower() == "true"
+        )
         try:
-            response = await self.client.place_order(payload)
+            async with AsyncExitStack() as submission_boundary:
+                if not trusted_risk_reducing:
+                    await submission_boundary.enter_async_context(
+                        kill_switch.risk_increasing_submission_guard(
+                            expected_generation=admission_generation,
+                        )
+                    )
+                response = await self.client.place_order(payload)
             row = self._first_row(response)
             row_code = str(row.get("sCode") or "0")
             row_message = str(row.get("sMsg") or "")
@@ -418,6 +433,10 @@ class OKXExecutionAdapter(ExchangeAdapter):
                     state=state,
                     error=str(exc),
                 ), []
+        except KillSwitchSubmissionBlocked as exc:
+            self._last_error = exc.reason
+            self._log_blocked_submit(intent=intent, reason=exc.reason)
+            return self._blocked_state(intent=intent, payload=payload, reason=exc.reason), []
         except Exception as exc:
             recovered_state = await self._recover_submit_from_write_exception(
                 intent=intent,

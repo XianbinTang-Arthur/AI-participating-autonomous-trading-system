@@ -9,60 +9,52 @@
 #
 # 设计原则：
 #   - Python 3.12 slim：与 WSL2 集成测试环境一致，避开 3.13/3.14 周边轮子缺口
-#   - 多阶段构建：builder 装编译依赖（gcc/libpq）做 wheel cache，runtime 只留 venv
+#   - 多阶段构建：builder 按哈希锁安装 wheel，runtime 只留 venv
 #   - 非 root 运行：UID 1000 与 docker desktop 默认 user 一致，避免 volume 权限
 #   - 包含 .[nats,redis,otel] 可选依赖：
 #     * nats  → 4 进程拓扑必须走 hybrid event bus
 #     * redis → Stage 6 Slice 6.1 hot state store；4 进程必须共享 KV 缓存
 #     * otel  → Stage 8 OpenTelemetry + Jaeger 分布式追踪
 #
-# 构建：cd deploy/wsl2-dev && docker compose --profile aats build aats-base
+# 标准构建/部署：从仓库根运行 bash scripts/deploy.sh --profile derivatives --skip-commit
 # 上下文：项目根 (..)，由 docker-compose.aats.yml 通过 build.context 指定
 # =============================================================================
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 1: builder
-# 装编译依赖、生成 venv、pip install -e .[nats]，把项目源码烤进 venv 的 .pth
+# 按目标平台锁文件生成 venv，再以 no-deps editable 方式注册项目源码
 # ─────────────────────────────────────────────────────────────────────────────
-FROM python:3.12-slim AS builder
+FROM python:3.12-slim@sha256:3ecf5ebe01fef4b6e81be34511fb40bf378ea7fd81ab215ba15b2775ef85413d AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# psycopg[binary] 自带 wheel，理论不需要 libpq-dev；保留 build-essential 是为
-# 防止某些可选依赖落到源码安装路径上（如未来 cython 扩展）。
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        build-essential \
-        ca-certificates \
-        curl \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /build
 
-# 先拷依赖描述文件，最大化 layer 缓存命中率
+# 先按 Linux/Python 3.12 锁文件安装全部第三方依赖，最大化 layer 缓存命中率。
+# --require-hashes 阻止未审计制品进入镜像；--only-binary 禁止隐式源码构建。
+COPY requirements/runtime-py312-linux-x86_64.lock ./requirements/runtime-py312-linux-x86_64.lock
+RUN python -m venv /opt/aats-venv \
+    && /opt/aats-venv/bin/pip install \
+        --require-hashes \
+        --only-binary=:all: \
+        -r requirements/runtime-py312-linux-x86_64.lock
+
+# 再拷项目源码；依赖已经由锁文件安装，editable 安装不得再次解析依赖，
+# 也不得创建未锁定的隔离构建环境。
 COPY pyproject.toml README.md ./
 COPY aats/ ./aats/
 COPY apps/ ./apps/
-
-# editable 安装 + nats + redis + otel extras
-# - nats：4 进程拓扑必须走 hybrid event bus
-# - redis：Stage 6 Slice 6.1 跨进程 hot state store
-# - otel：Stage 8 OpenTelemetry + Jaeger，aats/bootstrap/telemetry.py 在装了之后
-#         自动走 OTLP gRPC exporter 到 docker-compose 里的 jaeger:4317
-RUN python -m venv /opt/aats-venv \
-    && /opt/aats-venv/bin/pip install --upgrade "pip<26" \
-    && /opt/aats-venv/bin/pip install "grpcio>=1.63.2,<2" \
-    && /opt/aats-venv/bin/pip install -e ".[nats,redis,otel]"
+RUN /opt/aats-venv/bin/pip install --no-deps --no-build-isolation -e .
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 2: runtime
 # 仅保留 venv + 项目代码 + 必需运行时库；非 root 用户启动
 # ─────────────────────────────────────────────────────────────────────────────
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim@sha256:3ecf5ebe01fef4b6e81be34511fb40bf378ea7fd81ab215ba15b2775ef85413d AS runtime
 
 # glibc malloc 调优：防止 Python 进程 peak 内存不归还 OS，反复触碰容器 limit。
 # MALLOC_TRIM_THRESHOLD_: 堆顶空闲超 64KB 就 trim（默认 ~128KB，太懒）

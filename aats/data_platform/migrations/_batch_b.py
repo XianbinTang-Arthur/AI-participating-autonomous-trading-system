@@ -28,15 +28,19 @@ Batch B 做十件事:
 
 from __future__ import annotations
 
+import hashlib
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 
 MIGRATIONS_DIR = Path(__file__).parent
+RDP_SCHEMA_MIGRATIONS_TABLE = "governance.rdp_schema_migrations"
+_RDP_SCHEMA_MIGRATION_LOCK_KEY = 7_150_281_924_009_006
 
 
 BATCH_B_STAGES: tuple[str, ...] = (
@@ -60,6 +64,8 @@ BATCH_B_STAGES: tuple[str, ...] = (
 class BatchBStageResult:
     stage: str
     ok: bool
+    applied: bool = False
+    error_type: str | None = None
     error_message: str | None = None
 
 
@@ -99,6 +105,131 @@ def _load_sql(stage: str, *, rollback: bool = False) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _stage_checksum(stage: str) -> str:
+    sql = _load_sql(stage)
+    return hashlib.sha256(sql.encode("utf-8")).hexdigest()
+
+
+def _without_outer_transaction(sql: str, *, stage: str) -> str:
+    """Remove the SQL file's legacy BEGIN/COMMIT wrapper.
+
+    The runner owns the transaction so the schema change and its ledger row
+    commit atomically.  Keeping an inner COMMIT would allow DDL to become
+    visible before the checksum ledger is durable.
+    """
+    lines = sql.splitlines()
+    begin_indexes = [
+        index for index, line in enumerate(lines) if line.strip().upper() == "BEGIN;"
+    ]
+    commit_indexes = [
+        index for index, line in enumerate(lines) if line.strip().upper() == "COMMIT;"
+    ]
+    if len(begin_indexes) != 1 or len(commit_indexes) != 1:
+        raise RuntimeError(
+            "rdp_schema_migration_transaction_wrapper_invalid:"
+            f"{stage}:begin={len(begin_indexes)};commit={len(commit_indexes)}"
+        )
+    begin_index = begin_indexes[0]
+    commit_index = commit_indexes[0]
+    if begin_index >= commit_index:
+        raise RuntimeError(
+            f"rdp_schema_migration_transaction_wrapper_invalid:{stage}:order"
+        )
+    return "\n".join(
+        line
+        for index, line in enumerate(lines)
+        if index not in {begin_index, commit_index}
+    )
+
+
+@contextmanager
+def _migration_lock(engine: Engine) -> Iterator[None]:
+    """Serialize RDP schema changes across Gateway/daemon/operator jobs."""
+    if engine.dialect.name != "postgresql":
+        yield
+        return
+
+    connection = engine.connect()
+    try:
+        connection.execute(
+            text("SELECT pg_advisory_lock(:lock_key)"),
+            {"lock_key": _RDP_SCHEMA_MIGRATION_LOCK_KEY},
+        )
+        yield
+    finally:
+        try:
+            connection.execute(
+                text("SELECT pg_advisory_unlock(:lock_key)"),
+                {"lock_key": _RDP_SCHEMA_MIGRATION_LOCK_KEY},
+            )
+        finally:
+            connection.close()
+
+
+def _ensure_migration_ledger(engine: Engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(text("CREATE SCHEMA IF NOT EXISTS governance"))
+        conn.execute(
+            text(
+                f"""
+                CREATE TABLE IF NOT EXISTS {RDP_SCHEMA_MIGRATIONS_TABLE} (
+                    version VARCHAR(256) PRIMARY KEY,
+                    checksum VARCHAR(128) NOT NULL,
+                    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+        )
+
+
+def _applied_stage_checksums(engine: Engine) -> dict[str, str]:
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                f"SELECT version, checksum FROM {RDP_SCHEMA_MIGRATIONS_TABLE}"
+            )
+        ).mappings().all()
+    return {str(row["version"]): str(row["checksum"]) for row in rows}
+
+
+def validate_batch_b_migrations(engine: Engine) -> tuple[str, ...]:
+    """Read-only validation of the complete Batch B ledger/checksum contract."""
+    if engine.dialect.name == "postgresql":
+        with engine.connect() as conn:
+            exists = conn.execute(
+                text("SELECT to_regclass(:table_name)"),
+                {"table_name": RDP_SCHEMA_MIGRATIONS_TABLE},
+            ).scalar_one_or_none()
+        if exists is None:
+            raise RuntimeError("rdp_schema_migrations_ledger_missing")
+
+    applied = _applied_stage_checksums(engine)
+    expected = {stage: _stage_checksum(stage) for stage in BATCH_B_STAGES}
+    missing = sorted(set(expected) - set(applied))
+    unknown = sorted(set(applied) - set(expected))
+    mismatched = sorted(
+        stage
+        for stage in set(expected) & set(applied)
+        if expected[stage] != applied[stage]
+    )
+    if missing or unknown or mismatched:
+        raise RuntimeError(
+            "rdp_schema_migration_contract_failed:"
+            f"missing={missing};unknown={unknown};mismatched={mismatched}"
+        )
+    return BATCH_B_STAGES
+
+
+def _validate_target_stages(stages: Iterable[str] | None) -> tuple[str, ...]:
+    target = tuple(stages) if stages is not None else BATCH_B_STAGES
+    unknown = [stage for stage in target if stage not in BATCH_B_STAGES]
+    if unknown:
+        raise ValueError(f"unknown Batch B stages: {unknown}")
+    if len(set(target)) != len(target):
+        raise ValueError("duplicate Batch B stage requested")
+    return target
+
+
 def run_batch_b_migrations(
     engine: Engine,
     *,
@@ -109,20 +240,66 @@ def run_batch_b_migrations(
     每个 stage 在独立 transaction(SQL 文件内部已 BEGIN/COMMIT),
     失败即停;已跑的 stage 保留,未跑的跳过。
     """
-    target = tuple(stages) if stages is not None else BATCH_B_STAGES
+    target = _validate_target_stages(stages)
     report = BatchBReport()
 
-    for stage in target:
-        try:
-            sql = _load_sql(stage)
-            with engine.begin() as conn:
-                conn.execute(text(sql))
-            report.stages.append(BatchBStageResult(stage=stage, ok=True))
-        except Exception as exc:
-            report.stages.append(BatchBStageResult(
-                stage=stage, ok=False, error_message=str(exc)
-            ))
-            break
+    with _migration_lock(engine):
+        _ensure_migration_ledger(engine)
+        applied = _applied_stage_checksums(engine)
+        for stage in target:
+            try:
+                stage_index = BATCH_B_STAGES.index(stage)
+                missing_prerequisites = [
+                    prerequisite
+                    for prerequisite in BATCH_B_STAGES[:stage_index]
+                    if prerequisite not in applied
+                ]
+                if missing_prerequisites:
+                    raise RuntimeError(
+                        "rdp_schema_migration_prerequisite_missing:"
+                        f"{stage}:{missing_prerequisites}"
+                    )
+
+                checksum = _stage_checksum(stage)
+                recorded_checksum = applied.get(stage)
+                if recorded_checksum is not None:
+                    if recorded_checksum != checksum:
+                        raise RuntimeError(
+                            f"rdp_schema_migration_checksum_mismatch:{stage}"
+                        )
+                    report.stages.append(
+                        BatchBStageResult(stage=stage, ok=True, applied=False)
+                    )
+                    continue
+
+                sql = _without_outer_transaction(_load_sql(stage), stage=stage)
+                with engine.begin() as conn:
+                    conn.execute(text(sql))
+                    conn.execute(
+                        text(
+                            f"""
+                            INSERT INTO {RDP_SCHEMA_MIGRATIONS_TABLE}
+                                (version, checksum, applied_at)
+                            VALUES (:version, :checksum, NOW())
+                            """
+                        ),
+                        {"version": stage, "checksum": checksum},
+                    )
+                applied[stage] = checksum
+                report.stages.append(
+                    BatchBStageResult(stage=stage, ok=True, applied=True)
+                )
+            except Exception as exc:
+                report.stages.append(
+                    BatchBStageResult(
+                        stage=stage,
+                        ok=False,
+                        applied=False,
+                        error_type=type(exc).__name__,
+                        error_message=str(exc),
+                    )
+                )
+                break
 
     return report
 
@@ -133,19 +310,69 @@ def run_batch_b_rollback(
     stages: Iterable[str] | None = None,
 ) -> BatchBReport:
     """按逆序回滚 Batch B migrations。"""
-    target = tuple(stages) if stages is not None else tuple(reversed(BATCH_B_STAGES))
+    target = (
+        _validate_target_stages(stages)
+        if stages is not None
+        else tuple(reversed(BATCH_B_STAGES))
+    )
     report = BatchBReport()
 
-    for stage in target:
-        try:
-            sql = _load_sql(stage, rollback=True)
-            with engine.begin() as conn:
-                conn.execute(text(sql))
-            report.stages.append(BatchBStageResult(stage=stage, ok=True))
-        except Exception as exc:
-            report.stages.append(BatchBStageResult(
-                stage=stage, ok=False, error_message=str(exc)
-            ))
-            break
+    with _migration_lock(engine):
+        _ensure_migration_ledger(engine)
+        applied = _applied_stage_checksums(engine)
+        for stage in target:
+            try:
+                checksum = _stage_checksum(stage)
+                recorded_checksum = applied.get(stage)
+                if recorded_checksum is None:
+                    report.stages.append(
+                        BatchBStageResult(stage=stage, ok=True, applied=False)
+                    )
+                    continue
+                if recorded_checksum != checksum:
+                    raise RuntimeError(
+                        f"rdp_schema_migration_checksum_mismatch:{stage}"
+                    )
+
+                stage_index = BATCH_B_STAGES.index(stage)
+                applied_dependents = [
+                    dependent
+                    for dependent in BATCH_B_STAGES[stage_index + 1 :]
+                    if dependent in applied
+                ]
+                if applied_dependents:
+                    raise RuntimeError(
+                        "rdp_schema_rollback_not_applied_suffix:"
+                        f"{stage}:{applied_dependents}"
+                    )
+
+                sql = _without_outer_transaction(
+                    _load_sql(stage, rollback=True),
+                    stage=f"{stage}:rollback",
+                )
+                with engine.begin() as conn:
+                    conn.execute(text(sql))
+                    conn.execute(
+                        text(
+                            f"DELETE FROM {RDP_SCHEMA_MIGRATIONS_TABLE} "
+                            "WHERE version = :version"
+                        ),
+                        {"version": stage},
+                    )
+                applied.pop(stage, None)
+                report.stages.append(
+                    BatchBStageResult(stage=stage, ok=True, applied=True)
+                )
+            except Exception as exc:
+                report.stages.append(
+                    BatchBStageResult(
+                        stage=stage,
+                        ok=False,
+                        applied=False,
+                        error_type=type(exc).__name__,
+                        error_message=str(exc),
+                    )
+                )
+                break
 
     return report

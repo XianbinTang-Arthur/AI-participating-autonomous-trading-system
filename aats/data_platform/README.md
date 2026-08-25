@@ -2,7 +2,7 @@
 
 > 项目定位声明：RDP 只在严格风控、可审计、可恢复、可治理的边界内为主交易系统提供研究证据和受控参数。完整定位见 [项目定位声明](../../docs/project_positioning.md)。
 
-最后核对：2026-08-22（代码基线 `be9179e`）
+最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；未提交 Phase 3A–3V 整改工作区）
 适用范围：`aats/data_platform/`、`scripts/rdp_*.py`、`configs/rdp_workflows/`、RDP API 与任务守护进程。
 
 本文是 RDP 当前入口。逐文件模块清单见 [RDP 代码模块参考](../../docs/rdp/module_reference.md)，日常操作见 [平台运行手册](../../docs/operations/platform_runbook.md)，完整系统边界见 [项目代码审查与系统说明](../../docs/code_review/README.md)。
@@ -18,6 +18,10 @@ RDP 是研究和治理子系统，不是实时交易执行器。
 - 参数写入必须经受保护的 Operator API、权限校验、gate、actor 和 history；直接 apply/rollback 还要求短时 HMAC token。组合 release 端点当前没有 token 依赖，详见第 7 节的策略差异。旧的直写 CLI 已禁用并返回退出码 2。
 - Research Factory 只产出证据、结论和人工应用设计，不写 runtime、active parameters、managed config 或 OKX。
 - 当前不允许自动 release：`release_cycle` 配置禁用，且任务队列显式阻止它入队。
+- Phase 3V 的 real-data runner 使用 train stability + valid selection 双门；test 只参与
+  dataset quality/source integrity 与内容 seal，不产生 factor/label/绩效 metrics/selection
+  gate。execution summary 必须精确绑定 valid 窗口且只合并到
+  valid。recommendation 的 ready-for-review 不代表最终 OOS 已通过。
 
 ## 2. 数据架构
 
@@ -34,7 +38,7 @@ RDP 是研究和治理子系统，不是实时交易执行器。
 | `governance` | 19 | 参数、推荐、发布、观察、任务队列、调度和运行状态 |
 | **合计** | **78** | — |
 
-迁移定义位于 `aats/data_platform/migrations/`。不能用旧文档中的“48 张表”判断 schema 是否完整。
+迁移定义位于 `aats/data_platform/migrations/`。显式前向入口是 `scripts/apply_schema_migrations.py`（部署综合作业）或兼容初始化入口 `scripts/rdp_init_db.py`；它们均执行 ORM baseline + 全部 13 个有序 Batch B stage，并在 `governance.rdp_schema_migrations` 保存 version/checksum。应用、daemon 和研究 job 不在启动期执行 DDL，只读校验 ORM table/column surface 与迁移账本。不能用旧文档中的“48 张表”或单纯“表存在”判断 schema 完整。
 
 ### 数据流
 
@@ -141,7 +145,7 @@ Gateway 和 scheduler 都向 `governance.rdp_task_queue` 写任务，daemon 负�
 使用项目 Python 运行；涉及数据库写入前先确认目标环境。
 
 ```powershell
-# 初始化/迁移 RDP schema
+# 显式初始化/迁移 RDP schema（仅对已明确的非 live/受控目标）
 .\.venv\Scripts\python.exe scripts\rdp_init_db.py
 
 # 单次日批采集
@@ -157,6 +161,8 @@ Gateway 和 scheduler 都向 `governance.rdp_task_queue` 写任务，daemon 负�
 .\.venv\Scripts\python.exe scripts\rdp_run_reliability_check.py
 .\.venv\Scripts\python.exe scripts\rdp_run_quality_monitor.py
 ```
+
+`--ensure-schema` 是为了 CLI 兼容保留的旧名；在上述 ingest/replay/pipeline 运行器中它现在**只读校验** schema contract，不会创建表或执行 ALTER。如需迁移，必须先单独运行显式迁移入口；live/WSL2 仅通过 `scripts/deploy.sh` 执行综合 schema job。
 
 `scripts/rdp_start.py`、`scripts/rdp_realtime_daemon.py` 是兼容入口；`rdp_start.py` 会转发到 daily ingest 和 historical `--once`。新自动化应直接调用目标脚本或任务队列，不应依赖这些 legacy shim。
 

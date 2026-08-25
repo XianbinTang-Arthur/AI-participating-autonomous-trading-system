@@ -74,6 +74,14 @@ class MarketDataGateway:
         # 锁按需创建并保留（数量 = 白名单品种数，内存可忽略）。
         self._rest_fetch_locks: dict[str, asyncio.Lock] = {}
 
+    def critical_background_tasks(self) -> tuple[asyncio.Task[None], ...]:
+        """暴露由 gateway 自主管理、预期永久运行的行情 task 供 runtime 监督。"""
+        return tuple(
+            task
+            for task in (self._background_task, self._fallback_task)
+            if task is not None
+        )
+
     async def start(self) -> None:
         if self.settings.market_data_backend != "okx":
             return
@@ -123,6 +131,14 @@ class MarketDataGateway:
                 await self._background_task
             except asyncio.CancelledError:
                 pass
+            except Exception as exc:
+                log_event(
+                    self.logger,
+                    "okx_market_stream_shutdown_observed_failure",
+                    level="warning",
+                    task_name=self._background_task.get_name(),
+                    error_type=type(exc).__name__,
+                )
             self._background_task = None
         if self._fallback_task is not None:
             self._fallback_task.cancel()
@@ -130,6 +146,14 @@ class MarketDataGateway:
                 await self._fallback_task
             except asyncio.CancelledError:
                 pass
+            except Exception as exc:
+                log_event(
+                    self.logger,
+                    "okx_market_fallback_shutdown_observed_failure",
+                    level="warning",
+                    task_name=self._fallback_task.get_name(),
+                    error_type=type(exc).__name__,
+                )
             self._fallback_task = None
         for task in list(self._backfill_tasks):
             task.cancel()
@@ -137,6 +161,14 @@ class MarketDataGateway:
                 await task
             except asyncio.CancelledError:
                 pass
+            except Exception as exc:
+                log_event(
+                    self.logger,
+                    "okx_market_backfill_shutdown_observed_failure",
+                    level="warning",
+                    task_name=task.get_name(),
+                    error_type=type(exc).__name__,
+                )
         self._backfill_tasks.clear()
 
     async def publish_local_snapshot(self, symbol: str | None = None) -> MarketSnapshot:

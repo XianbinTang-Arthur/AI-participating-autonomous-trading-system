@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidateSet('spot', 'spot-live', 'derivatives', 'derivatives-live', 'derivatives-live-monolith')]
-    [string]$Profile = 'derivatives-live',
+    [string]$Profile = 'derivatives',
     [string]$CommitMessage,
     [switch]$SkipSync,
     [switch]$SkipCommit,
@@ -13,6 +13,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($Profile -in @('spot-live', 'derivatives-live', 'derivatives-live-monolith')) {
+    throw "Live profile '$Profile' is disabled while REAL-MONEY PRODUCTION is NO-GO. Use spot or derivatives for local testing."
+}
 
 function Get-RepoRoot {
     return (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..')).Path

@@ -28,6 +28,11 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from aats.storage.connection_budget import (
+    RDP_LIVE_SESSION_RO_POOL,
+    RDP_LIVE_SESSION_RW_POOL,
+)
+
 log = logging.getLogger(__name__)
 
 _LIVE_DB_URL_ENV = "AATS_LIVE_DB_URL_RDP"
@@ -80,16 +85,16 @@ def init_live_engines(*, allow_missing_url: bool = False) -> bool:
 
         _engine_rw = create_engine(
             url.strip(),
-            pool_size=3,
-            max_overflow=2,
+            pool_size=RDP_LIVE_SESSION_RW_POOL.pool_size,
+            max_overflow=RDP_LIVE_SESSION_RW_POOL.max_overflow,
             pool_recycle=300,
             pool_pre_ping=True,
             pool_timeout=30,
         )
         _engine_ro = create_engine(
             url.strip(),
-            pool_size=2,
-            max_overflow=2,
+            pool_size=RDP_LIVE_SESSION_RO_POOL.pool_size,
+            max_overflow=RDP_LIVE_SESSION_RO_POOL.max_overflow,
             pool_recycle=300,
             pool_pre_ping=True,
             pool_timeout=30,

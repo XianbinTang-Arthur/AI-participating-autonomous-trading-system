@@ -5,13 +5,8 @@
 #   - env_file 指向 .env.derivatives.live（实盘凭证 + 风控参数）
 #   - AATS_PROFILE 设为 derivatives_live
 #
-# 启动方式（在 deploy/wsl2-dev/ 目录下）：
-#   docker compose \
-#     -f docker-compose.aats.yml \
-#     -f docker-compose.aats.derivatives-live.yml \
-#     --env-file ../../.env.wsl2 \
-#     --env-file ../../.env.derivatives.live \
-#     up -d
+# 当前状态：标准部署入口会在任何副作用前拒绝 derivatives-live，且不存在 override。
+# 本 override 是受版本控制的未来配置，不是可执行 runbook；不得手工执行 docker compose。
 # =============================================================================
 
 name: aats-dev

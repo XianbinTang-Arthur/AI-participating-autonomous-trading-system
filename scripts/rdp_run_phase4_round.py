@@ -211,7 +211,11 @@ def main() -> None:
     parser.add_argument(
         "--artifact-root", type=str, default=str(_DEFAULT_ARTIFACT_ROOT),
     )
-    parser.add_argument("--ensure-schema", action="store_true")
+    parser.add_argument(
+        "--ensure-schema",
+        action="store_true",
+        help="Legacy name: validate schema before the first run; does not run DDL",
+    )
     parser.add_argument("--no-print-summary", action="store_true")
     # P0: 参数闭环 — 支持从 Phase 2 parameter_candidates.json 注入参数
     parser.add_argument(

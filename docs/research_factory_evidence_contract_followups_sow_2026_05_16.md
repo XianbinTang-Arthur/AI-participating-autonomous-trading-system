@@ -1,5 +1,9 @@
 # Research Factory Evidence Contract Followups SOW - 2026-05-16
 
+> 历史任务材料：本文描述 2026-05-16 的 v1 目标，不是当前操作契约。Phase 3V real-data v2
+> 还要求 execution summary 绑定 `benchmark_segment=valid` 与精确 valid 时间窗；当前说明见
+> [`task/fs_004_research_selection_holdout_sow_2026_08_25.md`](task/fs_004_research_selection_holdout_sow_2026_08_25.md)。
+
 ## Business Objectives and Boundaries
 
 Close the remaining audit and evidence-contract gaps in the Research Factory real-data runner before it is used by scheduled research automation.

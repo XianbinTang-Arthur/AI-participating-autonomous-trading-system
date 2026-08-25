@@ -2,7 +2,7 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
-> 最后核对：2026-08-22（代码基线 `be9179e`）。
+> 最后核对：2026-08-25（起始 HEAD `00b6df0` + Phase 3A–3W 整改提交候选）。当前标准入口禁用 live；下列 live 项只作为重新开放前的 future 检查，不代表已有运行状态。
 
 
 ## 日常巡检
@@ -138,6 +138,7 @@
 ### 必须确认的启动条件
 
 - [ ] 当前 profile 与账户一致：`spot_live` 是 spot/cash，`derivatives_live` 是 derivatives/cross/hedge。
+- [ ] committed candidate 的 managed strategy YAML 已通过 mapping/unknown-key 校验；没有仓库外 overlay 继续写已删除的伪 auto-rollback key。
 - [ ] `AATS_STORAGE_MODE=postgres`。
 - [ ] `AATS_DATABASE_URL` 指向对应 live 数据库，不与模拟盘/研究库混用。
 - [ ] `AATS_DATABASE_SINGLE_RUNTIME_GUARD_ENABLED=true`。
@@ -150,9 +151,19 @@
 
 ### 必须确认的运行状态
 
-- [ ] `/healthz` 返回 200，但不要把它当作 trading-ready 信号。
+- [ ] Gateway 实际 Docker published HostIp 仅为 loopback，并与最新模拟 evidence 一致；静态 Compose 不能替代 runtime inspect。
+- [ ] 目标主机防火墙、VPN/NAT、TLS/证书与非授权网络不可达性有本次只读证据；未验证时标 UNKNOWN。
+- [ ] 从目标 HTTPS 入口检查 CSP、`DENY`、`nosniff`、`no-referrer`、Permissions Policy、COOP/CORP 和 HSTS 各只有有效策略，proxy 未删除、重复或降级。
+- [ ] 真实浏览器登录、UI 导航和 API 请求无 CSP violation；不受信 Host 返回 400 且不回显输入。
+- [ ] HTTP 模拟入口不带 HSTS；只在证书、域名和 HTTPS 重定向闭环成立后验证 HSTS，不要在错误域名上人工缓存。
+- [ ] 在实际 Gateway 进程数和受信 proxy 拓扑下验证登录集中限流不可由多进程、重启或伪造 forwarding header 绕过；当前代码只有每进程 60/20/10 窗口。
+- [ ] 在隔离生产等价 DB/KDF 硬件验证正确/错误/不存在用户混合负载的 p95/p99、event-loop lag、DB pool wait、429/503 拒绝率和紧急登录 SLA；默认 concurrency 4/queue 1s 不是容量验收。
+- [ ] FS-008 目标容量证据覆盖全部 daemon、两个 collector、RDP、慢查询、DB 短断/重连、进程重启和恢复/admin 竞争；记录每服务 checked-out/overflow/wait/timeout、PostgreSQL 峰值/拒绝、联合内存和告警送达。声明 topology 150、普通容量 197、名义余量 47 只是静态预算，不可勾选替代实测。
+- [ ] 部署证据包中的 runtime readiness generation 与 gateway/market/decision/execution 结构化日志完全一致；不得用旧代次 key 或单一容器 healthy 代替证明。
+- [ ] 在隔离生产等价 Redis/NATS/Compose 运行新部署、单容器重启、peer 延迟/失败、Redis announce/poll 断连和旧 generation 残留矩阵；任一失败时必须无 publisher/无 ready。
+- [ ] `/healthz` 返回 200；这只证明 FastAPI 存活且当前进程内 supervisor 未发现关键 task 结束或纳管固定周期 task stalled，不覆盖全部事件驱动任务，也不是 trading-ready 信号。
 - [ ] `/system/health` 无 critical blocker。
-- [ ] `aats-rdp-daemon` 健康；derivatives-live 额外确认 `aats-liquidations-daemon` 和 `aats-microstructure-collector` 健康、数据新鲜（部署脚本尚未自动 gate 这两个采集器）。
+- [ ] `aats-rdp-daemon` 健康；future derivatives-live required list 已包含 `aats-liquidations-daemon` 和 `aats-microstructure-collector`，但当前 live 禁用，必须保留为未验证而非勾选通过。
 - [ ] Kill switch 状态明确；如果打开，必须有 operator 记录说明原因。
 - [ ] account snapshot fresh，且账户产品类型、保证金模式、币种与 profile 一致。
 - [ ] reconciliation 最近报告无 unresolved high/critical finding。
@@ -163,6 +174,7 @@
 ### 人工确认项
 
 - [ ] live submit 开关、kill switch、runtime mode 三者状态一致。
+- [ ] Gateway/monolith 的 Kill Switch permission lease task 正常，generation 与长期 RUNNING authority 一致；execution 不具备续租能力。当前尚无目标环境 PASS 证据时，此项只能记 UNKNOWN，不能据此放行 live。
 - [ ] 当前 active parameter set 有清晰的审批、gate、apply history。
 - [ ] 本次启动前的代码版本、profile、数据库和 OKX 账户已记录。
 - [ ] 如有人工恢复、手动取消或参数回滚，已写入操作备注。

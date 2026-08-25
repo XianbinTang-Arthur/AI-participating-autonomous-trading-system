@@ -2,7 +2,7 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
-> 文档状态：现行操作说明。最后核对：2026-08-22（代码基线 `be9179e`）。repair 只允许复用标准部署包装器，不能形成第二套部署入口。
+> 文档状态：现行操作说明。最后核对：2026-08-24（起始 HEAD `00b6df0` + 未提交 Phase 3F 覆盖层）。repair 只允许复用标准部署包装器，不能形成第二套部署入口；当前只允许 `spot`/`derivatives` 模拟栈，live profile 会失败。
 
 ## 目的
 
@@ -30,7 +30,7 @@ Windows 重启后，AATS 跑在 Ubuntu WSL 内的独立 Docker 引擎上。单�
 在项目根目录执行：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register_wsl2_aats_startup_task.ps1 -Profile derivatives-live
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register_wsl2_aats_startup_task.ps1 -Profile derivatives
 ```
 
 默认会注册一个 `AtLogOn` 任务，在登录后延迟 30 秒执行 prewarm。prewarm 会自动先启动 keepalive。
@@ -40,19 +40,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register_wsl2_aats
 启动：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\keepalive_wsl2_aats.ps1 -Action Start -Profile derivatives-live
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\keepalive_wsl2_aats.ps1 -Action Start -Profile derivatives
 ```
 
 查询状态：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\keepalive_wsl2_aats.ps1 -Action Status -Profile derivatives-live
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\keepalive_wsl2_aats.ps1 -Action Status -Profile derivatives
 ```
 
 停止：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\keepalive_wsl2_aats.ps1 -Action Stop -Profile derivatives-live
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\keepalive_wsl2_aats.ps1 -Action Stop -Profile derivatives
 ```
 
 ## Dry-run
@@ -60,19 +60,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\keepalive_wsl2_aat
 keepalive：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\keepalive_wsl2_aats.ps1 -Action Start -Profile derivatives-live -DryRun
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\keepalive_wsl2_aats.ps1 -Action Start -Profile derivatives -DryRun
 ```
 
 prewarm：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\prewarm_wsl2_aats.ps1 -Profile derivatives-live -DryRun
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\prewarm_wsl2_aats.ps1 -Profile derivatives -DryRun
 ```
 
 注册脚本：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register_wsl2_aats_startup_task.ps1 -Profile derivatives-live -DryRun
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register_wsl2_aats_startup_task.ps1 -Profile derivatives -DryRun
 ```
 
 ## 自恢复策略
@@ -95,25 +95,25 @@ repair deploy 严格复用标准入口包装器，并固定使用：
 1. 先查 keepalive 是否存在：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\keepalive_wsl2_aats.ps1 -Action Status -Profile derivatives-live
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\keepalive_wsl2_aats.ps1 -Action Status -Profile derivatives
 ```
 
 2. 再手工跑一次 prewarm：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\prewarm_wsl2_aats.ps1 -Profile derivatives-live
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\prewarm_wsl2_aats.ps1 -Profile derivatives
 ```
 
 3. 如果仍失败，再检查计划任务最近执行结果：
 
 ```powershell
-Get-ScheduledTask -TaskName "AATS-WSL2-Prewarm-derivatives-live" | Get-ScheduledTaskInfo
+Get-ScheduledTask -TaskName "AATS-WSL2-Prewarm-derivatives" | Get-ScheduledTaskInfo
 ```
 
 ## 移除登录任务
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register_wsl2_aats_startup_task.ps1 -Profile derivatives-live -Remove
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register_wsl2_aats_startup_task.ps1 -Profile derivatives -Remove
 ```
 
 ## 适用边界
@@ -121,3 +121,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register_wsl2_aats
 - 适用于 Windows 登录后自动恢复本地 WSL AATS 栈
 - 不替代正式 deploy
 - 不自动同步 Windows 工作区代码
+- 不支持 live 自动预热/repair；显式 live profile 在任何 repair deploy 前失败

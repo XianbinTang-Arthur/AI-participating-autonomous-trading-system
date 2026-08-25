@@ -63,6 +63,7 @@ logging.basicConfig(
 log = logging.getLogger("rdp_execution_realism")
 
 _DEFAULT_ARTIFACT_ROOT = pathlib.Path("artifacts/research/execution_rounds")
+_EXECUTION_EVIDENCE_SCHEMA_VERSION = "execution_cost_summary_v1"
 
 
 # =========================================================================
@@ -178,6 +179,76 @@ def _load_replay_params(
 
     log.info("  Using default ReplayParameterOverrides")
     return ReplayParameterOverrides()
+
+
+def _parse_utc_datetime(value: str) -> datetime:
+    """Parse an ISO date/timestamp and normalize it to aware UTC."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("datetime value must be a non-empty string")
+    raw = value.strip()
+    if len(raw) == 10:
+        raw = f"{raw}T00:00:00+00:00"
+    if raw.endswith("Z"):
+        raw = f"{raw[:-1]}+00:00"
+    parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _annotate_research_evidence_identity(
+    summary: dict[str, Any],
+    *,
+    source_run_id: str,
+    symbol: str,
+    timeframe: str,
+    window_start: datetime,
+    window_end: datetime,
+    benchmark_segment: str | None,
+    dataset_fingerprint: str | None,
+    dataset_fingerprint_compatibility_reason: str | None,
+) -> dict[str, Any]:
+    """Attach fail-closed Research Factory identity metadata to a summary."""
+
+    if not isinstance(summary, dict):
+        raise ValueError("execution cost summary must be a dict")
+    if window_end <= window_start:
+        raise ValueError("execution evidence window end must be after start")
+    normalized_fingerprint = (dataset_fingerprint or "").strip() or None
+    normalized_reason = (dataset_fingerprint_compatibility_reason or "").strip() or None
+    if benchmark_segment is None:
+        if normalized_fingerprint is not None or normalized_reason is not None:
+            raise ValueError("dataset identity requires --benchmark-segment")
+    elif benchmark_segment not in {"train", "valid", "test"}:
+        raise ValueError("benchmark_segment must be train, valid, or test")
+    elif normalized_fingerprint is None and normalized_reason is None:
+        raise ValueError(
+            "research benchmark evidence requires an exact dataset fingerprint "
+            "or an explicit compatibility reason"
+        )
+    elif normalized_fingerprint is not None and normalized_reason is not None:
+        raise ValueError("provide either dataset fingerprint or compatibility reason, not both")
+
+    annotated = dict(summary)
+    annotated.update(
+        {
+            "schema_version": _EXECUTION_EVIDENCE_SCHEMA_VERSION,
+            "source_run_id": source_run_id,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+        }
+    )
+    if benchmark_segment is not None:
+        annotated["benchmark_segment"] = benchmark_segment
+    if normalized_fingerprint is not None:
+        annotated["dataset_fingerprint"] = normalized_fingerprint
+    if normalized_reason is not None:
+        annotated["dataset_fingerprint_compatibility"] = "compatible"
+        annotated["compatibility_reason"] = normalized_reason
+    return annotated
 
 
 # =========================================================================
@@ -347,8 +418,8 @@ def main() -> None:
     parser.add_argument("--family", required=True, choices=["independent", "directional"])
     parser.add_argument("--symbol", required=True)
     parser.add_argument("--timeframe", required=True)
-    parser.add_argument("--start", required=True, help="YYYY-MM-DD (UTC)")
-    parser.add_argument("--end", required=True, help="YYYY-MM-DD (UTC)")
+    parser.add_argument("--start", required=True, help="UTC ISO date or timestamp")
+    parser.add_argument("--end", required=True, help="UTC ISO date or timestamp")
     parser.add_argument("--dataset-version", default="v1.0")
     parser.add_argument(
         "--taker-fee-bps", type=float, default=5.0,
@@ -357,7 +428,33 @@ def main() -> None:
     parser.add_argument(
         "--artifact-root", type=str, default=str(_DEFAULT_ARTIFACT_ROOT),
     )
-    parser.add_argument("--ensure-schema", action="store_true")
+    parser.add_argument(
+        "--benchmark-segment",
+        choices=("train", "valid", "test"),
+        default=None,
+        help=(
+            "Research evidence role. FS-004 real-data v2 accepts only valid and requires "
+            "this command window to exactly match the valid segment."
+        ),
+    )
+    parser.add_argument(
+        "--dataset-fingerprint",
+        default=None,
+        help="Exact Research Factory dataset fingerprint for this evidence.",
+    )
+    parser.add_argument(
+        "--dataset-fingerprint-compatibility-reason",
+        default=None,
+        help=(
+            "Explicit reviewed compatibility assertion when an exact fingerprint is unavailable; "
+            "mutually exclusive with --dataset-fingerprint."
+        ),
+    )
+    parser.add_argument(
+        "--ensure-schema",
+        action="store_true",
+        help="Legacy name: validate schema before replay; does not run DDL",
+    )
     # ---- P0: 参数注入 ----
     parser.add_argument(
         "--params-json", default=None,
@@ -373,8 +470,31 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    start_ts = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    end_ts = datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    try:
+        start_ts = _parse_utc_datetime(args.start)
+        end_ts = _parse_utc_datetime(args.end)
+        if end_ts <= start_ts:
+            parser.error("--end must be after --start")
+        if args.benchmark_segment is None and (
+            args.dataset_fingerprint
+            or args.dataset_fingerprint_compatibility_reason
+        ):
+            parser.error("dataset identity options require --benchmark-segment")
+        if args.benchmark_segment is not None and not (
+            args.dataset_fingerprint
+            or args.dataset_fingerprint_compatibility_reason
+        ):
+            parser.error(
+                "--benchmark-segment requires --dataset-fingerprint or "
+                "--dataset-fingerprint-compatibility-reason"
+            )
+        if args.dataset_fingerprint and args.dataset_fingerprint_compatibility_reason:
+            parser.error(
+                "--dataset-fingerprint and --dataset-fingerprint-compatibility-reason "
+                "are mutually exclusive"
+            )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     # 加载 replay 参数 (P0: Phase 2 -> Phase 4 闭环)
     replay_params = _load_replay_params(
@@ -399,12 +519,12 @@ def main() -> None:
 
     # ---- Step 1: DB 准备 + Replay ----
     from aats.data_platform.config import get_settings
-    from aats.data_platform.db import get_session, run_migrations
+    from aats.data_platform.db import get_session, validate_rdp_schema
 
     settings = get_settings()
     if args.ensure_schema:
-        log.info("Running migrations...")
-        run_migrations(settings)
+        log.info("Validating schema contract (--ensure-schema legacy flag)...")
+        validate_rdp_schema(settings)
 
     log.info("Step 1: Running replay...")
     with get_session(settings) as session:
@@ -463,6 +583,19 @@ def main() -> None:
     from aats.data_platform.execution_realism.execution_cost_model import build_execution_cost_summary
 
     cost_summary = build_execution_cost_summary(slippage_rows)
+    cost_summary = _annotate_research_evidence_identity(
+        cost_summary,
+        source_run_id=run_id,
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+        window_start=start_ts,
+        window_end=end_ts,
+        benchmark_segment=args.benchmark_segment,
+        dataset_fingerprint=args.dataset_fingerprint,
+        dataset_fingerprint_compatibility_reason=(
+            args.dataset_fingerprint_compatibility_reason
+        ),
+    )
 
     # ---- Step 6: Write artifacts ----
     log.info("Step 6: Writing artifacts...")

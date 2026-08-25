@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidateSet('spot', 'spot-live', 'derivatives', 'derivatives-live', 'derivatives-live-monolith')]
-    [string]$Profile = 'derivatives-live',
+    [string]$Profile = 'derivatives',
     [string]$Distro = 'Ubuntu',
     [int]$DockerTimeoutSeconds = 120,
     [int]$HealthTimeoutSeconds = 120,
@@ -17,6 +17,10 @@ $ErrorActionPreference = 'Stop'
 function Write-PrewarmInfo {
     param([string]$Message)
     Write-Host "[startup-prewarm] $Message"
+}
+
+if ($Profile -in @('spot-live', 'derivatives-live', 'derivatives-live-monolith')) {
+    throw "Live profile '$Profile' is disabled while REAL-MONEY PRODUCTION is NO-GO. Use spot or derivatives for local testing."
 }
 
 function Get-RepoRoot {
@@ -37,11 +41,11 @@ function Get-RequiredContainers {
     param([string]$ResolvedProfile)
 
     switch ($ResolvedProfile) {
-        'derivatives-live-monolith' { return @('aats-gateway', 'aats-rdp-daemon') }
+        'derivatives-live-monolith' { return @('aats-gateway', 'aats-rdp-daemon', 'aats-liquidations-daemon', 'aats-microstructure-collector') }
         'spot' { return @('aats-gateway', 'aats-market', 'aats-decision', 'aats-execution', 'aats-rdp-daemon') }
         'spot-live' { return @('aats-gateway', 'aats-market', 'aats-decision', 'aats-execution', 'aats-rdp-daemon') }
         'derivatives' { return @('aats-gateway', 'aats-market', 'aats-decision', 'aats-execution', 'aats-rdp-daemon') }
-        'derivatives-live' { return @('aats-gateway', 'aats-market', 'aats-decision', 'aats-execution', 'aats-rdp-daemon') }
+        'derivatives-live' { return @('aats-gateway', 'aats-market', 'aats-decision', 'aats-execution', 'aats-rdp-daemon', 'aats-liquidations-daemon', 'aats-microstructure-collector') }
         default { throw "Unsupported profile: $ResolvedProfile" }
     }
 }

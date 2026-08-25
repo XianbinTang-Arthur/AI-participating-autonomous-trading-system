@@ -3,7 +3,7 @@
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../docs/project_positioning.md)。
 
 
-最后核对：2026-08-22（代码基线 `be9179e`）
+最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；未提交 Phase 3A–3V 工作区）
 
 本文档说明配置文件应该放在哪里、如何生效，以及哪些配置在 live 环境属于安全关键项。
 
@@ -15,7 +15,7 @@
 
 1. `AATSSettings` 代码默认值。
 2. managed profile 代码基线。
-3. `configs/strategy_profiles/<profile>.yaml` 策略调参（由 managed profile loader 合并）。
+3. `configs/strategy_profiles/<profile>.yaml` 策略调参（由 managed profile loader 合并；非 mapping 或未知 `AATSSettings` key 会失败关闭）。
 4. 根目录 `.env.*` 中允许覆盖的环境字段；managed profile 派生身份字段会被忽略并记录日志。
 5. 启动器的显式 bind 参数（当前仅 `start_api.py --host/--port`，通过环境层生效）。
 6. `build_runtime()` 从 Postgres 注入 RDP active parameters，覆盖其映射到的策略字段。
@@ -69,7 +69,11 @@
 | directional 参数 | `strategy_entry_*`、`strategy_scale_in_*`、`strategy_reversal_*` |
 | independent 参数 | independent entry/exit/expectancy/guard 参数 |
 | sleeve 预算 | `strategy_sleeve_auto_*` |
-| 自动换档 | `strategy_profile_auto_control_enabled`、`strategy_profile_auto_rollback_enabled` |
+| 自动换档 | `strategy_profile_auto_control_enabled`；自动回滚没有统一 runtime Settings 开关 |
+
+`strategy_profile_auto_rollback_enabled` 曾出现在四个 profile 中，但没有 Settings 字段或
+行为消费者，实际始终被静默忽略。Phase 3P 已删除该伪配置；不要重新加入，除非先完成
+真实自动回滚的状态机、权限、审计、失败恢复和端到端测试设计。
 
 ## 6. RDP active parameter set 边界
 
@@ -108,6 +112,9 @@ live exchange-coupled runtime 必须满足：
 3. 更新 `docs/configuration/managed-config-reference.md`。
 4. 更新对应 `.env.*.example` 模板。
 5. 增加测试：settings parse、managed profile、live startup guard 或策略行为。
+
+`scripts/generate_managed_config_artifacts.py` 只生成 `.env.*.example` 与
+`managed-config-reference.md`；本 README 是人工治理入口，生成器不会覆盖它。
 
 ## 9. 当前配置相关风险
 

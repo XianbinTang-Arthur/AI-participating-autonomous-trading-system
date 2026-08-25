@@ -3,13 +3,13 @@
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
 
-> 最后核对：2026-08-22（代码基线 `be9179e`）。本文只描述 managed profile 当前路径；legacy `config_profile` YAML 是 deprecated 兼容路径，不应新增依赖。
+> 最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；Phase 3A–3W 整改提交候选）。本文只描述 managed profile 当前路径；legacy `config_profile` YAML 是 deprecated 兼容路径，不应新增依赖。
 
 ## 生效顺序
 
 1. `settings.py` 默认值
 2. managed profile 代码基线（运行时语义，不建议在 `.env` 重复）
-3. `configs/strategy_profiles/<profile>.yaml` 策略调参
+3. `configs/strategy_profiles/<profile>.yaml` 策略调参；文件必须是 mapping，且每个 key 必须属于 `AATSSettings`，否则启动失败关闭
 4. 对应 `.env` 里允许覆盖的最小环境字段
 5. `build_runtime()` 从 Postgres `governance.active_parameter_sets` 注入的 active parameters
 
@@ -139,7 +139,6 @@ managed profile 派生字段（环境、mode、storage/backend、产品/保证�
   - `ai_shadow_mode_enabled`
   - `ai_execution_suggestion_mode`
   - `strategy_profile_auto_control_enabled`
-  - `strategy_profile_auto_rollback_enabled`
   - `strategy_profile_emergency_safety_fast_track_enabled`
 
 ### 想改 directional 去哪
@@ -246,7 +245,6 @@ managed profile 派生字段（环境、mode、storage/backend、产品/保证�
 - `ai_outcome_max_churn_ratio_delta`
 - `ai_execution_suggestion_mode`
 - `strategy_profile_auto_control_enabled`
-- `strategy_profile_auto_rollback_enabled`
 - `strategy_profile_emergency_safety_fast_track_enabled`
 - `strategy_profile_emergency_safety_confidence_min`
 

@@ -1,6 +1,6 @@
 # RDP 平台运行手册
 
-> 最后核对：2026-08-22（代码基线 `be9179e`）。本手册面向当前 task-daemon、数据库队列和 10 个 workflow；早期仅含 4 个 workflow、JSON active parameter fallback 或直写 CLI 的说明均已失效。
+> 最后核对：2026-08-24（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；未提交 Phase 3E–3F 整改工作区）。本手册面向当前 task-daemon、数据库队列和 10 个 workflow；早期仅含 4 个 workflow、JSON active parameter fallback 或直写 CLI 的说明均已失效。当前标准入口只允许模拟 profile。
 
 ## 1. 运行边界
 
@@ -16,7 +16,7 @@
 ### 2.1 主系统与 RDP 健康
 
 1. 确认部署报告中的 gateway、market、decision、execution、rdp-daemon 健康。
-2. derivatives-live 额外确认 liquidations-daemon 与 microstructure-collector 健康和数据 freshness；它们尚未进入 `deploy.sh` required health list。
+2. future derivatives-live required list 已纳入 liquidations-daemon 与 microstructure-collector；当前 live 在副作用前被拒绝，因此两者必须标为未运行验证。
 3. 登录 Operator UI，检查：
    - `/system/health` 无 critical blocker；
    - `/system/recovery` 无未处理 stuck/ambiguous submit；
@@ -91,7 +91,7 @@
 .\.venv\Scripts\python.exe scripts\rdp_detect_gaps.py
 ```
 
-`rdp_init_db.py` 对应当前 78 张 RDP ORM 表；不要按旧的 48 表清单验收。
+`rdp_init_db.py` 是受控显式迁移入口，执行 ORM baseline、完整 Batch B ledger/checksum chain 和最终只读校验；不要按旧的 48 表清单或仅按 78 张 ORM 表存在验收。`--ensure-schema` 为旧 CLI 名，在 daily ingest/replay 等业务 runner 中已收紧为只读 validate-only，不再执行 DDL。Live 部署不手工运行本节命令，只通过根 `scripts/deploy.sh` 的一次性综合 schema job。
 
 ### 5.2 Replay 与研究
 

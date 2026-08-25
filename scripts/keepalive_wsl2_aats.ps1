@@ -3,13 +3,17 @@ param(
     [ValidateSet('Start', 'Stop', 'Status')]
     [string]$Action = 'Start',
     [ValidateSet('spot', 'spot-live', 'derivatives', 'derivatives-live', 'derivatives-live-monolith')]
-    [string]$Profile = 'derivatives-live',
+    [string]$Profile = 'derivatives',
     [string]$Distro = 'Ubuntu',
     [switch]$DryRun
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($Action -eq 'Start' -and $Profile -in @('spot-live', 'derivatives-live', 'derivatives-live-monolith')) {
+    throw "Live profile '$Profile' is disabled while REAL-MONEY PRODUCTION is NO-GO. Stop and Status remain available for legacy cleanup."
+}
 
 function Write-KeepAliveInfo {
     param([string]$Message)

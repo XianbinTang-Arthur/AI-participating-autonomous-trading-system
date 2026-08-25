@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from aats.data_platform.replay.backtest.fill_simulator import (
+    FILL_MODEL_VERSION,
     FillRequest,
     FillResult,
     FillSimulator,
@@ -29,6 +30,7 @@ from aats.data_platform.replay.backtest.cost_validator import (
 from aats.data_platform.replay.backtest.harness import (
     BacktestConfig,
     BacktestResult,
+    ExecutionTimingRecord,
     run_backtest,
 )
 
@@ -41,6 +43,8 @@ __all__ = [
     "CostValidator",
     "EquityBuilder",
     "EquityPoint",
+    "ExecutionTimingRecord",
+    "FILL_MODEL_VERSION",
     "Fill",
     "FillRequest",
     "FillResult",

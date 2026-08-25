@@ -9,13 +9,8 @@
 # 本文件仅作为回退备选。4 进程模式下 execution slice 本地构造
 # RiskEngine 实例提供 leg_risk_evaluator，无跨进程依赖。
 #
-# 启动方式（在 deploy/wsl2-dev/ 目录下）：
-#   docker compose \
-#     -f docker-compose.aats.yml \
-#     -f docker-compose.aats.derivatives-live-monolith.yml \
-#     --env-file ../../.env.wsl2 \
-#     --env-file ../../.env.derivatives.live \
-#     up -d
+# 当前状态：标准部署入口会在任何副作用前拒绝 derivatives-live-monolith，且不存在 override。
+# 本 override 是受版本控制的未来配置，不是可执行 runbook；不得手工执行 docker compose。
 # =============================================================================
 
 name: aats-dev

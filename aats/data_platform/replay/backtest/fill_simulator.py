@@ -1,10 +1,11 @@
-"""Backtest Fill Simulator — 纯函数式成交模拟器（MVP）.
+"""Backtest Fill Simulator — 纯函数式 OHLCV participation-cap 成交代理。
 
 背景
 ----
 AATS 已有 replay core（aats/data_platform/replay/）能够回放历史 candle 并产出策略
 决策，但尚缺 fill 模拟、position tracking 与 PnL 计算。本模块补齐 fill 一环：
-给定一笔下单意图（``FillRequest``）与当前 bar 的 close/volume，返回模拟成交结果
+给定一笔下单意图（``FillRequest``）与调用方选定的 execution-event 参考价格/
+流动性，返回模拟成交结果
 （``FillResult``），从而让 backtest runner 能够连接 "信号 → 订单 → 仓位 → 盈亏"
 闭环。
 
@@ -21,12 +22,14 @@ AATS 已有 replay core（aats/data_platform/replay/）能够回放历史 candle
 设计问题（主协作者讨论过的 3 个关键点）
 ---------------------------------------
 Q1：成交价模型选什么？
-    方案 A：bar close ± slippage（本模块选择）。优点：实现简单、deterministic、
-             符合 MVP "先能跑通" 的目标；
+    方案 A：调用方提供的 event reference ± slippage（本模块选择）。优点：
+             实现简单、deterministic，并允许上层强制因果时间契约；
     方案 B：bar VWAP。缺点：V1 gold 表里不一定有 VWAP；
     方案 C：bar range 内采样。缺点：需要额外随机源且不易 reproduce。
-    决策：采用 A。IOC 在 close 基础上加/减 ``ioc_slippage_bps`` 代表 taker
-           穿盘口的成本；post_only 不加 slippage（maker 定义上只在限价触达时成交）。
+    决策：采用 A。IOC/bounded 在 reference 基础上加/减
+           ``ioc_slippage_bps`` 代表 taker 穿盘口的固定成本；post_only 不加
+           slippage。FS-003 harness 对 IOC/bounded 传 next-bar open，对
+           post-only 在 next-bar close 后解析。
 
 Q2：post_only 成交率模型？
     Explore agent 建议按 volume_ratio 分段：
@@ -38,11 +41,14 @@ Q2：post_only 成交率模型？
     deterministic 的 [0, 1) 抽样，保证同 order_id 同种子同 outcome，
     backtest 可完整复现。
 
-Q3：bounded_limit 的成交价与费率？
-    bounded_limit 既有 maker 先挂单部分也有 taker 兜底部分。MVP 简化为
-    100% 成交 @ bar_close（不加 slippage，因为有部分 maker fill 改善均价），
-    fee 取 ``0.5 * (maker_fee_bps + taker_fee_bps)`` = 3.5 bps。fill_kind
-    保守归类为 "taker"，因为真实场景下至少有一部分 taker leg 触发。
+Q3：OHLCV 没有盘口深度时如何约束成交量？
+    三种订单都必须有调用方在因果上可用的 volume，并统一受
+    ``max_volume_participation`` 限制。IOC/bounded 超出 cap 的部分不成交；
+    bounded 按 taker 兜底的 fee/slippage 计价，不再用乐观的混合费率。
+    post_only 概率命中后仍受 cap，因此可以产生 partial fill。
+
+该代理不建模 L2 depth、spread、queue position 或 market impact；调用方必须在
+artifact 中保留这一证据边界，不能把 participation cap 当作 live 容量校准。
 
 所有金额/价格计算走 ``Decimal``，float 只保留给配置项（fee_bps, slippage_bps
 等），避免中间量的二进制舍入误差。
@@ -51,6 +57,7 @@ Q3：bounded_limit 的成交价与费率？
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal
@@ -63,6 +70,8 @@ OrderType = Literal["ioc", "post_only", "bounded_limit"]
 OrderSide = Literal["buy", "sell"]
 
 FillKind = Literal["taker", "maker", "no_fill"]
+
+FILL_MODEL_VERSION = "ohlcv_participation_cap_v2"
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +115,7 @@ class FillResult:
     fee_notional: Decimal
     fill_kind: FillKind
     notes: str = ""
+    slippage_bps: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -140,12 +150,40 @@ class FillSimulator:
     maker_fee_bps: float = 2.0
     taker_fee_bps: float = 5.0
     ioc_slippage_bps: float = 1.0
+    max_volume_participation: Decimal = Decimal("0.01")
 
     # Q2: volume_ratio 分段成交率（post_only）
     post_only_fill_prob_high: float = 0.90   # qty/bar_vol < 1%
     post_only_fill_prob_mid: float = 0.60    # 1% ~ 5%
     post_only_fill_prob_low: float = 0.20    # 5% ~ 10%
     # > 10% 强制 no_fill
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.max_volume_participation, Decimal) or not (
+            self.max_volume_participation.is_finite()
+            and Decimal("0") < self.max_volume_participation <= Decimal("1")
+        ):
+            raise ValueError("max_volume_participation must be finite and in (0, 1]")
+        for field_name in (
+            "maker_fee_bps",
+            "taker_fee_bps",
+            "ioc_slippage_bps",
+        ):
+            value = float(getattr(self, field_name))
+            if not math.isfinite(value):
+                raise ValueError(f"{field_name} must be finite")
+        if float(self.taker_fee_bps) < 0.0:
+            raise ValueError("taker_fee_bps must be non-negative")
+        if float(self.ioc_slippage_bps) < 0.0:
+            raise ValueError("ioc_slippage_bps must be non-negative")
+        for field_name in (
+            "post_only_fill_prob_high",
+            "post_only_fill_prob_mid",
+            "post_only_fill_prob_low",
+        ):
+            value = float(getattr(self, field_name))
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError(f"{field_name} must be finite and in [0, 1]")
 
     # ------------------------------------------------------------------
     # public API
@@ -165,8 +203,10 @@ class FillSimulator:
 
         Args:
             request: 下单意图。
-            bar_close_price: 当前 bar 收盘价（Decimal）。
-            bar_volume: 当前 bar 成交量（Decimal，单位同 ``target_qty``）。
+            bar_close_price: execution-event 参考价（Decimal）。参数名为兼容
+                旧 public API 保留；上层不得据此使用 observation bar close。
+            bar_volume: 对应 execution window 的成交量（Decimal，单位同
+                ``target_qty``）；只由依赖流动性的分支消费。
             rng_seed: post_only 概率抽样的种子，缺省时用 ``request.order_id``。
                       同一 (seed, order_id) 给相同的抽样值，保证可复现。
 
@@ -174,15 +214,24 @@ class FillSimulator:
             FillResult。
         """
         # -- 1. 入参健壮性检查 --
-        if request.target_qty <= 0:
+        if not isinstance(request.target_qty, Decimal) or not (
+            request.target_qty.is_finite() and request.target_qty > 0
+        ):
             return self._no_fill(request, notes="non-positive qty")
 
-        if bar_close_price <= 0:
+        if not isinstance(bar_close_price, Decimal) or not (
+            bar_close_price.is_finite() and bar_close_price > 0
+        ):
             return self._no_fill(request, notes="non-positive bar_close_price")
+
+        if not isinstance(bar_volume, Decimal) or not (
+            bar_volume.is_finite() and bar_volume > 0
+        ):
+            return self._no_fill(request, notes="missing or non-positive bar_volume")
 
         # -- 2. 分支派发 --
         if request.order_type == "ioc":
-            return self._simulate_ioc(request, bar_close_price)
+            return self._simulate_ioc(request, bar_close_price, bar_volume)
 
         if request.order_type == "post_only":
             return self._simulate_post_only(
@@ -193,7 +242,11 @@ class FillSimulator:
             )
 
         if request.order_type == "bounded_limit":
-            return self._simulate_bounded_limit(request, bar_close_price)
+            return self._simulate_bounded_limit(
+                request,
+                bar_close_price,
+                bar_volume,
+            )
 
         # 未知 order_type（类型系统应已拦截，这里只作防御）
         return self._no_fill(request, notes=f"unknown order_type={request.order_type!r}")
@@ -206,25 +259,33 @@ class FillSimulator:
         self,
         request: FillRequest,
         bar_close_price: Decimal,
+        bar_volume: Decimal,
     ) -> FillResult:
-        """IOC：100% 成交 @ bar_close ± ioc_slippage_bps。"""
+        """IOC：受 OHLCV participation cap 的 taker 成交。"""
+        filled_qty = self._fillable_qty(request, bar_volume)
         direction = Decimal(1) if request.side == "buy" else Decimal(-1)
         slip_ratio = direction * Decimal(str(self.ioc_slippage_bps)) / _BPS_DENOM
         avg_price = bar_close_price * (Decimal(1) + slip_ratio)
 
         fee_bps = self.taker_fee_bps
         fee_ratio = Decimal(str(fee_bps)) / _BPS_DENOM
-        fee_notional = request.target_qty * avg_price * fee_ratio
+        fee_notional = filled_qty * avg_price * fee_ratio
 
         return FillResult(
             order_id=request.order_id,
             side=request.side,
-            filled_qty=request.target_qty,
+            filled_qty=filled_qty,
             avg_fill_price=avg_price,
             fee_bps=fee_bps,
             fee_notional=fee_notional,
             fill_kind="taker",
-            notes="ioc filled",
+            notes=self._fill_notes(
+                order_type="ioc",
+                request=request,
+                filled_qty=filled_qty,
+                bar_volume=bar_volume,
+            ),
+            slippage_bps=self.ioc_slippage_bps,
         )
 
     def _simulate_post_only(
@@ -237,11 +298,8 @@ class FillSimulator:
     ) -> FillResult:
         """post_only：按 volume_ratio 分段概率决定成交。
 
-        成交 → maker fill @ bar_close，无 slippage；否则 no_fill。
+        成交 → maker fill @ event reference，无 slippage；否则 no_fill。
         """
-        if bar_volume <= 0:
-            return self._no_fill(request, notes="zero bar_volume")
-
         volume_ratio = request.target_qty / bar_volume
         fill_prob = self._post_only_fill_prob(volume_ratio)
 
@@ -267,46 +325,59 @@ class FillSimulator:
                 ),
             )
 
-        # 成交：maker fill @ bar_close（无 slippage）
+        # 成交：maker fill @ caller-provided event reference（无 slippage），
+        # 但实际数量仍受 participation cap。
+        filled_qty = self._fillable_qty(request, bar_volume)
         fee_bps = self.maker_fee_bps
         fee_ratio = Decimal(str(fee_bps)) / _BPS_DENOM
-        fee_notional = request.target_qty * bar_close_price * fee_ratio
+        fee_notional = filled_qty * bar_close_price * fee_ratio
 
         return FillResult(
             order_id=request.order_id,
             side=request.side,
-            filled_qty=request.target_qty,
+            filled_qty=filled_qty,
             avg_fill_price=bar_close_price,
             fee_bps=fee_bps,
             fee_notional=fee_notional,
             fill_kind="maker",
             notes=(
-                f"post_only filled: "
+                f"{self._fill_notes(order_type='post_only', request=request, filled_qty=filled_qty, bar_volume=bar_volume)} "
                 f"volume_ratio={self._fmt_pct(volume_ratio)} "
                 f"fill_prob={fill_prob * 100:.1f}%"
             ),
+            slippage_bps=0.0,
         )
 
     def _simulate_bounded_limit(
         self,
         request: FillRequest,
         bar_close_price: Decimal,
+        bar_volume: Decimal,
     ) -> FillResult:
-        """bounded_limit：100% 成交 @ bar_close，fee = 0.5*(maker + taker)。"""
-        fee_bps = 0.5 * (self.maker_fee_bps + self.taker_fee_bps)
+        """bounded_limit：保守按受 cap 的 taker fallback 计价。"""
+        filled_qty = self._fillable_qty(request, bar_volume)
+        direction = Decimal(1) if request.side == "buy" else Decimal(-1)
+        slip_ratio = direction * Decimal(str(self.ioc_slippage_bps)) / _BPS_DENOM
+        avg_price = bar_close_price * (Decimal(1) + slip_ratio)
+        fee_bps = self.taker_fee_bps
         fee_ratio = Decimal(str(fee_bps)) / _BPS_DENOM
-        fee_notional = request.target_qty * bar_close_price * fee_ratio
+        fee_notional = filled_qty * avg_price * fee_ratio
 
         return FillResult(
             order_id=request.order_id,
             side=request.side,
-            filled_qty=request.target_qty,
-            avg_fill_price=bar_close_price,
+            filled_qty=filled_qty,
+            avg_fill_price=avg_price,
             fee_bps=fee_bps,
             fee_notional=fee_notional,
-            # 保守归类：真实 bounded_limit 至少有部分 taker leg 触发
             fill_kind="taker",
-            notes="bounded_limit filled (blended fee)",
+            notes=self._fill_notes(
+                order_type="bounded_limit_taker_fallback",
+                request=request,
+                filled_qty=filled_qty,
+                bar_volume=bar_volume,
+            ),
+            slippage_bps=self.ioc_slippage_bps,
         )
 
     # ------------------------------------------------------------------
@@ -322,6 +393,32 @@ class FillSimulator:
         if volume_ratio < _POST_ONLY_LOW_RATIO:
             return self.post_only_fill_prob_low
         return 0.0
+
+    def _fillable_qty(
+        self,
+        request: FillRequest,
+        bar_volume: Decimal,
+    ) -> Decimal:
+        """按已知 volume 与固定 participation cap 返回实际可成交量。"""
+        cap = bar_volume * self.max_volume_participation
+        return min(request.target_qty, cap)
+
+    def _fill_notes(
+        self,
+        *,
+        order_type: str,
+        request: FillRequest,
+        filled_qty: Decimal,
+        bar_volume: Decimal,
+    ) -> str:
+        participation = filled_qty / bar_volume
+        status = "filled" if filled_qty == request.target_qty else "partial_fill"
+        return (
+            f"{order_type} {status}: filled_qty={filled_qty} "
+            f"target_qty={request.target_qty} "
+            f"volume_participation={self._fmt_pct(participation)} "
+            f"max_participation={self._fmt_pct(self.max_volume_participation)}"
+        )
 
     @staticmethod
     def _no_fill(request: FillRequest, *, notes: str) -> FillResult:

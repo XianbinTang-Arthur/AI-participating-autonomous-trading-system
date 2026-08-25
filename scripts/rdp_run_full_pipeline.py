@@ -99,7 +99,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true",
                    help="仅显示将执行的命令, 不实际运行")
     p.add_argument("--ensure-schema", action="store_true",
-                   help="首个阶段运行前执行 DB migration")
+                   help="兼容参数：首个阶段运行前只读校验 schema，不执行 DDL")
     p.add_argument("--no-stop-on-failure", action="store_true",
                    help="某阶段失败后继续运行后续阶段")
     p.add_argument(

@@ -124,6 +124,8 @@ class TestCLIArgparse(unittest.TestCase):
                 "entry_threshold=0.55",
                 "--order-type",
                 "ioc",
+                "--max-volume-participation",
+                "0.005",
             ]
         )
         self.assertEqual(args.command, "backtest")
@@ -137,6 +139,7 @@ class TestCLIArgparse(unittest.TestCase):
         self.assertEqual(args.output_dir, "/tmp/bt")
         self.assertEqual(args.param, ["entry_threshold=0.55"])
         self.assertEqual(args.order_type, "ioc")
+        self.assertEqual(args.max_volume_participation, Decimal("0.005"))
 
 
 # ---------------------------------------------------------------------------
@@ -191,13 +194,15 @@ class TestCLIOutputFiles(unittest.TestCase):
                 )
             self.assertEqual(rc, 0)
 
-            # 3 files must exist
+            # 4 artifacts must exist, including FS-003 causal execution timeline.
             summary_path = output_dir / "summary.json"
             equity_path = output_dir / "equity_curve.csv"
             cost_path = output_dir / "cost_validation.json"
+            timeline_path = output_dir / "execution_timeline.json"
             self.assertTrue(summary_path.exists())
             self.assertTrue(equity_path.exists())
             self.assertTrue(cost_path.exists())
+            self.assertTrue(timeline_path.exists())
 
             # summary.json parseable
             summary_data = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -206,6 +211,14 @@ class TestCLIOutputFiles(unittest.TestCase):
             self.assertIn("decisions_count", summary_data)
             self.assertEqual(summary_data["decisions_count"], 2)
             self.assertEqual(summary_data["fills_count"], 2)
+            self.assertEqual(
+                summary_data["config"]["fill_model_version"],
+                "ohlcv_participation_cap_v2",
+            )
+            self.assertEqual(
+                summary_data["config"]["max_volume_participation"],
+                "0.01",
+            )
             # Decimal serialized as string
             self.assertEqual(summary_data["summary"]["final_equity"], "12.5")
 
@@ -218,6 +231,9 @@ class TestCLIOutputFiles(unittest.TestCase):
             cost_data = json.loads(cost_path.read_text(encoding="utf-8"))
             self.assertEqual(cost_data["total_decisions"], 2)
             self.assertEqual(cost_data["decisions_with_fills"], 2)
+
+            timeline_data = json.loads(timeline_path.read_text(encoding="utf-8"))
+            self.assertEqual(timeline_data, [])
 
 
 # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ from aats.schemas.operator import (
 )
 from aats.services.execution_engine.baseline_import import AccountBaselineImportService
 from aats.services.execution_engine.state_writer import save_order_state_direct_legacy_only
+from aats.services.operator.command_bridge import OperatorCommandError
 from aats.services.runtime_scope import (
     latest_topic_event_for_scope,
     reconciliation_report_matches_scope,
@@ -807,14 +808,62 @@ class ReconciliationSystemQueryFacade:
         self,
         *,
         reason: str,
+        generation: str | None = None,
+        set_at_ts: float | None = None,
         actor_role: OperatorRole = "anonymous",
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
+        if self.owner.runtime.reconciliation_service is None:
+            transition = await self.owner.runtime.kill_switch.halt_async(
+                reason=reason,
+                generation=generation,
+                set_at_ts=set_at_ts,
+            )
+            client = getattr(self.owner.runtime, "operator_command_client", None)
+            if client is None:
+                raise OperatorCommandError(
+                    "halt_requires_operator_command_client: gateway runtime missing client wiring"
+                )
+            try:
+                try:
+                    result = await client.invoke(
+                        command="halt",
+                        payload={
+                            "reason": reason,
+                            "generation": transition["generation"],
+                            "set_at_ts": transition["set_at_ts"],
+                            "actor_role": actor_role,
+                            "actor_identity": actor_identity,
+                            "auth_source": auth_source,
+                        },
+                    )
+                except OperatorCommandError:
+                    raise
+                except Exception as exc:
+                    raise OperatorCommandError(
+                        f"kill_switch_execution_ack_unavailable:{type(exc).__name__}"
+                    ) from exc
+            finally:
+                self.owner._invalidate_cache()
+            if not (
+                isinstance(result, dict)
+                and result.get("state") == "HALTED"
+                and result.get("enforced") is True
+                and result.get("generation") == transition["generation"]
+                and result.get("acknowledged_by") in {"execution", "monolith"}
+            ):
+                raise OperatorCommandError("kill_switch_execution_ack_invalid")
+            result["gateway_propagation"] = transition.get("propagation")
+            return result
+
         was_halted = self.owner.runtime.kill_switch.halted
         recovery_before = self.owner.recovery_view()["recovery_state"]
-        # Stage 6 Slice 6.4：合并的 KillSwitch 提供 halt_async
-        await self.owner.runtime.kill_switch.halt_async(reason=reason)
+        transition = await self.owner.runtime.kill_switch.halt_async(
+            reason=reason,
+            generation=generation,
+            set_at_ts=set_at_ts,
+        )
         log_event(self.owner.logger, "operator_halt", level="warning", reason=reason, already_halted=was_halted)
         status = "already_halted" if was_halted else "halted"
         # Stage 5d hardening: halt 操作必须将 recovery_state 设为 resume_blocked。
@@ -855,7 +904,12 @@ class ReconciliationSystemQueryFacade:
             mode_snapshot=self.owner.system_mode(),
             blockers=self.owner.blockers(),
         )
-        return {"status": status, "halted": True, "reason": reason}
+        return {
+            "status": status,
+            "halted": True,
+            "reason": reason,
+            **transition,
+        }
 
     async def resume(
         self,
@@ -876,7 +930,7 @@ class ReconciliationSystemQueryFacade:
                     "gateway runtime missing client wiring"
                 )
             try:
-                return await client.invoke(
+                result = await client.invoke(
                     command="resume",
                     payload={
                         "reason": reason,
@@ -885,6 +939,27 @@ class ReconciliationSystemQueryFacade:
                         "auth_source": auth_source,
                     },
                 )
+                if result.get("status") in {"resumed", "already_resumed"}:
+                    generation = str(result.get("generation") or "").strip()
+                    if not (
+                        result.get("state") == "RUNNING"
+                        and result.get("resume_authorized") is True
+                        and generation
+                    ):
+                        raise OperatorCommandError(
+                            "kill_switch_resume_authority_response_invalid"
+                        )
+                    try:
+                        await self.owner.runtime.kill_switch.activate_trading_permission_for_authorized_generation(
+                            generation=generation,
+                        )
+                    except Exception as exc:
+                        raise OperatorCommandError(
+                            "kill_switch_permission_activation_failed:"
+                            f"{type(exc).__name__}"
+                        ) from exc
+                    result["trading_permission_generation"] = generation
+                return result
             finally:
                 self.owner._invalidate_cache()
 
@@ -1022,6 +1097,7 @@ class ReconciliationSystemQueryFacade:
             blockers=blockers,
         )
         recovery = self.owner.recovery_view()
+        kill_switch_state = self.owner.runtime.kill_switch.transition_status()
         return {
             "status": status,
             "halted": self.owner.runtime.kill_switch.halted,
@@ -1037,6 +1113,9 @@ class ReconciliationSystemQueryFacade:
             "blockers": blockers,
             "recovery": recovery,
             "reconciliation": None if report is None else report.model_dump(mode="json"),
+            "state": kill_switch_state["state"],
+            "generation": kill_switch_state["generation"],
+            "resume_authorized": kill_switch_state["resume_authorized"],
         }
 
     @classmethod

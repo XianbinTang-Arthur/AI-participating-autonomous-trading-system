@@ -6,6 +6,8 @@
 > 适用范围：`aats_live_derivatives.public.event_store` / `public.event_store_archive`
 >
 > 本文档 Phase 1 落地于 2026-04-19，后续 Phase 2/3 参见 `docs/design/event_store_retention_extension_design_2026_04_19.md`。
+>
+> 2026-08-24 边界：本文是专题恢复参考，不是当前可执行 live 发布流程。标准入口已禁用 live；任何生产归档开关变更与回退必须另行批准、克隆演练并重新开放 live gate。
 
 ---
 
@@ -218,7 +220,7 @@ Prometheus 指标：
    编辑 `aats/bootstrap/config.py::_housekeeping_loop` 调 `run_all`
    时传 `hot_event_archive_enabled=False`（或临时注释掉对 `housekeeping`
    的调用整个 loop）。
-2. **redeploy**：`bash scripts/deploy.sh --skip-commit`。
+2. **重建**：当前 live 部署禁用，本步骤不得执行。模拟验证可使用 `bash scripts/deploy.sh --profile derivatives --skip-commit`，但不能替代生产恢复。
 3. **数据影响**：已归档的行仍在 `event_store_archive`，读路径 UNION
    能看到，完全无数据丢失。hot 表会重新无限增长，但不会阻断业务。
 

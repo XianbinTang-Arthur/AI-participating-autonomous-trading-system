@@ -26,12 +26,15 @@ _ARTIFACT_ROOT = pathlib.Path("artifacts/research/experiments")
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build experiment report")
     parser.add_argument("--experiment-id", required=True, help="Experiment UUID")
-    parser.add_argument("--ensure-schema", action="store_true",
-                        help="Run DB migrations before building report")
+    parser.add_argument(
+        "--ensure-schema",
+        action="store_true",
+        help="Legacy name: validate the schema contract before building; no DDL",
+    )
     args = parser.parse_args()
 
     from aats.data_platform.config import get_settings
-    from aats.data_platform.db import get_session, run_migrations
+    from aats.data_platform.db import get_session, validate_rdp_schema
     from aats.data_platform.replay.registry.experiment_registry import (
         get_experiment,
         mark_experiment_succeeded,
@@ -40,8 +43,8 @@ def main() -> None:
 
     settings = get_settings()
     if args.ensure_schema:
-        log.info("Running migrations (--ensure-schema)...")
-        run_migrations(settings)
+        log.info("Validating schema contract (--ensure-schema legacy flag)...")
+        validate_rdp_schema(settings)
 
     exp_id = UUID(args.experiment_id)
 

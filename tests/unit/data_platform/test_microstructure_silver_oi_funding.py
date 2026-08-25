@@ -25,7 +25,7 @@ from tests.unit.data_platform._silver_test_helpers import (
 
 class TestOiAggregation(unittest.TestCase):
     def test_oi_open_close_high_low_from_ticks(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             ticks = [
                 {"ts": env.bar_start + timedelta(seconds=10), "tick_type": "oi",
@@ -64,7 +64,7 @@ class TestEmaColdStart(unittest.TestCase):
     """§7.4 EMA 递归 cold-start: silver 无上一行时 seed + flag='ema_seed_from_sma'。"""
 
     def test_first_bar_seeds_ema_with_sma_flag(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             ticks = [
                 {"ts": env.bar_start + timedelta(seconds=i * 60), "tick_type": "oi",
@@ -95,7 +95,7 @@ class TestFundingAndMarkLastValue(unittest.TestCase):
     """每 bar 内 tick_type='funding'/'mark' 只取最后一个 tick."""
 
     def test_last_funding_rate_kept(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             ticks = [
                 {"ts": env.bar_start + timedelta(seconds=30), "tick_type": "funding",
@@ -133,7 +133,7 @@ class TestFundingAndMarkLastValue(unittest.TestCase):
 
     def test_funding_received_in_bar_with_future_ts_is_kept(self) -> None:
         """OKX funding tick 的 ts 可指向下一次 funding, 用 received_at 判定已知状态。"""
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             ticks = [
                 {"ts": env.bar_start + timedelta(seconds=10), "tick_type": "oi",
@@ -179,7 +179,7 @@ class TestFundingAndMarkLastValue(unittest.TestCase):
             self.assertNotIn("funding_no_data", str(row.quality_flags))
 
     def test_recent_funding_state_carries_forward_by_received_at(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             ticks = [
                 {"ts": env.bar_start + timedelta(seconds=10), "tick_type": "oi",
@@ -217,7 +217,7 @@ class TestFundingAndMarkLastValue(unittest.TestCase):
             self.assertNotIn("funding_no_data", result.quality_flags)
 
     def test_stale_funding_state_still_marks_no_data(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             ticks = [
                 {"ts": env.bar_start + timedelta(seconds=10), "tick_type": "oi",

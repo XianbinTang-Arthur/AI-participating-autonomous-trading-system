@@ -362,7 +362,7 @@ class PostOnlyTimeoutFallbackTests(unittest.IsolatedAsyncioTestCase):
         manager, _ = _make_manager(adapter, timeout_ms=0.0)
 
         intent = _make_post_only_intent()
-        state = await manager.process_submit_command(intent=intent)
+        await manager.process_submit_command(intent=intent)
 
         # cancel 返回的 state remaining=0 → 没有 fallback
         self.assertEqual(len(adapter.submit_calls), 1)

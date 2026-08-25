@@ -1,9 +1,9 @@
 # AATS 当前代码库全景说明与代码审阅手册
 
 > 文档性质：当前实现说明、代码导航、运行与安全边界、维护手册
-> 审阅基线：Git `be9179ead5be6aba22fbe94e3baf72b9f46eedc3`（`main`，2026-05-19）
-> 编写日期：2026-08-21
-> 文档一致性复核：2026-08-23
+> 原始全景审阅基线：Git `be9179ead5be6aba22fbe94e3baf72b9f46eedc3`（`main`，2026-05-19）
+> 整改覆盖层最后复核：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；Phase 3A–3W 整改提交候选）
+> 适用边界：正文原始全景数量仍是带基线的静态快照；2026-08-24/25 明确标注的 FS 整改段描述当前未提交工作区，不证明任何 live runtime 状态
 > 适用对象：重新接手项目的维护者、代码审阅者、交易与风控负责人、Operator
 > 事实优先级：固定行为以当前可执行代码为准；有效运行值以现场 runtime/数据库为准；自动化测试用于交叉验证；历史设计文档仅作背景
 
@@ -29,7 +29,7 @@ AATS（AI Participating Autonomous Trading System）不是一个简单的“策�
 5. **成交是财务投影的核心事实输入。** `FillEvent` 驱动组合、余额、费用、已实现盈亏、lot、ledger、settlement 与 reconciliation；费用在系统内按正成本记录，并从余额/盈亏扣除。
 6. **四进程运行依赖 NATS 与 Redis。** exchange-coupled 的四进程模式若仍使用纯内存事件总线或纯内存热状态，启动会失败，而不是带着错误拓扑继续运行。
 7. **RDP 的研究结论默认不能直接改实盘。** Research Factory 明确禁止 runtime mutation、active parameter write、runtime config write 和 OKX write；研究产物先形成证据、verdict、recommendation，再进入审批、gate、发布和观察链路。
-8. **当前代码与若干旧文档存在漂移。** 例如 `scripts/run_local.py` 与现有 decision 入口签名不兼容；RDP 当前 ORM 元数据是 78 张表；JetStream 主事件流当前代码默认 1 天而部分旧注释仍写 7 天。具体见第 26 章。
+8. **当前代码与若干旧文档存在漂移。** Phase 3Q 已把失效的 `scripts/run_local.py` 收口为明确迁移失败入口；Phase 3R 又修复 replay short-bias gate，并重写已漂移的参数映射参考；Phase 3S 增加基础 CI/warning gate，Phase 3T 再加入 Python hashed lock 与外部镜像 digest，但远端 required check、integration 和完整供应链扫描仍未启用；RDP 当前 ORM 元数据是 78 张表；JetStream 主事件流当前代码默认 1 天而部分旧注释仍写 7 天。具体见第 26 章。
 
 ## 1. 文档范围、方法与可信边界
 
@@ -227,13 +227,31 @@ flowchart TD
     C --> D[通过跨进程 readiness barrier]
     D --> E[执行 startup recovery 或 slice 初始化]
     E --> F[启动 role 对应后台任务]
-    F --> G[写 heartbeat 并等待信号]
-    G --> H[SIGTERM/SIGINT]
-    H --> I[停止后台任务]
+    F --> G[注册关键长期 task 并写 heartbeat]
+    G --> H{停止信号、关键 task 结束或成功进度超时}
+    H -->|SIGTERM/SIGINT| I[正常停止，退出 0]
+    H -->|exception / cancel / 提前返回| K[停止 heartbeat，退出 1]
+    H -->|固定周期 task stalled| K
+    K --> I
     I --> J[关闭 runtime / bus / DB]
 ```
 
-进程会安装信号处理和 heartbeat。容器使用 `tini` 作为 PID 1，把 SIGTERM 正确传给 Python，避免只能等待强杀。
+进程会安装信号处理和 heartbeat。2026-08-24 Phase 3D 工作区新增显式
+critical task 监督：行情主循环、账户、对账、execution sync/outbox/command、
+decision dispatcher 与 guard 长期 task 发生未捕获异常、意外取消或提前返回时，
+worker 不再继续只靠独立 heartbeat 伪装健康，而是停止 heartbeat、清理并返回
+非零。容器使用 `tini` 作为 PID 1，把 SIGTERM 正确传给 Python，避免只能等待
+强杀。Phase 3K 进一步为账户刷新、执行同步、对账、outbox、command flow、
+Phase 1 shadow 和 trial guard 七条固定周期关键循环加入成功进度 deadline；
+永久 await 或连续无成功周期会分类为 `stalled`，复用非零退出/health `503`
+路径。预算为至少 60 秒或三个正常周期，使用进程单调时钟，不持久化。
+
+这仍不等于完整业务健康：public/private WebSocket、decision dispatcher、abort
+hook、guard-signal publisher 等事件驱动/service-owned task 需要各自的连接、
+freshness 或 queue-lag 契约；整个 event loop 被同步阻塞还需要容器外 supervisor。
+真实 Docker restart、依赖断连、告警和误杀边界尚未验证。详见
+[`fs_006_critical_task_supervision_sow_2026_08_24.md`](../task/fs_006_critical_task_supervision_sow_2026_08_24.md)
+与 [`fs_006_critical_task_progress_watchdog_sow_2026_08_24.md`](../task/fs_006_critical_task_progress_watchdog_sow_2026_08_24.md)。
 
 ### 5.3 Gateway lifespan
 
@@ -241,14 +259,22 @@ gateway 启动顺序为：
 
 1. 加载 settings、初始化结构化日志；
 2. 识别 gateway 或 monolith role；
-3. 调用 `build_runtime()`；
-4. 发布本 role ready，并等待 peer roles；
-5. 启动 runtime background tasks 与 dashboard snapshot plane；
-6. 尝试创建/迁移 RDP schema；RDP 失败不阻止主 gateway 启动，但会反映为 RDP 不可用；
+3. 只读校验 RDP ORM table/column surface 与 Batch B ledger/checksum；任一差异立即失败；
+4. 调用 `build_runtime()`，managed Postgres 在此只读校验 root migration ledger 与财务精度；
+5. 发布本 role ready，并等待 peer roles；
+6. 启动 runtime background tasks 与 dashboard snapshot plane；
 7. 对外提供 UI/API；
 8. lifespan 退出时停止 snapshot plane、后台任务和 runtime。
 
-`/healthz` 是不需要认证的 liveness；它不等于完整交易 readiness。完整状态要看 `/system/health`、`/system/runtime`、`/system/recovery`、blockers、reconciliation 和 submit gate。
+RDP 校验位于任何 readiness 广播、peer wait 和后台 task 之前；原“迁移失败只 warning 后继续 ready”路径已在 Phase 3E 收紧。它仍只是未提交的代码/隔离验证结论，不是生产库已通过声明。
+
+Phase 3J 将第 5 步的 peer barrier 收紧为四主进程 NATS/hybrid 必经失败关闭路径。标准 deploy 在 sync 后生成非秘密 generation，Compose 必填注入；每个 role 只写/读 `aats:runtime:ready:<generation>:<role>` 并校验 payload role/generation。缺失 generation/hot-state、Redis set/get 失败或 60 秒 peer timeout 都在 `start_background_tasks()` 前抛固定错误。退出时 best-effort 删本 role/本代次 key。该 key 是 consumer provisioning 事实，不是持续业务健康 lease。
+
+`/healthz` 不需要认证；lifespan runtime 的关键 task 已结束，或纳管的固定周期
+任务成功进度超时时返回 `503`，其余情况下只证明 gateway lifespan 和当前监督面
+未发现失败。它不等于完整交易 readiness。完整状态还要看 `/system/health`、
+`/system/runtime`、`/system/recovery`、事件驱动 task freshness/queue lag、
+blockers、reconciliation 和 submit gate。
 
 ### 5.4 Runtime slice
 
@@ -264,6 +290,8 @@ gateway 启动顺序为：
 | Operator API/UI | ✓ | ✓ |  |  |  |
 
 shared slice 提供 bus、hot state、kill switch、mode、market/account gateway 基础能力、execution adapter、health、metrics 和 Phase 1 shadow 等共同依赖；具体 worker 只注册本 role 需要的订阅和任务。
+
+Phase 3L 后，Kill Switch 的长期 Redis state 只负责恢复和 generation 权威，不能单独授权增险。Gateway/monolith 在 readiness 后维护同 generation 的短时 permission key（Redis TTL 15 秒、每 5 秒续租），execution 在最终 `place_order` fence 内同时读取长期 state 与 permission，而且没有签发/续租能力。四进程代理 resume 必须由 Gateway 重读 execution 已写的 exact RUNNING generation 并成功激活 permission 后才返回。halt 和 shutdown 优先撤销前一 RUNNING generation；Redis 删除失败仍由 TTL 到期收敛。此协议尚未经过真实 Redis/NATS 四进程单向分区与目标 crash/restart 验证，FS-002 仍为 P0 HARD BLOCKER。
 
 ### 5.5 四进程通信
 
@@ -343,6 +371,8 @@ topic 分三类：
 | `AATS_EVENTS_COMMANDS` | position target、order intent、baseline、sleeve、allocation、bundle、execution plan | limits | 1 天 | 512 MiB |
 
 NATS server file store 上限 8 GiB。三条 stream 声明上限合计 6.5 GiB，留出内部索引、consumer state 与运行余量。
+
+`AATS_EVENTS` 使用 INTEREST，因此“Redis 异常/超时后继续 publisher”的旧 LIMITS 兼容注释已不成立。Phase 3J 单测已证明 strict 路径对 announce/poll/timeout/旧代次失败关闭，但未连接真实 NATS/Redis，也未证明 Compose 并发启动、自动重启和 consumer provisioning 延迟下的消息计数。所以当前状态是 `CODE REMEDIATED / TARGET NATS STARTUP-RESTART VERIFICATION OPEN`，不是 CLOSED。
 
 ### 7.4 投递策略
 
@@ -909,22 +939,34 @@ execution/monolith 启动恢复的核心顺序是：
 
 ### 18.2 Schema 创建与增量迁移
 
-Postgres runtime 会：
+Postgres runtime 按两种明确模式工作：
 
-1. 可选执行 ORM `Base.metadata.create_all()`；
-2. 用 transaction advisory lock 串行执行 `migrations/*.sql`；
-3. 在 `schema_migrations` 记录版本与 SHA-256 checksum；
-4. 已执行迁移若文件 checksum 变化则拒绝启动；
-5. 校验关键财务列为 `NUMERIC(36,18)`；
-6. 每个 process role 获取作用域化 session advisory lock，防止同一 role 重复运行。
+1. 显式 migration job：ORM `Base.metadata.create_all()` 后，用 transaction advisory lock 串行执行 `migrations/*.sql`，在 `schema_migrations` 记录 version + SHA-256 checksum；
+2. managed 应用启动：`database_auto_create_schema=false`，只读比较当前 checkout 的完整 migration 文件集与 ledger，missing/unknown/checksum mismatch 都拒绝启动；
+3. 两种模式都校验关键财务列为 `NUMERIC(36,18)`；
+4. 每个 process role 获取作用域化 session advisory lock，防止同一 role 重复运行。
 
 当前增量 SQL 是：baseline guard、obligation active currency index、execution truth dedicated columns、live read indexes、decision audit recent indexes。
 
 ### 18.3 数据库连接
 
-主库 SQLAlchemy engine 当前 pool size 15、overflow 45、timeout 30 秒、pre-ping，并注入 60 秒 `idle_in_transaction_session_timeout` 作为极端慢查询/线程拥塞的安全网。该超时不是修复应用层长事务的替代品。
+Phase 3U 后，主库 SQLAlchemy engine 不再对所有进程统一使用 15+45。它从
+`aats/storage/connection_budget.py` 按角色解析：gateway 12+20、market 4+4、decision
+5+5、execution 8+8、monolith 12+20；仍使用 30 秒 pool timeout、pre-ping，并注入 60 秒
+`idle_in_transaction_session_timeout` 作为极端慢查询/线程拥塞的安全网。该超时不是修复
+应用层长事务的替代品。
 
-RDP 使用独立 engine cache，pool size 5、overflow 10。RDP `run_migrations()` 当前以 ORM `create_all()` 建表；另有 batch-A FK/UQ/check hardening 入口。
+完整四进程声明 topology（包括当前 RDP、两个 collector、live query/facts/session、
+governance、orderbook 和四个 startup transient）ceiling 为 150。Compose 声明
+`max_connections=200`、superuser reserved=3，因此普通容量 197、名义余量 47。静态 AST
+verifier 归类当前 13 个 `create_engine` 调用，并在新增未审 engine、裸 pool 值或 Compose/CI
+漂移时失败。
+
+上述是配置 ceiling，不是生产并发测量。治理 transient engine、并行 `NullPool` CLI、
+迁移/恢复/admin、仓库外进程、慢查询/连接泄漏/重连峰值和 64MB `work_mem` 联合内存仍未
+闭环；FS-008 状态是“声明拓扑已预算，目标负载与瞬时路径开放”，不是 CLOSED。
+
+RDP 使用独立 engine cache，pool size 5、overflow 10。Phase 3E 后，`apply_rdp_migrations()` 是显式写入入口：先建 ORM baseline，再在 session advisory lock 内执行 13 个 canonical Batch B stage。每个 stage 以原 SQL 的 SHA-256 记录到 `governance.rdp_schema_migrations`，外层 `BEGIN/COMMIT` 由 runner 移除，DDL 与 ledger 行在同一 transaction 提交。已记录 stage 不同 checksum、前置缺失、非 suffix rollback 均失败关闭。`validate_rdp_schema()` 是运行进程唯一允许的只读入口。Batch A 历史 hardening 代码仍存在，未在 Phase 3E 中伪装成已统一/已演练的生产 manifest。
 
 ### 18.4 OrderState 三层一致性
 
@@ -976,6 +1018,19 @@ session token 是 base64 编码 JSON + HMAC-SHA256 签名，包含 subject、rol
 
 密码使用 PBKDF2-HMAC-SHA256、随机 salt、390,000 次迭代。登录有失败计数与锁定。用户管理防止删除/禁用最后一个 admin，也防止不安全的自我降权路径。
 
+Phase 3I 将 `POST /auth/login` 的同步 repository、PBKDF2、账户失败/成功状态和
+Operator audit 完整移入 `asyncio.to_thread` worker。每 FastAPI app/每 event loop
+用 semaphore 限制并发，默认 4；capacity 最多等待 1 秒，超时在创建 worker 前以
+固定 503 失败。请求取消不提前释放 capacity，已开始的 worker 结束后才由 callback
+归还，避免底层 thread 继续运行时新增无界 worker。
+
+登录前还执行每进程 60 秒滑动窗口：global 60、ASGI socket client 20、规范化
+identity 10；不信任 `X-Forwarded-For`。不存在/禁用用户和损坏 hash 走 390,000 次
+dummy PBKDF2，hash iteration 上限为 1,000,000；username/password 上限分别为
+128/1024，密码以 `SecretStr` 承载。该限流不跨进程，目标 proxy/Redis 集中限流、
+真实 DB、慢连接和生产等价 p95/p99/event-loop lag 尚未验证，所以 FS-019 为
+`CODE REMEDIATED / DISTRIBUTED RATE-LIMIT & LOAD VERIFICATION OPEN`。
+
 ### 19.4 Gateway middleware
 
 - API 请求创建 telemetry root span，但跳过 health、metrics、favicon 等噪声路径；
@@ -983,6 +1038,22 @@ session token 是 base64 编码 JSON + HMAC-SHA256 签名，包含 subject、rol
 - governance DB unavailable 映射 503；
 - governance constraint violation 映射 422；
 - 未处理异常进入统一错误与结构化日志。
+
+Phase 3H 新增最外层 user middleware `GatewayBrowserSecurityMiddleware`：
+
+- Host 按小写、合法端口、`localhost` 尾点和 IPv6 括号规范化，当前只允许
+  `127.0.0.1`、`localhost`、`::1` 与测试主机；空值、all-interface、userinfo、
+  path/query/fragment、非法端口和外部域名在路由前返回 400；
+- 普通 HTML/JSON、认证/HTTPException 和 Host 400 响应统一覆盖严格 CSP、
+  `X-Frame-Options: DENY`、`nosniff`、`no-referrer`、Permissions Policy、COOP/CORP；
+- CSP 与当前无 inline script/style、全同源 UI 匹配，不允许 `unsafe-inline`或
+  `unsafe-eval`；新增资源来源前必须同步修改契约和测试；
+- HSTS 只依据 ASGI `scheme=https` 输出，不盲信客户端
+  `X-Forwarded-Proto`；HTTP 会主动移除下游弱 HSTS。
+
+该结论只有代码审阅和 ASGI/TestClient 证据。框架最外层未捕获 500、真实 TLS
+terminator/proxy 是否删除或重复 header、CSP 在目标浏览器的实际兼容性均未验证，
+因此 FS-020 为 `CODE & ASGI REMEDIATED / TARGET TLS-BROWSER VERIFICATION OPEN`。
 
 ### 19.5 Dashboard 数据面
 
@@ -1065,6 +1136,45 @@ flowchart LR
 
 采集和 ETL 使用 checkpoint、manifest、quality report 与幂等 UPSERT。Gold bar 是 replay 与 Research Factory 的主要受控输入，不应直接用未校验 staging 生成生产建议。
 
+> 2026-08-24 未提交整改工作区补充（FS-003）：Gold `ts` 是 bar start，完整
+> OHLCV 只能在 `ts + timeframe` 后用于决策。当前 backtest harness 固定使用
+> `next_bar_event_v2`：IOC/bounded-limit 最早按下一根可用 bar 的 open 事件
+> 解析，post-only 只在下一根完整 bar close 后使用其 volume；末端无下一事件
+> 的订单过期，未闭合/重复/倒序/重叠 bar 失败关闭。CLI 额外生成
+> `execution_timeline.json`，逐笔保存 observation/decision/submit/fill 时间。
+> 旧 same-bar 模型的绩效产物全部失效，必须重跑；该模型仍不是订单簿、排队与
+> 真实延迟证明。设计与验收边界见
+> [`fs_003_backtest_causal_timing_sow_2026_08_24.md`](../task/fs_003_backtest_causal_timing_sow_2026_08_24.md)。
+
+> 2026-08-24 未提交整改工作区补充（FS-014 / Phase 3N）：当前 fill model
+> 固定为 `ohlcv_participation_cap_v2`。IOC、post-only、bounded-limit 都要求
+> 正 volume 并受默认 1% participation cap，允许 partial fill；IOC/bounded
+> 在 next-open 只使用产生订单的已闭合 observation bar volume，不能读取下一 bar
+> 的未来完整 volume。bounded 按保守 taker fee + fixed slippage；cost diagnostic
+> 分开记录 fee/slippage。scorecard meta 明示 OHLCV 粒度和无 L2 depth、spread/
+> queue、impact/latency 校准。该模型不能外推 live 容量/收益，FS-014 仍为
+> `PARTIALLY REMEDIATED / OHLCV CONTAINED / L2 CALIBRATION OPEN`。见
+> [`fs_014_ohlcv_fill_realism_containment_sow_2026_08_24.md`](../task/fs_014_ohlcv_fill_realism_containment_sow_2026_08_24.md)
+> 与 [`34-fs-014-ohlcv-fill-realism-containment.md`](../../audit/full_system_2026_08_24/34-fs-014-ohlcv-fill-realism-containment.md)。
+
+> 2026-08-25 未提交整改工作区补充（FS-017/018 / Phase 3O）：Dashboard 详情
+> 抽屉已由视觉-only `<aside>` 改为原生 modal `<dialog>`，所有异步详情入口显式
+> 传递原触发按钮；打开聚焦关闭按钮，Escape/backdrop/按钮统一清理并尽可能返回
+> 焦点。`prefers-reduced-motion: reduce` 停止 CSS animation/transition/smooth scroll、
+> 已知 hover 位移和 JavaScript 显式 smooth scroll。该结论只由静态/单元/语法测试
+> 支持；目标浏览器、键盘、读屏、axe、缩放和动效观察仍 OPEN。见
+> [`fs_017_fs_018_dashboard_accessibility_sow_2026_08_25.md`](../task/fs_017_fs_018_dashboard_accessibility_sow_2026_08_25.md)
+> 与 [`35-fs-017-fs-018-dashboard-accessibility.md`](../../audit/full_system_2026_08_24/35-fs-017-fs-018-dashboard-accessibility.md)。
+
+> 2026-08-25 未提交整改工作区补充（FS-010 / Phase 3P）：四个 managed
+> strategy YAML 中没有 Settings 字段或行为消费者的伪 auto-rollback key 已删除；
+> managed loader 现在要求 YAML 为 mapping，并对 runtime defaults 与 YAML 全部 key
+> 使用 `AATSSettings.model_fields` 失败关闭校验。配置 reference 与 generator 输出一致，
+> generator 不再覆盖人工治理的 `configs/README.md`。目标进程启动、仓库外 overlay、
+> generator clean-run 与独立复核仍 OPEN。见
+> [`fs_010_managed_profile_unknown_key_fail_closed_sow_2026_08_25.md`](../task/fs_010_managed_profile_unknown_key_fail_closed_sow_2026_08_25.md)
+> 与 [`36-fs-010-managed-profile-unknown-key-fail-closed.md`](../../audit/full_system_2026_08_24/36-fs-010-managed-profile-unknown-key-fail-closed.md)。
+
 ### 20.4 Task queue
 
 gateway 通过 `governance.rdp_task_queue` 给 daemon 发任务。其并发语义：
@@ -1110,7 +1220,9 @@ gateway 通过 `governance.rdp_task_queue` 给 daemon 发任务。其并发语�
 
 Research Factory 的 typed spec 对以下内容做严格验证：
 
-- train/valid/test/replay 时间段与无泄漏顺序；
+- train/valid/test/replay 时间段与无泄漏顺序；Phase 3V real-data v2 还要求 train/valid
+  各自评估且双门通过，test 仅用于 dataset quality/source integrity 与内容 seal，不得用于
+  factor/label/绩效 metrics/selection gate；
 - processor 白名单；
 - feature expression 与路径安全；
 - label 的 fee/slippage/funding 语义；
@@ -1129,6 +1241,12 @@ Candidate verdict 只有三种：
 
 最后一种也只表示“证据通过且扣成本 edge 为正，进入 pre-apply review”，不表示已批准生产变更。verdict 对象把 runtime mutation、active parameter、runtime config 与 OKX write 权限固定为 false。
 
+Phase 3V 的 `development_evidence.json` 把 train stability、valid selection 与
+`test=sealed_not_evaluated` 写入同一 lineage。candidate/recommendation 的指标仍只是 valid
+development evidence；当前没有最终 OOS runner、一次性 holdout access ledger、purged
+walk-forward、多重检验或历史 v1 artifact 污染审计，因此不能把 ready-for-review 当作
+test PASS 或生产授权。
+
 ### 20.8 Active parameter 发布
 
 RDP governance 表保存 parameter set、recommendation、pre-apply gate、release、apply history、observation 与 rollback recommendation。主交易启动时只读取已成为 active truth 且符合映射/完整性/安全不变量的参数。研究数据库不可用时，不应根据 artifact 文件猜测一个“最近参数”注入实盘。
@@ -1140,24 +1258,27 @@ RDP governance 表保存 parameter set、recommendation、pre-apply gate、relea
 代码已经提交时：
 
 ```bash
-bash scripts/deploy.sh --skip-commit
+bash scripts/deploy.sh --profile derivatives --skip-commit
 ```
 
 不要手工拼 `docker compose`，不要使用 rsync。标准脚本同时处理 profile overlay、WSL Git 同步、环境文件位置、live TLS、基础设施、镜像、应用、健康检查和版本报告。手工绕过会跳过这些一致性检查。
 
-### 21.2 deploy.sh 七步
+### 21.2 deploy.sh 八步
 
 1. 检查/提交精确暂存的代码；不会自动 `git add -A`；
 2. 通过仓库同步脚本把已提交 Git HEAD 同步到 WSL2；
-3. 停止旧应用；
-4. 构建镜像；
+3. 在停止旧应用前构建新镜像；
+4. 停止旧应用；
 5. 清理 dangling image；
 6. 启动基础设施并同步 Postgres 密码；
-7. 启动应用并做健康检查。
+7. 用新镜像运行一次性 root + RDP schema migration/validation job；非零时不启动应用；
+8. 启动应用并做健康检查。
 
-默认 profile 是 `derivatives-live`。支持 spot、spot-live、derivatives、derivatives-live、derivatives-live-monolith。
+没有默认 profile；必须显式选择。Phase 3F/3G 当前只允许 `spot` 与 `derivatives`，三个 live profile 在任何副作用前以 NO-GO 非零退出，`--yes` 不能绕过；本地 `start_api.py` 也拒绝 live 与非 loopback host。
 
-live profile 会在 WSL runtime 目录生成 localhost 自签名证书，gateway health 使用 HTTPS；非 live 使用 HTTP。部署完成会比较 Windows HEAD 与 WSL deployed HEAD，若不一致明确报警。
+非 live 使用 HTTP。live TLS 生成逻辑仍保留为 future path，但当前 gate 在生成证书前即拒绝。Gateway 容器内监听 `0.0.0.0`，宿主映射固定 `127.0.0.1`；模拟部署 evidence 会读取实际 Docker published binding，任一非 loopback HostIp 即失败。证据包还含 WSL commit、image ID、profile、schema job 和 required container 状态，并明确 `production_ready=false`；报告会比较 Windows HEAD 与 WSL deployed HEAD，若不一致明确报警。
+
+该代码收口不证明现有容器已经按新 mapping 重建，也不证明 Windows/WSL 防火墙、VPN/NAT、证书、Host/auth/cookie/限流已经通过目标网络验证。远程访问必须通过另行批准的 proxy/VPN/mTLS 设计，不能把 Compose 改回 all-interface。
 
 ### 21.3 标准应用容器
 
@@ -1171,9 +1292,7 @@ live profile 会在 WSL runtime 目录生成 localhost 自签名证书，gateway
 | `aats-liquidations-daemon` | liquidation WS collector | 512 MiB | `/tmp` heartbeat |
 | `aats-microstructure-collector` | microstructure WS collector | 512 MiB | `/tmp` heartbeat |
 
-monolith profile 只要求 gateway 与 RDP daemon；标准四进程 profile 要求 gateway、market、decision、execution、RDP daemon。
-
-一个当前实现 caveat：`deploy.sh` 的“required app containers”健康汇总没有包含两个旁路 collector。Compose 给它们定义了 healthcheck，但部署脚本可能在主五容器健康后报告完成，即使旁路 collector 仍未健康。上线后应额外检查这两个容器及其数据 freshness。
+当前 `spot`/`derivatives` 模拟 profile 要求 gateway、market、decision、execution、RDP daemon。future `derivatives-live` required list 另含两个 collector；future monolith list 也要求 collector，确保没有完整 overlay 时不能误通过。因为 live 当前硬禁用，这只是失败关闭契约，不是运行健康证据。
 
 ### 21.4 基础设施容器
 
@@ -1397,51 +1516,140 @@ OTel trace context 随 EventEnvelope 跨进程传播；Jaeger 接收 OTLP。Prom
 
 以下不是对历史作者的评价，而是重新接手时必须知道的“当前代码事实”。
 
-### 26.1 `scripts/run_local.py` 当前不可用
+### 26.1 `scripts/run_local.py` 是迁移失败入口
 
-脚本调用：
-
-```python
-asyncio.run(main(iterations=..., interval_seconds=...))
-```
-
-但当前 `apps.decision_engine.main.main()` 是无参数同步函数，直接返回 `run_process_sync()` 的整数退出码。因此根 README 的“local paper loop”命令已经失效。不要把它作为入门验证入口；应修复脚本或删除旧说明后再使用。
+Phase 3Q 后脚本保留旧参数识别，但不加载 dotenv、不导入 decision runtime、不创建
+event loop；它固定向 stderr 输出当前 API/UI 与 integration 迁移指引并返回 exit `2`。
+当前 `apps.decision_engine.main.main()` 保持无参数同步 process entry。旧入口不是可运行
+paper loop；仓库外期待 JSON summary/exit 0 的调用方仍需迁移。
 
 ### 26.2 “四进程”不等于部署只有四个应用容器
 
-四进程只描述主交易 slice。标准 derivatives-live overlay 还包含 RDP daemon、liquidation collector 与 microstructure collector。监控、资源规划和故障域必须按实际 7 个应用容器理解。
+四进程只描述主交易 slice。derivatives-live overlay 还定义 RDP daemon、liquidation collector 与 microstructure collector；future 监控、资源规划和故障域必须按 7 个应用容器理解。该 profile 当前被部署入口禁用，不能从静态拓扑推断运行状态。
 
-### 26.3 旁路 collector 未纳入 deploy 成功门
+### 26.3 Future live collector 已进入 required list，但目标验证仍缺失
 
-部署脚本的 required list 只检查五个主容器，不检查两个 collector。部署“完成”不证明研究数据旁路健康。建议后续把它们加入 profile-specific required/optional health 报告，或至少在报告中显式列出。
+Phase 3F 后，future `derivatives-live` required list 已包含 liquidation 与 microstructure
+collector，不再是旧的“五个主容器”清单。当前 live profile 在任何部署副作用前硬禁用，
+因此代码清单尚未经过目标 Compose health/freshness 验证；静态包含不能证明旁路数据健康。
 
-### 26.4 RDP 表数量旧说明已过时
+### 26.4 RDP 迁移不再属于应用启动
+
+Phase 3E 工作区已把 root/RDP schema 所有权收口到部署期显式 job，并为 RDP Batch B 增加完整 ledger/checksum/order/rollback-suffix contract。Gateway 在任何 ready/background side effect 前只读校验，daemon 和研究 runner 也不再以 `--ensure-schema` 隐式做 DDL。这关闭了原“Gateway 吞迁移异常仍 ready”路径，但克隆库 manifest、部分失败重试和 app+schema rollback 仍未运行，FS-009/G6 保持未放行。
+
+### 26.5 RDP 表数量旧说明已过时
 
 当前 `RdpBase.metadata` 是 78 张表、7 个 schema；旧 README/设计中出现的 48 等数量只能代表历史阶段。
 
-### 26.5 JetStream 旧注释漂移（已在 2026-08-22 文档修复中更正）
+### 26.6 JetStream 旧注释漂移（已在 2026-08-22 文档修复中更正）
 
 早期设计说明曾保留 “AATS_EVENTS 7 day/两条 stream” 文本，但当前 `DEFAULT_AATS_EVENTS_SPEC.max_age_seconds` 是 86,400 秒，且 retention 是 interest。本次已把 `nats_bus.py` 的模块注释修正为当前三 stream；历史 Stage runbook 仍只作历史证据。运维容量、保留与恢复评估必须读实际 `StreamSpec`。
 
-### 26.6 NATS server 容量注释漏算 command stream（已更正）
+### 26.7 NATS server 容量注释漏算 command stream（已更正）
 
 `nats-server.conf` 过去只写 market 2 GiB + main 4 GiB；本次已补入 command stream 512 MiB。当前注释与测试都以三条 stream 的 6.5 GiB 声明总量和 8 GiB server 上限为准。
 
-### 26.7 RDP active parameter 的文件 fallback 说明需谨慎
+### 26.8 RDP active parameter 的文件 fallback 说明需谨慎
 
 当前主交易 active parameter 加载是数据库真源；Research Factory artifact、历史 active JSON 或 scheduler 状态文件不能自动替代 active DB truth。部分 RDP 运行状态仍设计了 DB 失败时的文件降级，但那不等价于实盘参数允许文件接管。
 
-### 26.8 `autonomous_live` 只是保留类型
+### 26.9 `autonomous_live` 只是保留类型
 
 settings 类型与部分 schema 包含它，但 runtime mode controller 明确不支持。对外文档不应将其列成可选上线模式。
 
-### 26.9 当前受版本控制的 derivatives-live 基线并不代表最终 live 参数
+### 26.10 当前受版本控制的 derivatives-live 基线并不代表最终 live 参数
 
 该 YAML 启用 active parameters，因此运行时数据库可能覆盖策略阈值。审查一笔真实决策必须同时记录：Git revision、managed profile、strategy YAML、active parameter set/revision/provenance、人工 mode/profile override 和恢复状态。
 
-### 26.10 文档与代码中的历史日期注释很多
+### 26.11 文档与代码中的历史日期注释很多
 
 大量注释以 Stage/Task/日期记录修复背景，适合解释“为什么”，不应替代当前控制流。维护文档时应保留有价值的因果说明，同时将真实默认值、状态机和拓扑从可执行代码自动核对。
+
+### 26.12 Independent replay 的 short-bias gate 已与生产收口
+
+Phase 3R 后，`ReplayParameterOverrides` 以生产同名布尔字段记录
+`strategy_short_bias_enabled`。值为 `false` 时，independent replay 在 score history、
+dominant-leg 和状态机之前把 short score 钳制为 `0.0`，与生产
+`compute_raw_book_score()` 的关闭语义一致。该值是目标 profile 上下文快照，不进入按
+family/timeframe 分片的 active-parameter 自动映射；正式实验必须显式保存实际值。
+
+这只关闭 short gate 的行为差异，不使 OHLCV replay 输入、AI assessment、真实盘口或
+成交模型与生产完全等价。历史 artifact 尚未重跑，不能用新代码追认旧结论。
+
+### 26.13 基础 CI 已落地，但尚不是完整发布门
+
+Phase 3S 新增 `.github/workflows/quality.yml`，以只读权限在 Python 3.12 执行全仓
+Ruff、完整 unit、strict markers 和新增 warning 阻断；Long/Short poller 测试中错误的
+同步方法 `AsyncMock` 已改正。workflow 不读取 secrets、不运行 Docker 或部署。
+
+Phase 3T 已将 CI 安装改为消费 Linux/Python 3.12 hashed lock，因此“依赖 lock/hash”不再
+是当前缺失项；但该文件仍无远端 run/required-check 证据，且不覆盖
+PostgreSQL/NATS/Redis integration、Node/browser、Compose/schema runtime、APT、SBOM、
+secret/CVE/license/provenance。FS-021 仍只能标为基础门禁部分整改；详见
+[`../../audit/full_system_2026_08_24/39-fs-021-ci-quality-gate.md`](../../audit/full_system_2026_08_24/39-fs-021-ci-quality-gate.md)。
+
+### 26.14 依赖和外部镜像已固定，但供应链尚未闭环
+
+Phase 3T 新增 `requirements/`：运行时和 CI 分别有面向 CPython 3.12/Linux x86_64 的
+完整版本/hash 锁。Docker 与 CI 都使用 `--require-hashes --only-binary=:all:`，项目源码
+只以 `--no-deps --no-build-isolation` 注册。两个 Python stage 和九个外部 Compose
+image 均固定 manifest digest；标准库 verifier 与单元测试阻止恢复开放解析或 tag-only
+引用。
+
+已验证 46 个 runtime 和 33 个 CI 目标 wheel 的 SHA-256 下载，静态 verifier 确认九个
+镜像引用。这不等于 clean Docker build、远端 CI、镜像签名、SBOM 或无漏洞。runtime
+APT package 仍按构建时 repository 解析，CVE/license/secret/provenance 和独立复核仍
+OPEN，因此 FS-022 只能标为部分整改。详见
+[`../../audit/full_system_2026_08_24/40-fs-022-reproducible-dependencies.md`](../../audit/full_system_2026_08_24/40-fs-022-reproducible-dependencies.md)。
+
+### 26.15 数据库连接已有声明预算，但尚未通过目标容量验证
+
+Phase 3U 新增 `aats/storage/connection_budget.py`，主进程按角色使用 32/8/10/16 的
+ceiling，并把当前 RDP、两个 collector、live query/facts/session、governance、orderbook
+和 startup pool 建模为 14 个 component、合计 150。当前 Compose 普通连接容量 197，
+名义余量 47。标准库 AST verifier 归类 13 个 `create_engine` 调用，禁止新增未审 engine、
+裸 pool 数字、错误单一真源、短命持久 pool 或 Compose/CI 漂移。
+
+150 不是运行时跨进程硬上限。governance transient、并行 `NullPool` 命令、迁移/恢复/
+admin、仓库外进程、慢查询/泄漏/重连和 topology 实例漂移仍可能叠加；pool 缩小还可能
+增加等待、timeout 和 Gateway latency。目标全拓扑负载、故障、告警与 64MB `work_mem`
+联合内存没有现场证据，因此 FS-008 保持部分整改。详见
+[`../../audit/full_system_2026_08_24/41-fs-008-database-connection-budget.md`](../../audit/full_system_2026_08_24/41-fs-008-database-connection-budget.md)。
+
+### 26.16 Research Factory 已隔离 test 选择路径，但最终 OOS 仍开放
+
+Phase 3V 将 real-data runner 固定为 `train_valid_selection_test_holdout_v2`：train 与 valid
+分别计算 segment-local label、metrics 和 gate，二者必须同时通过；valid 是 candidate
+benchmark。外部 execution summary 也必须声明 valid 并精确覆盖 valid 时间窗，只合并进
+valid；覆盖全窗口或 test 会失败关闭。test 仍参与 dataset quality/source integrity gate，
+但不进入 factor evaluator、label、绩效 metrics 或 selection gate；它生成绑定完整 prepared
+rows 与 dataset fingerprint 的 `rfseg_` SHA-256 seal，并标记
+`sealed_not_evaluated`/`metrics_exposed=false`。
+
+新 candidate/recommendation 必须闭合 development evidence ref、segment roles、protocol
+和 holdout seal，并披露当前 metrics 只是 development evidence。该代码消除了当前 v2
+runner 的 test 直接选候选路径，但 seal 不能证明历史 test 从未被查看，也没有完成一次性
+最终 OOS、walk-forward、多重检验、历史 artifact/registry 审计或独立复核。FS-004 因此是
+`PARTIALLY REMEDIATED / TEST SEALED FROM CANDIDATE SELECTION / FINAL OOS & HISTORY AUDIT OPEN`。
+详见
+[`../../audit/full_system_2026_08_24/42-fs-004-research-selection-holdout.md`](../../audit/full_system_2026_08_24/42-fs-004-research-selection-holdout.md)。
+
+### 26.17 全量候选复审已收口新增缺陷，目标运行验证仍开放
+
+Phase 3W 对 Phase 3A–3V 的叠加候选重新进行入口到执行/部署的全量复审，新增收口如下：
+
+- 登录 timeout/window、Kill Switch authority/permission 时间与 FillSimulator 参数都拒绝
+  `NaN`/无穷；非有限市场输入不再产生成交证据；
+- `scripts/start_api.py` 显式固定 `monolith`，使“本地单进程”与实际 slice 一致；
+- Quality workflow 的 SQLite allowlist 改用命令行 `-W` 的字面前缀语义；所有内存 SQLite
+  测试 engine 由 cleanup/finalizer 确定性释放；
+- 当前 Compose 文件不再提供手工 `up/down/down -v` 指令；模拟盘只走标准部署脚本，live
+  override 明确不是当前可执行 runbook。
+
+全仓 Ruff、依赖锁、连接预算、生成器和严格 unit 已通过；完整结果为
+`4423 passed, 30 skipped, 94 subtests passed`。这仍是 Windows 静态/隔离证据，不证明 WSL2
+四进程、NATS/Redis、恢复、模拟交易所或持续日志健康。详见
+[`../../audit/full_system_2026_08_24/43-phase3w-post-audit-full-change-review.md`](../../audit/full_system_2026_08_24/43-phase3w-post-audit-full-change-review.md)。
 
 ## 27. 尚未通过本次静态审阅确认的运行事实
 
@@ -1690,6 +1898,18 @@ POST /rdp/sleeve-advice/{rec_id}/apply
 POST /rdp/sleeve-advice/{rec_id}/release
 POST /rdp/sleeve-advice/{rec_id}/mark-reviewed
 ```
+
+> 2026-08-24 Phase 3M 未提交整改工作区补充：
+> `POST /rdp/profile-recommendations/{rec_id}/apply` 与 `/rollback` 路由仍注册，
+> 但当前代码都只在 token/actor、状态及双人签署校验后以 `501` 无写入失败。
+> apply 不检查/打开 live pool，不创建或续跑历史 Saga，也不把 recommendation
+> 改成 `applied`；rollback 不把 recommendation 改成 `rolled_back`。approve/release
+> 只表示研究治理状态，不能表示有效参数或 worker runtime 已改变。真实
+> execution-owned generation、worker ack/readback 与 reverse saga 完成前，这两个
+> profile endpoint 均不可用于运行参数操作；详见
+> [`fs_001_profile_apply_fail_closed_sow_2026_08_24.md`](../task/fs_001_profile_apply_fail_closed_sow_2026_08_24.md)、
+> [`fs_001_profile_rollback_fail_closed_sow_2026_08_24.md`](../task/fs_001_profile_rollback_fail_closed_sow_2026_08_24.md)
+> 和 [`33-fs-001-profile-apply-fail-closed.md`](../../audit/full_system_2026_08_24/33-fs-001-profile-apply-fail-closed.md)。
 
 ## 附录 B：主交易库 49 张表
 
@@ -2041,6 +2261,7 @@ system.guard_signal_updates
 
 - [aats/data_platform/rdp_models.py](../../aats/data_platform/rdp_models.py)
 - [aats/data_platform/db.py](../../aats/data_platform/db.py)
+- [aats/data_platform/migrations/_batch_b.py](../../aats/data_platform/migrations/_batch_b.py)
 - [aats/data_platform/governance/rdp_task_db.py](../../aats/data_platform/governance/rdp_task_db.py)
 - [aats/data_platform/operations/workflow_scheduler.py](../../aats/data_platform/operations/workflow_scheduler.py)
 - [aats/data_platform/research_factory/workflow.py](../../aats/data_platform/research_factory/workflow.py)
@@ -2050,6 +2271,7 @@ system.guard_signal_updates
 ### G.7 部署
 
 - [scripts/deploy.sh](../../scripts/deploy.sh)
+- [scripts/apply_schema_migrations.py](../../scripts/apply_schema_migrations.py)
 - [scripts/compose_entrypoint.py](../../scripts/compose_entrypoint.py)
 - [deploy/wsl2-dev/docker-compose.yml](../../deploy/wsl2-dev/docker-compose.yml)
 - [deploy/wsl2-dev/docker-compose.aats.yml](../../deploy/wsl2-dev/docker-compose.aats.yml)

@@ -24,6 +24,7 @@ from aats.services.execution_engine.lifecycle_snapshot_refs import (
     LIFECYCLE_MARKET_CONTEXT_REF_KEYS,
     choose_lifecycle_market_context_refs,
 )
+from aats.storage.connection_budget import ORDERBOOK_READ_POOL
 
 
 _ORDERBOOK_REF_TABLES = (
@@ -124,15 +125,18 @@ def build_orderbook_snapshot_read_source(database_url: str) -> OrderbookSnapshot
     engine_kwargs: dict[str, Any] = {
         "future": True,
         "pool_pre_ping": True,
-        "pool_size": 1,
-        "max_overflow": 1,
         "pool_timeout": 2,
     }
     if parsed.get_backend_name() == "postgresql":
         engine_kwargs["connect_args"] = {
             "options": _merged_read_only_options(database_url),
         }
-    engine = create_engine(database_url, **engine_kwargs)
+    engine = create_engine(
+        database_url,
+        pool_size=ORDERBOOK_READ_POOL.pool_size,
+        max_overflow=ORDERBOOK_READ_POOL.max_overflow,
+        **engine_kwargs,
+    )
     factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
     return OrderbookSnapshotReadSource(
         session_factory=factory,

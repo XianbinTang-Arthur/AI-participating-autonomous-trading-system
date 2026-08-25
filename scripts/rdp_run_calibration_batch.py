@@ -712,7 +712,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--ensure-schema", action="store_true",
-        help="Run DB migrations before batch (default: assume schema ready)",
+        help="Legacy name: validate schema before batch; does not run DDL",
     )
     parser.add_argument(
         "--stop-on-error", action="store_true",
@@ -742,14 +742,14 @@ def main() -> None:
 
     # 2. 延迟导入
     from aats.data_platform.config import get_settings
-    from aats.data_platform.db import get_session, run_migrations
+    from aats.data_platform.db import get_session, validate_rdp_schema
     from aats.data_platform.replay.adapters.directional_adapter import DirectionalReplayAdapter
     from aats.data_platform.replay.adapters.independent_adapter import IndependentReplayAdapter
 
     settings = get_settings()
     if args.ensure_schema:
-        log.info("Running migrations (--ensure-schema)...")
-        run_migrations(settings)
+        log.info("Validating schema contract (--ensure-schema legacy flag)...")
+        validate_rdp_schema(settings)
 
     # 创建 adapter
     family = spec["family"]

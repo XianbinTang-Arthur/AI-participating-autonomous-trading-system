@@ -12,7 +12,7 @@ from __future__ import annotations
 import unittest
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 from aats.bootstrap.settings import AATSSettings
 from aats.events import topics

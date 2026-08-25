@@ -17,11 +17,11 @@ log = logging.getLogger("rdp_init_db")
 
 def main() -> None:
     from aats.data_platform.config import get_settings
-    from aats.data_platform.db import run_migrations
+    from aats.data_platform.db import apply_rdp_migrations
 
     settings = get_settings()
-    log.info("Running research DB migrations against: %s", settings.database_url.split("@")[-1])
-    run_migrations(settings)
+    log.info("Running the versioned RDP schema migration chain")
+    apply_rdp_migrations(settings)
     log.info("Research database initialized successfully.")
 
 

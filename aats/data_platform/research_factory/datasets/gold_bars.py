@@ -18,6 +18,9 @@ from aats.data_platform.research_factory.specs import DatasetSpec, ProcessorSpec
 
 NumericValue = int | float | Decimal
 DATASET_FINGERPRINT_SCHEMA = "research_factory.gold_bars.dataset_fingerprint.v1"
+SEGMENT_CONTENT_FINGERPRINT_SCHEMA = (
+    "research_factory.gold_bars.segment_content_fingerprint.v1"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +206,37 @@ def dataset_fingerprint(
         sort_keys=True,
     ).encode("utf-8")
     return f"rfds_{hashlib.sha256(encoded).hexdigest()}"
+
+
+def segment_content_fingerprint(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    segment_name: str,
+    dataset_fingerprint_value: str,
+) -> str:
+    """Seal exact prepared segment content without computing research metrics."""
+
+    if not isinstance(rows, Sequence) or isinstance(rows, str | bytes | bytearray):
+        raise ValueError("segment rows must be a sequence")
+    if not rows:
+        raise ValueError("segment rows must not be empty")
+    if not all(isinstance(row, Mapping) for row in rows):
+        raise ValueError("segment rows must contain mappings")
+    _require_non_empty(segment_name, "segment_name")
+    _require_non_empty(dataset_fingerprint_value, "dataset_fingerprint_value")
+    payload = {
+        "schema": SEGMENT_CONTENT_FINGERPRINT_SCHEMA,
+        "dataset_fingerprint": dataset_fingerprint_value,
+        "segment_name": segment_name,
+        "rows": _normalize_cache_value(rows),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return f"rfseg_{hashlib.sha256(encoded).hexdigest()}"
 
 
 def _validate_records(records: Sequence[GoldBarRecord]) -> tuple[GoldBarRecord, ...]:

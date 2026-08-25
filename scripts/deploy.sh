@@ -6,8 +6,8 @@
 #   代码提交 -> 同步到 WSL2 -> docker compose build/up -> 健康检查 -> 部署报告
 #
 # 用法：
-#   ./scripts/deploy.sh
-#   ./scripts/deploy.sh --profile spot-live
+#   ./scripts/deploy.sh --profile spot
+#   ./scripts/deploy.sh --profile derivatives
 #   ./scripts/deploy.sh --commit "修复策略页布局"
 #   ./scripts/deploy.sh --no-cache
 #   ./scripts/deploy.sh --skip-sync
@@ -15,7 +15,7 @@
 #   ./scripts/deploy.sh --yes            # 非交互：--skip-sync 且有未提交改动时默认继续
 #
 # 说明：
-#   - 默认 profile 为 derivatives-live
+#   - --profile 必填；当前审计 NO-GO 期间，所有 live profile 在副作用前被拒绝
 #   - 未提交改动不会被同步到 WSL2；如需部署当前 Windows 工作区，请先提交
 #   - --skip-sync 只会部署 WSL2 侧当前 checkout，不会带上 Windows 新改动
 #   - --commit 只提交已经精确暂存的文件；不会自动 git add -A
@@ -41,7 +41,7 @@ DEPLOY_DIR="deploy/wsl2-dev"
 DISTRO="${AATS_WSL2_DISTRO:-Ubuntu}"
 WSL_PROJECT="${AATS_WSL2_PROJECT:-\$HOME/aats}"
 
-PROFILE="derivatives-live"
+PROFILE=""
 COMMIT_MSG=""
 NO_CACHE=""
 SKIP_SYNC=false
@@ -62,6 +62,8 @@ OPERATOR_TLS_CERT_WSL=""
 OPERATOR_TLS_KEY_WSL=""
 OPERATOR_TLS_CERT_CONTAINER=""
 OPERATOR_TLS_KEY_CONTAINER=""
+DEPLOYMENT_EVIDENCE_PATH=""
+RUNTIME_READINESS_GENERATION=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -126,9 +128,12 @@ required_app_containers_for_profile() {
     local profile="$1"
     case "$profile" in
         derivatives-live-monolith)
-            echo "aats-gateway aats-rdp-daemon"
+            echo "aats-gateway aats-rdp-daemon aats-liquidations-daemon aats-microstructure-collector"
             ;;
-        spot|spot-live|derivatives|derivatives-live)
+        derivatives-live)
+            echo "aats-gateway aats-market aats-decision aats-execution aats-rdp-daemon aats-liquidations-daemon aats-microstructure-collector"
+            ;;
+        spot|spot-live|derivatives)
             echo "aats-gateway aats-market aats-decision aats-execution aats-rdp-daemon"
             ;;
         *)
@@ -136,6 +141,21 @@ required_app_containers_for_profile() {
             exit 1
             ;;
     esac
+}
+
+require_explicit_non_live_profile() {
+    if [[ -z "$PROFILE" ]]; then
+        log_error "必须显式指定 --profile；本地测试使用 spot 或 derivatives"
+        log_error "当前真实资金生产结论为 NO-GO，脚本没有默认 profile"
+        exit 2
+    fi
+
+    if is_live_profile "$PROFILE"; then
+        log_error "真实资金 profile '$PROFILE' 已由 FS-007 安全门禁禁用"
+        log_error "当前审计结论为 REAL-MONEY PRODUCTION: NO-GO；--yes 不能绕过"
+        log_error "请先使用 spot/derivatives 完成本地测试，并关闭全部上线 gate 与未知项"
+        exit 5
+    fi
 }
 
 is_live_profile() {
@@ -198,11 +218,31 @@ resolve_wsl2_env_file() {
 }
 
 compose_env_prefix() {
+    if [[ -z "$RUNTIME_READINESS_GENERATION" ]]; then
+        log_error "runtime readiness generation 尚未生成"
+        return 1
+    fi
+    printf "AATS_RUNTIME_READINESS_GENERATION='%s'" "$RUNTIME_READINESS_GENERATION"
     if [[ "$OPERATOR_TLS_ENABLED" == true ]]; then
-        printf "AATS_OPERATOR_TLS_CERT_FILE='%s' AATS_OPERATOR_TLS_KEY_FILE='%s'" \
+        printf " AATS_OPERATOR_TLS_CERT_FILE='%s' AATS_OPERATOR_TLS_KEY_FILE='%s'" \
             "$OPERATOR_TLS_CERT_CONTAINER" \
             "$OPERATOR_TLS_KEY_CONTAINER"
     fi
+}
+
+prepare_runtime_readiness_generation() {
+    local deployed_rev
+    local deployed_short
+    local generated_at
+    deployed_rev="$(wsl_head_rev)"
+    if [[ ! "$deployed_rev" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        log_error "无法为 runtime readiness 生成合法 deployed revision"
+        exit 1
+    fi
+    deployed_short="${deployed_rev:0:12}"
+    generated_at="$(date -u +%Y%m%dT%H%M%SZ)"
+    RUNTIME_READINESS_GENERATION="${deployed_short}-${generated_at}-$$-${RANDOM}"
+    log_info "Runtime readiness generation: $RUNTIME_READINESS_GENERATION"
 }
 
 ensure_operator_tls_assets() {
@@ -335,7 +375,7 @@ step_commit() {
     cd "$PROJECT_ROOT"
 
     if [[ -n "$COMMIT_MSG" ]]; then
-        log_info "Step 1/7: 提交代码..."
+        log_info "Step 1/8: 提交代码..."
         if repo_has_staged_changes; then
             if repo_has_unstaged_or_untracked_changes; then
                 log_error "--commit 只提交已精确暂存的文件；检测到未暂存或未跟踪改动"
@@ -354,7 +394,7 @@ step_commit() {
             log_warn "工作区干净，无需提交"
         fi
     elif [[ "$SKIP_COMMIT" == true ]]; then
-        log_info "Step 1/7: 跳过提交（--skip-commit）"
+        log_info "Step 1/8: 跳过提交（--skip-commit）"
     fi
 
     if repo_has_uncommitted_changes; then
@@ -385,27 +425,25 @@ step_commit() {
 
 step_sync() {
     if [[ "$SKIP_SYNC" == true ]]; then
-        log_info "Step 2/7: 跳过同步（--skip-sync）"
+        log_info "Step 2/8: 跳过同步（--skip-sync）"
         return
     fi
 
-    log_info "Step 2/7: 同步代码到 WSL2..."
+    log_info "Step 2/8: 同步代码到 WSL2..."
     "$SCRIPT_DIR/sync_to_wsl2.sh" pull
     log_ok "同步完成"
 }
 
 step_down() {
-    log_info "Step 3/7: 停止旧服务..."
+    log_info "Step 4/8: 停止旧服务..."
     local env_prefix
     env_prefix="$(compose_env_prefix)"
-    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && ${env_prefix:+env $env_prefix }docker compose $COMPOSE_CMD_ARGS down --timeout 5" || {
-        log_warn "docker compose down 返回非零，可能当前没有运行中的服务，继续"
-    }
+    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && ${env_prefix:+env $env_prefix }docker compose $COMPOSE_CMD_ARGS down --timeout 5"
     log_ok "旧服务已停止"
 }
 
 step_build() {
-    log_info "Step 4/7: 构建新镜像${NO_CACHE:+（无缓存）}..."
+    log_info "Step 3/8: 构建新镜像${NO_CACHE:+（无缓存）}..."
     local env_prefix
     env_prefix="$(compose_env_prefix)"
     wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && ${env_prefix:+env $env_prefix }docker compose $COMPOSE_CMD_ARGS build $NO_CACHE"
@@ -413,7 +451,7 @@ step_build() {
 }
 
 step_prune() {
-    log_info "Step 5/7: 清理悬空镜像..."
+    log_info "Step 5/8: 清理悬空镜像..."
     local pruned
     pruned=$(wsl_run "docker image prune -f 2>/dev/null" || true)
     if echo "$pruned" | grep -q "Total reclaimed space: 0B"; then
@@ -424,10 +462,8 @@ step_prune() {
 }
 
 step_infra_up() {
-    log_info "Step 6/7: 启动基础设施（Postgres/Redis/NATS/...）..."
-    if ! wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && docker compose -f docker-compose.yml --env-file $WSL2_ENV_FILE up -d"; then
-        log_warn "基础设施 docker compose up 返回非零；继续检查实际容器状态"
-    fi
+    log_info "Step 6/8: 启动基础设施（Postgres/Redis/NATS/...）..."
+    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && docker compose -f docker-compose.yml --env-file $WSL2_ENV_FILE up -d --wait --wait-timeout 90"
 
     local elapsed=0
     while [[ $elapsed -lt 30 ]]; do
@@ -457,13 +493,22 @@ PWEOF
     log_ok "基础设施就绪，密码已同步"
 }
 
-step_app_up() {
-    log_info "Step 7/7: 启动应用服务..."
+step_schema_migrate() {
+    log_info "Step 7/8: 执行主交易 + RDP schema 迁移与校验..."
     local env_prefix
     env_prefix="$(compose_env_prefix)"
-    if ! wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && ${env_prefix:+env $env_prefix }docker compose $COMPOSE_CMD_ARGS up -d"; then
-        log_warn "应用 docker compose up 返回非零；继续进入健康检查确认实际容器状态"
-    fi
+    # 复用 gateway 的合法 managed process_role 与双数据库连接环境；命令覆写后
+    # 不会启动 FastAPI，也不会接触交易所。rdp-daemon 的自定义 role 不能传给
+    # AATSSettings.load_settings()，因此不能作为此 one-shot job 的宿主。
+    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && ${env_prefix:+env $env_prefix }docker compose $COMPOSE_CMD_ARGS run --rm --no-deps aats-gateway python scripts/compose_entrypoint.py python scripts/apply_schema_migrations.py"
+    log_ok "Schema migration contract 已应用并校验"
+}
+
+step_app_up() {
+    log_info "Step 8/8: 启动应用服务..."
+    local env_prefix
+    env_prefix="$(compose_env_prefix)"
+    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && ${env_prefix:+env $env_prefix }docker compose $COMPOSE_CMD_ARGS up -d"
     log_info "应用服务启动命令已返回，等待健康检查确认"
 }
 
@@ -507,14 +552,32 @@ step_health() {
     exit 3
 }
 
+write_deployment_evidence() {
+    log_info "写入模拟部署证据包..."
+
+    local required_args=""
+    local c
+    for c in $APP_CONTAINERS; do
+        required_args="$required_args --required-container '$c'"
+    done
+
+    DEPLOYMENT_EVIDENCE_PATH="$(wsl_run "cd $WSL_PROJECT && python3 scripts/write_deployment_evidence.py --repo-root $WSL_PROJECT --profile '$PROFILE' --overlay '$COMPOSE_OVERLAY' --schema-job-status passed --runtime-readiness-generation '$RUNTIME_READINESS_GENERATION' $required_args" | tr -d '\r' | tail -1)"
+    if [[ -z "$DEPLOYMENT_EVIDENCE_PATH" ]]; then
+        log_error "模拟部署证据包路径为空，拒绝报告成功"
+        exit 6
+    fi
+    log_ok "模拟部署证据包已写入: $DEPLOYMENT_EVIDENCE_PATH"
+}
+
 report() {
     echo
     echo "=========================================="
-    log_ok "部署完成"
+    log_ok "模拟栈基础检查通过（不是 trading-ready 或生产放行）"
     echo "=========================================="
     log_info "Profile:    $PROFILE"
     log_info "Overlay:    $COMPOSE_OVERLAY"
     log_info "Env file:   $WSL2_ENV_FILE"
+    log_info "Evidence:   $DEPLOYMENT_EVIDENCE_PATH"
 
     echo
     local env_prefix
@@ -549,6 +612,8 @@ report() {
 }
 
 main() {
+    require_explicit_non_live_profile
+
     echo
     log_info "============ AATS 部署流水线 ============"
     echo
@@ -558,12 +623,15 @@ main() {
 
     step_commit
     step_sync
-    step_down
+    prepare_runtime_readiness_generation
     step_build
+    step_down
     step_prune
     step_infra_up
+    step_schema_migrate
     step_app_up
     step_health
+    write_deployment_evidence
     report
 }
 

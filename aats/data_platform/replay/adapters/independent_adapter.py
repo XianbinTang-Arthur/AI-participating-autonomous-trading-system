@@ -95,9 +95,15 @@ class IndependentReplayAdapter(BaseReplayAdapter):
 
         self._bar_history.append(bar)
 
-        # 1) 计算 long / short 原始评分
+        # 1) 计算 long / short 原始评分。short gate 与生产
+        # compute_raw_book_score(strategy_short_bias_enabled) 同语义；必须在
+        # history、dominant-leg 和状态机之前钳制，避免禁用后的 short 信号残留。
         long_score = self._compute_book_score(bar, leg="long")
-        short_score = self._compute_book_score(bar, leg="short")
+        short_score = (
+            self._compute_book_score(bar, leg="short")
+            if params.strategy_short_bias_enabled
+            else 0.0
+        )
 
         self._long_score_history.append(long_score)
         self._short_score_history.append(short_score)

@@ -29,9 +29,10 @@ from aats.storage.sqlalchemy_models import (
 )
 
 
-def _make_session_factory() -> sessionmaker[Session]:
+def _make_session_factory(owner: unittest.TestCase) -> sessionmaker[Session]:
     engine = create_engine("sqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
+    owner.addCleanup(engine.dispose)
     return sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
 
@@ -92,7 +93,7 @@ class TestArchiveHotEventStore(unittest.TestCase):
     # ──────────────────────────────────────────────────────────────────
 
     def test_archive_moves_old_rows_and_keeps_new_ones(self) -> None:
-        sf = _make_session_factory()
+        sf = _make_session_factory(self)
         now = datetime.now(timezone.utc)
         # 3 行老数据 (> 14 天), 2 行新数据 (< 14 天)
         for i in range(3):
@@ -134,7 +135,7 @@ class TestArchiveHotEventStore(unittest.TestCase):
     # ──────────────────────────────────────────────────────────────────
 
     def test_batch_size_forces_multiple_rounds(self) -> None:
-        sf = _make_session_factory()
+        sf = _make_session_factory(self)
         now = datetime.now(timezone.utc)
         for i in range(25):
             _insert_event(
@@ -161,7 +162,7 @@ class TestArchiveHotEventStore(unittest.TestCase):
     # ──────────────────────────────────────────────────────────────────
 
     def test_idempotent_second_run_is_noop(self) -> None:
-        sf = _make_session_factory()
+        sf = _make_session_factory(self)
         now = datetime.now(timezone.utc)
         for i in range(3):
             _insert_event(
@@ -190,7 +191,7 @@ class TestArchiveHotEventStore(unittest.TestCase):
         DELETE 未跑、下次 backfill）。预期：这行应该仍被 DELETE 掉 hot，
         archive 保持原行（不重复 INSERT）。
         """
-        sf = _make_session_factory()
+        sf = _make_session_factory(self)
         now = datetime.now(timezone.utc)
         old_ts = now - timedelta(days=20)
         # 先手工放进 archive
@@ -248,7 +249,7 @@ class TestArchiveHotEventStore(unittest.TestCase):
     # ──────────────────────────────────────────────────────────────────
 
     def test_cutoff_uses_strict_less_than(self) -> None:
-        sf = _make_session_factory()
+        sf = _make_session_factory(self)
         # 构造：一行恰好在 cutoff 上，一行早 1 秒
         # older_than_days=14 → cutoff = now - 14d
         # 放一行 ts = now - 14d - 1s（应归档），一行 ts = now - 13d 23h 59m（不归档）
@@ -288,7 +289,7 @@ class TestArchiveHotEventStore(unittest.TestCase):
           - archive 表为空
           - 异常向上抛
         """
-        sf = _make_session_factory()
+        sf = _make_session_factory(self)
         now = datetime.now(timezone.utc)
         for i in range(3):
             _insert_event(
@@ -342,7 +343,7 @@ class TestArchiveHotEventStore(unittest.TestCase):
     # ──────────────────────────────────────────────────────────────────
 
     def test_dry_run_counts_but_does_not_mutate(self) -> None:
-        sf = _make_session_factory()
+        sf = _make_session_factory(self)
         now = datetime.now(timezone.utc)
         for i in range(5):
             _insert_event(
@@ -371,7 +372,7 @@ class TestArchiveHotEventStore(unittest.TestCase):
     # ──────────────────────────────────────────────────────────────────
 
     def test_max_batches_bounds_execution(self) -> None:
-        sf = _make_session_factory()
+        sf = _make_session_factory(self)
         now = datetime.now(timezone.utc)
         for i in range(15):
             _insert_event(
@@ -472,7 +473,7 @@ class TestRunAllIntegration(unittest.TestCase):
     """run_all 把 archive_hot + outbox purge + archive purge 串联。"""
 
     def test_run_all_includes_archive_hot_report(self) -> None:
-        sf = _make_session_factory()
+        sf = _make_session_factory(self)
         now = datetime.now(timezone.utc)
         for i in range(3):
             _insert_event(
@@ -495,7 +496,7 @@ class TestRunAllIntegration(unittest.TestCase):
         self.assertEqual(report["deleted_rows"], 3)
 
     def test_run_all_can_disable_hot_archive(self) -> None:
-        sf = _make_session_factory()
+        sf = _make_session_factory(self)
         now = datetime.now(timezone.utc)
         _insert_event(
             sf,

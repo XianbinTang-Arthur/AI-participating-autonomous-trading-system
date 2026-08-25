@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 import yaml
 
+from aats.bootstrap.settings import AATSSettings
+
 
 ManagedEnvProfile = Literal["spot", "derivatives", "spot_live", "derivatives_live"]
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -30,6 +32,7 @@ MANAGED_PROFILE_DEFINITIONS: dict[ManagedEnvProfile, ManagedProfileDefinition] =
             "startup_profile": "spot",
             "mode": "guarded_live",
             "storage_mode": "postgres",
+            "database_auto_create_schema": False,
             "market_data_backend": "okx",
             "execution_backend": "okx",
             "account_backend": "okx",
@@ -53,6 +56,7 @@ MANAGED_PROFILE_DEFINITIONS: dict[ManagedEnvProfile, ManagedProfileDefinition] =
             "startup_profile": "spot",
             "mode": "guarded_live",
             "storage_mode": "postgres",
+            "database_auto_create_schema": False,
             "market_data_backend": "okx",
             "execution_backend": "okx",
             "account_backend": "okx",
@@ -76,6 +80,7 @@ MANAGED_PROFILE_DEFINITIONS: dict[ManagedEnvProfile, ManagedProfileDefinition] =
             "startup_profile": "derivatives",
             "mode": "guarded_live",
             "storage_mode": "postgres",
+            "database_auto_create_schema": False,
             "market_data_backend": "okx",
             "execution_backend": "okx",
             "account_backend": "okx",
@@ -102,6 +107,7 @@ MANAGED_PROFILE_DEFINITIONS: dict[ManagedEnvProfile, ManagedProfileDefinition] =
             "startup_profile": "derivatives",
             "mode": "guarded_live",
             "storage_mode": "postgres",
+            "database_auto_create_schema": False,
             "market_data_backend": "okx",
             "execution_backend": "okx",
             "account_backend": "okx",
@@ -130,6 +136,7 @@ MANAGED_PROFILE_DERIVED_ENV_KEYS: frozenset[str] = frozenset(
         "AATS_STARTUP_PROFILE",
         "AATS_MODE",
         "AATS_STORAGE_MODE",
+        "AATS_DATABASE_AUTO_CREATE_SCHEMA",
         "AATS_MARKET_DATA_BACKEND",
         "AATS_EXECUTION_BACKEND",
         "AATS_ACCOUNT_BACKEND",
@@ -153,6 +160,25 @@ MANAGED_PROFILE_DERIVED_ENV_KEYS: frozenset[str] = frozenset(
 )
 
 
+def _validate_managed_profile_settings_keys(
+    profile: ManagedEnvProfile,
+    values: dict[Any, Any],
+    *,
+    source: Path | str,
+) -> None:
+    allowed_keys = AATSSettings.model_fields
+    unknown_keys = sorted(
+        str(key)
+        for key in values
+        if not isinstance(key, str) or key not in allowed_keys
+    )
+    if unknown_keys:
+        raise ValueError(
+            "managed_profile_contains_unknown_settings_keys:"
+            f"profile={profile}:source={source}:keys={','.join(unknown_keys)}"
+        )
+
+
 def load_managed_profile_values(
     profile: ManagedEnvProfile,
     *,
@@ -160,7 +186,25 @@ def load_managed_profile_values(
 ) -> dict[str, Any]:
     definition = MANAGED_PROFILE_DEFINITIONS[profile]
     merged = dict(definition.runtime_defaults)
+    _validate_managed_profile_settings_keys(
+        profile,
+        merged,
+        source=f"managed_runtime_defaults:{profile}",
+    )
     strategy_path = definition.strategy_tuning_path(project_root)
     if strategy_path.exists():
-        merged.update(yaml.safe_load(strategy_path.read_text(encoding="utf-8")) or {})
+        strategy_values = yaml.safe_load(strategy_path.read_text(encoding="utf-8"))
+        if strategy_values is None:
+            strategy_values = {}
+        if not isinstance(strategy_values, dict):
+            raise ValueError(
+                "managed_profile_strategy_tuning_must_be_mapping:"
+                f"profile={profile}:source={strategy_path}"
+            )
+        _validate_managed_profile_settings_keys(
+            profile,
+            strategy_values,
+            source=strategy_path,
+        )
+        merged.update(strategy_values)
     return merged

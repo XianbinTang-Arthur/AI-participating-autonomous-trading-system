@@ -9,6 +9,8 @@
   （某次只改了 3 个 entry 忘了第 4 个的故事会反复发生）。
 * 同时也是 5e smoke 测试的注入点：smoke 测试通过手动触发同一个 stop event
   就能干净地把进程关掉、检查退出码与日志。
+* FS-006：启动完成后同时监督 OS stop 与显式注册的关键长期 task。关键 task
+  非预期结束时停止健康心跳、执行清理并返回非零，不能继续伪装 healthy。
 
 跨平台说明：
 * Linux 上用 loop.add_signal_handler 注册 SIGTERM/SIGINT 是 asyncio 推荐路径。
@@ -25,7 +27,9 @@ Readiness barrier (B1, 2026-04-20)：
   consumer 创建完成后才开始 publish。这是 nats_retention_global_architecture_sow.md
   §B1 对 INTEREST retention 切换的硬前置——INTEREST 下 publish 发生在
   consumer 就位前就会消息丢失。
-* 超时 fallback 不硬失败，保持当前 LIMITS 模式下的向前兼容。
+* 四主进程使用 NATS/hybrid 时，announce/poll/timeout 必须失败关闭。当前一般
+  events stream 已是 INTEREST，不能再沿用早期 LIMITS fallback。
+* ready key 绑定标准部署生成的 generation，旧部署残留不能满足新部署 barrier。
 """
 from __future__ import annotations
 
@@ -37,7 +41,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable, Sequence
+from typing import Any, Awaitable, Callable, Sequence
 
 from aats.bootstrap.config import ApplicationRuntime, build_runtime, load_settings
 from aats.bootstrap.logging import configure_logging_for_settings, get_logger
@@ -53,8 +57,8 @@ _LIFECYCLE_LOGGER = "aats.bootstrap.process_lifecycle"
 # Readiness barrier (B1)
 # ────────────────────────────────────────────────────────────────
 
-# Redis key 前缀：每个进程 build_runtime 完成后（subscribe 全部就位）写此 key。
-# 其他进程的 publisher 启动前阻塞读此 key 确认 peer 就位。
+# Redis key 前缀：每个进程 build_runtime 完成后（subscribe 全部就位）写入
+# generation-scoped key。其他进程的 publisher 启动前只接受同代次 peer。
 _RUNTIME_READY_KEY_PREFIX = "aats:runtime:ready:"
 
 # Ready key TTL：防止进程异常退出后 key 残留让新启动进程误判。5 分钟够覆盖
@@ -66,10 +70,8 @@ _RUNTIME_READY_TTL_SECONDS: float = 300.0
 # 延迟感知慢。500ms 对 startup order 影响 < 1s，可接受。
 _PEER_READY_POLL_INTERVAL_SECONDS: float = 0.5
 
-# Peer ready 等待超时。超时后 publisher 不再阻塞继续启动——这是 fallback 保护
-# 模式，保持 LIMITS retention 下的向前兼容（消息不会丢，只是 consumer 落后
-# 几秒）。INTEREST 切换后超时会真丢消息，但 60s 窗口足够覆盖 build_runtime
-# 的 slice builder + cache hydrate 全流程（实测 10-30s）。
+# Peer ready 等待超时。四主进程 NATS/hybrid 路径超时后失败关闭；60s 窗口覆盖
+# build_runtime 的 slice builder + cache hydrate 全流程（历史实测 10-30s）。
 _PEER_READY_TIMEOUT_SECONDS: float = 60.0
 
 
@@ -91,8 +93,31 @@ _PEER_READINESS_MAP: dict[str, tuple[str, ...]] = {
 }
 
 
-def _ready_key(role: str) -> str:
-    return f"{_RUNTIME_READY_KEY_PREFIX}{role}"
+_MAIN_PROCESS_ROLES = frozenset({"market", "decision", "execution", "gateway"})
+
+
+def _ready_key(role: str, *, generation: str | None = None) -> str:
+    if generation is None:
+        return f"{_RUNTIME_READY_KEY_PREFIX}{role}"
+    return f"{_RUNTIME_READY_KEY_PREFIX}{generation}:{role}"
+
+
+def _strict_peer_readiness_required(*, role: str, settings: AATSSettings) -> bool:
+    backend = str(getattr(settings, "event_bus_backend", "in_memory") or "in_memory")
+    return role in _MAIN_PROCESS_ROLES and backend in {"hybrid", "nats"}
+
+
+def _runtime_readiness_generation(
+    *,
+    role: str,
+    settings: AATSSettings,
+    required: bool,
+) -> str | None:
+    raw_generation = getattr(settings, "runtime_readiness_generation", None)
+    generation = str(raw_generation or "").strip() or None
+    if required and generation is None:
+        raise RuntimeError(f"runtime_ready_gate_generation_required:{role}")
+    return generation
 
 
 async def _announce_runtime_ready(
@@ -100,13 +125,19 @@ async def _announce_runtime_ready(
     role: str,
     hot_state_store: HotStateStore | None,
     logger,
+    generation: str | None = None,
+    required: bool = False,
 ) -> None:
     """把本进程的 ready 信号写到 Redis，让其他 peer 能看到。
 
     在 build_runtime 完成（subscribe 已全部就位）后调用。hot_state_store
-    为 None 时是 InMemory 单元测试场景，直接 no-op。
+    为 None 时只有 optional/InMemory 场景可 no-op；strict NATS split 路径失败。
     """
+    if required and generation is None:
+        raise RuntimeError(f"runtime_ready_gate_generation_required:{role}")
     if hot_state_store is None:
+        if required:
+            raise RuntimeError(f"runtime_ready_gate_hot_state_required:{role}")
         logger.info(
             "runtime_ready_gate_skipped_no_hot_state",
             extra={
@@ -117,12 +148,13 @@ async def _announce_runtime_ready(
         return
     value = {
         "process_role": role,
+        "generation": generation,
         "ready_ts": datetime.now(timezone.utc).isoformat(),
         "pid": os.getpid(),
     }
     try:
         await hot_state_store.set(
-            _ready_key(role),
+            _ready_key(role, generation=generation),
             value,
             ttl_seconds=_RUNTIME_READY_TTL_SECONDS,
         )
@@ -133,15 +165,17 @@ async def _announce_runtime_ready(
                 "event": "runtime_ready_gate_announce_failed",
                 "process_role": role,
                 "error_type": type(exc).__name__,
-                "error": str(exc),
             },
         )
+        if required:
+            raise RuntimeError(f"runtime_ready_gate_announce_failed:{role}") from exc
         return
     logger.info(
         "runtime_ready_gate_announced",
         extra={
             "event": "runtime_ready_gate_announced",
             "process_role": role,
+            "generation": generation,
         },
     )
 
@@ -154,16 +188,22 @@ async def _wait_for_peer_roles_ready(
     peers: Sequence[str] | None = None,
     timeout_seconds: float = _PEER_READY_TIMEOUT_SECONDS,
     poll_interval: float = _PEER_READY_POLL_INTERVAL_SECONDS,
+    generation: str | None = None,
+    required: bool = False,
 ) -> None:
     """阻塞等 peer role 都写完自己的 ready key。
 
-    超时仍未就位时不硬失败，日志 warning 后返回——fallback 到 LIMITS
-    retention 的向前兼容行为。
+    strict NATS split 路径的 Redis 异常或超时会抛固定 RuntimeError，确保 publisher
+    不启动；optional/InMemory 路径保留兼容返回。
 
     ``peers`` 默认读 ``_PEER_READINESS_MAP[role]``；测试可手动注入。
     ``hot_state_store`` 为 None 时直接返回（InMemory 场景 / 单进程 smoke）。
     """
+    if required and generation is None:
+        raise RuntimeError(f"runtime_ready_gate_generation_required:{role}")
     if hot_state_store is None:
+        if required:
+            raise RuntimeError(f"runtime_ready_gate_hot_state_required:{role}")
         return
     peer_list = list(peers if peers is not None else _PEER_READINESS_MAP.get(role, ()))
     if not peer_list:
@@ -175,13 +215,18 @@ async def _wait_for_peer_roles_ready(
             "process_role": role,
             "peers": peer_list,
             "timeout_seconds": timeout_seconds,
+            "generation": generation,
         },
     )
     deadline = time.monotonic() + timeout_seconds
     while True:
+        peer_keys = {
+            peer: _ready_key(peer, generation=generation)
+            for peer in peer_list
+        }
         try:
             ready_values = await hot_state_store.get_many(
-                [_ready_key(p) for p in peer_list]
+                list(peer_keys.values())
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -190,11 +235,23 @@ async def _wait_for_peer_roles_ready(
                     "event": "runtime_ready_gate_poll_failed",
                     "process_role": role,
                     "error_type": type(exc).__name__,
-                    "error": str(exc),
+                    "generation": generation,
                 },
             )
+            if required:
+                raise RuntimeError(f"runtime_ready_gate_poll_failed:{role}") from exc
             return
-        missing = [p for p in peer_list if not ready_values.get(_ready_key(p))]
+        missing: list[str] = []
+        for peer, peer_key in peer_keys.items():
+            payload = ready_values.get(peer_key)
+            if not isinstance(payload, dict):
+                missing.append(peer)
+                continue
+            if payload.get("process_role") != peer:
+                missing.append(peer)
+                continue
+            if generation is not None and payload.get("generation") != generation:
+                missing.append(peer)
         if not missing:
             logger.info(
                 "runtime_ready_gate_all_peers_ready",
@@ -202,6 +259,7 @@ async def _wait_for_peer_roles_ready(
                     "event": "runtime_ready_gate_all_peers_ready",
                     "process_role": role,
                     "peers": peer_list,
+                    "generation": generation,
                     "elapsed_seconds": round(
                         time.monotonic() - (deadline - timeout_seconds), 2
                     ),
@@ -216,10 +274,49 @@ async def _wait_for_peer_roles_ready(
                     "process_role": role,
                     "missing_peers": missing,
                     "timeout_seconds": timeout_seconds,
+                    "generation": generation,
                 },
             )
+            if required:
+                raise RuntimeError(
+                    f"runtime_ready_gate_timeout:{role}:{','.join(missing)}"
+                )
             return
         await asyncio.sleep(poll_interval)
+
+
+async def _withdraw_runtime_ready(
+    *,
+    role: str,
+    hot_state_store: HotStateStore | None,
+    logger,
+    generation: str | None,
+) -> None:
+    """Best-effort 删除本角色本代次 ready key，不覆盖原始退出原因。"""
+
+    if hot_state_store is None or generation is None:
+        return
+    try:
+        await hot_state_store.delete(_ready_key(role, generation=generation))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "runtime_ready_gate_withdraw_failed",
+            extra={
+                "event": "runtime_ready_gate_withdraw_failed",
+                "process_role": role,
+                "generation": generation,
+                "error_type": type(exc).__name__,
+            },
+        )
+        return
+    logger.info(
+        "runtime_ready_gate_withdrawn",
+        extra={
+            "event": "runtime_ready_gate_withdrawn",
+            "process_role": role,
+            "generation": generation,
+        },
+    )
 
 
 # Stage 7 修复：心跳文件目录。3 个 daemon 进程 (market/decision/execution)
@@ -410,29 +507,47 @@ async def run_process(
 
     runtime: ApplicationRuntime | None = None
     heartbeat_task: asyncio.Task | None = None
+    stop_wait_task: asyncio.Task[bool] | None = None
+    critical_wait_task: asyncio.Task[Any] | None = None
+    readiness_hot_state: HotStateStore | None = None
+    readiness_generation: str | None = None
+    readiness_required = False
     # 心跳 stop_event 与 run_process stop_event 分开：心跳必须在
     # stop_background_tasks 期间继续打，让 docker 看到容器仍在干净退出而非挂死。
     heartbeat_stop = asyncio.Event()
     try:
+        readiness_required = _strict_peer_readiness_required(
+            role=role,
+            settings=effective_settings,
+        )
+        readiness_generation = _runtime_readiness_generation(
+            role=role,
+            settings=effective_settings,
+            required=readiness_required,
+        )
         runtime = await build_runtime(effective_settings, process_role=role)
         # ── Readiness barrier (B1) ─────────────────────────────
         # build_runtime 内部已做 _wire_event_subscriptions，本进程的 durable
         # consumer 已在 NATS server 注册。现在：
         #   (1) 写 Redis 告诉其他 peer "我准备好了"
-        #   (2) 阻塞等其他 peer 也准备好（或超时 fallback）
+        #   (2) 阻塞等其他 peer 也准备好（strict 路径超时失败）
         # 再调 start_background_tasks 启动 publisher（见 SOW §B1）。
         # getattr 兜底：测试场景可能传 InMemoryApplicationRuntime，没有
         # hot_state_store。
-        _hot_state = getattr(runtime, "hot_state_store", None)
+        readiness_hot_state = getattr(runtime, "hot_state_store", None)
         await _announce_runtime_ready(
             role=role,
-            hot_state_store=_hot_state,
+            hot_state_store=readiness_hot_state,
             logger=logger,
+            generation=readiness_generation,
+            required=readiness_required,
         )
         await _wait_for_peer_roles_ready(
             role=role,
-            hot_state_store=_hot_state,
+            hot_state_store=readiness_hot_state,
             logger=logger,
+            generation=readiness_generation,
+            required=readiness_required,
         )
         await runtime.start_background_tasks()
         if extra_setup is not None:
@@ -459,7 +574,60 @@ async def run_process(
                 "background_task_count": len(runtime.background_tasks),
             },
         )
-        await local_stop.wait()
+        stop_wait_task = asyncio.create_task(
+            local_stop.wait(),
+            name=f"aats-stop-wait-{role}",
+        )
+        wait_for_critical_failure = getattr(
+            runtime,
+            "wait_for_critical_background_task_failure",
+            None,
+        )
+        if callable(wait_for_critical_failure):
+            critical_wait_task = asyncio.create_task(
+                wait_for_critical_failure(),
+                name=f"aats-critical-task-watch-{role}",
+            )
+            done, _pending = await asyncio.wait(
+                (stop_wait_task, critical_wait_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            critical_failure = None
+            if critical_wait_task in done:
+                critical_failure = critical_wait_task.result()
+            else:
+                inspect_failure = getattr(
+                    runtime,
+                    "critical_background_task_failure",
+                    None,
+                )
+                if callable(inspect_failure):
+                    critical_failure = inspect_failure()
+            if critical_failure is not None:
+                heartbeat_stop.set()
+                logger.error(
+                    "process_lifecycle_critical_task_failed",
+                    extra={
+                        "event": "process_lifecycle_critical_task_failed",
+                        "process_role": role,
+                        "task_name": critical_failure.task_name,
+                        "failure_kind": critical_failure.failure_kind,
+                        "error_type": critical_failure.error_type,
+                        "stalled_seconds": getattr(
+                            critical_failure,
+                            "stalled_seconds",
+                            None,
+                        ),
+                        "timeout_seconds": getattr(
+                            critical_failure,
+                            "timeout_seconds",
+                            None,
+                        ),
+                    },
+                )
+                return 1
+        else:
+            await stop_wait_task
         logger.info(
             "process_lifecycle_stopping",
             extra={"event": "process_lifecycle_stopping", "process_role": role},
@@ -478,7 +646,23 @@ async def run_process(
         )
         return 1
     finally:
+        waiter_tasks = tuple(
+            task
+            for task in (stop_wait_task, critical_wait_task)
+            if task is not None
+        )
+        for waiter_task in waiter_tasks:
+            if not waiter_task.done():
+                waiter_task.cancel()
+        if waiter_tasks:
+            await asyncio.gather(*waiter_tasks, return_exceptions=True)
         if runtime is not None:
+            await _withdraw_runtime_ready(
+                role=role,
+                hot_state_store=readiness_hot_state,
+                logger=logger,
+                generation=readiness_generation,
+            )
             try:
                 await runtime.stop_background_tasks()
             except Exception as stop_exc:  # pragma: no cover - 关闭路径异常 logging

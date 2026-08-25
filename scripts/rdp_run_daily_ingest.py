@@ -121,7 +121,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--ensure-schema", action="store_true",
-        help="执行前运行 DB migration",
+        help="兼容参数：执行前只读校验 schema contract，不执行 DDL",
     )
     return p.parse_args()
 
@@ -347,13 +347,13 @@ def main() -> int:
     args = parse_args()
 
     from aats.data_platform.config import get_settings
-    from aats.data_platform.db import run_migrations
+    from aats.data_platform.db import validate_rdp_schema
 
     settings = get_settings()
 
     if args.ensure_schema:
-        log.info("Running DB migrations...")
-        run_migrations(settings)
+        log.info("Validating schema contract (--ensure-schema legacy flag)...")
+        validate_rdp_schema(settings)
 
     symbols = args.symbols or settings.rolling_candles_symbols
     timeframes = args.timeframes or settings.rolling_candles_timeframes

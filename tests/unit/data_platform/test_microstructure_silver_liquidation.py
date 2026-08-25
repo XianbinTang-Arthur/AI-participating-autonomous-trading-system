@@ -28,7 +28,7 @@ class TestLiquidationSplitBySide(unittest.TestCase):
     """OKX side='sell'→长仓清算, side='buy'→短仓清算。"""
 
     def test_long_vs_short_counts_and_notional(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             rows = [
                 # 3 长仓清算 (side='sell')
@@ -83,7 +83,7 @@ class TestLiquidationCascadeFlag(unittest.TestCase):
     """count >= 30 触发 cascade_flag。"""
 
     def test_cascade_triggers_when_count_exceeds_threshold(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             # 35 笔清算 → > 30 阈值
             rows = [
@@ -119,7 +119,7 @@ class TestLiquidationCascadeFlag(unittest.TestCase):
 
 class TestLiquidationEmptyBar(unittest.TestCase):
     def test_empty_bar_flag_and_zero_counts(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             result = build_silver_microstructure_15m(
                 session=sess, symbol=env.symbol,

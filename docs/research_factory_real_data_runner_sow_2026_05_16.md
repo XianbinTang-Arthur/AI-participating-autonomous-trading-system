@@ -1,5 +1,9 @@
 # Research Factory Real Data Runner SOW - 2026-05-16
 
+> 历史任务材料：本文描述 v1 runner；其中 test 评价路径已被 Phase 3V 替代。当前 train/valid
+> 选择、test 内容封存及 execution evidence 窗口契约见
+> [`task/fs_004_research_selection_holdout_sow_2026_08_25.md`](task/fs_004_research_selection_holdout_sow_2026_08_25.md)。
+
 ## Business Objectives and Boundaries
 
 Promote Research Factory from synthetic smoke validation to a real-data research loop that can evaluate safe factor DSL candidates against AATS Gold replay bars and execution realism evidence. The goal is to start answering whether a candidate has cost-adjusted executable edge on real AATS data.

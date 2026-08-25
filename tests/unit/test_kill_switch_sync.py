@@ -111,7 +111,20 @@ async def _make_kill_switch(
 ) -> tuple[KillSwitch, InMemoryHotStateStore, InMemoryEventBus]:
     """工厂方法：创建 KillSwitch + 默认 sidecar 依赖，可选 bootstrap。"""
     ks = KillSwitch()
-    store = hot_state_store or InMemoryHotStateStore()
+    store = hot_state_store if hot_state_store is not None else InMemoryHotStateStore()
+    if hot_state_store is None:
+        await store.set(
+            KILL_SWITCH_REDIS_KEY,
+            {
+                "halted": False,
+                "reason": None,
+                "state": "RUNNING",
+                "generation": "ksgen_test_initial",
+                "set_at_ts": 1.0,
+                "source_role": "execution",
+                "resume_authorized": True,
+            },
+        )
     bus_obj = bus if bus is not None else InMemoryEventBus()
     if bootstrap:
         await ks.bootstrap(
@@ -163,12 +176,14 @@ class TestKillSwitchLocalOnly(unittest.TestCase):
 
 class TestKillSwitchBootstrap(unittest.IsolatedAsyncioTestCase):
     async def test_bootstrap_from_empty_redis_keeps_local_default(self) -> None:
-        ks, _store, _bus = await _make_kill_switch()
-        self.assertFalse(ks.halted)
+        ks, _store, _bus = await _make_kill_switch(
+            hot_state_store=InMemoryHotStateStore(),
+        )
+        self.assertTrue(ks.halted)
         snap = ks.snapshot()
         self.assertTrue(snap["bootstrapped"])
         self.assertTrue(snap["subscribed"])
-        self.assertEqual(snap["last_applied_ts"], 0.0)
+        self.assertEqual(snap["kill_switch"]["state"], "DEGRADED")
 
     async def test_bootstrap_hydrates_halt_state_from_redis(self) -> None:
         store = InMemoryHotStateStore()
@@ -198,17 +213,18 @@ class TestKillSwitchBootstrap(unittest.IsolatedAsyncioTestCase):
         # 仍然订阅成功（NATS 可以后续修正 fail-safe 状态）
         self.assertTrue(ks.snapshot()["subscribed"])
 
-    async def test_bootstrap_redis_get_failure_no_halt_in_monolith(self) -> None:
-        """monolith 模式下 Redis 不可达 → 不触发 fail-safe halt。"""
+    async def test_bootstrap_redis_get_failure_halts_monolith(self) -> None:
+        """已配线 monolith 与多进程一样，权威不可达必须 fail-closed。"""
         store = _ExplodingHotStateStore(raise_on_set=False, raise_on_get=True)
         ks, _, _bus = await _make_kill_switch(
             hot_state_store=store, process_role="monolith",
         )
-        self.assertFalse(ks.halted)
+        self.assertTrue(ks.halted)
+        self.assertEqual(ks.phase, "DEGRADED")
         self.assertTrue(ks.snapshot()["bootstrapped"])
 
-    async def test_bootstrap_fail_safe_halt_can_be_overridden_by_nats_resume(self) -> None:
-        """fail-safe halt 后 NATS 推送 resume → 本地恢复。"""
+    async def test_bootstrap_fail_safe_halt_rejects_unverified_nats_resume(self) -> None:
+        """Redis 不可达时，单独 NATS resume 不得解除 fail-safe。"""
         store = _ExplodingHotStateStore(raise_on_set=False, raise_on_get=True)
         ks, _, _bus = await _make_kill_switch(
             hot_state_store=store, process_role="gateway",
@@ -233,8 +249,8 @@ class TestKillSwitchBootstrap(unittest.IsolatedAsyncioTestCase):
             "key": "execution",
             "payload": resume_envelope.model_dump(mode="json"),
         })
-        # fail-safe halt 被 NATS 事件修正
-        self.assertFalse(ks.halted)
+        self.assertTrue(ks.halted)
+        self.assertEqual(ks.phase, "DEGRADED")
 
     async def test_bootstrap_subscribes_to_kill_switch_topic(self) -> None:
         ks, _store, bus = await _make_kill_switch()
@@ -298,8 +314,8 @@ class TestKillSwitchAsyncHaltResume(unittest.IsolatedAsyncioTestCase):
         assert isinstance(stored, dict)
         self.assertFalse(stored["halted"])
         self.assertIsNone(stored["reason"])
-        # halt + resume 各发布一次
-        self.assertEqual(len(published), 2)
+        # execution halt 发布 HALTING/HALTED，resume 发布 RUNNING。
+        self.assertEqual(len(published), 3)
 
     async def test_halt_async_redis_failure_still_broadcasts_nats(self) -> None:
         store = _ExplodingHotStateStore(raise_on_set=True)
@@ -455,9 +471,13 @@ class TestKillSwitchRemoteEvent(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ks.halted)
 
     async def test_remote_resume_event_clears_local_halt(self) -> None:
-        ks, _store, _bus = await _make_kill_switch(process_role="execution")
+        import time as _time
+
+        ks, store, _bus = await _make_kill_switch(process_role="execution")
         # 先用远端 halt envelope 把本地推到 halted（避免 ks.halt() 把 _last_applied_ts
         # 推到 time.time()，导致随后的小时间戳 resume envelope 被当成 stale 丢弃）
+        halt_ts = _time.time()
+        resume_ts = halt_ts + 100.0
         halt_envelope = EventEnvelope(
             event_type=KILL_SWITCH_EVENT_TYPE,
             source_component=KILL_SWITCH_SOURCE_COMPONENT,
@@ -466,7 +486,7 @@ class TestKillSwitchRemoteEvent(unittest.IsolatedAsyncioTestCase):
             payload={
                 "halted": True,
                 "reason": "remote_seed_halt",
-                "set_at_ts": 5000.0,
+                "set_at_ts": halt_ts,
                 "source_role": "gateway",
             },
         )
@@ -479,6 +499,18 @@ class TestKillSwitchRemoteEvent(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(ks.halted)
 
+        await store.set(
+            KILL_SWITCH_REDIS_KEY,
+            {
+                "halted": False,
+                "reason": None,
+                "state": "RUNNING",
+                "generation": "ksgen_remote_resume",
+                "set_at_ts": resume_ts,
+                "source_role": "gateway",
+                "resume_authorized": True,
+            },
+        )
         envelope = EventEnvelope(
             event_type=KILL_SWITCH_EVENT_TYPE,
             source_component=KILL_SWITCH_SOURCE_COMPONENT,
@@ -487,7 +519,10 @@ class TestKillSwitchRemoteEvent(unittest.IsolatedAsyncioTestCase):
             payload={
                 "halted": False,
                 "reason": None,
-                "set_at_ts": 7777.0,
+                "state": "RUNNING",
+                "generation": "ksgen_remote_resume",
+                "resume_authorized": True,
+                "set_at_ts": resume_ts,
                 "source_role": "gateway",
             },
         )

@@ -1937,7 +1937,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--ensure-schema", action="store_true",
-        help="Run DB migrations before first batch",
+        help="Legacy name: validate schema before first batch; does not run DDL",
     )
     parser.add_argument(
         "--stop-on-error", action="store_true",

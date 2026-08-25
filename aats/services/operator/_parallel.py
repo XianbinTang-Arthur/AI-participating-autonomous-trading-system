@@ -36,9 +36,9 @@ panel 调用，然后它内部调 ``blockers`` 作为一个子任务，``blocker
 线程总数上限：
     共享池 12 × (1 + 本地小池 4) = 60
 
-DB 连接池已在 ``aats/storage/session.py::create_database_runtime`` 配套扩容到
-``pool_size=15 + max_overflow=45 = 60`` 并发连接。PG ``max_connections=200``
-足够支撑。
+Gateway DB 连接池由 ``aats/storage/connection_budget.py`` 固定为 32 个声明上限。
+线程数可以高于连接数；多余查询在 SQLAlchemy ``pool_timeout`` 处背压，避免四个
+进程各自把线程上限等同于连接上限。目标负载下的超时率仍须单独验证。
 
 异常安全：某个 future.result() 抛异常时，cancel 尚未启动的 pending
 futures、等待已在运行的 futures 收敛，确保不会有残留任务占用共享池。
@@ -62,8 +62,8 @@ _executor_lock = threading.Lock()
 # 选 4 而不是 12 的理由：
 # 1. 内层 fan-out 通常 3-9 路（recovery_view 9 路、system_mode 4 路），4 已够
 #    让大部分嵌套场景并行化
-# 2. 控制线程总数上限 = 共享池 12 × (1 + 本地小池 4) = 60，正好匹配 DB
-#    pool_size=15 + max_overflow=45 的 60 上限
+# 2. 控制线程总数上限 = 共享池 12 × (1 + 本地小池 4) = 60；它可以高于
+#    Gateway DB pool 的 32 上限，超额查询由 pool_timeout 背压而不是扩连接
 _INNER_MAX_WORKERS = 4
 
 # ── 嵌套检测（thread-local depth counter）────────────────────

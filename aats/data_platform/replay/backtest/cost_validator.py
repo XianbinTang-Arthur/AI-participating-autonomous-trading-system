@@ -4,14 +4,14 @@
 ----
 AATS 的策略决策层（``ReplayDecision``）产出 ``expected_net_edge_bps``，其内嵌
 了一个"假设"的 ``cost_bps``（blended fee + slippage buffer）。但这个假设值
-与真实 fill 侧模拟器（``fill_simulator.FillSimulator``）在 bar-close + 真实
-volume 情况下计算出来的实际 cost（fee_bps + 估算 slippage）可能不一致：
+与 fill 侧模拟器（``fill_simulator.FillSimulator``）在后续 execution event
+价格/流动性下计算出来的实际 cost（fee_bps + 调用方估算 slippage）可能不一致：
 
 * 如果 live/backtest fee schedule 变化，assumed_cost 就偏离实际；
 * 如果决策层低估了 post_only 落空率，那么"穿盘口兜底"后的实际 cost 会比假设高；
 * 反向：若决策层按 taker 成本估算，但实际落入 post_only fill，assumed 偏悲观。
 
-Cost Validator 做的事就是把 **同一 bar 的 decision 与 fill** 配对，计算：
+Cost Validator 做的事就是把**一个 decision 与其后续因果 fill**配对，计算：
 
     cost_diff_bps     = actual_cost - assumed_cost
     actual_net_edge   = assumed_net_edge - cost_diff
@@ -49,6 +49,8 @@ class CostDiagnostic:
         actual_net_edge_bps: 换用 actual cost 后的 net edge = ``assumed_net_edge - cost_diff``。
         edge_flipped_negative: ``True`` 表示 assumed 正、actual 非正（<= 0），即 edge 翻负。
         notes: 调试/审计备注。
+        actual_fee_bps: 可选实际手续费分项；历史调用方可省略。
+        actual_slippage_bps: 可选实际滑点分项；历史调用方可省略。
     """
 
     decision_id: str
@@ -59,6 +61,8 @@ class CostDiagnostic:
     actual_net_edge_bps: float
     edge_flipped_negative: bool
     notes: str = ""
+    actual_fee_bps: float | None = None
+    actual_slippage_bps: float | None = None
 
 
 @dataclass(frozen=True)
@@ -118,6 +122,8 @@ class CostValidator:
         actual_cost_bps: float,
         assumed_net_edge_bps: float,
         notes: str = "",
+        actual_fee_bps: float | None = None,
+        actual_slippage_bps: float | None = None,
     ) -> CostDiagnostic:
         """记录一次 decision-vs-fill 对比。
 
@@ -144,6 +150,14 @@ class CostValidator:
             actual_net_edge_bps=actual_net_edge_bps,
             edge_flipped_negative=edge_flipped_negative,
             notes=notes,
+            actual_fee_bps=(
+                None if actual_fee_bps is None else float(actual_fee_bps)
+            ),
+            actual_slippage_bps=(
+                None
+                if actual_slippage_bps is None
+                else float(actual_slippage_bps)
+            ),
         )
         self._diagnostics.append(diag)
         return diag

@@ -10,7 +10,10 @@ from aats.api.session_auth import SessionIdentity, verify_session_token
 from aats.bootstrap.config import ApplicationRuntime
 from aats.schemas.common import utc_now
 from aats.schemas.operator import AuthSource, OperatorRole
-from aats.services.operator.passwords import verify_password
+from aats.services.operator.passwords import (
+    consume_dummy_password_verification,
+    verify_password,
+)
 
 
 class OperatorPrincipal(BaseModel):
@@ -35,9 +38,11 @@ def _runtime(request: Request) -> ApplicationRuntime:
 
 def authenticate_operator_user(runtime: ApplicationRuntime, *, username: str, password: str) -> OperatorLoginResult:
     if not hasattr(runtime, "operator_repo"):
+        consume_dummy_password_verification(password)
         return OperatorLoginResult(principal=None, failure_code="operator_login_failed")
     user = runtime.operator_repo.get_by_username(username)
     if user is None or not user.enabled:
+        consume_dummy_password_verification(password)
         return OperatorLoginResult(principal=None, failure_code="operator_login_failed")
     now = utc_now()
     if user.locked_until is not None and user.locked_until > now:

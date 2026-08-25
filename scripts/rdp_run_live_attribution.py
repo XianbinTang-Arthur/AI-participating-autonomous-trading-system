@@ -466,7 +466,11 @@ def main() -> int:
     parser.add_argument(
         "--artifact-root", type=str, default=str(_DEFAULT_ARTIFACT_ROOT),
     )
-    parser.add_argument("--ensure-schema", action="store_true")
+    parser.add_argument(
+        "--ensure-schema",
+        action="store_true",
+        help="Legacy name: validate schema before attribution; does not run DDL",
+    )
     # ---- P0: 参数注入 ----
     parser.add_argument(
         "--params-json", default=None,
@@ -519,12 +523,12 @@ def main() -> int:
 
     # ---- Step 1: Run replay ----
     from aats.data_platform.config import get_settings
-    from aats.data_platform.db import get_session, run_migrations
+    from aats.data_platform.db import get_session, validate_rdp_schema
 
     settings = get_settings()
     if args.ensure_schema:
-        log.info("Running migrations...")
-        run_migrations(settings)
+        log.info("Validating schema contract (--ensure-schema legacy flag)...")
+        validate_rdp_schema(settings)
 
     log.info("Running replay...")
     with get_session(settings) as session:

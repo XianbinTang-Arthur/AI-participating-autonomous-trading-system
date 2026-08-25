@@ -13910,6 +13910,8 @@ class OperatorQueryService:
         self,
         *,
         reason: str,
+        generation: str | None = None,
+        set_at_ts: float | None = None,
         actor_role: OperatorRole = "anonymous",
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
@@ -13918,6 +13920,8 @@ class OperatorQueryService:
         # 也是 async（要 await kill_switch.halt_async 走跨进程同步路径）
         return await self.reconciliation_system_queries.halt(
             reason=reason,
+            generation=generation,
+            set_at_ts=set_at_ts,
             actor_role=actor_role,
             actor_identity=actor_identity,
             auth_source=auth_source,

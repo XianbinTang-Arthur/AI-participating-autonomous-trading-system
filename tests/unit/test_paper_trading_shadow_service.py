@@ -17,7 +17,6 @@ from unittest.mock import MagicMock
 from aats.bootstrap.settings import AATSSettings
 from aats.services.strategy_engines.paper_trading_shadow import (
     PaperTradingShadowService,
-    _QTY_EPSILON,
     _action_label,
     _classify_action_type,
 )
@@ -186,7 +185,6 @@ class TestSafetyInvariants(unittest.TestCase):
         logger = MagicMock()
         svc = PaperTradingShadowService(base_settings=base, logger=logger)
         # 构造 minimal mock context/baseline/target (不真实触发 engine.build)
-        from aats.schemas.common import utc_now
 
         context = MagicMock()
         context.timeframe = "1m"

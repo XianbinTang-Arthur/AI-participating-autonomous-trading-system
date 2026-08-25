@@ -1,6 +1,6 @@
 # AATS 文档地图与适用边界
 
-最后核对：2026-08-23（代码基线 `be9179e`）
+最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；包含 Phase 3A–3W 整改提交候选）
 
 本页解决一个长期问题：仓库同时保存当前规范、专题参考、历史设计、审查报告、任务书和一次性观察记录。文件仍在仓库中，不代表它描述当前行为。
 
@@ -77,6 +77,7 @@
 - [`operations/parameter_governance.md`](operations/parameter_governance.md)
 - [`operations/parameter_apply_and_rollback.md`](operations/parameter_apply_and_rollback.md)
 - [`operations/production_parameter_change_runbook.md`](operations/production_parameter_change_runbook.md)
+- [`operations/parameter_mapping_reference.md`](operations/parameter_mapping_reference.md)
 
 ### WSL2 与基础设施
 
@@ -113,16 +114,129 @@
 
 ## 7. 当前必须牢记的漂移修正
 
-- 主交易是 4 个交易 slice；标准 derivatives-live 另有 rdp-daemon 和两个采集 daemon，共 7 个应用容器。
+- 主交易是 4 个交易 slice；derivatives-live Compose 定义另有 rdp-daemon 和两个采集 daemon，共 7 个应用容器，但该 live profile 当前不可部署。
 - profile 模板端口：spot 8000、derivatives 8001、spot-live 8010、derivatives-live 8011。
-- 本地 `start_api.py` 是 HTTP；标准 live 部署由 deploy script 配置 HTTPS。
-- `scripts/run_local.py` 当前签名已漂移，不能作为可用 paper loop。
+- 本地 `start_api.py` 是 HTTP，只接受模拟 profile 与 loopback host；live TLS 配置仍保留，但当前 deploy/prewarm/wrapper/local launcher 都禁止 live。
+- `scripts/run_local.py` 现为明确迁移失败入口：不加载 profile/runtime，输出指引并 exit `2`；不是可用 paper loop，仓库外旧调用方仍需迁移。
 - JetStream 是 3 条 stream，全部 1 天上限/兜底；总声明容量 6.5 GiB，server 8 GiB。
 - RDP ORM 是 78 张表，不是 48 张。
 - RDP workflow 是 10 个定义、8 个 enabled；decision/release disabled，release 还禁止入队。
 - runtime active parameter 是 Postgres DB-only；JSON 文件不是 fallback。
 - `apply_active_parameter_set.py`、`approve_recommendation_and_apply.py`、`rdp_rollback_active_parameter_set.py`、`rdp_freeze_parameter_set.py`、`rdp_run_release_cycle.py` 已禁用。
-- `deploy.sh` 自动健康门尚未覆盖 derivatives-live 的两个采集器，需单独验证。
+- `deploy.sh` 没有默认 profile，只允许 `spot`/`derivatives` 模拟部署；future derivatives-live required list 已包含两个采集器，但当前 live 禁用且没有运行结论。
+- 2026-08-24 未提交整改工作区已把 replay/backtest 固定为
+  `next_bar_event_v2`；旧 same-bar-close 回测结果全部失效，只有带模型版本和
+  `execution_timeline.json` 的新产物才具备时间因果审计基础，但仍不能证明真实
+  盘口成交。详见 [`task/fs_003_backtest_causal_timing_sow_2026_08_24.md`](task/fs_003_backtest_causal_timing_sow_2026_08_24.md)。
+- 2026-08-24 未提交整改工作区已增加 FS-006 显式关键 task 监督：daemon 的
+  critical task 非预期结束会停止 heartbeat 并非零退出，FastAPI `/healthz`
+  对已失败关键 task 返回 `503`。Phase 3K 又为账户刷新、执行同步、对账、
+  outbox、command flow、Phase 1 shadow 与 trial guard 七条固定周期任务加入成功
+  进度 deadline；永久 await 或连续无成功周期会分类为 `stalled` 并走同一失败
+  路径。事件驱动任务、event-loop 整体阻塞、真实容器 restart/告警与依赖故障
+  注入仍未验证，不能据此宣称 trading-ready。详见
+  [`task/fs_006_critical_task_supervision_sow_2026_08_24.md`](task/fs_006_critical_task_supervision_sow_2026_08_24.md)
+  和 [`task/fs_006_critical_task_progress_watchdog_sow_2026_08_24.md`](task/fs_006_critical_task_progress_watchdog_sow_2026_08_24.md)。
+- 2026-08-24 未提交整改工作区已收紧 FS-009 schema 所有权：
+  managed 应用启动只读校验 root/RDP ledger 和 schema contract，部署在
+  app up 前以一次性 job 执行 root migrations + ORM baseline + 全 Batch B，
+  RDP stage 用 version/checksum/advisory lock 记账且 DDL 与 ledger 原子提交。
+  Gateway 在任何 readiness/后台 task 前校验，失败不对外 ready。
+  空库/历史克隆/部分失败 manifest 和 app+schema rollback 仍未运行，
+  所以不得声称生产 schema 已一致。详见
+  [`task/fs_009_schema_single_truth_sow_2026_08_24.md`](task/fs_009_schema_single_truth_sow_2026_08_24.md)。
+- 2026-08-24 Phase 3F 已把 FS-007 确认风险改为代码层 containment：profile
+  必填，live 无 override 且在副作用前失败，Compose 关键步骤非零即停止，模拟部署
+  只生成 `production_ready=false` 的脱敏证据包。完整 runtime readiness 与
+  app+schema+parameter 一致回滚仍 OPEN，详见
+  [`task/fs_007_deployment_fail_closed_sow_2026_08_24.md`](task/fs_007_deployment_fail_closed_sow_2026_08_24.md)。
+- 2026-08-24 Phase 3G 已把 Gateway Compose 宿主映射固定为 `127.0.0.1`，
+  本地启动器拒绝 live/非 loopback，模拟 evidence 校验实际 Docker HostIp。
+  现有容器、目标防火墙、VPN/NAT、证书与外部不可达性仍 UNKNOWN，详见
+  [`task/fs_005_gateway_loopback_containment_sow_2026_08_24.md`](task/fs_005_gateway_loopback_containment_sow_2026_08_24.md)。
+- 2026-08-24 Phase 3H 已为 Gateway 加入固定 Host allowlist 和统一浏览器
+  安全响应头；CSP 不依赖 `unsafe-inline`/`unsafe-eval`，HSTS 只对实际 HTTPS
+  scope 输出。真实 TLS terminator、proxy、目标浏览器与未捕获 500 响应边界仍
+  需运行验证，详见
+  [`task/fs_020_browser_security_headers_sow_2026_08_24.md`](task/fs_020_browser_security_headers_sow_2026_08_24.md)。
+- 2026-08-24 Phase 3I 已把 Operator 登录的同步 DB/PBKDF2/账户状态/审计链
+  完整移出 event loop，以每进程有界 worker、排队超时、global/client/identity
+  滑动窗口、dummy KDF 和输入上限失败关闭。多进程集中限流、trusted proxy、
+  真实数据库和目标负载仍 OPEN，详见
+  [`task/fs_019_operator_login_async_isolation_sow_2026_08_24.md`](task/fs_019_operator_login_async_isolation_sow_2026_08_24.md)。
+- 2026-08-24 Phase 3J 已将四主进程 NATS/hybrid peer readiness 收紧为
+  generation-scoped 失败关闭；旧 key、Redis 异常、peer timeout 或缺代次都
+  不能启动 publisher。标准模拟 deploy 生成/注入同一代次并记入证据包；
+  真 Redis/NATS/Compose 启动、重启和断连矩阵仍 OPEN，详见
+  [`task/fs_016_nats_peer_readiness_fail_closed_sow_2026_08_24.md`](task/fs_016_nats_peer_readiness_fail_closed_sow_2026_08_24.md)。
+- 2026-08-24 Phase 3L 已把 Kill Switch 长期恢复状态与在线增险许可拆分：
+  Gateway/monolith 维护同 generation 的 15 秒 Redis permission，execution 只在最终
+  submission fence 读取且不能续租。旧 RUNNING authority 不能替代过期 permission；
+  真 Redis/NATS 四进程单向分区、crash/restart、目标告警和独立复核仍 OPEN，详见
+  [`task/fs_002_short_lived_trading_permission_lease_sow_2026_08_24.md`](task/fs_002_short_lived_trading_permission_lease_sow_2026_08_24.md)。
+- 2026-08-24 Phase 3M 已把 profile recommendation apply 与 rollback 都收紧为
+  授权/状态/双签校验后的无写入 `501`。approve/release 不代表 runtime 生效，历史
+  apply Saga 不再由 route 调用；真实 generation、worker ack/readback、反向 Saga 与
+  历史漂移对账仍 OPEN。详见
+  [`task/fs_001_profile_apply_fail_closed_sow_2026_08_24.md`](task/fs_001_profile_apply_fail_closed_sow_2026_08_24.md)
+  和 [`../audit/full_system_2026_08_24/33-fs-001-profile-apply-fail-closed.md`](../audit/full_system_2026_08_24/33-fs-001-profile-apply-fail-closed.md)。
+- 2026-08-24 Phase 3N 已将回测 fill 固定为 `ohlcv_participation_cap_v2`：
+  三类订单都要求正 volume 并受默认 1% cap，IOC/bounded 只使用下单前已知的
+  observation volume，bounded 按 taker fee + fixed slippage，成本和 scorecard
+  明示 fee/slippage、OHLCV 粒度与 L2/queue/impact 限制。它只收敛 bar proxy，
+  不构成 live 容量/收益证明；FS-014/G3 仍 OPEN。详见
+  [`task/fs_014_ohlcv_fill_realism_containment_sow_2026_08_24.md`](task/fs_014_ohlcv_fill_realism_containment_sow_2026_08_24.md)
+  和 [`../audit/full_system_2026_08_24/34-fs-014-ohlcv-fill-realism-containment.md`](../audit/full_system_2026_08_24/34-fs-014-ohlcv-fill-realism-containment.md)。
+- 2026-08-25 Phase 3O 已将 Dashboard 详情抽屉改为原生 modal dialog，补齐
+  accessible name/description、初始/返回焦点、Escape/backdrop/按钮统一关闭；
+  reduced-motion 同时覆盖 CSS 动画/过渡/滚动和 JavaScript smooth scroll。
+  目标浏览器、keyboard-only、NVDA/VoiceOver、axe、缩放和动效人工验证仍 OPEN。
+  详见 [`task/fs_017_fs_018_dashboard_accessibility_sow_2026_08_25.md`](task/fs_017_fs_018_dashboard_accessibility_sow_2026_08_25.md)
+  和 [`../audit/full_system_2026_08_24/35-fs-017-fs-018-dashboard-accessibility.md`](../audit/full_system_2026_08_24/35-fs-017-fs-018-dashboard-accessibility.md)。
+- 2026-08-25 Phase 3P 已删除四个 managed profile 中无 Settings 字段/消费者的伪
+  auto-rollback key，并让 strategy YAML 非 mapping 或未知 key 在 managed loader
+  失败关闭；配置 reference 与 generator 一致，生成器不再覆盖人工治理 README。
+  committed candidate 目标启动、仓库外 overlay、generator clean-run 与独立复核仍 OPEN。
+  详见 [`task/fs_010_managed_profile_unknown_key_fail_closed_sow_2026_08_25.md`](task/fs_010_managed_profile_unknown_key_fail_closed_sow_2026_08_25.md)
+  和 [`../audit/full_system_2026_08_24/36-fs-010-managed-profile-unknown-key-fail-closed.md`](../audit/full_system_2026_08_24/36-fs-010-managed-profile-unknown-key-fail-closed.md)。
+- 2026-08-25 Phase 3Q 已把失效的 `scripts/run_local.py` 改为无配置副作用的迁移
+  失败入口：识别旧参数、输出当前 API/UI 与 integration 指引并 exit `2`，不加载
+  `.env.*` 或 runtime。committed candidate 独立复核与仓库外调用方迁移仍 OPEN。
+  详见 [`task/fs_011_legacy_run_local_fail_closed_sow_2026_08_25.md`](task/fs_011_legacy_run_local_fail_closed_sow_2026_08_25.md)
+  和 [`../audit/full_system_2026_08_24/37-fs-011-legacy-run-local-fail-closed.md`](../audit/full_system_2026_08_24/37-fs-011-legacy-run-local-fail-closed.md)。
+- 2026-08-25 Phase 3R 已把 independent replay 的 short-bias gate 与生产收口：
+  `strategy_short_bias_enabled=false` 时在 score history/dominant-leg 之前把 short score
+  固定为 `0.0`，同名布尔值进入 replay artifact；它是目标 profile 上下文而不是
+  active-parameter 调优项。历史回测尚未按显式 gate 值重跑，独立复核仍 OPEN。
+  详见 [`task/fs_015_replay_short_bias_parity_sow_2026_08_25.md`](task/fs_015_replay_short_bias_parity_sow_2026_08_25.md)
+  和 [`../audit/full_system_2026_08_24/38-fs-015-replay-short-bias-parity.md`](../audit/full_system_2026_08_24/38-fs-015-replay-short-bias-parity.md)。
+- 2026-08-25 Phase 3S 已新增最小权限 GitHub Actions 基础门禁：Python 3.12
+  全仓 Ruff、完整 unit、strict markers 与新增 warning 失败；Long/Short 错误 AsyncMock
+  已修正。Phase 3T 又为 CI/运行时加入目标平台完整 hash lock，并固定 Python 基础镜像与
+  九个外部 Compose image digest。远端运行/required check、integration、安全扫描、APT、
+  SBOM 与 clean build 仍 OPEN。详见
+  [`task/fs_021_ci_quality_gate_sow_2026_08_25.md`](task/fs_021_ci_quality_gate_sow_2026_08_25.md)、
+  [`task/fs_022_reproducible_dependencies_sow_2026_08_25.md`](task/fs_022_reproducible_dependencies_sow_2026_08_25.md)
+  和 [`../audit/full_system_2026_08_24/40-fs-022-reproducible-dependencies.md`](../audit/full_system_2026_08_24/40-fs-022-reproducible-dependencies.md)。
+- 2026-08-25 Phase 3U 已把主交易和 RDP 相关 SQLAlchemy pool 上限收敛到单一真源：
+  四进程声明 topology ceiling=150、Compose 普通容量=197、名义余量=47；AST verifier
+  归类当前 13 个 `create_engine` 调用并接入 CI。该结果不是目标负载或全局 runtime cap；
+  transient/CLI/迁移/恢复/admin、故障重连、告警和联合内存仍 OPEN。详见
+  [`task/fs_008_database_connection_budget_sow_2026_08_25.md`](task/fs_008_database_connection_budget_sow_2026_08_25.md)
+  和 [`../audit/full_system_2026_08_24/41-fs-008-database-connection-budget.md`](../audit/full_system_2026_08_24/41-fs-008-database-connection-budget.md)。
+- 2026-08-25 Phase 3V 已把 Research Factory real-data v2 的 candidate selection 与 test
+  隔离：train/valid 分段计算并要求双门通过，valid 是 development benchmark；外部
+  execution summary 也必须精确绑定 valid 窗口；test 只参与输入质量/来源一致性检查与精确
+  内容 seal，不能直接或经全窗口执行指标进入绩效 selection gate。新 recommendation 明示 holdout 尚未
+  评估。最终 OOS、一次性访问账本、walk-forward、多重检验、历史 v1 artifact 审计和独立
+  复核仍 OPEN。详见
+  [`task/fs_004_research_selection_holdout_sow_2026_08_25.md`](task/fs_004_research_selection_holdout_sow_2026_08_25.md)
+  和 [`../audit/full_system_2026_08_24/42-fs-004-research-selection-holdout.md`](../audit/full_system_2026_08_24/42-fs-004-research-selection-holdout.md)。
+- 2026-08-25 Phase 3W 完成起始基线以来全量候选变更复审，补齐登录/Kill Switch/
+  回测成交的非有限值边界、本地 monolith 入口、CI warning filter 和 SQLite 测试资源释放，
+  并删除当前 Compose 注释中的手工运维误导。Windows 严格全量单测为
+  `4423 passed, 30 skipped, 94 subtests passed`；WSL2 集成和模拟栈运行事实仍须现场验证。
+  详见 [`../audit/full_system_2026_08_24/43-phase3w-post-audit-full-change-review.md`](../audit/full_system_2026_08_24/43-phase3w-post-audit-full-change-review.md)。
 
 ## 8. 易漂移事实与代码真源
 
@@ -134,7 +248,7 @@
 | 应用进程与容器 | `apps/`、`deploy/wsl2-dev/docker-compose*.yml` | service/overlay 变化 |
 | 部署与停机 | `scripts/deploy.sh`、`scripts/ops/safe_shutdown.sh` | 阶段、profile、health gate 变化 |
 | JetStream 数量、subject、容量、保留 | `aats/bus/nats_bus.py`、`deploy/wsl2-dev/nats/nats-server.conf` | `StreamSpec` 或 server budget 变化 |
-| RDP 表和 schema | `aats/data_platform/rdp_models.py`、migrations | ORM/migration 变化 |
+| RDP 表和 schema | `aats/data_platform/rdp_models.py`、`aats/data_platform/migrations/_batch_b.py`、`scripts/apply_schema_migrations.py` | ORM/migration/ledger 变化 |
 | RDP workflow、schedule、timeout、enqueue block | `configs/rdp_workflows/*.json`、`rdp_task_db.py`、`workflow_scheduler.py`、`rdp_task_daemon.py` | 任一集合/调度语义变化 |
 | HTTP API 与认证 | FastAPI route registry、`aats/api/auth*.py` | route/dependency/middleware 变化 |
 | 真实账户与运行健康 | 当前受控 UI/API、只读数据库和标准 health checks | 每次操作都重新读取，禁止缓存到长期文档 |

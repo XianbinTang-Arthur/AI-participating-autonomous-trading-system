@@ -2,7 +2,7 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](docs/project_positioning.md)。
 
-> 文档状态：现行约束。最后核对：2026-08-23（代码基线 `be9179e`）。运行架构、部署、安全纪律或文档治理变化时必须同步复核。
+> 文档状态：现行约束。最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`，包含 Phase 3A–3W 整改提交候选）。运行架构、部署、安全纪律或文档治理变化时必须同步复核。
 
 > 本文件是仓库级操作手册。所有在本仓库工作的编码代理必须遵守此文档约束。
 
@@ -28,13 +28,13 @@ AATS 的首要意义是通过自动化交易持续追求长期稳定盈利，为
 
 基础设施容器：aats-postgres, aats-redis, aats-redis-exporter, aats-nats, aats-jaeger, aats-grafana, aats-prometheus, aats-loki, aats-promtail
 
-“四进程”只表示主交易 role 数量。标准 `derivatives-live` 部署共有 7 个应用容器；`deploy.sh` 当前自动健康门只覆盖其中 gateway/market/decision/execution/rdp-daemon，两个采集器仍需单独核查。
+“四进程”只表示主交易 role 数量。`derivatives-live` Compose 拓扑共有 7 个应用容器；Phase 3F 已把两个 collector 加入该 profile 的 future required list，但标准部署入口当前硬禁用所有 live profile，不能据此推断它们已运行或健康。
 
 ## 关键路径和文件
 
 ### 部署
 
-- **部署脚本**: `scripts/deploy.sh` — 7 个编号阶段（提交→同步→停止→构建→清理→基础设施→应用）之后执行健康检查和部署报告
+- **部署脚本**: `scripts/deploy.sh` — profile 必填；8 个编号阶段（提交→同步→先构建→停止→清理→基础设施→显式 schema migration/校验→应用）之后执行健康检查、写入模拟证据包并输出非生产报告
 - **WSL2 同步**: `scripts/sync_to_wsl2.sh` — 必须用这个同步代码，**绝对不要用 rsync**
 - **Compose 文件目录**: `deploy/wsl2-dev/`
 - **主 Dockerfile**: `deploy/wsl2-dev/Dockerfile`
@@ -45,6 +45,10 @@ AATS 的首要意义是通过自动化交易持续追求长期稳定盈利，为
 - **WSL2 环境变量**: `.env.wsl2`（Postgres 密码等基础设施凭证）
 - **配置模板**: `configs/templates/`（仅供参考，不是运行时配置）
 - **运行时参数**: managed profile 代码基线 + `configs/strategy_profiles/<profile>.yaml` + 允许的 `.env.*` override；RDP active parameters 最后从 Postgres `governance.active_parameter_sets` 注入
+- **Managed 配置真实性**: Phase 3P 后 strategy YAML 必须是 mapping，runtime defaults 与 YAML 的每个 key 都必须属于 `AATSSettings.model_fields`，未知 key 在 runtime 构建前失败；`strategy_profile_auto_rollback_enabled` 从未有消费者且已删除，不能写成已实现能力
+- **Profile recommendation 边界**: `approve/release` 只推进研究治理状态；Phase 3M 后 `profile-recommendations/{id}/apply` 与 `/rollback` 均在授权检查后无写入 `501`。在 execution-owned generation/worker readback 完成前，不得把它们用于运行参数变更
+- **回测成交证据边界**: Phase 3N 后只接受带 `next_bar_event_v2` 与 `ohlcv_participation_cap_v2` 的新回测作为当前 bar-proxy 证据；三类订单均受 volume/cap 约束，artifact 必须声明无 L2 depth、spread/queue、impact/latency 校准，不能外推 live 容量或收益
+- **Dashboard 无障碍边界**: Phase 3O 后详情抽屉必须保持原生 modal dialog、初始/返回焦点、Escape/backdrop 统一关闭和 reduced-motion CSS/JS 契约；静态/单元通过不能替代目标浏览器、键盘、NVDA/VoiceOver 与 axe 实测
 
 ### 数据库
 
@@ -54,29 +58,34 @@ AATS 的首要意义是通过自动化交易持续追求长期稳定盈利，为
 - **衍生品实盘数据库**: `aats_live_derivatives`
 - **RDP 数据库**: `RDP_DATABASE_URL`；容器未显式设置时可复用 `AATS_ACTIVE_PARAMETER_DB_URL`。绝不读取或展示凭证文件内容
 - **数据库命名规律**: `aats_live_derivatives`（不是 `aats_derivatives_live`）
+- **连接预算**: `aats/storage/connection_budget.py` 是 SQLAlchemy pool ceiling 的单一真源；四进程声明拓扑上限 150，Compose 普通连接容量 197、名义余量 47。该算术不是负载或运行状态证明；目标压测、瞬时 engine、迁移/恢复/admin 和联合内存预算仍开放。
 
 ### API
 
-- **Gateway 端口**: 8011（衍生品实盘），查看 `AATS_API_PORT` 环境变量
+- **Gateway 端口**: 当前本地衍生品模拟模板为 8001；future 衍生品实盘模板 8011 仍保留但启动禁用，查看 `AATS_API_PORT`
+- **Gateway 宿主绑定**: WSL2 Compose 固定 `127.0.0.1`；本地 `start_api.py` 只接受模拟 profile 和 loopback host
+- **Gateway 浏览器边界**: 常规、HTTPException/认证失败与 Host 400 响应由最外层 user middleware 覆盖固定 CSP/frame/nosniff/referrer/permissions/COOP/CORP 安全头；Host 仅允许 `127.0.0.1`/`localhost`/`::1`/`testserver`；HSTS 仅在实际 HTTPS scope 下输出；框架最外层未捕获 500 仍须故障注入
 - **认证方式**: Session-based（需先登录获取 cookie）
-- **健康检查**: `GET /healthz`
+- **登录资源边界**: 同步 DB/PBKDF2/审计完整移入有界 worker；每 Gateway 进程默认并发 4、排队 1 秒，60 秒窗口默认 global/client/identity 为 60/20/10；client 只取 ASGI socket，不信任 `X-Forwarded-For`。这是每进程代码保护，分布式限流和目标负载仍 OPEN
+- **健康检查**: `GET /healthz`；关键 task 结束或纳管固定周期 task 成功进度超时会 503，但事件驱动 task/跨进程交易 readiness 仍须另验
 - **系统恢复**: `POST /system/resume`
 
 ## 常用部署命令
 
 ```bash
-# 标准部署（已提交代码后）
-bash scripts/deploy.sh --skip-commit
+# 标准本地模拟部署（已提交代码后）
+bash scripts/deploy.sh --profile derivatives --skip-commit
 
 # 带自动提交的部署
-bash scripts/deploy.sh --commit "修复描述"
+bash scripts/deploy.sh --profile derivatives --commit "修复描述"
 
 # 无缓存重建
-bash scripts/deploy.sh --no-cache --skip-commit
+bash scripts/deploy.sh --profile derivatives --no-cache --skip-commit
 
-# 指定 profile
-bash scripts/deploy.sh --profile derivatives-live --skip-commit
+# 当前真实资金 NO-GO：所有 live profile 在同步/构建/停服/迁移前非零退出，--yes 不能绕过
 ```
+
+标准模拟 deploy 会在 sync 后自动生成非秘密 runtime readiness generation，注入四主进程并记入模拟证据包。不要把该值写进 `.env.*` 或手工复用到新部署；直接 Compose 缺代次时失败是预期安全语义。代码已收紧 peer barrier，但真 Redis/NATS/Compose 启动重启矩阵仍未验证。
 
 ## 开发环境
 

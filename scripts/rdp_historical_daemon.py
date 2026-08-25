@@ -349,7 +349,7 @@ def run_historical_daemon(
     推荐操作员拖完 ZIP 后手动执行 --once 一次, 或 cron 低频兜底。
     """
     from aats.data_platform.config import get_settings
-    from aats.data_platform.db import run_migrations
+    from aats.data_platform.db import validate_rdp_schema
 
     if not once:
         log.warning("=" * 70)
@@ -362,7 +362,7 @@ def run_historical_daemon(
         log.warning("=" * 70)
 
     settings = get_settings()
-    run_migrations(settings)
+    validate_rdp_schema(settings)
 
     incoming = Path(settings.historical_incoming_dir)
     completed = Path(settings.historical_completed_dir)

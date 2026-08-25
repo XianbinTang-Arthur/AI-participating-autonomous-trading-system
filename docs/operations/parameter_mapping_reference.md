@@ -1,155 +1,158 @@
 # RDP 参数映射参考
 
-> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+> 项目定位声明：本文件服从 [AATS 项目定位声明](../project_positioning.md)。
+> 文档状态：现行参考
+> 最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；包含 Phase 3A–3W 整改提交候选）
+> 静态真源：`aats/bootstrap/active_parameters.py`、`aats/data_platform/replay/core/replay_context.py`、`aats/bootstrap/settings.py`
+> 运行时边界：本文不证明当前数据库 active set、目标进程有效 settings、账户、订单、仓位或 trading-ready 状态
 
+## 1. 用途与裁决规则
 
-## 概述
+本文说明 RDP/replay 参数如何进入生产 `AATSSettings`。唯一可执行映射定义是
+`FAMILY_PARAMETER_MAPPINGS`；本文是人工可读参考，发生冲突时以当前代码和测试为准。
 
-本文档说明 RDP 研究层参数名与主系统 `AATSSettings` 字段名之间的映射关系。
-映射定义在 `aats/bootstrap/active_parameters.py` 的 `FAMILY_PARAMETER_MAPPINGS` 中。
+生产启动从 PostgreSQL `governance.active_parameter_sets` 读取 active sets，按 family 选择
+映射并生成 settings overrides。数据库不可用或数据无效时的具体降级/失败语义必须以
+`active_parameters.py` 和启动日志为准，不能从本文推断某个参数已经在运行进程生效。
 
-**修改映射时，必须同步更新本文档。**
+## 2. 映射分类与失败语义
 
-## 映射类型
+| 分类 | 含义 | 当前行为 |
+|---|---|---|
+| required + mapped | 研究参数与生产字段存在明确映射 | 写入对应 settings override |
+| required + unmapped | 该 family 必须接入生产但映射缺失 | 记录 ERROR，整个 combo 失败关闭并跳过 |
+| non-required + mapped | 对该 family 有有效生产落点，但不是完整研究闭环硬要求 | 写入对应 settings override |
+| replay-only | 只用于回放、成本模型或目标配置快照 | 不注入生产 settings，不报映射缺失 |
+| 其他 unmapped | 研究层存在、生产无等价消费点 | 记录 INFO 后丢弃，不伪装成已生效 |
 
-| 标记 | 含义 | 风险等级 |
-|------|------|---------|
-| `[DIRECT]` | 同义映射，RDP 参数与生产字段描述同一概念，单位一致 | 低 |
-| `[APPROXIMATE]` | 近似映射，语义接近但不完全等同，需要换算关系 | 中 |
-| `[PLACEHOLDER]` | 第一版占位，语义对接尚未确认，需后续验证 | 高 |
+当前 required 集合：
 
-## 未映射的 RDP 内部参数
+- `independent`：下表全部 21 个参数；
+- `directional`：只有 `min_hold_seconds`；
+- 其他 family：当前未纳入该 RDP 自动发布路径。
 
-以下参数仅在 RDP replay 引擎内部使用，**不注入生产配置**：
+## 3. Independent family：21 个 required 映射
 
-| RDP 参数 | 原因 |
-|----------|------|
-| `signal_edge_scale_bps` | score → bps 缩放系数，生产端无等价概念。原映射到 `de_risk_net_edge_bps` 是语义错误（scale=15 → de_risk=15bps，远超正常 net_edge 2-3bps） |
-| `score_stability_threshold` | replay 内部稳定性容忍度（无量纲）。原映射到 `min_score_drawdown_bps` 是语义错误（RDP 值 2.0 → 生产 2.0bps，正常信号波动 3-5bps 就会被 block） |
+### 3.1 信号、稳定性与资格门槛
 
-## Independent Family 映射
+| RDP 参数 | 生产字段 | 单位/语义 |
+|---|---|---|
+| `signal_edge_scale_bps` | `strategy_signal_edge_scale_bps` | score 到 bps 的缩放；生产 score-based edge 路径 |
+| `score_stability_threshold` | `strategy_hedge_independent_min_score_stability_bps` | score 回撤容忍，bps；生产端可被更专用的 drawdown 字段覆盖 |
+| `min_confirm_ticks` | `strategy_hedge_independent_min_confirm_ticks` | 信号确认 tick 数 |
+| `min_safe_net_edge_bps` | `strategy_hedge_independent_min_safe_net_edge_bps` | 最小安全净边际，bps |
 
-共 18 个映射，分为 6 个主题组。
+`signal_edge_scale_bps` 过去曾错误映射到 de-risk threshold；当前已经映射到专用的
+`strategy_signal_edge_scale_bps`。`score_stability_threshold` 当前单位已与生产的 `×100`
+评分差异语义对齐，不再属于“未映射参数”。
 
-### 原有映射（Phase 2）
+### 3.2 进出场阈值
 
-| RDP 参数 | 生产字段 | 类型 | 单位 | 说明 |
-|----------|---------|------|------|------|
-| `min_confirm_ticks` | `strategy_hedge_independent_min_confirm_ticks` | DIRECT | count | 信号确认所需最少 tick 数 |
-| `min_safe_net_edge_bps` | `strategy_hedge_independent_min_safe_net_edge_bps` | DIRECT | bps | 交易执行的净边际安全线 |
+| RDP 参数 | 生产字段 | 单位/语义 |
+|---|---|---|
+| `entry_threshold` | `strategy_hedge_independent_long_entry_threshold` | long 开仓评分，ratio |
+| `close_threshold` | `strategy_hedge_independent_long_close_threshold` | long 平仓评分，ratio |
+| `scale_in_threshold` | `strategy_hedge_independent_long_scale_in_threshold` | long 加仓评分；replay 当前不模拟 scale-in |
+| `short_entry_threshold` | `strategy_hedge_independent_short_entry_threshold` | short 开仓评分，ratio |
+| `short_close_threshold` | `strategy_hedge_independent_short_close_threshold` | short 平仓评分，ratio |
 
-### 进出场阈值
+约束：`close_threshold <= entry_threshold`；short 两个阈值均非空时，
+`short_close_threshold <= short_entry_threshold`。映射存在不等于 replay 已验证 scale-in。
 
-| RDP 参数 | 生产字段 | 类型 | 单位 | 说明 |
-|----------|---------|------|------|------|
-| `entry_threshold` | `strategy_hedge_independent_long_entry_threshold` | DIRECT | ratio 0~1 | 开仓评分阈值（long） |
-| `close_threshold` | `strategy_hedge_independent_long_close_threshold` | DIRECT | ratio 0~1 | 平仓评分阈值（long） |
-| `scale_in_threshold` | `strategy_hedge_independent_long_scale_in_threshold` | DIRECT | ratio 0~1 | 加仓评分阈值（long）。⚠️ **REPLAY 未模拟**：replay 无 scale-in 逻辑 |
-| `short_entry_threshold` | `strategy_hedge_independent_short_entry_threshold` | DIRECT | ratio 0~1 | 开仓评分阈值（short，非对称） |
-| `short_close_threshold` | `strategy_hedge_independent_short_close_threshold` | DIRECT | ratio 0~1 | 平仓评分阈值（short，非对称） |
+### 3.3 持仓生命周期
 
-**约束**: `close_threshold <= entry_threshold`，`short_close_threshold <= short_entry_threshold`
+| RDP 参数 | 生产字段 | 单位/语义 |
+|---|---|---|
+| `min_hold_seconds` | `strategy_hedge_independent_long_min_hold_seconds` | long 最小持仓秒数 |
+| `rebalance_cooldown_seconds` | `strategy_hedge_independent_rebalance_cooldown_seconds` | 平仓后冷却秒数 |
+| `max_thesis_age_seconds` | `strategy_hedge_independent_max_thesis_age_seconds` | thesis 最大存活秒数 |
 
-### 持仓时间管理
+`min_hold_seconds` 当前只映射 long 专属字段；不能据此声称 short 使用完全相同的生产
+参数。约束：`min_hold_seconds <= max_thesis_age_seconds`。
 
-| RDP 参数 | 生产字段 | 类型 | 单位 | 说明 |
-|----------|---------|------|------|------|
-| `min_hold_seconds` | `strategy_hedge_independent_long_min_hold_seconds` | DIRECT | seconds | 最小持仓秒数。⚠️ 仅映射 long 方向 |
-| `rebalance_cooldown_seconds` | `strategy_hedge_independent_rebalance_cooldown_seconds` | DIRECT | seconds | 平仓后冷却秒数 |
-| `max_thesis_age_seconds` | `strategy_hedge_independent_max_thesis_age_seconds` | DIRECT | seconds | thesis 最长存活秒数 |
+### 3.4 风险阈值
 
-### 风险管理阈值
+| RDP 参数 | 生产字段 | 单位/语义 |
+|---|---|---|
+| `de_risk_net_edge_bps` | `strategy_hedge_independent_de_risk_net_edge_bps` | 降风险阈值，bps |
+| `failed_thesis_net_edge_bps` | `strategy_hedge_independent_failed_thesis_net_edge_bps` | thesis 失效阈值，bps |
+| `catastrophic_failed_thesis_buffer_bps` | `strategy_hedge_independent_catastrophic_failed_thesis_buffer_bps` | 灾难性失效额外缓冲，bps |
 
-| RDP 参数 | 生产字段 | 类型 | 单位 | 说明 |
-|----------|---------|------|------|------|
-| `de_risk_net_edge_bps` | `strategy_hedge_independent_de_risk_net_edge_bps` | DIRECT | bps | 净边际变薄时触发降风险 |
-| `failed_thesis_net_edge_bps` | `strategy_hedge_independent_failed_thesis_net_edge_bps` | DIRECT | bps | 净边际低于此值 thesis 失效退出 |
+约束：`failed_thesis_net_edge_bps <= de_risk_net_edge_bps`；灾难性缓冲不得为负。
 
-**约束**: `failed_thesis_net_edge_bps <= de_risk_net_edge_bps`
+### 3.5 成本、评分质量与执行
 
-### 成本缓冲
+| RDP 参数 | 生产字段 | 单位/语义 |
+|---|---|---|
+| `expected_slippage_buffer_bps` | `strategy_hedge_independent_expected_slippage_buffer_bps` | 开仓滑点缓冲，bps |
+| `expected_execution_buffer_bps` | `strategy_hedge_independent_expected_execution_buffer_bps` | 执行缓冲，bps |
+| `max_acceptable_cost_bps` | `strategy_hedge_independent_max_acceptable_cost_bps` | 最大允许单边成本，bps |
+| `min_score_drawdown_bps` | `strategy_hedge_independent_min_score_drawdown_bps` | 评分回撤阈值，bps |
+| `min_liquidity_quality` | `strategy_hedge_independent_min_liquidity_quality` | 流动性质量，ratio；replay 的简化输入不等价于真实盘口 |
+| `limit_offset_bps_entry` | `strategy_hedge_independent_limit_offset_bps_entry` | 开仓限价偏移，bps；replay 当前不模拟订单簿 offset 匹配 |
 
-| RDP 参数 | 生产字段 | 类型 | 单位 | 说明 |
-|----------|---------|------|------|------|
-| `expected_slippage_buffer_bps` | `strategy_hedge_independent_expected_slippage_buffer_bps` | DIRECT | bps | 开仓预期滑点缓冲 |
-| `expected_execution_buffer_bps` | `strategy_hedge_independent_expected_execution_buffer_bps` | DIRECT | bps | 开仓执行缓冲 |
-| `max_acceptable_cost_bps` | `strategy_hedge_independent_max_acceptable_cost_bps` | DIRECT | bps | 最大允许单边成本 |
+safe-edge 约束由 `ReplayParameterOverrides.__post_init__()` 执行；具体公式应直接核对
+该函数。成本或 limit 参数被传入生产不代表 OHLCV 回测已经证明真实 queue、spread、
+impact 或 latency。
 
-### 评分质量
+## 4. Directional family：3 个实际映射、1 个 required
 
-| RDP 参数 | 生产字段 | 类型 | 单位 | 说明 |
-|----------|---------|------|------|------|
-| `min_score_drawdown_bps` | `strategy_hedge_independent_min_score_drawdown_bps` | DIRECT | bps | 评分最大回撤容忍度 |
-| `min_liquidity_quality` | `strategy_hedge_independent_min_liquidity_quality` | APPROXIMATE | ratio 0~1 | 最低流动性质量分。⚠️ replay 默认 liq=1.0 |
+| RDP 参数 | 生产字段 | 分类 | 单位/语义 |
+|---|---|---|---|
+| `min_hold_seconds` | `strategy_min_hold_seconds` | required/direct | 全局最小持仓秒数 |
+| `taker_fee_bps` | `trade_cost_derivatives_taker_fee_bps` | mapped/direct | 衍生品 taker 费，bps |
+| `slippage_bps` | `trade_cost_derivatives_slippage_bps` | mapped/direct | 衍生品滑点，bps |
 
-### 执行策略
+`directional_trend_weight` **没有**映射到 `strategy_entry_alpha_min`。两者分别是趋势权重
+与入场 alpha 门槛，历史 PLACEHOLDER 已因语义不等价撤除。directional replay 使用的
+entry/close、trend weight、return clamp 等参数当前没有对应的 directional 专属生产消费点，
+不得把 replay 最优值描述成已自动发布到生产。
 
-| RDP 参数 | 生产字段 | 类型 | 单位 | 说明 |
-|----------|---------|------|------|------|
-| `limit_offset_bps_entry` | `strategy_hedge_independent_limit_offset_bps_entry` | DIRECT | bps | 限价偏移。⚠️ **REPLAY 未模拟** |
+## 5. Replay-only 与目标配置快照
 
-## Directional Family 映射
+当前显式 replay-only 白名单如下：
 
-| RDP 参数 | 生产字段 | 类型 | 单位 | 说明 |
-|----------|---------|------|------|------|
-| `directional_trend_weight` | `strategy_entry_alpha_min` | PLACEHOLDER | 见下 | 趋势权重 → 入场 alpha 阈值 |
-| `taker_fee_bps` | `trade_cost_derivatives_taker_fee_bps` | DIRECT | bps | taker 手续费 |
-| `slippage_bps` | `trade_cost_derivatives_slippage_bps` | DIRECT | bps | 滑点估计 |
+| 参数 | 原因 |
+|---|---|
+| `cost_config` | replay 成本对象，不是一个生产 settings 字段 |
+| `taker_fee_bps`、`slippage_bps` | 可供 replay 使用；仅在 directional 映射表中有生产落点 |
+| `directional_trend_weight`、`directional_return_clamp_bps` | directional 回放模型内部参数 |
+| `strategy_short_bias_enabled` | FS-015 后的目标 profile 上下文快照；不是按 combo 调优的参数 |
 
-### directional_trend_weight 映射说明
+`strategy_short_bias_enabled` 与生产字段同名。independent replay 在它为 `false` 时于 score
+history 和 dominant-leg 选择前把 short score 固定为 `0.0`。它不进入 active-parameter
+映射，因为 active sets 按 family/timeframe 分片，而生产开关是全局能力开关；允许多个
+combo 自动写入会形成顺序相关覆盖。正式 replay 必须显式记录目标 profile 解析后的实际值。
 
-**RDP 端含义:** 方向性策略中趋势信号在综合评分中的权重 (0~1)。
+`noise_buffer_bps` 同样是 replay 参数，但当前不是 active-parameter 自动映射项；生产对应
+值来自 managed settings 的 `strategy_edge_noise_buffer_bps`。面向生产配置的研究必须记录
+两端取值，不能依赖未声明的默认值。
 
-**生产端含义:** `strategy_entry_alpha_min` 是入场信号的最小 alpha 阈值（数值越大越严格）。
+## 6. Replay 默认值边界
 
-**语义张力:**
-- RDP 端是「趋势信号的权重」（占比概念）
-- 生产端是「最低 alpha 要求」（门槛概念）
-- 这不是同一个概念
+`ReplayParameterOverrides` 当前默认值主要面向 derivatives independent replay：
 
-**为什么暂时这样映射:**
-第一版中，directional family 的研究主要关注趋势信号强度，`trend_weight` 越高意味着对趋势的依赖越强，间接要求更高的 alpha 才能入场。这是一种间接近似。
+| family | entry | close | scale-in |
+|---|---:|---:|---:|
+| independent | `0.30` | `0.15` | `0.40` |
+| directional（`for_family("directional")`） | `0.45` | `0.20` | `0.55` |
 
-**TODO:**
-1. 明确 `trend_weight` 和 `alpha_min` 的数学关系
-2. 考虑是否需要拆成两个独立参数
-3. 或者在 RDP 中直接输出 `entry_alpha_min` 参数
+默认值只用于兼容和实验起点，不证明当前数据库 active set 或目标 worker 的有效值。任何
+正式结论都应保存完整 `parameter_overrides`、dataset version、时间窗、代码 commit 和
+目标 profile 上下文。
 
-### directional 家族默认阈值说明
+## 7. 变更检查清单
 
-directional 适配器原始硬编码默认值与 independent **不同**：
-- directional: `entry_threshold=0.45`, `close_threshold=0.20`
-- independent: `entry_threshold=0.25`, `close_threshold=0.15`, `scale_in_threshold=0.25`
-  (2026-04-19 calibration + Round 3 下调；旧值 entry 0.40 / scale_in 0.40 已失效)
+修改映射或 replay 参数时至少确认：
 
-使用 `ReplayParameterOverrides.for_family("directional")` 获取正确默认值。
+- [ ] 参数单位、方向、范围和空值语义与生产消费点一致；
+- [ ] required 集合、映射表和 `_RDP_REPLAY_ONLY_PARAMS` 没有互相掩盖真实断链；
+- [ ] 全局生产开关没有被多个 family/timeframe combo 以不确定顺序覆盖；
+- [ ] `ReplayParameterOverrides.to_dict()/from_dict()` 可无损复现类型和值；
+- [ ] 未模拟的 scale-in、盘口、limit offset、真实流动性没有被写成已验证；
+- [ ] 本文、代码注释、相关测试和审计状态同步更新；
+- [ ] 运行 focused、active-parameter、replay/backtest、全量 unit 与 Ruff；
+- [ ] 目标环境有效值仍由受控运行时读回，不由静态文档推断。
 
-**⚠️ 运维操作员注意**：approve 任何关于 `entry_threshold` / `scale_in_threshold` /
-`composite_alpha` 的 RDP parameter_upgrade recommendation **前**，必须核对该
-recommendation 的 source_round 是否基于 2026-04-19 之后的 9-alpha baseline 分布。
-否则可能误覆盖当前 calibration 结果。详见
-`docs/calibration/baseline_weight_recalibration_2026_04_19.md` 与
-`docs/review/allocator_budget_zero_root_cause_2026_04_19.md`。
-
-## 安全检查清单
-
-在修改映射前，确认:
-
-- [ ] RDP 参数和生产字段的**单位**一致（bps, count, ratio 等）
-- [ ] RDP 参数和生产字段的**方向**一致（越大越好 vs 越小越好）
-- [ ] RDP 参数的**取值范围**在生产字段的合理区间内
-- [ ] 如果是 APPROXIMATE/PLACEHOLDER，有明确的换算公式或假设说明
-- [ ] 本文档已同步更新
-- [ ] `failed_thesis_net_edge_bps <= de_risk_net_edge_bps` 约束满足
-- [ ] `close_threshold <= entry_threshold` 约束满足
-- [ ] 标注为「REPLAY 未模拟」的参数不作为回测结论的依据
-
-## 新增映射步骤
-
-1. 在 `active_parameters.py` 的 `PARAMETER_MAPPING_*` dict 中添加新条目
-2. 添加注释说明映射类型（DIRECT/APPROXIMATE/PLACEHOLDER）和语义关系
-3. 在本文档对应 family 表格中添加行
-4. 如果是 APPROXIMATE/PLACEHOLDER，写清楚 TODO
-5. 如果参数有约束关系，在 `ReplayParameterOverrides.__post_init__()` 中添加校验
-6. 如果 replay 不模拟该参数，标注「REPLAY 未模拟」
-7. 在 dev 环境验证映射后的 settings 值合理
+FS-015 的设计边界与验收条件见
+[`fs_015_replay_short_bias_parity_sow_2026_08_25.md`](../task/fs_015_replay_short_bias_parity_sow_2026_08_25.md)。

@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import random as _random
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Coroutine, Literal
 
 import yaml
 
@@ -222,6 +224,7 @@ from aats.storage.session import (
     create_database_runtime,
     create_schema,
     scoped_runtime_lock_key,
+    validate_current_migrations,
     validate_runtime_schema,
 )
 from aats.schemas.system import RecoveryStatus
@@ -412,6 +415,30 @@ class ObserverSubscriptionSpec:
     handler: Any
 
 
+@dataclass(frozen=True, slots=True)
+class CriticalBackgroundTaskFailure:
+    """关键长期 task 非预期结束或成功进度超时的安全监督快照。"""
+
+    task_name: str
+    failure_kind: Literal[
+        "exception",
+        "cancelled",
+        "unexpected_completion",
+        "stalled",
+    ]
+    error_type: str | None = None
+    stalled_seconds: float | None = None
+    timeout_seconds: float | None = None
+
+
+@dataclass(slots=True)
+class CriticalBackgroundTaskProgress:
+    """固定周期关键 task 的进程内成功进度 deadline。"""
+
+    timeout_seconds: float
+    last_success_monotonic: float
+
+
 @dataclass(slots=True)
 class ApplicationRuntime:
     started_at: Any
@@ -518,6 +545,10 @@ class ApplicationRuntime:
     replay_validation_history: list[dict[str, Any]] = field(default_factory=list)
     database_runtime: DatabaseRuntime | None = None
     background_tasks: list[asyncio.Task[Any]] = field(default_factory=list)
+    critical_background_tasks: dict[str, asyncio.Task[Any]] = field(default_factory=dict)
+    critical_background_task_progress: dict[
+        str, CriticalBackgroundTaskProgress
+    ] = field(default_factory=dict)
     background_failure_messages: dict[str, str] = field(default_factory=dict)
     execution_outbox_publisher: PostgresExecutionOutboxPublisher | None = None
     funding_fee_repo: FundingFeeRepository | None = None
@@ -558,7 +589,215 @@ class ApplicationRuntime:
     # 构造，否则 None). start_background_tasks 按 None 跳过启动.
     long_short_poller: LongShortRatioPoller | None = None
 
+    def register_background_task(
+        self,
+        task: asyncio.Task[Any],
+        *,
+        name: str | None = None,
+        critical: bool = False,
+        owned_by_runtime: bool = True,
+        progress_timeout_seconds: float | None = None,
+    ) -> asyncio.Task[Any]:
+        """登记 task 的所有权与 criticality，拒绝同名静默覆盖。"""
+        timeout_seconds = ApplicationRuntime._validated_critical_progress_timeout(
+            critical=critical,
+            progress_timeout_seconds=progress_timeout_seconds,
+        )
+        if not critical:
+            if owned_by_runtime and task not in self.background_tasks:
+                self.background_tasks.append(task)
+            return task
+
+        task_name = str(name or task.get_name()).strip()
+        if not task_name:
+            raise ValueError("critical background task requires a non-empty name")
+        registry = getattr(self, "critical_background_tasks", None)
+        if registry is None:
+            registry = {}
+            self.critical_background_tasks = registry
+        existing = registry.get(task_name)
+        if existing is not None and existing is not task:
+            raise RuntimeError(
+                f"critical background task name already registered: {task_name}"
+            )
+        if timeout_seconds is not None:
+            progress_registry = getattr(
+                self,
+                "critical_background_task_progress",
+                None,
+            )
+            if progress_registry is None:
+                progress_registry = {}
+                self.critical_background_task_progress = progress_registry
+            existing_progress = progress_registry.get(task_name)
+            if (
+                existing_progress is not None
+                and existing_progress.timeout_seconds != timeout_seconds
+            ):
+                raise RuntimeError(
+                    "critical background task progress timeout already registered: "
+                    f"{task_name}"
+                )
+            if existing_progress is None:
+                progress_registry[task_name] = CriticalBackgroundTaskProgress(
+                    timeout_seconds=timeout_seconds,
+                    last_success_monotonic=time.monotonic(),
+                )
+        if owned_by_runtime and task not in self.background_tasks:
+            self.background_tasks.append(task)
+        registry[task_name] = task
+        return task
+
+    def create_background_task(
+        self,
+        coroutine: Coroutine[Any, Any, Any],
+        *,
+        name: str,
+        critical: bool = False,
+        progress_timeout_seconds: float | None = None,
+    ) -> asyncio.Task[Any]:
+        ApplicationRuntime._validated_critical_progress_timeout(
+            critical=critical,
+            progress_timeout_seconds=progress_timeout_seconds,
+        )
+        task = asyncio.create_task(coroutine, name=name)
+        return self.register_background_task(
+            task,
+            name=name,
+            critical=critical,
+            owned_by_runtime=True,
+            progress_timeout_seconds=progress_timeout_seconds,
+        )
+
+    @staticmethod
+    def _validated_critical_progress_timeout(
+        *,
+        critical: bool,
+        progress_timeout_seconds: float | None,
+    ) -> float | None:
+        if progress_timeout_seconds is None:
+            return None
+        if not critical:
+            raise ValueError(
+                "non-critical background task cannot declare a progress timeout"
+            )
+        timeout_seconds = float(progress_timeout_seconds)
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0.0:
+            raise ValueError(
+                "critical background task progress timeout must be finite and positive"
+            )
+        return timeout_seconds
+
+    def mark_critical_background_task_success(self, task_name: str) -> None:
+        """提交固定周期关键 task 的一次成功业务周期。"""
+
+        progress_registry = getattr(
+            self,
+            "critical_background_task_progress",
+            None,
+        ) or {}
+        progress = progress_registry.get(task_name)
+        if progress is None:
+            raise RuntimeError(
+                f"critical background task progress is not registered: {task_name}"
+            )
+        progress.last_success_monotonic = time.monotonic()
+
+    def critical_background_task_failure(
+        self,
+    ) -> CriticalBackgroundTaskFailure | None:
+        """返回首个已结束或成功进度超时的关键 task，不泄漏异常正文。"""
+        registry = getattr(self, "critical_background_tasks", None) or {}
+        progress_registry = getattr(
+            self,
+            "critical_background_task_progress",
+            None,
+        ) or {}
+        now = time.monotonic()
+        for task_name in sorted(registry):
+            task = registry[task_name]
+            if task.done():
+                if task.cancelled():
+                    return CriticalBackgroundTaskFailure(
+                        task_name=task_name,
+                        failure_kind="cancelled",
+                        error_type="CancelledError",
+                    )
+                exception = task.exception()
+                if exception is None:
+                    return CriticalBackgroundTaskFailure(
+                        task_name=task_name,
+                        failure_kind="unexpected_completion",
+                    )
+                return CriticalBackgroundTaskFailure(
+                    task_name=task_name,
+                    failure_kind="exception",
+                    error_type=type(exception).__name__,
+                )
+            progress = progress_registry.get(task_name)
+            if progress is None:
+                continue
+            stalled_seconds = max(
+                0.0,
+                now - progress.last_success_monotonic,
+            )
+            if stalled_seconds >= progress.timeout_seconds:
+                return CriticalBackgroundTaskFailure(
+                    task_name=task_name,
+                    failure_kind="stalled",
+                    stalled_seconds=round(stalled_seconds, 3),
+                    timeout_seconds=round(progress.timeout_seconds, 3),
+                )
+        return None
+
+    async def wait_for_critical_background_task_failure(
+        self,
+    ) -> CriticalBackgroundTaskFailure:
+        """阻塞到任一关键 task 结束或进度超时；不取消被观察 task。"""
+        while True:
+            failure = self.critical_background_task_failure()
+            if failure is not None:
+                return failure
+            registry = getattr(self, "critical_background_tasks", None) or {}
+            if not registry:
+                await asyncio.Future()
+            progress_registry = getattr(
+                self,
+                "critical_background_task_progress",
+                None,
+            ) or {}
+            now = time.monotonic()
+            deadline_waits = [
+                max(
+                    0.0,
+                    progress.last_success_monotonic
+                    + progress.timeout_seconds
+                    - now,
+                )
+                for task_name, progress in progress_registry.items()
+                if task_name in registry and not registry[task_name].done()
+            ]
+            await asyncio.wait(
+                tuple(registry.values()),
+                timeout=min(deadline_waits) if deadline_waits else None,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
     async def start_background_tasks(self) -> None:
+        # FS-002 Phase 3L：peer readiness 已完成后，先由 gateway/monolith
+        # 建立 generation-scoped 短时交易许可。execution 只在最终提交 fence
+        # 读取该许可，绝不能自行续租。任务内部在 TTL 上界到达时 raise，登记为
+        # service-owned critical task 复用 FS-006 进程失败监督。
+        trading_permission_task = (
+            await self.kill_switch.start_trading_permission_lease()
+        )
+        if trading_permission_task is not None:
+            self.register_background_task(
+                trading_permission_task,
+                critical=True,
+                owned_by_runtime=False,
+            )
+
         # Bug-1 时序平滑：在 market_gateway.start() 之前先用 OKX REST 拉一次
         # 历史 K 线灌入 FeatureCalculator 的 RollingCandleState。这样 market
         # 进程一开始推送 tick，feature calculator 就立即走"时序平滑"路径而不是
@@ -582,6 +821,18 @@ class ApplicationRuntime:
             "market", effective_process_role=self.process_role
         ):
             await self.market_gateway.start()
+            market_critical_tasks = getattr(
+                self.market_gateway,
+                "critical_background_tasks",
+                None,
+            )
+            if callable(market_critical_tasks):
+                for task in market_critical_tasks():
+                    self.register_background_task(
+                        task,
+                        critical=True,
+                        owned_by_runtime=False,
+                    )
 
         # P2.7 — Long-Short ratio poller 后台循环. 仅在 market / monolith 角色
         # 且 flag 开启时启动 (_build_market_slice 已保证 poller 非 None 等价于
@@ -606,43 +857,102 @@ class ApplicationRuntime:
         if self.environment_capabilities.account_state_source_kind == "exchange" and _slice_active(
             "execution", effective_process_role=self.process_role
         ):
-            self.background_tasks.append(
-                asyncio.create_task(self.account_service.run_private_ws_forever(), name="aats_okx_private_account_ws")
+            self.create_background_task(
+                self.account_service.run_private_ws_forever(),
+                name="aats_okx_private_account_ws",
+                critical=True,
             )
         # Stage 3 多进程切片化：reconciliation/order_manager 在 gateway/market/decision
         # role 下不存在，对应 background loop 必须按字段是否非 None 来决定是否启动。
         if self.reconciliation_service is not None:
-            self.background_tasks.append(
-                asyncio.create_task(self._refresh_reconciliation_loop(), name="aats_reconciliation_refresh")
+            reconciliation_interval_seconds = max(
+                0.5,
+                min(
+                    self.settings.reconciliation_stale_after_seconds / 2.0,
+                    60.0,
+                ),
+            )
+            self.create_background_task(
+                self._refresh_reconciliation_loop(),
+                name="aats_reconciliation_refresh",
+                critical=True,
+                progress_timeout_seconds=self._critical_progress_timeout_seconds(
+                    reconciliation_interval_seconds
+                ),
             )
         if self.environment_capabilities.account_state_source_kind == "exchange" and _slice_active(
             "execution", effective_process_role=self.process_role
         ):
-            self.background_tasks.append(
-                asyncio.create_task(self._refresh_account_loop(), name="aats_okx_account_refresh")
+            self.create_background_task(
+                self._refresh_account_loop(),
+                name="aats_okx_account_refresh",
+                critical=True,
+                progress_timeout_seconds=self._critical_progress_timeout_seconds(
+                    float(self.settings.okx_account_refresh_interval_seconds)
+                ),
             )
         if (
             self.environment_capabilities.execution_adapter_kind == "okx"
             and self.order_manager is not None
         ):
-            self.background_tasks.append(
-                asyncio.create_task(self._sync_execution_loop(), name="aats_okx_execution_sync")
+            self.create_background_task(
+                self._sync_execution_loop(),
+                name="aats_okx_execution_sync",
+                critical=True,
+                progress_timeout_seconds=self._critical_progress_timeout_seconds(
+                    float(self.settings.okx_execution_sync_interval_seconds)
+                ),
             )
         if self.execution_outbox_publisher is not None:
-            self.background_tasks.append(
-                asyncio.create_task(self._flush_execution_outbox_loop(), name="aats_execution_outbox_flush")
+            self.create_background_task(
+                self._flush_execution_outbox_loop(),
+                name="aats_execution_outbox_flush",
+                critical=True,
+                progress_timeout_seconds=self._critical_progress_timeout_seconds(
+                    30.0
+                ),
             )
         if self.execution_command_processor is not None:
-            self.background_tasks.append(
-                asyncio.create_task(self._process_execution_commands_loop(), name="aats_execution_command_flow")
+            self.create_background_task(
+                self._process_execution_commands_loop(),
+                name="aats_execution_command_flow",
+                critical=True,
+                progress_timeout_seconds=self._critical_progress_timeout_seconds(
+                    max(
+                        0.1,
+                        float(
+                            self.settings.execution_command_poll_interval_seconds
+                        ),
+                    )
+                ),
             )
         if self.phase1_shadow_monitor is not None:
-            self.background_tasks.append(
-                asyncio.create_task(self._monitor_phase1_shadow_loop(), name="aats_phase1_shadow_monitor")
+            self.create_background_task(
+                self._monitor_phase1_shadow_loop(),
+                name="aats_phase1_shadow_monitor",
+                critical=True,
+                progress_timeout_seconds=self._critical_progress_timeout_seconds(
+                    max(
+                        1.0,
+                        min(
+                            self.settings.reconciliation_stale_after_seconds
+                            / 4.0,
+                            5.0,
+                        ),
+                    )
+                ),
             )
         if self.trial_guard_service is not None:
-            self.background_tasks.append(
-                asyncio.create_task(self._monitor_trial_guard_loop(), name="aats_trial_guard_monitor")
+            self.create_background_task(
+                self._monitor_trial_guard_loop(),
+                name="aats_trial_guard_monitor",
+                critical=True,
+                progress_timeout_seconds=self._critical_progress_timeout_seconds(
+                    max(
+                        1.0,
+                        float(self.settings.trial_guard_poll_interval_seconds),
+                    )
+                ),
             )
         # 策略档位自动换档：与主决策链路解耦。strategy_profile_service 驻
         # decision/monolith role（_attach_strategy_profile_service 装配），
@@ -692,13 +1002,44 @@ class ApplicationRuntime:
             abort_hook_service = getattr(self, "abort_hook_service", None)
             if abort_hook_service is not None:
                 await abort_hook_service.start()
+                abort_hook_task = getattr(
+                    abort_hook_service,
+                    "background_task",
+                    None,
+                )
+                if abort_hook_task is not None:
+                    self.register_background_task(
+                        abort_hook_task,
+                        critical=True,
+                        owned_by_runtime=False,
+                    )
         except Exception as exc:
             log_event(
                 self.logger,
                 "abort_hook_service_start_failed",
-                level="warning",
+                level="error",
                 error_type=type(exc).__name__,
-                error=str(exc),
+            )
+            raise
+
+        decision_trigger = getattr(self, "decision_trigger", None)
+        decision_background_task = getattr(
+            decision_trigger,
+            "background_task",
+            None,
+        )
+        if decision_background_task is not None:
+            self.register_background_task(
+                decision_background_task,
+                critical=True,
+                owned_by_runtime=False,
+            )
+        guard_signal_task = getattr(self, "_guard_signal_publish_task", None)
+        if guard_signal_task is not None:
+            self.register_background_task(
+                guard_signal_task,
+                critical=True,
+                owned_by_runtime=True,
             )
         # G-1 修复：MetricsRegistry → OTel Counter 桥接。定期把进程内计数器
         # 同步到 PrometheusMetricReader，供 Prometheus server 采集、Grafana 查询。
@@ -808,6 +1149,18 @@ class ApplicationRuntime:
         )
 
     async def stop_background_tasks(self) -> None:
+        # 关停首先停止控制面续租并撤销短时许可；长期 kill-switch state 不变。
+        # 即使后续账户 WS 或其他服务退出耗时，execution 也不能继续依赖旧 lease
+        # 接受新的增险提交。kill_switch.stop() 稍后会幂等地再次确认清理。
+        try:
+            await self.kill_switch.stop_trading_permission_lease()
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "kill_switch_permission_lease_shutdown_failed",
+                level="warning",
+                error_type=type(exc).__name__,
+            )
         await self.account_service.stop_private_ws()
         # R2-B1 审查修复: poller.run_forever 被 background_tasks cancel 只能
         # 终止正在 await 的协程点；先显式调 stop() 触发 _stop_event，让 poller
@@ -835,7 +1188,25 @@ class ApplicationRuntime:
                 await task
             except asyncio.CancelledError:
                 pass
+            except Exception as exc:
+                log_event(
+                    self.logger,
+                    "background_task_shutdown_observed_failure",
+                    level="warning",
+                    task_name=task.get_name(),
+                    error_type=type(exc).__name__,
+                )
         self.background_tasks.clear()
+        critical_registry = getattr(self, "critical_background_tasks", None)
+        if critical_registry is not None:
+            critical_registry.clear()
+        critical_progress_registry = getattr(
+            self,
+            "critical_background_task_progress",
+            None,
+        )
+        if critical_progress_registry is not None:
+            critical_progress_registry.clear()
         # P2-1：关停审计批量写。必须在 bus.close 和 DB dispose 之前执行，
         # 确保所有缓冲中的 audit records 刷入 DB。getattr 兜底同下方各 cache。
         try:
@@ -1012,6 +1383,12 @@ class ApplicationRuntime:
             self.database_runtime.dispose()
 
     @staticmethod
+    def _critical_progress_timeout_seconds(interval_seconds: float) -> float:
+        """固定周期关键 task 的成功进度预算：至少 60 秒或三个周期。"""
+
+        return max(60.0, float(interval_seconds) * 3.0)
+
+    @staticmethod
     def _jittered_sleep_seconds(base_seconds: float, jitter_fraction: float = 0.10) -> float:
         """2026-04-21 A2 · 给固定间隔 loop 加随机 jitter 防 4 进程锁步打 DB。
 
@@ -1052,6 +1429,9 @@ class ApplicationRuntime:
                 await self._record_background_failure(subsystem="account_refresh", exc=exc)
             else:
                 await self._record_background_recovery(subsystem="account_refresh")
+                self.mark_critical_background_task_success(
+                    "aats_okx_account_refresh"
+                )
             await asyncio.sleep(
                 self._jittered_sleep_seconds(
                     float(self.settings.okx_account_refresh_interval_seconds)
@@ -1119,6 +1499,9 @@ class ApplicationRuntime:
                 await self._record_background_failure(subsystem="execution_sync", exc=exc)
             else:
                 await self._record_background_recovery(subsystem="execution_sync")
+                self.mark_critical_background_task_success(
+                    "aats_okx_execution_sync"
+                )
             await asyncio.sleep(
                 self._jittered_sleep_seconds(
                     float(self.settings.okx_execution_sync_interval_seconds)
@@ -1142,6 +1525,9 @@ class ApplicationRuntime:
                 await self._record_background_failure(subsystem="reconciliation_refresh", exc=exc)
             else:
                 await self._record_background_recovery(subsystem="reconciliation_refresh")
+                self.mark_critical_background_task_success(
+                    "aats_reconciliation_refresh"
+                )
             await asyncio.sleep(self._jittered_sleep_seconds(interval_seconds))
 
     async def _flush_execution_outbox_loop(self) -> None:
@@ -1151,6 +1537,9 @@ class ApplicationRuntime:
                 if self.execution_outbox_publisher is not None:
                     await self.execution_outbox_publisher.flush_pending()
                 await self._record_background_recovery(subsystem="execution_outbox_flush")
+                self.mark_critical_background_task_success(
+                    "aats_execution_outbox_flush"
+                )
                 backoff = 1.0
             except Exception as exc:
                 await self._record_background_failure(subsystem="execution_outbox_flush", exc=exc)
@@ -1167,6 +1556,9 @@ class ApplicationRuntime:
                 await self._record_background_failure(subsystem="execution_command_flow", exc=exc)
             else:
                 await self._record_background_recovery(subsystem="execution_command_flow")
+                self.mark_critical_background_task_success(
+                    "aats_execution_command_flow"
+                )
             await asyncio.sleep(self._jittered_sleep_seconds(interval_seconds))
 
     async def _monitor_phase1_shadow_loop(self) -> None:
@@ -1179,6 +1571,10 @@ class ApplicationRuntime:
                 await asyncio.to_thread(self._record_phase1_shadow_state)
             except Exception as exc:
                 await self._record_background_failure(subsystem="phase1_shadow_monitor", exc=exc)
+            else:
+                self.mark_critical_background_task_success(
+                    "aats_phase1_shadow_monitor"
+                )
             await asyncio.sleep(self._jittered_sleep_seconds(interval_seconds))
 
     async def _monitor_trial_guard_loop(self) -> None:
@@ -1191,6 +1587,9 @@ class ApplicationRuntime:
                 await self._record_background_failure(subsystem="trial_guard_monitor", exc=exc)
             else:
                 await self._record_background_recovery(subsystem="trial_guard_monitor")
+                self.mark_critical_background_task_success(
+                    "aats_trial_guard_monitor"
+                )
             await asyncio.sleep(self._jittered_sleep_seconds(interval_seconds))
 
     @staticmethod
@@ -1753,10 +2152,15 @@ def build_storage_backends(
     if not settings.database_url:
         raise ValueError("AATS_DATABASE_URL must be configured when storage_mode=postgres")
 
-    database_runtime = create_database_runtime(settings.database_url)
+    database_runtime = create_database_runtime(
+        settings.database_url,
+        process_role=process_role,
+    )
     if settings.database_auto_create_schema:
         create_schema(database_runtime)
-    apply_current_migrations(database_runtime)
+        apply_current_migrations(database_runtime)
+    else:
+        validate_current_migrations(database_runtime)
     validate_runtime_schema(database_runtime)
     if settings.database_single_runtime_guard_enabled:
         database_runtime.acquire_single_runtime_lock(
@@ -5226,6 +5630,9 @@ async def build_runtime(
         bus=slices.bus,
         process_role=effective_process_role or "monolith",
         logger=get_logger("aats.governance.kill_switch"),
+        fail_closed_on_authority_loss=(
+            slices.mode_controller.environment_capabilities.exchange_submission_enabled
+        ),
     )
     log_event(
         get_logger("aats.bootstrap"),
@@ -5768,6 +6175,17 @@ async def build_runtime(
                 auth_source=payload.get("auth_source", "anonymous"),
             )
 
+        async def _handle_halt(payload: dict[str, Any]) -> dict[str, Any]:
+            service = OperatorQueryService(runtime)
+            return await service.halt(
+                reason=payload.get("reason", "manual_halt"),
+                generation=payload.get("generation"),
+                set_at_ts=payload.get("set_at_ts"),
+                actor_role=payload.get("actor_role", "anonymous"),
+                actor_identity=payload.get("actor_identity"),
+                auth_source=payload.get("auth_source", "anonymous"),
+            )
+
         async def _handle_resume(payload: dict[str, Any]) -> dict[str, Any]:
             service = OperatorQueryService(runtime)
             return await service.resume(
@@ -5852,6 +6270,7 @@ async def build_runtime(
             process_role=PROCESS_ROLE_EXECUTION,
             logger=runtime.logger,
             command_handlers={
+                "halt": _handle_halt,
                 "rebaseline": _handle_rebaseline,
                 "resume": _handle_resume,
                 "validate_reconciliation": _handle_validate_reconciliation,
@@ -6064,7 +6483,12 @@ async def build_runtime(
             _guard_signal_publish_loop(),
             name="aats_guard_signal_publish",
         )
-        runtime.background_tasks.append(_publish_task)
+        runtime.register_background_task(
+            _publish_task,
+            name="aats_guard_signal_publish",
+            critical=True,
+            owned_by_runtime=True,
+        )
         runtime._guard_signal_publish_task = _publish_task
 
     elif effective_process_role == PROCESS_ROLE_DECISION and runtime.risk_engine is not None:

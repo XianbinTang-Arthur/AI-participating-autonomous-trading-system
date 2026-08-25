@@ -109,7 +109,6 @@ const nodes = {
   rdpContent: document.getElementById("rdpContent"),
   adminContent: document.getElementById("adminContent"),
   detailDrawer: document.getElementById("detailDrawer"),
-  drawerBackdrop: document.getElementById("drawerBackdrop"),
   closeDrawerButton: document.getElementById("closeDrawerButton"),
   drawerEyebrow: document.getElementById("drawerEyebrow"),
   drawerTitle: document.getElementById("drawerTitle"),
@@ -134,6 +133,7 @@ const {
 } = navigationState;
 
 let refreshController = null;
+let drawerReturnFocusElement = null;
 const shellRenderer = createDashboardShellRenderer({
   state,
   nodes,
@@ -314,7 +314,13 @@ function bindEvents() {
     }
   });
   nodes.closeDrawerButton?.addEventListener("click", closeDrawer);
-  nodes.drawerBackdrop?.addEventListener("click", closeDrawer);
+  nodes.detailDrawer?.addEventListener("cancel", (event) => {
+    // 原生 Escape 默认会直接关闭 dialog。阻止默认行为后统一走 closeDrawer，
+    // 才能同时清理视觉状态并把焦点返回到打开详情的按钮。
+    event.preventDefault();
+    closeDrawer();
+  });
+  nodes.detailDrawer?.addEventListener("click", handleDrawerBackdropClick);
 
   document.addEventListener("click", (event) => {
     const target = event.target instanceof HTMLElement ? event.target.closest("[data-action]") : null;
@@ -737,10 +743,10 @@ async function logoutOperator() {
 const LOCAL_DISPATCH_ACTIONS = {
   "refresh-dashboard": () => refreshDashboard({ manual: true }),
   "navigate-view": (value) => navigateToView(value),
-  "inspect-decision": (value) => inspectDecision(value),
-  "inspect-decision-history": () => inspectDecisionHistory(),
-  "inspect-strategy-attribution": () => inspectStrategyAttribution(),
-  "inspect-trial-review-details": () => inspectTrialReviewDetails(),
+  "inspect-decision": (value, target) => inspectDecision(value, target),
+  "inspect-decision-history": (_value, target) => inspectDecisionHistory(target),
+  "inspect-strategy-attribution": (_value, target) => inspectStrategyAttribution(target),
+  "inspect-trial-review-details": (_value, target) => inspectTrialReviewDetails(target),
   "select-ai-operating-mode": (value, target) => selectAIOperatingMode(value, target),
   "manual-activate-strategy-profile": (value, target) => activateStrategyProfile(value, target),
   "restore-strategy-profile-auto": (_value, target) => restoreStrategyProfileAutomaticControl(target),
@@ -811,7 +817,7 @@ function navigateToView(value) {
     // refreshDashboard prevents the generic "页面数据已刷新" notice from
     // clobbering this more specific message at end of refresh.
     setFlash(state, "info", `当前已在${VIEW_LABELS[nextView] || "当前页面"}，已为你重新拉取最新数据。`);
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    window.scrollTo({ top: 0, behavior: preferredScrollBehavior() });
     return refreshDashboard({ manual: true });
   }
   return setActiveView(nextView, { pushHistory: true });
@@ -838,41 +844,41 @@ async function dispatchAction(action, value, target = null) {
   return undefined;
 }
 
-async function inspectDecision(decisionId) {
+async function inspectDecision(decisionId, triggerElement = null) {
   if (!decisionId) return;
   try {
     const detail = await requestJson(`/decision/${encodeURIComponent(decisionId)}`);
-    openDrawer(buildDecisionDrawer(detail));
+    openDrawer(buildDecisionDrawer(detail), triggerElement);
   } catch (error) {
     setFlash(state, "danger", error instanceof Error ? error.message : String(error));
     renderBanners();
   }
 }
 
-async function inspectDecisionHistory() {
+async function inspectDecisionHistory(triggerElement = null) {
   try {
     const detail = await requestJson("/decision/recent?limit=50&offset=0");
-    openDrawer(buildDecisionHistoryDrawer(detail));
+    openDrawer(buildDecisionHistoryDrawer(detail), triggerElement);
   } catch (error) {
     setFlash(state, "danger", error instanceof Error ? error.message : String(error));
     renderBanners();
   }
 }
 
-async function inspectStrategyAttribution() {
+async function inspectStrategyAttribution(triggerElement = null) {
   try {
     const detail = await requestJson("/reports/strategy-attribution?limit=200");
-    openDrawer(buildStrategyAttributionDrawer(detail));
+    openDrawer(buildStrategyAttributionDrawer(detail), triggerElement);
   } catch (error) {
     setFlash(state, "danger", error instanceof Error ? error.message : String(error));
     renderBanners();
   }
 }
 
-async function inspectTrialReviewDetails() {
+async function inspectTrialReviewDetails(triggerElement = null) {
   try {
     const detail = await requestJson("/reports/trial-review-details?profitability_limit=100&anomaly_limit=100&segment_limit=100&window_days=7&period_count=4");
-    openDrawer(buildTrialReviewDetailsDrawer(detail));
+    openDrawer(buildTrialReviewDetailsDrawer(detail), triggerElement);
   } catch (error) {
     setFlash(state, "danger", error instanceof Error ? error.message : String(error));
     renderBanners();
@@ -1021,12 +1027,18 @@ function syncExitExecutionHistoryFilterRoots() {
 function scrollExitExecutionWorkspaceIntoView(target = null) {
   const workspace = document.getElementById(state.activeView === "exitExecution" ? "exit-execution-workspace" : "risk-exit-workspace");
   if (workspace instanceof HTMLElement) {
-    workspace.scrollIntoView({ behavior: "smooth", block: "start" });
+    workspace.scrollIntoView({ behavior: preferredScrollBehavior(), block: "start" });
     return;
   }
   if (target instanceof HTMLElement) {
-    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.scrollIntoView({ behavior: preferredScrollBehavior(), block: "center" });
   }
+}
+
+function preferredScrollBehavior() {
+  const reduceMotion = typeof window.matchMedia === "function"
+    && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  return reduceMotion ? "auto" : "smooth";
 }
 
 function setActionPending(target, pendingLabel) {
@@ -1291,22 +1303,80 @@ function activePhase1ShadowBlocker() {
   return candidates.find((item) => String(item?.blocker || "").startsWith("phase1_shadow")) || null;
 }
 
-function openDrawer({ eyebrow, title, summary, body }) {
-  if (!nodes.detailDrawer || !nodes.drawerBackdrop) return;
+function openDrawer({ eyebrow, title, summary, body }, triggerElement = null) {
+  const drawer = nodes.detailDrawer;
+  if (!drawer) return;
+
+  // 异步详情请求可能在返回前触发页面重绘，因此由 action 调用链显式传入原始
+  // 按钮，而不是在请求结束时才猜测 document.activeElement。已打开 drawer 内
+  // 切换内容时保留最初的返回点，避免把关闭按钮本身记成返回目标。
+  if (!drawer.open) {
+    const returnTarget = triggerElement instanceof HTMLElement
+      ? triggerElement
+      : document.activeElement;
+    drawerReturnFocusElement = returnTarget instanceof HTMLElement ? returnTarget : null;
+  }
+
   nodes.drawerEyebrow.textContent = eyebrow;
   nodes.drawerTitle.textContent = title;
   nodes.drawerSummary.textContent = summary;
   nodes.drawerBody.innerHTML = body;
-  nodes.detailDrawer.classList.add("is-open");
-  nodes.detailDrawer.setAttribute("aria-hidden", "false");
-  nodes.drawerBackdrop.hidden = false;
+
+  if (!drawer.open) {
+    if (typeof drawer.showModal === "function") {
+      try {
+        drawer.showModal();
+      } catch (_error) {
+        // 非目标旧浏览器或非活动 document 的兼容显示路径。目标浏览器验收必须
+        // 实际命中 showModal，因为只有 modal dialog 才提供背景 inert/焦点约束。
+        drawer.setAttribute("open", "");
+      }
+    } else {
+      drawer.setAttribute("open", "");
+    }
+  }
+  drawer.classList.add("is-open");
+  nodes.closeDrawerButton?.focus({ preventScroll: true });
 }
 
 function closeDrawer() {
-  if (!nodes.detailDrawer || !nodes.drawerBackdrop) return;
-  nodes.detailDrawer.classList.remove("is-open");
-  nodes.detailDrawer.setAttribute("aria-hidden", "true");
-  nodes.drawerBackdrop.hidden = true;
+  const drawer = nodes.detailDrawer;
+  if (!drawer) return;
+  drawer.classList.remove("is-open");
+  if (drawer.open) {
+    if (typeof drawer.close === "function") {
+      try {
+        drawer.close();
+      } catch (_error) {
+        drawer.removeAttribute("open");
+      }
+    } else {
+      drawer.removeAttribute("open");
+    }
+  }
+
+  const returnTarget = drawerReturnFocusElement;
+  drawerReturnFocusElement = null;
+  if (
+    returnTarget instanceof HTMLElement
+    && returnTarget.isConnected
+    && !returnTarget.hidden
+    && !returnTarget.hasAttribute("disabled")
+    && returnTarget.getAttribute("aria-disabled") !== "true"
+  ) {
+    returnTarget.focus({ preventScroll: true });
+  }
+}
+
+function handleDrawerBackdropClick(event) {
+  const drawer = nodes.detailDrawer;
+  if (!drawer || event.target !== drawer) return;
+  const rect = drawer.getBoundingClientRect();
+  const clickedOutsidePanel = event.clientX < rect.left
+    || event.clientX > rect.right
+    || event.clientY < rect.top
+    || event.clientY > rect.bottom;
+  if (clickedOutsidePanel) closeDrawer();
 }
 
 // #2 修复：原本无条件挂 `window.refreshDashboard = refreshDashboard`，相当于一个全局调试

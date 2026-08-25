@@ -228,20 +228,33 @@ PROFILE_SPECIFIC_FIELDS: dict["ManagedEnvProfile", tuple[EnvSectionSpec, ...]] =
 
 DEPRECATED_FIELD_ROWS = (
     (
-        "AATS_CONFIG_PROFILE",
-        "managed profile 启动时不再建议写进 `.env`；由代码按 profile 自动派生。",
+        "AATS_CONFIG_PROFILE / AATS_ENVIRONMENT / AATS_STARTUP_PROFILE / AATS_MODE",
+        "由 managed profile 自动派生；环境 override 被忽略。",
     ),
     (
-        "AATS_MARKET_DATA_BACKEND / AATS_EXECUTION_BACKEND / AATS_ACCOUNT_BACKEND",
-        "managed profile 启动时由代码自动派生，不建议继续在 `.env` 里覆盖。",
+        "AATS_STORAGE_MODE / AATS_MARKET_DATA_BACKEND / AATS_EXECUTION_BACKEND / "
+        "AATS_ACCOUNT_BACKEND / AATS_ACCOUNT_READ_ENABLED",
+        "由 managed profile 自动派生；环境 override 被忽略。",
     ),
     (
-        "AATS_TRADING_PRODUCT_TYPE / AATS_MARGIN_MODE / AATS_OKX_SIMULATED_TRADING",
-        "managed profile 启动时由代码自动派生，不建议继续在 `.env` 里覆盖。",
+        "AATS_LIVE_SUBMIT_ENABLED / AATS_GUARDED_EXECUTION_DRY_RUN / "
+        "AATS_BOOTSTRAP_PORTFOLIO_FROM_EXCHANGE",
+        "由 managed profile 自动派生；环境 override 被忽略。",
+    ),
+    (
+        "AATS_TRADING_PRODUCT_TYPE / AATS_MARGIN_MODE / AATS_DERIVATIVES_POSITION_MODE / "
+        "AATS_DERIVATIVES_HEDGE_TRANSITION_MODE / "
+        "AATS_DERIVATIVES_REQUIRE_EXCHANGE_POS_MODE_MATCH",
+        "产品身份由 managed profile 自动派生；环境 override 被忽略。",
+    ),
+    (
+        "AATS_OKX_SIMULATED_TRADING / AATS_OPERATOR_AUTH_ENABLED / "
+        "AATS_OPERATOR_SESSION_COOKIE_SECURE",
+        "模拟/实盘与认证身份由 managed profile 自动派生；环境 override 被忽略。",
     ),
     (
         "AATS_PRIMARY_TIMEFRAME / AATS_SECONDARY_TIMEFRAME",
-        "当前实现固定为 15m + 1h；保留字段仅为兼容旧配置，不建议继续写入 `.env`。",
+        "当前实现固定为 15m + 1h；环境 override 被忽略。",
     ),
 )
 
@@ -266,7 +279,6 @@ STRATEGY_FIELD_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "ai_outcome_max_churn_ratio_delta",
             "ai_execution_suggestion_mode",
             "strategy_profile_auto_control_enabled",
-            "strategy_profile_auto_rollback_enabled",
             "strategy_profile_emergency_safety_fast_track_enabled",
             "strategy_profile_emergency_safety_confidence_min",
         ),
@@ -352,7 +364,9 @@ STRATEGY_FIELD_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate managed config templates and docs.")
+    parser = argparse.ArgumentParser(
+        description="Generate managed config templates and the managed config reference."
+    )
     parser.add_argument(
         "--sync-local",
         action="store_true",
@@ -493,12 +507,22 @@ def _render_reference() -> str:
     lines = [
         "# Managed Profile 配置说明",
         "",
+        "> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。",
+        "",
+        "",
+        "> 最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；Phase 3A–3W 整改提交候选）。本文只描述 managed profile 当前路径；legacy `config_profile` YAML 是 deprecated 兼容路径，不应新增依赖。",
+        "",
         "## 生效顺序",
         "",
         "1. `settings.py` 默认值",
         "2. managed profile 代码基线（运行时语义，不建议在 `.env` 重复）",
-        "3. `configs/strategy_profiles/<profile>.yaml` 策略调参",
-        "4. 对应 `.env` 里的最小 override",
+        "3. `configs/strategy_profiles/<profile>.yaml` 策略调参；文件必须是 mapping，且每个 key 必须属于 `AATSSettings`，否则启动失败关闭",
+        "4. 对应 `.env` 里允许覆盖的最小环境字段",
+        "5. `build_runtime()` 从 Postgres `governance.active_parameter_sets` 注入的 active parameters",
+        "",
+        "managed profile 派生字段（环境、mode、storage/backend、产品/保证金/持仓模式、模拟/实盘标识、Operator auth/secure cookie、主副 timeframe 等）即使写入 `.env` 也会被忽略并记录日志。`runtime_profile_resolution()` 当前是 `env_only`，不会从旧管理控制面再次覆盖。",
+        "",
+        "> live profile 还会受到 startup hardening 约束。即使配置文件能被解析，exchange-coupled runtime 也必须满足 Postgres、OKX account/execution、Operator auth、single runtime guard 等硬条件才允许启动。",
         "",
         "## 四个托管 profile",
         "",
@@ -510,16 +534,35 @@ def _render_reference() -> str:
         lines.append(f"- 策略调参文件：`{definition.strategy_tuning_relative_path}`")
         lines.append(f"- 默认产品类型：`{definition.runtime_defaults['trading_product_type']}`")
         lines.append(f"- 默认保证金模式：`{definition.runtime_defaults['margin_mode']}`")
+        if definition.runtime_defaults["trading_product_type"] == "derivatives":
+            lines.append(f"- 默认持仓模式：`{definition.runtime_defaults['derivatives_position_mode']}`")
         lines.append(f"- 默认 OKX 模式：`{'模拟盘' if definition.runtime_defaults['okx_simulated_trading'] else '实盘'}`")
         lines.append("")
     lines.extend(
         [
         "## `.env` 里应该保留什么",
         "",
-        "- 标的与资金规模",
+        "- 标的与本地 paper/demo 规模；exchange-coupled 可用余额必须来自账户快照",
         "- 数据库、端口、日志目录",
         "- 交易所与 OpenAI 凭证",
         "- 账户级仓位/杠杆/风控上限",
+        "",
+        "## live profile 有效安全约束",
+        "",
+        "| 字段 | 要求 |",
+        "|------|------|",
+        "| `AATS_STORAGE_MODE` | `postgres` |",
+        "| `AATS_DATABASE_URL` | 指向对应 live DB |",
+        "| `AATS_DATABASE_SINGLE_RUNTIME_GUARD_ENABLED` | `true` |",
+        "| `AATS_EXECUTION_BACKEND` | `okx` |",
+        "| `AATS_ACCOUNT_BACKEND` | `okx` |",
+        "| `AATS_ACCOUNT_READ_ENABLED` | `true` |",
+        "| `AATS_OPERATOR_AUTH_ENABLED` | `true` |",
+        "| `AATS_OPERATOR_UNSAFE_WRITE_WITHOUT_AUTH` | `false` |",
+        "| `AATS_OPERATOR_SESSION_SECRET` | 长随机 secret，不能提交 |",
+        "| `AATS_OPERATOR_SESSION_COOKIE_SECURE` | live 环境为 `true` |",
+        "",
+        "这些是 runtime 必须满足的有效状态，其中 managed 派生字段不应重新写入 `.env`。live 环境还应确认 active parameter version、gate history、reconciliation 状态和 recovery status。",
         "",
         "## 按字段分组的修改指南",
         "",
@@ -552,6 +595,7 @@ def _render_reference() -> str:
         "### 想改仓位 / 杠杆 / 名义金额上限去哪",
         "",
         "- 改根目录对应 profile 的 `.env.*` 文件。",
+        "- 这些值是风险上限或本地规模种子，不能代替 OKX account snapshot；active parameter 映射字段若在数据库中有 active set，最终以数据库注入值为准。",
         "- 现货常改：",
         "  - `AATS_DEFAULT_ORDER_QTY`",
         "  - `AATS_MAX_ABS_POSITION_QTY`",
@@ -582,7 +626,6 @@ def _render_reference() -> str:
         "  - `ai_shadow_mode_enabled`",
         "  - `ai_execution_suggestion_mode`",
         "  - `strategy_profile_auto_control_enabled`",
-        "  - `strategy_profile_auto_rollback_enabled`",
         "  - `strategy_profile_emergency_safety_fast_track_enabled`",
         "",
         "### 想改 directional 去哪",
@@ -681,7 +724,7 @@ def _render_reference() -> str:
         lines.append("")
     lines.extend(
         [
-            "## 已标记为 deprecated / 不建议继续写入 managed `.env` 的字段",
+            "## managed `.env` 中会被忽略的派生字段",
             "",
             "| 字段 | 说明 |",
             "| --- | --- |",
@@ -698,43 +741,16 @@ def _render_reference() -> str:
             "- 托管 profile（`spot/derivatives/spot_live/derivatives_live`）不再叠加这些 YAML",
             "- 新的策略调参统一走 `configs/strategy_profiles/*.yaml`",
             "",
+            "## Active parameter 真源与故障语义",
+            "",
+            "- 主交易 runtime 只读取 Postgres `governance.active_parameter_sets`。",
+            "- `active_parameter_registry_path` 和 `configs/active_parameter_sets/*.json` 只保留兼容 API/审计用途，加载路径不再使用文件 fallback。",
+            "- 数据库 URL 已配置但加载失败时，loader 返回带 `db_load_failed` 的空 registry 并记录 error；系统退化到 managed/profile 参数。Operator 必须把这种退化当作配置漂移处理。",
+            "- active parameters 在普通环境 override 之后注入，因此映射字段的最终值以 active set 为准。",
+            "",
         ]
     )
     return "\n".join(lines)
-
-
-def _render_configs_readme() -> str:
-    return "\n".join(
-        [
-            "# configs 目录职责",
-            "",
-            "## 当前推荐路径",
-            "",
-            "- `spot / derivatives / spot_live / derivatives_live` 四个托管 profile：",
-            "  - 运行时语义来自代码里的 managed profile 基线",
-            "  - 最小 override 来自项目根目录四个 `.env.*` 文件",
-            "  - 策略调参来自 `configs/strategy_profiles/*.yaml`",
-            "",
-            "## legacy `configs/*.yaml` 的职责",
-            "",
-            "- 只保留给非托管/manual `config_profile` 路径与测试使用",
-            "- 不再作为四个托管 profile 的主配置来源",
-            "- `base.yaml` 主要是本地演示/开发默认值说明，不是当前实盘推荐配置",
-            "",
-            "## 目录说明",
-            "",
-            "- `strategy_profiles/`：托管 profile 使用的策略调参文件",
-            "- `templates/`：自动生成的最小 `.env` 示例模板",
-            "- 其余 YAML：legacy/manual `config_profile` 路径或测试兼容",
-            "",
-            "## 维护规则",
-            "",
-            "- 账户、数据库、端口、日志、凭证类 override 改根目录 `.env.*`",
-            "- AI、自动换档、directional / smart_arbitrage / spot_grid / dca 调参改 `strategy_profiles/*.yaml`",
-            "- 若新增设置字段，优先更新 `aats/bootstrap/settings.py`，再决定它应归属 `.env` 还是 `strategy_profiles/*.yaml`",
-            "",
-        ]
-    )
 
 
 def _sync_local_env_files() -> None:
@@ -769,15 +785,10 @@ def _write_reference_doc() -> None:
     (docs_dir / "managed-config-reference.md").write_text(_render_reference().rstrip() + "\n", encoding="utf-8")
 
 
-def _write_configs_readme() -> None:
-    (ROOT / "configs" / "README.md").write_text(_render_configs_readme().rstrip() + "\n", encoding="utf-8")
-
-
 def main() -> None:
     args = _parse_args()
     _write_example_env_files()
     _write_reference_doc()
-    _write_configs_readme()
     if args.sync_local:
         _sync_local_env_files()
     print("managed config artifacts generated")

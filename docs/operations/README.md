@@ -1,6 +1,6 @@
 # AATS Operations 文档索引
 
-> 文档状态：现行索引。最后核对：2026-08-23（代码基线 `be9179e`）。
+> 文档状态：现行索引。最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；Phase 3A–3W 整改提交候选）。
 
 本目录同时保存当前操作手册、专题参考和历史运行记录。文件名包含 `runbook`、`checklist` 或 `release`，不代表它仍可用于当前实盘。执行任何状态变更前，先按本页状态选择入口，并按 [`../README.md`](../README.md) 的真实性与时效性规则复核当前 `HEAD`。
 
@@ -15,7 +15,7 @@
 | [`rdp_operator_workflow.md`](rdp_operator_workflow.md) | RDP Operator 标准流程 | 禁止使用已硬禁用的旧 CLI |
 | [`parameter_governance.md`](parameter_governance.md) | 参数治理状态与证据 | active parameter 真源是 Postgres |
 | [`parameter_apply_and_rollback.md`](parameter_apply_and_rollback.md) | apply/rollback API、安全门和审计 | direct apply/rollback 需要短期 token；组合 release 路径安全依赖不同 |
-| [`production_parameter_change_runbook.md`](production_parameter_change_runbook.md) | 生产参数变更全流程 | 必须审批、gate、观察和可恢复证据 |
+| [`production_parameter_change_runbook.md`](production_parameter_change_runbook.md) | 生产参数变更全流程 | 当前 live 部署禁用；只可准备/审阅证据，不得执行 runtime 发布 |
 | [`rdp_scheduling_strategy.md`](rdp_scheduling_strategy.md) | scheduler 语义 | 以 workflow JSON、allowlist 和 daemon timeout 为真源 |
 | [`rdp_workflow_calendar.md`](rdp_workflow_calendar.md) | 当前 workflow 日历 | decision/release disabled；release 禁止入队 |
 | [`workflow_failure_recovery.md`](workflow_failure_recovery.md) | task queue 失败恢复 | 旧 `/rdp/operations/failures*` 路由不存在 |

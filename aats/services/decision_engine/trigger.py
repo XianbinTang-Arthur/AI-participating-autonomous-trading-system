@@ -182,6 +182,11 @@ class DecisionCycleTrigger:
     # abort_hook_service 同模式。
     # ──────────────────────────────────────────────────────────────
 
+    @property
+    def background_task(self) -> asyncio.Task[None] | None:
+        """返回 service-owned dispatcher task，供进程生命周期只读监督。"""
+        return self._dispatcher_task
+
     async def start(self) -> None:
         """初始化 queue 并拉起后台 dispatcher task。在 bus.subscribe 之前调。
 

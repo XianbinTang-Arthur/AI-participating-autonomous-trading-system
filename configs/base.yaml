@@ -45,7 +45,9 @@ bootstrap_portfolio_from_exchange: false
 
 # [运行必改] database_url：PostgreSQL 连接串。可选值：合法的 postgresql+psycopg 连接串；仅在 storage_mode=postgres 时生效。
 database_url: postgresql+psycopg://aats:aats@localhost:5432/aats
-# [运行必改] database_auto_create_schema：是否自动建表建索引。可选值：true / false；推荐值：true。
+# database_auto_create_schema：仅供本地非 managed 开发初始化。managed profile
+# 固定为 false，由部署期 scripts/apply_schema_migrations.py 显式迁移，
+# 应用进程启动时只读校验。可选值：true / false。
 database_auto_create_schema: true
 
 # [常用可调] max_abs_position_qty：单标的最大绝对仓位数量。可选值：正数；推荐值：0.01。
@@ -195,6 +197,18 @@ okx_bills_refresh_interval_seconds: 60.0
 operator_auth_enabled: false
 # [运行必改] operator_unsafe_write_without_auth：是否允许未鉴权写操作。可选值：true / false；推荐值：false。
 operator_unsafe_write_without_auth: false
+# [安全边界] Operator 登录同步 DB/KDF worker 每 Gateway 进程最大并发数；可选值：1~32；推荐值：4。
+operator_login_max_concurrency: 4
+# [安全边界] 等待登录 worker capacity 的最长秒数；必须大于 0；推荐值：1.0。
+operator_login_queue_timeout_seconds: 1.0
+# [安全边界] 每进程登录滑动窗口秒数；必须大于 0；推荐值：60.0。
+operator_login_rate_limit_window_seconds: 60.0
+# [安全边界] 每进程在窗口内的总登录尝试上限；推荐值：60。
+operator_login_rate_limit_global_attempts: 60
+# [安全边界] 每 ASGI socket client 在窗口内的尝试上限；不超过 global；推荐值：20。
+operator_login_rate_limit_client_attempts: 20
+# [安全边界] 每规范化 identity 在窗口内的尝试上限；不超过 global；推荐值：10。
+operator_login_rate_limit_identity_attempts: 10
 # [常用可调] operator_session_cookie_name：会话 cookie 名。可选值：自定义字符串；推荐值：aats_operator_session。
 operator_session_cookie_name: aats_operator_session
 # [常用可调] operator_session_max_age_seconds：会话最大有效秒数。可选值：300~604800；推荐值：43200。

@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
-import json
 import sys
-from pathlib import Path
+from collections.abc import Sequence
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+MIGRATION_MESSAGE = """\
+scripts/run_local.py 已停用：它属于旧的单进程 paper-loop 架构，不能启动当前 AATS runtime。
+本地 API/UI 模拟联调请使用：.venv\\Scripts\\python.exe scripts/start_api.py --profile derivatives
+有限迭代业务闭环请运行明确选择的 tests/integration 场景；不要把本脚本当作成功路径。
+本次调用未加载任何 .env profile，也未启动服务。"""
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the local in-memory AATS paper loop.")
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="已停用的 AATS 单进程 paper-loop 兼容入口。",
+        epilog="该命令只输出迁移指引并以非零状态退出。",
+    )
     parser.add_argument("--iterations", type=int, default=None, help="Number of local market snapshots to publish.")
     parser.add_argument(
         "--interval-seconds",
@@ -23,22 +26,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--profile",
         choices=("spot", "derivatives"),
-        required=True,
-        help="必填。选择本地演练时加载的环境模板；实盘请使用 start_api.py。",
+        default=None,
+        help="旧参数，仅用于识别迁移调用；不会加载环境模板。",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parse_args(argv)
+    print(MIGRATION_MESSAGE, file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":
-    from aats.bootstrap.env_profiles import load_profiled_dotenv_into_process
-    from apps.decision_engine.main import main
-
-    args = parse_args()
-    load_profiled_dotenv_into_process(ROOT, args.profile)
-    summary = asyncio.run(
-        main(
-            iterations=args.iterations,
-            interval_seconds=args.interval_seconds,
-        )
-    )
-    print(json.dumps(summary, indent=2, default=str))
+    raise SystemExit(main())

@@ -113,7 +113,9 @@ def _make_cache() -> PortfolioSnapshotCache:
     )
 
 
-def _make_postgres_repo_session_factory() -> sessionmaker[Session]:
+def _make_postgres_repo_session_factory(
+    owner: unittest.TestCase,
+) -> sessionmaker[Session]:
     """用 SQLite in-memory 搭 PostgresPortfolioRepository 的替身。
 
     PostgresPortfolioRepository 只依赖 sessionmaker + PortfolioSnapshotModel，
@@ -121,6 +123,7 @@ def _make_postgres_repo_session_factory() -> sessionmaker[Session]:
     """
     engine = create_engine("sqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
+    owner.addCleanup(engine.dispose)
     return sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
 
@@ -143,7 +146,7 @@ class TestListenerNotAttached(unittest.TestCase):
         self.assertIsNone(cache.get_sync(scope))
 
     def test_postgres_repo_save_snapshot_without_listener_leaves_cache_empty(self) -> None:
-        session_factory = _make_postgres_repo_session_factory()
+        session_factory = _make_postgres_repo_session_factory(self)
         repo = PostgresPortfolioRepository(session_factory)
         cache = _make_cache()
         scope = _make_scope()
@@ -251,7 +254,7 @@ class TestListenerAttachedInMemory(unittest.TestCase):
 
 class TestListenerAttachedPostgres(unittest.TestCase):
     def setUp(self) -> None:
-        self.session_factory = _make_postgres_repo_session_factory()
+        self.session_factory = _make_postgres_repo_session_factory(self)
         self.repo = PostgresPortfolioRepository(self.session_factory)
         self.cache = _make_cache()
         self.repo.attach_snapshot_listener(self.cache.apply_sync)
@@ -316,7 +319,7 @@ class TestListenerExceptionIsolated(unittest.TestCase):
         self.assertEqual(repo.history()[0].decision_id, snapshot.decision_id)
 
     def test_postgres_repo_survives_listener_exception(self) -> None:
-        session_factory = _make_postgres_repo_session_factory()
+        session_factory = _make_postgres_repo_session_factory(self)
         repo = PostgresPortfolioRepository(session_factory)
         boom = _BoomListener()
         repo.attach_snapshot_listener(boom)

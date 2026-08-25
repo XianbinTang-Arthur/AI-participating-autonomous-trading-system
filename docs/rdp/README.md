@@ -1,7 +1,7 @@
 # AATS RDP 文档索引
 
 > 文档状态：现行索引  
-> 最后核对：2026-08-23（代码基线 `be9179e`）
+> 最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；Phase 3A–3W 整改提交候选）
 
 ## 当前入口
 
@@ -10,6 +10,7 @@
 - [`../operations/platform_runbook.md`](../operations/platform_runbook.md)：daemon、队列、调度和恢复；
 - [`../operations/rdp_operator_workflow.md`](../operations/rdp_operator_workflow.md)：Operator 标准流程；
 - [`../operations/rdp_workflow_calendar.md`](../operations/rdp_workflow_calendar.md)：当前 workflow 日历。
+- [`../task/fs_004_research_selection_holdout_sow_2026_08_25.md`](../task/fs_004_research_selection_holdout_sow_2026_08_25.md)：Research Factory v2 的 train/valid 选择、test 内容封存与仍开放的最终 OOS 边界。
 
 ## 深入参考
 

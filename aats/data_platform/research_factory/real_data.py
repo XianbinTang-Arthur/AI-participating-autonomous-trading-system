@@ -18,7 +18,9 @@ from aats.data_platform.research_factory.benchmarks.baseline import run_factor_b
 from aats.data_platform.research_factory.datasets.gold_bars import (
     GoldBarDatasetHandler,
     GoldBarRecord,
+    PreparedGoldBarDataset,
     dataset_fingerprint,
+    segment_content_fingerprint,
 )
 from aats.data_platform.research_factory.datasets.segments import build_time_segments
 from aats.data_platform.research_factory.evidence import (
@@ -62,10 +64,17 @@ from aats.data_platform.research_factory.specs import (
     FeatureSpec,
     LabelSpec,
     MetricsSnapshot,
+    SegmentSpec,
 )
 
 DEFAULT_EXPERIMENT_ARTIFACT_ROOT = Path("artifacts") / "research" / "research_factory" / "experiments"
-REAL_DATA_CODE_VERSION = "research_factory_real_data_runner_v1"
+REAL_DATA_CODE_VERSION = "research_factory_real_data_runner_v2"
+SELECTION_PROTOCOL_VERSION = "train_valid_selection_test_holdout_v2"
+DEVELOPMENT_EVIDENCE_REF = "development_evidence.json"
+DEVELOPMENT_SEGMENTS = ("train", "valid")
+BENCHMARK_SEGMENT = "valid"
+HOLDOUT_SEGMENT = "test"
+HOLDOUT_STATUS = "sealed_not_evaluated"
 EXECUTION_COST_SUMMARY_REF = "execution_cost_summary.json"
 DATASET_QUALITY_REPORT_REF = "dataset_quality_report.json"
 SOURCE_INTEGRITY_REPORT_REF = "source_integrity_report.json"
@@ -154,6 +163,7 @@ class ResearchFactoryExperimentResult:
     registry_ref: str | None = None
     novelty_gate_ref: str | None = None
     proposal_ref: str | None = None
+    development_evidence_ref: str | None = None
     failure_ref: str | None = None
     dataset_fingerprint: str | None = None
     error: str | None = None
@@ -170,6 +180,7 @@ class ResearchFactoryExperimentResult:
             "registry_ref": self.registry_ref,
             "novelty_gate_ref": self.novelty_gate_ref,
             "proposal_ref": self.proposal_ref,
+            "development_evidence_ref": self.development_evidence_ref,
             "failure_ref": self.failure_ref,
             "dataset_fingerprint": self.dataset_fingerprint,
             "error": self.error,
@@ -454,12 +465,16 @@ def run_research_factory_experiment(
         )
         execution_evidence = None
         if execution_summary_payload is not None and execution_cost_summary_ref is not None:
+            valid_segment = _require_segment_spec(prepared, BENCHMARK_SEGMENT)
             execution_evidence = build_execution_evidence_report(
                 summary=execution_summary_payload,
                 dataset_spec=dataset_spec,
                 dataset_fingerprint=research_dataset_fingerprint,
                 evidence_ref=execution_cost_summary_ref,
                 created_at=config.timestamp,
+                benchmark_segment=BENCHMARK_SEGMENT,
+                expected_window_start=valid_segment.start,
+                expected_window_end=valid_segment.end,
             )
             execution_evidence = _apply_execution_evidence_policy(
                 execution_evidence,
@@ -488,38 +503,59 @@ def run_research_factory_experiment(
             failures = "; ".join(evidence_bundle.failures)
             raise ValueError(f"evidence quality gate failed: {failures}")
 
-        test_rows = prepared.rows_for_segment("test")
-        factor_values = evaluate_factor_expression(feature.expression, test_rows).values
-        label_values = _future_simple_returns(test_rows, label.horizon_bars)
-        metrics = run_factor_baseline(
-            prepared,
-            factor_values,
-            label_values,
-            cost_config={
-                "fee_bps": config.fee_bps,
-                "slippage_bps": config.slippage_bps,
-                "funding_bps": config.funding_bps,
-                "periods_per_year": _periods_per_year(config),
-            },
+        train_metrics, train_gate = _evaluate_development_segment(
+            prepared=prepared,
+            segment_name="train",
+            feature=feature,
+            label=label,
+            config=config,
+            research_profile=research_profile,
+            execution_metrics=None,
         )
-        if execution_metrics is not None:
-            metrics = merge_metric_snapshots(
-                metrics,
-                execution_metrics,
-                conflict_strategy="prefer_right",
-            )
+        valid_metrics, valid_gate = _evaluate_development_segment(
+            prepared=prepared,
+            segment_name="valid",
+            feature=feature,
+            label=label,
+            config=config,
+            research_profile=research_profile,
+            execution_metrics=execution_metrics,
+        )
+        holdout_rows = prepared.rows_for_segment(HOLDOUT_SEGMENT)
+        holdout_content_fingerprint = segment_content_fingerprint(
+            holdout_rows,
+            segment_name=HOLDOUT_SEGMENT,
+            dataset_fingerprint_value=research_dataset_fingerprint,
+        )
+        development_evidence = _build_development_evidence(
+            prepared=prepared,
+            dataset_fingerprint_value=research_dataset_fingerprint,
+            holdout_content_fingerprint=holdout_content_fingerprint,
+            train_metrics=train_metrics,
+            train_gate=train_gate,
+            valid_metrics=valid_metrics,
+            valid_gate=valid_gate,
+            created_at=config.timestamp,
+        )
+        recorder.record_json_artifact(
+            experiment_id,
+            "development_evidence",
+            DEVELOPMENT_EVIDENCE_REF,
+            development_evidence,
+        )
+        metrics = valid_metrics
+        gate = _combine_development_gates(train_gate, valid_gate, config.timestamp)
         recorder.record_metrics(experiment_id, metrics)
-        gate = _deterministic_gate(metrics, config.timestamp, research_profile)
         if not gate.passed:
             failures = "; ".join(gate.failures)
-            raise ValueError(f"candidate gate failed: {failures}")
+            raise ValueError(f"development selection gate failed: {failures}")
         candidate = _build_candidate(
             experiment_id=experiment_id,
             feature=feature,
             metrics=metrics,
             gate=gate,
             dataset_fingerprint_value=research_dataset_fingerprint,
-            benchmark_segment="test",
+            holdout_content_fingerprint=holdout_content_fingerprint,
             execution_cost_summary_ref=execution_cost_summary_ref,
             evidence_bundle_ref=EVIDENCE_BUNDLE_REF,
             novelty_gate_ref=novelty_gate_ref,
@@ -534,6 +570,7 @@ def run_research_factory_experiment(
                 execution_cost_summary_ref,
                 novelty_gate_ref,
                 proposal_ref,
+                DEVELOPMENT_EVIDENCE_REF,
             ),
             created_at=config.timestamp,
             require_execution_realism=execution_evidence_required,
@@ -563,6 +600,7 @@ def run_research_factory_experiment(
             registry_ref=registry_ref,
             novelty_gate_ref=manifest["output_refs"].get("novelty_gate_result"),
             proposal_ref=manifest["output_refs"].get("factor_proposal"),
+            development_evidence_ref=manifest["output_refs"].get("development_evidence"),
             dataset_fingerprint=research_dataset_fingerprint,
         )
     except Exception as exc:
@@ -591,6 +629,9 @@ def run_research_factory_experiment(
                 registry_ref=registry_ref,
                 novelty_gate_ref=manifest["output_refs"].get("novelty_gate_result"),
                 proposal_ref=manifest["output_refs"].get("factor_proposal"),
+                development_evidence_ref=manifest["output_refs"].get(
+                    "development_evidence"
+                ),
                 failure_ref=manifest["output_refs"].get("failure"),
                 dataset_fingerprint=research_dataset_fingerprint,
                 error=str(exc),
@@ -751,6 +792,117 @@ def _deterministic_gate(
     )
 
 
+def _evaluate_development_segment(
+    *,
+    prepared: PreparedGoldBarDataset,
+    segment_name: str,
+    feature: FeatureSpec,
+    label: LabelSpec,
+    config: ResearchFactoryExperimentConfig,
+    research_profile: ResearchProfile | None,
+    execution_metrics: MetricsSnapshot | None,
+) -> tuple[MetricsSnapshot, CandidateGateResult]:
+    if segment_name not in DEVELOPMENT_SEGMENTS:
+        raise ValueError(f"unsupported development segment: {segment_name!r}")
+    rows = prepared.rows_for_segment(segment_name)
+    factor_values = evaluate_factor_expression(feature.expression, rows).values
+    label_values = _future_simple_returns(rows, label.horizon_bars)
+    metrics = run_factor_baseline(
+        prepared,
+        factor_values,
+        label_values,
+        cost_config={
+            "fee_bps": config.fee_bps,
+            "slippage_bps": config.slippage_bps,
+            "funding_bps": config.funding_bps,
+            "periods_per_year": _periods_per_year(config),
+        },
+    )
+    if execution_metrics is not None:
+        metrics = merge_metric_snapshots(
+            metrics,
+            execution_metrics,
+            conflict_strategy="prefer_right",
+        )
+    return metrics, _deterministic_gate(metrics, config.timestamp, research_profile)
+
+
+def _require_segment_spec(
+    prepared: PreparedGoldBarDataset,
+    segment_name: str,
+) -> SegmentSpec:
+    matches = tuple(
+        segment
+        for segment in prepared.dataset_spec.segments
+        if segment.name == segment_name
+    )
+    if len(matches) != 1:
+        raise ValueError(f"dataset must define exactly one {segment_name!r} segment")
+    return matches[0]
+
+
+def _combine_development_gates(
+    train_gate: CandidateGateResult,
+    valid_gate: CandidateGateResult,
+    evaluated_at: datetime,
+) -> CandidateGateResult:
+    if train_gate.thresholds != valid_gate.thresholds:
+        raise ValueError("train and valid gates must use identical thresholds")
+    failures = tuple(
+        f"{segment_name}: {failure}"
+        for segment_name, segment_gate in (("train", train_gate), ("valid", valid_gate))
+        for failure in segment_gate.failures
+    )
+    return CandidateGateResult(
+        passed=not failures,
+        failures=failures,
+        thresholds=train_gate.thresholds,
+        critical_metrics=train_gate.critical_metrics,
+        evaluated_at=evaluated_at,
+    )
+
+
+def _build_development_evidence(
+    *,
+    prepared: PreparedGoldBarDataset,
+    dataset_fingerprint_value: str,
+    holdout_content_fingerprint: str,
+    train_metrics: MetricsSnapshot,
+    train_gate: CandidateGateResult,
+    valid_metrics: MetricsSnapshot,
+    valid_gate: CandidateGateResult,
+    created_at: datetime,
+) -> dict[str, Any]:
+    return {
+        "schema_version": SELECTION_PROTOCOL_VERSION,
+        "dataset_fingerprint": dataset_fingerprint_value,
+        "selection_rule": "train_and_valid_must_pass",
+        "benchmark_segment": BENCHMARK_SEGMENT,
+        "segments": {
+            "train": {
+                "role": "development_stability",
+                "row_count": len(prepared.rows_for_segment("train")),
+                "metrics": train_metrics,
+                "gate": train_gate,
+            },
+            "valid": {
+                "role": "candidate_selection",
+                "row_count": len(prepared.rows_for_segment("valid")),
+                "metrics": valid_metrics,
+                "gate": valid_gate,
+            },
+        },
+        "holdout": {
+            "segment": HOLDOUT_SEGMENT,
+            "status": HOLDOUT_STATUS,
+            "row_count": len(prepared.rows_for_segment(HOLDOUT_SEGMENT)),
+            "content_fingerprint": holdout_content_fingerprint,
+            "metrics_exposed": False,
+        },
+        "created_at": created_at,
+    }
+
+
 def _build_candidate(
     *,
     experiment_id: str,
@@ -758,7 +910,7 @@ def _build_candidate(
     metrics: MetricsSnapshot,
     gate: CandidateGateResult,
     dataset_fingerprint_value: str,
-    benchmark_segment: str,
+    holdout_content_fingerprint: str,
     execution_cost_summary_ref: str | None,
     evidence_bundle_ref: str,
     novelty_gate_ref: str | None,
@@ -773,7 +925,13 @@ def _build_candidate(
         payload={
             "factor_expression": feature.expression,
             "dataset_fingerprint": dataset_fingerprint_value,
-            "benchmark_segment": benchmark_segment,
+            "benchmark_segment": BENCHMARK_SEGMENT,
+            "selection_protocol_version": SELECTION_PROTOCOL_VERSION,
+            "development_evidence_ref": DEVELOPMENT_EVIDENCE_REF,
+            "development_segments": DEVELOPMENT_SEGMENTS,
+            "holdout_segment": HOLDOUT_SEGMENT,
+            "holdout_status": HOLDOUT_STATUS,
+            "holdout_content_fingerprint": holdout_content_fingerprint,
             "execution_cost_summary_ref": execution_cost_summary_ref,
             "evidence_bundle_ref": evidence_bundle_ref,
             "novelty_gate_ref": novelty_gate_ref,
@@ -792,10 +950,12 @@ def _recommendation_evidence_refs(
     execution_cost_summary_ref: str | None,
     novelty_gate_ref: str | None,
     proposal_ref: str | None,
+    development_evidence_ref: str,
 ) -> dict[str, str]:
     refs = {
         "candidate_artifact": "candidate_artifact.json",
         "dataset_quality_report": DATASET_QUALITY_REPORT_REF,
+        "development_evidence": development_evidence_ref,
         "evidence_bundle": EVIDENCE_BUNDLE_REF,
         "experiment_manifest": "experiment_manifest.json",
         "metrics_snapshot": "metrics_snapshot.json",

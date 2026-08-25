@@ -28,7 +28,7 @@ class TestOrderbookHappyPath(unittest.TestCase):
     """60 BBO + 30 books5 构造合理数据,验证 sample count + last + mean。"""
 
     def test_bbo_samples_n_matches_inserted(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             rows = [
                 {
@@ -72,7 +72,7 @@ class TestOrderbookHappyPath(unittest.TestCase):
             self.assertLess(float(row.mid_price_last), 95010)
 
     def test_books5_samples_aggregate_top5_depth(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             rows = [
                 {
@@ -119,7 +119,7 @@ class TestOrderbookEmptyBar(unittest.TestCase):
     """§8 case 11: Bronze 无数据 → silver row 仍写入 + *_no_data flag。"""
 
     def test_empty_bronze_produces_null_silver_row(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             result = build_silver_microstructure_15m(
                 session=sess, symbol=env.symbol,
@@ -148,7 +148,7 @@ class TestOrderbookEmptyBar(unittest.TestCase):
     def test_empty_bronze_increments_no_data_counter(self) -> None:
         """空 orderbook bar → bars_with_no_data_orderbook_total +1。"""
         from aats.bootstrap.metrics import MetricsRegistry
-        env = make_env()
+        env = make_env(owner=self)
         registry = MetricsRegistry()
         with Session(env.engine) as sess:
             build_silver_microstructure_15m(
@@ -172,7 +172,7 @@ class TestOrderbookEmptyBar(unittest.TestCase):
         `orderbook_books5_no_data` flag 会出现但不满足 "全命中", 应不 +1。
         """
         from aats.bootstrap.metrics import MetricsRegistry
-        env = make_env()
+        env = make_env(owner=self)
         registry = MetricsRegistry()
         with Session(env.engine) as sess:
             rows = [

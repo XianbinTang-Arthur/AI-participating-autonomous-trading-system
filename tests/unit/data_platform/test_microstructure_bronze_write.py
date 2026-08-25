@@ -24,7 +24,7 @@ from uuid import uuid4
 # → sqlite TEXT/INTEGER) 必须先 import 才能让 rdp_models metadata 落地正确,
 # 复用该 helper 保持方言无关。
 from tests.unit.data_platform.test_microstructure_bronze_schema import (  # noqa: F401
-    _make_sqlite_engine,
+    _SQLiteEngineTestCase,
 )
 
 from sqlalchemy import text
@@ -478,17 +478,16 @@ class TestWriteOifBatchFields(unittest.TestCase):
 # =====================================================================
 
 
-class TestSqliteRoundTrip(unittest.TestCase):
+class TestSqliteRoundTrip(_SQLiteEngineTestCase):
     """在 SQLite fake 上跑自定义 INSERT OR IGNORE 等价 SQL,验证字段
     映射连通性 (SQLite 不支持 ON CONFLICT ON CONSTRAINT <name>,但
     mapping 正确性可通过 INSERT OR IGNORE 等价验证)。
     """
 
     def test_trades_round_trip_via_sqlite_equivalent(self) -> None:
-        engine = _make_sqlite_engine()
         run_id = str(uuid4())
 
-        with Session(engine) as session:
+        with Session(self.engine) as session:
             rows = [
                 TradeRow(
                     symbol="BTC-USDT-SWAP", ts=_TS, trade_id="T-1",
@@ -520,9 +519,8 @@ class TestSqliteRoundTrip(unittest.TestCase):
             self.assertEqual(dup, 0, "second INSERT of same PK should be ignored")
 
     def test_oif_append_only_via_sqlite(self) -> None:
-        engine = _make_sqlite_engine()
         # staging 表无 ingest_run_id + 无 ON CONFLICT,直接走 real writer
-        with Session(engine) as session:
+        with Session(self.engine) as session:
             rows = [
                 OiFundingMarkRow(
                     ts=_TS, symbol="BTC-USDT-SWAP", tick_type="oi",

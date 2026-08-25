@@ -110,6 +110,16 @@ def _make_sqlite_engine():
     return engine
 
 
+class _SQLiteEngineTestCase(unittest.TestCase):
+    """Own and deterministically dispose each test's in-memory database."""
+
+    def setUp(self) -> None:
+        self.engine = _make_sqlite_engine()
+
+    def tearDown(self) -> None:
+        self.engine.dispose()
+
+
 _SAMPLE_TS = datetime(2026, 4, 20, 12, 0, 0, tzinfo=timezone.utc)
 
 
@@ -118,7 +128,7 @@ _SAMPLE_TS = datetime(2026, 4, 20, 12, 0, 0, tzinfo=timezone.utc)
 # =====================================================================
 
 
-class TestMicrostructureSchemaRoundtrip(unittest.TestCase):
+class TestMicrostructureSchemaRoundtrip(_SQLiteEngineTestCase):
     """§6 的 4 张表每张插入一行后能按字段 round-trip 读回。
 
     不对 NUMERIC 精度做字符串严格对比(SQLite 用 REAL 背后存 Decimal),
@@ -126,10 +136,9 @@ class TestMicrostructureSchemaRoundtrip(unittest.TestCase):
     """
 
     def test_all_four_tables_insert_and_read(self) -> None:
-        engine = _make_sqlite_engine()
         run_id = str(uuid4())
 
-        with Session(engine) as session:
+        with Session(self.engine) as session:
             session.add(BronzeMarketTradesModel(
                 symbol="BTC-USDT-SWAP",
                 ts=_SAMPLE_TS,
@@ -203,17 +212,16 @@ class TestMicrostructureSchemaRoundtrip(unittest.TestCase):
 # =====================================================================
 
 
-class TestMarketTradesPrimaryKey(unittest.TestCase):
+class TestMarketTradesPrimaryKey(_SQLiteEngineTestCase):
     """§6.1 的 natural PK (symbol, ts, trade_id) 在重连重发下由 DB 级
     约束做幂等: 同 PK 二次 insert 触发 IntegrityError,对应 ON CONFLICT
     DO NOTHING 的业务语义。
     """
 
     def test_duplicate_primary_key_raises(self) -> None:
-        engine = _make_sqlite_engine()
         run_id = str(uuid4())
 
-        with Session(engine) as session:
+        with Session(self.engine) as session:
             session.add(BronzeMarketTradesModel(
                 symbol="BTC-USDT-SWAP",
                 ts=_SAMPLE_TS,
@@ -242,13 +250,12 @@ class TestMarketTradesPrimaryKey(unittest.TestCase):
         """OKX 同一 ts 可能有多笔 trade (liquidation cascade)。
         (symbol, ts, trade_id) 复合 PK 允许同 ts 但 trade_id 不同。
         """
-        engine = _make_sqlite_engine()
         run_id = str(uuid4())
 
         # 逐条 flush 避开 SA 2.0 insert-many-values sentinel 在 SQLite 上
         # 对 TEXT 型时间戳列无法 match sentinel 的已知问题(PostgreSQL 没有
         # 这个问题,因为 TIMESTAMPTZ 原生类型能 round-trip)。
-        with Session(engine) as session:
+        with Session(self.engine) as session:
             for tid in ("T-1", "T-2", "T-3"):
                 session.add(BronzeMarketTradesModel(
                     symbol="BTC-USDT-SWAP",
@@ -271,7 +278,7 @@ class TestMarketTradesPrimaryKey(unittest.TestCase):
 # =====================================================================
 
 
-class TestBboGeneratedColumns(unittest.TestCase):
+class TestBboGeneratedColumns(_SQLiteEngineTestCase):
     """§6.2 bronze.market_orderbook_bbo 的 mid / spread / imbalance 是
     GENERATED ALWAYS AS ... STORED,避免 Silver ETL 每次重算。
 
@@ -284,10 +291,9 @@ class TestBboGeneratedColumns(unittest.TestCase):
         """mid / spread 是整数算术(相加 / 相减),在 SQLite 与 PostgreSQL
         上结果等价 —— 只验证 mid 严格在 bid 与 ask 之间、spread 为正。
         """
-        engine = _make_sqlite_engine()
         run_id = str(uuid4())
 
-        with Session(engine) as session:
+        with Session(self.engine) as session:
             session.add(BronzeMarketOrderbookBboModel(
                 symbol="BTC-USDT-SWAP",
                 ts=_SAMPLE_TS,
@@ -317,10 +323,9 @@ class TestBboGeneratedColumns(unittest.TestCase):
         精度差异引入 false-positive。实盘 PG 的精度行为另由集成测试覆盖
         (Stage 4 的 testcontainers e2e)。
         """
-        engine = _make_sqlite_engine()
         run_id = str(uuid4())
 
-        with Session(engine) as session:
+        with Session(self.engine) as session:
             session.add(BronzeMarketOrderbookBboModel(
                 symbol="BTC-USDT-SWAP",
                 ts=_SAMPLE_TS,
@@ -346,15 +351,13 @@ class TestBboGeneratedColumns(unittest.TestCase):
 # =====================================================================
 
 
-class TestCheckConstraints(unittest.TestCase):
+class TestCheckConstraints(_SQLiteEngineTestCase):
     """CHECK (tick_type IN ('oi','funding','mark')) 与 CHECK (side IN
     ('buy','sell')) 的 DB 级约束阻止非法值落库(防御不小心的 parser bug)。
     """
 
     def test_tick_type_check_rejects_unknown(self) -> None:
-        engine = _make_sqlite_engine()
-
-        with Session(engine) as session:
+        with Session(self.engine) as session:
             session.add(StagingMarketOiFundingTicksModel(
                 ts=_SAMPLE_TS,
                 symbol="BTC-USDT-SWAP",
@@ -365,10 +368,9 @@ class TestCheckConstraints(unittest.TestCase):
             session.rollback()
 
     def test_trade_side_check_rejects_unknown(self) -> None:
-        engine = _make_sqlite_engine()
         run_id = str(uuid4())
 
-        with Session(engine) as session:
+        with Session(self.engine) as session:
             session.add(BronzeMarketTradesModel(
                 symbol="BTC-USDT-SWAP",
                 ts=_SAMPLE_TS,
@@ -388,7 +390,7 @@ class TestCheckConstraints(unittest.TestCase):
 # =====================================================================
 
 
-class TestRollbackSql(unittest.TestCase):
+class TestRollbackSql(_SQLiteEngineTestCase):
     """batch_b_05_rollback.sql 必须 DROP 4 张表,且不 DROP schema 本身
     (schema 可能被其他 stage 共用)。
 
@@ -407,9 +409,8 @@ class TestRollbackSql(unittest.TestCase):
         self.assertTrue(self._ROLLBACK_PATH.exists(), f"missing {self._ROLLBACK_PATH}")
         sql_text = self._ROLLBACK_PATH.read_text(encoding="utf-8")
 
-        engine = _make_sqlite_engine()
         # 初始确认表存在
-        with engine.connect() as conn:
+        with self.engine.connect() as conn:
             for schema, tbl in (
                 ("bronze", "market_trades"),
                 ("bronze", "market_orderbook_bbo"),
@@ -445,12 +446,12 @@ class TestRollbackSql(unittest.TestCase):
                 continue
             stmts.append(stmt)
 
-        with engine.begin() as conn:
+        with self.engine.begin() as conn:
             for stmt in stmts:
                 # 逐条执行, DROP TABLE IF EXISTS 对 SQLite 同样生效
                 conn.execute(text(stmt))
 
-        with engine.connect() as conn:
+        with self.engine.connect() as conn:
             for schema, tbl in (
                 ("bronze", "market_trades"),
                 ("bronze", "market_orderbook_bbo"),

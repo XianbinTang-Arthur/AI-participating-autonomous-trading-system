@@ -236,8 +236,12 @@ async def halt(
             actor_identity=principal.identity,
             auth_source=principal.auth_source,
         )
-    except ValueError as exc:
+    except OperatorCommandTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except (ValueError, OperatorCommandRemoteError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OperatorCommandError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     result["mode"] = RuntimeModeState(**query.system_mode()).model_dump(mode="json")
     result["blockers"] = query.blockers()
     return result

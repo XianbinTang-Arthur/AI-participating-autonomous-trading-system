@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from aats.services.feature_engine.long_short_poller import (
     LongShortRatioPoller,
@@ -49,7 +49,7 @@ class LongShortRatioPollerTests(unittest.IsolatedAsyncioTestCase):
     async def test_successful_poll_updates_cache(self) -> None:
         """Mock httpx.AsyncClient.get 返回合法 OKX 响应，缓存应更新."""
         mock_resp = AsyncMock()
-        mock_resp.raise_for_status = AsyncMock()
+        mock_resp.raise_for_status = Mock()
         mock_resp.json = lambda: {
             "code": "0",
             "data": [["1745000000000", "2.5"]],
@@ -69,7 +69,7 @@ class LongShortRatioPollerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_poll_round_sets_cache(self) -> None:
         mock_resp = AsyncMock()
-        mock_resp.raise_for_status = AsyncMock()
+        mock_resp.raise_for_status = Mock()
         mock_resp.json = lambda: {
             "code": "0",
             "data": [["1745000000000", "1.8"]],
@@ -91,7 +91,7 @@ class LongShortRatioPollerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_okx_code_non_zero_skips_cache_update(self) -> None:
         mock_resp = AsyncMock()
-        mock_resp.raise_for_status = AsyncMock()
+        mock_resp.raise_for_status = Mock()
         mock_resp.json = lambda: {"code": "50011", "msg": "rate limit", "data": []}
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(return_value=mock_resp)
@@ -101,7 +101,7 @@ class LongShortRatioPollerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_empty_data_returns_none(self) -> None:
         mock_resp = AsyncMock()
-        mock_resp.raise_for_status = AsyncMock()
+        mock_resp.raise_for_status = Mock()
         mock_resp.json = lambda: {"code": "0", "data": []}
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(return_value=mock_resp)
@@ -111,7 +111,7 @@ class LongShortRatioPollerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_negative_ls_ratio_rejected(self) -> None:
         mock_resp = AsyncMock()
-        mock_resp.raise_for_status = AsyncMock()
+        mock_resp.raise_for_status = Mock()
         mock_resp.json = lambda: {"code": "0", "data": [["1745000000000", "-1.0"]]}
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(return_value=mock_resp)

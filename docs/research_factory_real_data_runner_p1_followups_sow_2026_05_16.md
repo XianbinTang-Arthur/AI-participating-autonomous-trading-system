@@ -1,5 +1,9 @@
 # Research Factory Real Data Runner P1 Followups SOW - 2026-05-16
 
+> 历史任务材料：本文保留 v1 artifact/path 边界。Phase 3V 已新增 train/valid 选择、test seal
+> 以及 valid-only execution evidence 契约；当前入口见
+> [`task/fs_004_research_selection_holdout_sow_2026_08_25.md`](task/fs_004_research_selection_holdout_sow_2026_08_25.md)。
+
 ## Business Objectives and Boundaries
 
 Fix three P1 audit and artifact-boundary issues before the real-data Research Factory runner is used by scheduled automation:

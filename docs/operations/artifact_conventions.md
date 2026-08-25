@@ -173,6 +173,13 @@ configs/active_parameter_sets/
 
 ### 4.3 execution_cost_summary.json (Phase 4)
 
+Phase 3V 起，若该 artifact 将被 Research Factory real-data v2 消费，除指标外还必须包含
+`schema_version=execution_cost_summary_v1`、`source_run_id`、symbol/timeframe、精确 UTC
+`window_start/window_end`、`benchmark_segment=valid`，以及 exact `dataset_fingerprint` 或
+经审查的 compatibility reason。窗口必须精确等于 experiment 的 valid segment；覆盖完整
+train/valid/test 窗口或标为 test 会失败关闭。standalone Phase 4 summary 不自动具备研究
+候选证据资格。
+
 | 字段 | 说明 |
 |------|------|
 | `total_candidates` | 候选订单总数 |
@@ -180,7 +187,7 @@ configs/active_parameter_sets/
 | `slippage.mean` | 平均滑点 (bps) |
 | `total_execution_cost.mean` | 平均总执行成本 (bps) |
 | `cost_adjusted_edge.mean` | 成本调整后 edge (bps) |
-| `positive_adjusted_edge_ratio` | 正调整 edge 比例 |
+| `positive_edge_ratio` | 正成本调整 edge 比例 |
 
 ---
 

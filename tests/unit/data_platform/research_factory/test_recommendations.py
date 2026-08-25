@@ -112,7 +112,11 @@ def metrics_snapshot(
     )
 
 
-def candidate_artifact(*, execution_ref: str | None = None) -> CandidateArtifact:
+def candidate_artifact(
+    *,
+    execution_ref: str | None = None,
+    payload_overrides: dict | None = None,
+) -> CandidateArtifact:
     metrics = metrics_snapshot()
     gate = evaluate_candidate_gate(metrics, {"max_drawdown_limit": 0.2})
     payload = {
@@ -124,6 +128,8 @@ def candidate_artifact(*, execution_ref: str | None = None) -> CandidateArtifact
     }
     if execution_ref is not None:
         payload["execution_cost_summary_ref"] = execution_ref
+    if payload_overrides is not None:
+        payload.update(payload_overrides)
     return CandidateArtifact(
         candidate_id="cand_20260516_000003",
         experiment_id="exp_20260516_000003",
@@ -164,6 +170,55 @@ def test_build_research_recommendation_from_candidate() -> None:
     assert recommendation.evidence.evidence_refs["candidate_artifact"] == "candidate_artifact.json"
     assert recommendation.observation_plan.mode == "shadow"
     assert recommendation.rollback_plan.rollback_required is True
+
+
+def test_sealed_holdout_recommendation_requires_development_evidence_ref() -> None:
+    candidate = candidate_artifact(
+        payload_overrides={
+            "benchmark_segment": "valid",
+            "selection_protocol_version": "train_valid_selection_test_holdout_v2",
+            "development_segments": ("train", "valid"),
+            "development_evidence_ref": "development_evidence.json",
+            "holdout_segment": "test",
+            "holdout_status": "sealed_not_evaluated",
+            "holdout_content_fingerprint": f"rfseg_{'a' * 64}",
+        }
+    )
+
+    with pytest.raises(ValueError, match="matching development_evidence ref"):
+        build_research_recommendation(
+            candidate,
+            evidence_refs=evidence_refs(),
+            created_at=dt(9),
+        )
+
+
+def test_sealed_holdout_recommendation_discloses_development_only_limitation() -> None:
+    candidate = candidate_artifact(
+        payload_overrides={
+            "benchmark_segment": "valid",
+            "selection_protocol_version": "train_valid_selection_test_holdout_v2",
+            "development_segments": ("train", "valid"),
+            "development_evidence_ref": "development_evidence.json",
+            "holdout_segment": "test",
+            "holdout_status": "sealed_not_evaluated",
+            "holdout_content_fingerprint": f"rfseg_{'b' * 64}",
+        }
+    )
+    refs = evidence_refs()
+    refs["development_evidence"] = "development_evidence.json"
+
+    recommendation = build_research_recommendation(
+        candidate,
+        evidence_refs=refs,
+        created_at=dt(9),
+    )
+
+    assert recommendation.evidence.benchmark_segment == "valid"
+    assert (
+        "sealed test holdout has not been evaluated; metrics are development evidence"
+        in recommendation.evidence.limitations
+    )
 
 
 def test_recommendation_rejects_runtime_mutation_flag() -> None:

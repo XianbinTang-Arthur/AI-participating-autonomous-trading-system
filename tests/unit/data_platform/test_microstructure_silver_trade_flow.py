@@ -25,7 +25,7 @@ from tests.unit.data_platform._silver_test_helpers import (
 
 class TestTradeFlowHappyPath(unittest.TestCase):
     def test_buy_sell_volume_split(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             trades = []
             for i in range(20):
@@ -82,7 +82,7 @@ class TestWhaleDetection(unittest.TestCase):
     """§8 case 12: size >= _WHALE_SIZE_FALLBACK (2.0) 的 trades 算 whale。"""
 
     def test_whale_count_triggers_above_threshold(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             trades = []
             # 5 non-whale
@@ -137,7 +137,7 @@ class TestTradeFlowEmptyBar(unittest.TestCase):
     """trades_no_data 且 trade_count=0 (不抛错, 不走 etl_failed)。"""
 
     def test_empty_trades_writes_null_row(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             result = build_silver_microstructure_15m(
                 session=sess, symbol=env.symbol,
@@ -163,7 +163,7 @@ class TestTradeFlowEmptyBar(unittest.TestCase):
         volume_profile 也共享 trades source, 同样 +1。
         """
         from aats.bootstrap.metrics import MetricsRegistry
-        env = make_env()
+        env = make_env(owner=self)
         registry = MetricsRegistry()
         with Session(env.engine) as sess:
             build_silver_microstructure_15m(
@@ -188,7 +188,7 @@ class TestTradeFlowEmptyBar(unittest.TestCase):
     def test_happy_path_does_not_fire_no_data_counter(self) -> None:
         """有 trade 的 bar 不应触发 trade_flow no-data counter (0 或 未注册)。"""
         from aats.bootstrap.metrics import MetricsRegistry
-        env = make_env()
+        env = make_env(owner=self)
         registry = MetricsRegistry()
         with Session(env.engine) as sess:
             from tests.unit.data_platform._silver_test_helpers import insert_trades

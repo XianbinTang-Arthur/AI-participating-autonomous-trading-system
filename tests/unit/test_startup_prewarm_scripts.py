@@ -63,8 +63,9 @@ def test_prewarm_script_ensures_keepalive_before_health_checks() -> None:
 def test_prewarm_script_keeps_current_topology_mapping() -> None:
     text = (REPO_ROOT / "scripts" / "prewarm_wsl2_aats.ps1").read_text(encoding="utf-8")
 
-    assert "@('aats-gateway', 'aats-rdp-daemon')" in text
+    assert "@('aats-gateway', 'aats-rdp-daemon', 'aats-liquidations-daemon', 'aats-microstructure-collector')" in text
     assert "@('aats-gateway', 'aats-market', 'aats-decision', 'aats-execution', 'aats-rdp-daemon')" in text
+    assert "@('aats-gateway', 'aats-market', 'aats-decision', 'aats-execution', 'aats-rdp-daemon', 'aats-liquidations-daemon', 'aats-microstructure-collector')" in text
 
 
 def test_register_script_creates_logon_task_and_supports_remove() -> None:

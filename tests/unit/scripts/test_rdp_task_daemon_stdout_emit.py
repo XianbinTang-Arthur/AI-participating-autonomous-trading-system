@@ -12,7 +12,6 @@ import logging
 import sys
 from pathlib import Path
 
-import pytest
 
 _ROOT = Path(__file__).resolve().parents[3]
 _SCRIPT = _ROOT / "scripts" / "rdp_task_daemon.py"

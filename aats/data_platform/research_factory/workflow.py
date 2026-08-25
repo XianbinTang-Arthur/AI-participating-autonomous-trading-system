@@ -1309,6 +1309,7 @@ def _execution_evidence_from_mapping(payload: Mapping[str, Any]) -> ExecutionEvi
         passed=bool(payload.get("passed")),
         failures=_text_sequence(payload.get("failures", ()), "execution_evidence.failures"),
         created_at=_parse_datetime(payload.get("created_at"), "execution_evidence.created_at"),
+        benchmark_segment=payload.get("benchmark_segment"),
     )
 
 

@@ -7,13 +7,8 @@
 #       AATS_STARTUP_PROFILE / AATS_ENV_TEMPLATE_PROFILE 两个派生变量，
 #       走 managed profile spot runtime_defaults 分支。
 #
-# 启动方式（在 deploy/wsl2-dev/ 目录下）：
-#   docker compose \
-#     -f docker-compose.aats.yml \
-#     -f docker-compose.aats.spot.yml \
-#     --env-file ../../.env.wsl2 \
-#     --env-file ../../.env.spot \
-#     up -d
+# 运维入口（仓库根）：scripts/deploy.sh --profile spot --skip-commit
+# 本 override 只由标准部署脚本编排，不得手工执行 docker compose。
 #
 # 说明：
 #   - 本文件和 docker-compose.aats.derivatives.yml 结构完全对齐（spot ↔ derivatives 镜像对称）

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from aats.data_platform.research_factory import real_data as real_data_module
 from aats.data_platform.research_factory.datasets.gold_bars import GoldBarRecord
 from aats.data_platform.research_factory.real_data import (
     GoldReplayDataSource,
@@ -81,8 +82,9 @@ def write_execution_cost_summary(path: Path, *, cost_adjusted_edge: float = 1.75
                 "source_run_id": "phase4-run-1",
                 "symbol": "BTC-USDT-SWAP",
                 "timeframe": "1h",
-                "window_start": START.isoformat(),
-                "window_end": (START + timedelta(hours=12)).isoformat(),
+                "benchmark_segment": "valid",
+                "window_start": (START + timedelta(hours=4.8)).isoformat(),
+                "window_end": (START + timedelta(hours=7.2)).isoformat(),
                 "dataset_fingerprint_compatibility": "compatible",
                 "compatibility_reason": "unit test fixture uses the same configured dataset window",
                 "full_fill_ratio": 0.9,
@@ -243,11 +245,14 @@ def test_real_data_runner_writes_recommendation_and_registry(tmp_path: Path) -> 
     dataset_quality = read_json(experiment_dir / "dataset_quality_report.json")
     source_integrity = read_json(experiment_dir / "source_integrity_report.json")
     execution_evidence = read_json(experiment_dir / "execution_evidence_report.json")
+    development_evidence = read_json(experiment_dir / "development_evidence.json")
+    candidate = read_json(experiment_dir / "candidate_artifact.json")
     registry_entries = read_jsonl(root.parent / "registry" / "research_memory.jsonl")
 
     assert result.status == "succeeded"
     assert result.candidate_generated is True
     assert result.recommendation_ref == "research_recommendation.json"
+    assert result.development_evidence_ref == "development_evidence.json"
     assert result.dataset_fingerprint
     assert (experiment_dir / "execution_cost_summary.json").exists()
     assert read_json(experiment_dir / "execution_cost_summary.json")["cost_adjusted_edge"]["mean"] == pytest.approx(1.75)
@@ -256,6 +261,7 @@ def test_real_data_runner_writes_recommendation_and_registry(tmp_path: Path) -> 
     assert manifest["output_refs"]["source_integrity_report"] == "source_integrity_report.json"
     assert manifest["output_refs"]["execution_evidence_report"] == "execution_evidence_report.json"
     assert manifest["output_refs"]["evidence_bundle"] == "evidence_bundle.json"
+    assert manifest["output_refs"]["development_evidence"] == "development_evidence.json"
     assert manifest["output_refs"]["novelty_gate_result"] == "novelty_gate_result.json"
     assert manifest["output_refs"]["research_recommendation"] == "research_recommendation.json"
     assert evidence_bundle["passed"] is True
@@ -266,15 +272,153 @@ def test_real_data_runner_writes_recommendation_and_registry(tmp_path: Path) -> 
     assert source_integrity["build_run_consistent"] is True
     assert execution_evidence["contract_schema_version"] == "execution_cost_summary_v1"
     assert execution_evidence["source_run_id"] == "phase4-run-1"
-    assert execution_evidence["window_start"] == START.isoformat()
+    assert execution_evidence["benchmark_segment"] == "valid"
+    assert execution_evidence["window_start"] == (START + timedelta(hours=4.8)).isoformat()
     assert execution_evidence["dataset_fingerprint_compatible"] is True
     assert recommendation["evidence"]["execution_realism_required"] is True
+    assert recommendation["evidence"]["benchmark_segment"] == "valid"
+    assert (
+        "sealed test holdout has not been evaluated; metrics are development evidence"
+        in recommendation["evidence"]["limitations"]
+    )
     assert recommendation["evidence"]["evidence_refs"]["execution_cost_summary"] == "execution_cost_summary.json"
     assert recommendation["evidence"]["evidence_refs"]["novelty_gate_result"] == "novelty_gate_result.json"
     assert recommendation["evidence"]["evidence_refs"]["evidence_bundle"] == "evidence_bundle.json"
     assert recommendation["evidence"]["evidence_refs"]["dataset_quality_report"] == "dataset_quality_report.json"
+    assert (
+        recommendation["evidence"]["evidence_refs"]["development_evidence"]
+        == "development_evidence.json"
+    )
+    assert development_evidence["schema_version"] == "train_valid_selection_test_holdout_v2"
+    assert development_evidence["selection_rule"] == "train_and_valid_must_pass"
+    assert development_evidence["benchmark_segment"] == "valid"
+    assert set(development_evidence["segments"]) == {"train", "valid"}
+    assert development_evidence["segments"]["train"]["gate"]["passed"] is True
+    assert development_evidence["segments"]["valid"]["gate"]["passed"] is True
+    assert (
+        development_evidence["segments"]["train"]["metrics"][
+            "cost_adjusted_edge_bps_mean"
+        ]
+        != pytest.approx(1.75)
+    )
+    assert development_evidence["segments"]["valid"]["metrics"][
+        "cost_adjusted_edge_bps_mean"
+    ] == pytest.approx(1.75)
+    assert development_evidence["holdout"]["segment"] == "test"
+    assert development_evidence["holdout"]["status"] == "sealed_not_evaluated"
+    assert development_evidence["holdout"]["metrics_exposed"] is False
+    assert "metrics" not in development_evidence["holdout"]
+    assert candidate["payload"]["benchmark_segment"] == "valid"
+    assert candidate["payload"]["development_segments"] == ["train", "valid"]
+    assert candidate["payload"]["holdout_status"] == "sealed_not_evaluated"
+    assert (
+        candidate["payload"]["holdout_content_fingerprint"]
+        == development_evidence["holdout"]["content_fingerprint"]
+    )
     assert registry_entries[0]["status"] == "recommendation_ready"
     assert registry_entries[0]["created_by"] == "research_factory_real_data_runner"
+
+
+def test_real_data_runner_does_not_evaluate_sealed_test_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = artifact_root(tmp_path)
+    observed_segments: list[tuple[datetime, ...]] = []
+    original_evaluator = real_data_module.evaluate_factor_expression
+
+    def tracking_evaluator(expression, rows):
+        observed_segments.append(tuple(row["ts"] for row in rows))
+        return original_evaluator(expression, rows)
+
+    monkeypatch.setattr(real_data_module, "evaluate_factor_expression", tracking_evaluator)
+    result = run_research_factory_experiment(
+        experiment_config(
+            root,
+            execution_cost_summary_path=None,
+            require_execution_realism=False,
+            experiment_id="rf_real_holdout_not_evaluated",
+        ),
+        data_source=FakeDataSource(load_result()),
+    )
+
+    test_timestamps = {START + timedelta(hours=index) for index in range(8, 12)}
+    assert result.status == "succeeded"
+    assert len(observed_segments) == 2
+    assert all(not (set(segment) & test_timestamps) for segment in observed_segments)
+
+
+def test_real_data_runner_requires_train_and_valid_gates_to_pass(tmp_path: Path) -> None:
+    root = artifact_root(tmp_path)
+    closes = (105.0, 104.0, 103.0, 102.0, 101.0, 100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0)
+    records = tuple(
+        replace(
+            record,
+            open=close - 0.25,
+            high=close + 0.75,
+            low=close - 1.0,
+            close=close,
+        )
+        for record, close in zip(gold_records(), closes, strict=True)
+    )
+
+    result = run_research_factory_experiment(
+        experiment_config(
+            root,
+            execution_cost_summary_path=None,
+            require_execution_realism=False,
+            experiment_id="rf_real_train_gate_failure",
+        ),
+        data_source=FakeDataSource(load_result(records)),
+    )
+
+    experiment_dir = root / "rf_real_train_gate_failure"
+    development_evidence = read_json(experiment_dir / "development_evidence.json")
+    assert result.status == "failed"
+    assert result.candidate_generated is False
+    assert "development selection gate failed: train:" in result.error
+    assert development_evidence["segments"]["train"]["gate"]["passed"] is False
+    assert development_evidence["segments"]["valid"]["gate"]["passed"] is True
+    assert development_evidence["holdout"]["metrics_exposed"] is False
+    assert not (experiment_dir / "candidate_artifact.json").exists()
+
+
+def test_holdout_content_change_does_not_change_development_metrics(
+    tmp_path: Path,
+) -> None:
+    root_a = tmp_path / "case_a" / "artifacts" / "research" / "research_factory" / "experiments"
+    root_b = tmp_path / "case_b" / "artifacts" / "research" / "research_factory" / "experiments"
+    original_records = gold_records()
+    changed_records = list(original_records)
+    changed_records[-1] = replace(changed_records[-1], close=107.8)
+
+    result_a = run_research_factory_experiment(
+        experiment_config(
+            root_a,
+            execution_cost_summary_path=None,
+            require_execution_realism=False,
+            experiment_id="rf_real_holdout_a",
+        ),
+        data_source=FakeDataSource(load_result(original_records)),
+    )
+    result_b = run_research_factory_experiment(
+        experiment_config(
+            root_b,
+            execution_cost_summary_path=None,
+            require_execution_realism=False,
+            experiment_id="rf_real_holdout_b",
+        ),
+        data_source=FakeDataSource(load_result(tuple(changed_records))),
+    )
+
+    candidate_a = read_json(root_a / result_a.experiment_id / "candidate_artifact.json")
+    candidate_b = read_json(root_b / result_b.experiment_id / "candidate_artifact.json")
+    assert result_a.status == result_b.status == "succeeded"
+    assert candidate_a["metrics"] == candidate_b["metrics"]
+    assert (
+        candidate_a["payload"]["holdout_content_fingerprint"]
+        != candidate_b["payload"]["holdout_content_fingerprint"]
+    )
 
 
 def test_real_data_runner_applies_research_profile_quality_thresholds(tmp_path: Path) -> None:
@@ -703,12 +847,13 @@ def test_real_data_runner_rejects_execution_summary_missing_contract_fields(tmp_
     assert not (experiment_dir / "candidate_artifact.json").exists()
 
 
-def test_real_data_runner_rejects_execution_summary_window_mismatch(tmp_path: Path) -> None:
+def test_real_data_runner_rejects_execution_summary_covering_sealed_test(tmp_path: Path) -> None:
     root = artifact_root(tmp_path)
     execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
     write_execution_cost_summary(execution_summary)
     payload = read_json(execution_summary)
-    payload["window_end"] = (START + timedelta(hours=11)).isoformat()
+    payload["window_start"] = START.isoformat()
+    payload["window_end"] = (START + timedelta(hours=12)).isoformat()
     execution_summary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
     result = run_research_factory_experiment(
@@ -727,7 +872,34 @@ def test_real_data_runner_rejects_execution_summary_window_mismatch(tmp_path: Pa
     assert result.status == "failed"
     assert bundle["passed"] is False
     assert execution_evidence["passed"] is False
-    assert "window_end" in execution_evidence["failures"][0]
+    assert any("benchmark window_start" in failure for failure in execution_evidence["failures"])
+    assert any("benchmark window_end" in failure for failure in execution_evidence["failures"])
+    assert not (experiment_dir / "candidate_artifact.json").exists()
+
+
+def test_real_data_runner_rejects_execution_summary_for_test_segment(tmp_path: Path) -> None:
+    root = artifact_root(tmp_path)
+    execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
+    write_execution_cost_summary(execution_summary)
+    payload = read_json(execution_summary)
+    payload["benchmark_segment"] = "test"
+    execution_summary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    result = run_research_factory_experiment(
+        experiment_config(
+            root,
+            execution_cost_summary_path=execution_summary,
+            experiment_id="rf_real_test_execution_evidence",
+        ),
+        data_source=FakeDataSource(load_result()),
+    )
+
+    experiment_dir = root / "rf_real_test_execution_evidence"
+    execution_evidence = read_json(experiment_dir / "execution_evidence_report.json")
+
+    assert result.status == "failed"
+    assert execution_evidence["passed"] is False
+    assert any("benchmark_segment must be valid" in failure for failure in execution_evidence["failures"])
     assert not (experiment_dir / "candidate_artifact.json").exists()
 
 

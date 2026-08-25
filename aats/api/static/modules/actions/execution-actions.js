@@ -12,33 +12,33 @@ export function createExecutionActionHandlers({
   adjustPageLimit,
   resetPageLimit,
 }) {
-  async function inspectOrder(orderId) {
+  async function inspectOrder(orderId, triggerElement = null) {
     if (!orderId) return;
     try {
       const detail = await requestJson(`/orders/${encodeURIComponent(orderId)}`);
-      openDrawer(buildOrderDrawer(detail));
+      openDrawer(buildOrderDrawer(detail), triggerElement);
     } catch (error) {
       setFlash(state, "danger", error instanceof Error ? error.message : String(error));
       renderBanners();
     }
   }
 
-  async function inspectFill(fillId) {
+  async function inspectFill(fillId, triggerElement = null) {
     if (!fillId) return;
     try {
       const detail = await requestJson(`/fills/${encodeURIComponent(fillId)}`);
-      openDrawer(buildFillDrawer(detail));
+      openDrawer(buildFillDrawer(detail), triggerElement);
     } catch (error) {
       setFlash(state, "danger", error instanceof Error ? error.message : String(error));
       renderBanners();
     }
   }
 
-  async function inspectLifecycleAttribution(lifecycleId) {
+  async function inspectLifecycleAttribution(lifecycleId, triggerElement = null) {
     if (!lifecycleId) return;
     try {
       const detail = await requestJson(`/reports/position-lifecycle-attribution/${encodeURIComponent(lifecycleId)}`);
-      openDrawer(buildLifecycleAttributionDrawer(detail));
+      openDrawer(buildLifecycleAttributionDrawer(detail), triggerElement);
     } catch (error) {
       setFlash(state, "danger", error instanceof Error ? error.message : String(error));
       renderBanners();
@@ -68,9 +68,9 @@ export function createExecutionActionHandlers({
   }
 
   return {
-    "inspect-order": (value) => inspectOrder(value),
-    "inspect-fill": (value) => inspectFill(value),
-    "inspect-lifecycle-attribution": (value) => inspectLifecycleAttribution(value),
+    "inspect-order": (value, target) => inspectOrder(value, target),
+    "inspect-fill": (value, target) => inspectFill(value, target),
+    "inspect-lifecycle-attribution": (value, target) => inspectLifecycleAttribution(value, target),
     "resolve-stuck-order": (value) => resolveStuckOrder(value),
     "load-more-orders": () => adjustPageLimit("recentOrders", pageLoadStep),
     "collapse-orders": () => resetPageLimit("recentOrders"),

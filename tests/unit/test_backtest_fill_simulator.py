@@ -1,12 +1,12 @@
 """Unit tests for aats.data_platform.replay.backtest.fill_simulator.
 
 验收清单（对应任务列出的 9 条）：
-    1. test_ioc_buy_taker_fill              — IOC buy 100% 成交，fee = taker rate
+    1. test_ioc_buy_taker_fill              — cap 内 IOC buy 全量成交，fee = taker rate
     2. test_ioc_sell_slippage_direction     — IOC sell 滑点方向为负
     3. test_post_only_high_prob_fills       — 低 volume_ratio deterministic 种子成交
     4. test_post_only_over_10_pct_no_fill   — qty/bar_vol > 10% 必不成交
     5. test_post_only_fill_price_no_slippage— 成交时 avg_fill_price == bar_close
-    6. test_bounded_limit_blended_fee       — bounded_limit fee == 3.5 bps
+    6. test_bounded_limit_taker_fallback    — bounded_limit 保守按 taker 计价
     7. test_zero_bar_volume_post_only_no_fill
     8. test_zero_qty_no_fill
     9. test_fee_notional_is_decimal_precise — 无 float 舍入误差
@@ -26,7 +26,6 @@ from decimal import Decimal
 
 from aats.data_platform.replay.backtest.fill_simulator import (
     FillRequest,
-    FillResult,
     FillSimulator,
 )
 
@@ -39,13 +38,13 @@ def _md5_uniform(seed: str) -> float:
 
 
 class TestFillSimulatorIOC(unittest.TestCase):
-    """IOC 分支：100% 成交 + taker fee + slippage 带方向。"""
+    """IOC 分支：participation cap + taker fee + slippage 带方向。"""
 
     def setUp(self) -> None:
         self.sim = FillSimulator()  # 默认参数: maker 2, taker 5, slip 1
 
     def test_ioc_buy_taker_fill(self) -> None:
-        """IOC buy 100% 成交，filled_qty = target_qty，fee_bps = taker_fee_bps。"""
+        """cap 内 IOC buy 全量成交，filled_qty = target_qty，fee 为 taker。"""
         req = FillRequest(
             order_id="ioc-buy-1",
             side="buy",
@@ -53,11 +52,12 @@ class TestFillSimulatorIOC(unittest.TestCase):
             target_qty=Decimal("2"),
             submitted_at_ts=1_000,
         )
-        result = self.sim.simulate(req, Decimal("50000"), Decimal("100"))
+        result = self.sim.simulate(req, Decimal("50000"), Decimal("1000"))
 
         self.assertEqual(result.fill_kind, "taker")
         self.assertEqual(result.filled_qty, Decimal("2"))
         self.assertEqual(result.fee_bps, 5.0)
+        self.assertEqual(result.slippage_bps, 1.0)
         # buy slippage +1 bps: 50000 * (1 + 1/10000) = 50005
         self.assertEqual(result.avg_fill_price, Decimal("50005.0000"))
         # fee = 2 * 50005 * 5/10000 = 50.005
@@ -187,7 +187,7 @@ class TestFillSimulatorPostOnly(unittest.TestCase):
         self.assertEqual(high_result.fill_kind, "maker")
 
     def test_zero_bar_volume_post_only_no_fill(self) -> None:
-        """bar_volume <= 0 时 post_only 立刻 no_fill，notes 标注 zero bar_volume。"""
+        """bar_volume <= 0 时 post_only 立刻 no_fill，notes 标注缺失流动性。"""
         req = FillRequest(
             order_id="order-4",
             side="buy",
@@ -198,17 +198,17 @@ class TestFillSimulatorPostOnly(unittest.TestCase):
         result = self.sim.simulate(req, Decimal("50000"), Decimal("0"))
         self.assertEqual(result.fill_kind, "no_fill")
         self.assertEqual(result.filled_qty, Decimal(0))
-        self.assertIn("zero bar_volume", result.notes)
+        self.assertIn("non-positive bar_volume", result.notes)
 
 
 class TestFillSimulatorBoundedLimit(unittest.TestCase):
-    """bounded_limit 分支：100% 成交 @ bar_close，blended fee。"""
+    """bounded_limit 分支：participation cap 下保守按 taker fallback。"""
 
     def setUp(self) -> None:
         self.sim = FillSimulator()
 
-    def test_bounded_limit_blended_fee(self) -> None:
-        """bounded_limit fee 应等于 0.5 * (maker + taker) = 3.5 bps。"""
+    def test_bounded_limit_taker_fallback(self) -> None:
+        """bounded_limit 应施加 taker fee 与固定不利滑点。"""
         req = FillRequest(
             order_id="bl-1",
             side="buy",
@@ -220,13 +220,14 @@ class TestFillSimulatorBoundedLimit(unittest.TestCase):
 
         self.assertEqual(result.fill_kind, "taker")
         self.assertEqual(result.filled_qty, Decimal("1"))
-        self.assertEqual(result.avg_fill_price, Decimal("50000"))
-        self.assertEqual(result.fee_bps, 3.5)
-        # fee = 1 * 50000 * 3.5/10000 = 17.5
-        self.assertEqual(result.fee_notional, Decimal("17.50000000"))
+        self.assertEqual(result.avg_fill_price, Decimal("50005.0000"))
+        self.assertEqual(result.fee_bps, 5.0)
+        self.assertEqual(result.slippage_bps, 1.0)
+        # fee = 1 * 50005 * 5/10000 = 25.0025
+        self.assertEqual(result.fee_notional, Decimal("25.00250000"))
 
-    def test_bounded_limit_sell_no_slippage(self) -> None:
-        """bounded_limit sell 价格仍等于 bar_close（不加 slippage）。"""
+    def test_bounded_limit_sell_unfavourable_slippage(self) -> None:
+        """bounded_limit sell 采用 taker fallback，价格承受负向滑点。"""
         req = FillRequest(
             order_id="bl-sell",
             side="sell",
@@ -234,8 +235,8 @@ class TestFillSimulatorBoundedLimit(unittest.TestCase):
             target_qty=Decimal("2"),
             submitted_at_ts=1,
         )
-        result = self.sim.simulate(req, Decimal("50000"), Decimal("100"))
-        self.assertEqual(result.avg_fill_price, Decimal("50000"))
+        result = self.sim.simulate(req, Decimal("50000"), Decimal("1000"))
+        self.assertEqual(result.avg_fill_price, Decimal("49995.0000"))
 
 
 class TestFillSimulatorGuards(unittest.TestCase):
@@ -300,6 +301,38 @@ class TestFillSimulatorGuards(unittest.TestCase):
         self.assertEqual(result.fill_kind, "no_fill")
         self.assertIn("unknown order_type", result.notes)
 
+    def test_non_finite_market_inputs_return_no_fill_without_decimal_error(self) -> None:
+        req = FillRequest(
+            order_id="non-finite-input",
+            side="buy",
+            order_type="ioc",
+            target_qty=Decimal("1"),
+            submitted_at_ts=1,
+        )
+        for price, volume in (
+            (Decimal("NaN"), Decimal("1000")),
+            (Decimal("Infinity"), Decimal("1000")),
+            (Decimal("50000"), Decimal("NaN")),
+            (Decimal("50000"), Decimal("Infinity")),
+        ):
+            with self.subTest(price=price, volume=volume):
+                result = self.sim.simulate(req, price, volume)
+                self.assertEqual(result.fill_kind, "no_fill")
+                self.assertEqual(result.filled_qty, Decimal("0"))
+
+    def test_non_finite_or_out_of_range_model_config_is_rejected(self) -> None:
+        invalid_configs = (
+            {"max_volume_participation": Decimal("NaN")},
+            {"max_volume_participation": Decimal("Infinity")},
+            {"ioc_slippage_bps": float("nan")},
+            {"taker_fee_bps": float("inf")},
+            {"post_only_fill_prob_high": 1.01},
+        )
+        for config in invalid_configs:
+            with self.subTest(config=config):
+                with self.assertRaises(ValueError):
+                    FillSimulator(**config)
+
 
 class TestFillSimulatorDecimalPrecision(unittest.TestCase):
     """fee 计算必须保持 Decimal 精度，无 float 舍入误差。"""
@@ -319,11 +352,15 @@ class TestFillSimulatorDecimalPrecision(unittest.TestCase):
         bar_close = Decimal("0.1")       # 0.1 float 亦有二进制舍入
         result = self.sim.simulate(req, bar_close, Decimal("100"))
 
-        # Decimal("0.3") * Decimal("0.1") * Decimal(str(3.5)) / Decimal("10000")
-        # = Decimal("0.03") * Decimal("3.5") / Decimal("10000")
-        # = Decimal("0.105") / Decimal("10000")
-        # = Decimal("0.0000105")
-        expected = Decimal("0.3") * Decimal("0.1") * Decimal("3.5") / Decimal("10000")
+        expected_avg = Decimal("0.1") * (
+            Decimal(1) + Decimal("1") / Decimal("10000")
+        )
+        expected = (
+            Decimal("0.3")
+            * expected_avg
+            * Decimal("5")
+            / Decimal("10000")
+        )
         self.assertEqual(result.fee_notional, expected)
         # 额外断言：返回类型是 Decimal，不是 float
         self.assertIsInstance(result.fee_notional, Decimal)
@@ -332,7 +369,7 @@ class TestFillSimulatorDecimalPrecision(unittest.TestCase):
 
         # 反向证明：把中间量走 float 会产生不同的 (通常是近似) 值
         as_float = 0.3 * 0.1 * 3.5 / 10000
-        # expected 是 0.0000105 精确；as_float 典型会是 0.00001050000...0002 等
+        # expected 由精确 Decimal 价格与费率计算；float 路径只用于反向说明。
         # 我们只断言 "Decimal 结果不等于 float 直算转 Decimal"（只要其一不成立，
         # 说明 Decimal 路径更精确；若相等也不是 bug，只是恰好对齐）。此处用
         # 绝对等价当成 sanity check：两者可能相等也可能不等，但 result 必须

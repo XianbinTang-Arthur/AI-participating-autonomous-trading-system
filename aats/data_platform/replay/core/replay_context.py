@@ -152,6 +152,7 @@ class ReplayParameterOverrides:
     - scale_in_threshold          加仓评分阈值（long）
     - short_entry_threshold       开仓评分阈值（short，None = 同 entry_threshold）
     - short_close_threshold       平仓评分阈值（short，None = 同 close_threshold）
+    - strategy_short_bias_enabled 是否允许 independent replay 选择 short leg
     - min_hold_seconds            最小持仓秒数
     - rebalance_cooldown_seconds  平仓后冷却秒数
     - max_thesis_age_seconds      thesis 最长存活秒数
@@ -203,6 +204,14 @@ class ReplayParameterOverrides:
 
     short_close_threshold: float | None = None
     """short book 平仓阈值。None 时使用 close_threshold（对称模式）。"""
+
+    strategy_short_bias_enabled: bool = True
+    """是否允许 independent replay 计算并选择 short leg。
+
+    字段名与生产 ``AATSSettings.strategy_short_bias_enabled`` 完全一致。默认 ``True``
+    用于兼容当前 derivatives replay 与 tracked derivatives profiles；面向指定 profile
+    生成正式证据时，调用方必须显式传入该 profile 解析后的实际值。
+    """
 
     # ── Phase 1 扩展：持仓时间管理 ────────────────────────────────
     min_hold_seconds: float = 300.0
@@ -258,8 +267,8 @@ class ReplayParameterOverrides:
     limit_offset_bps_entry: float = 1.5
     """开仓限价偏移（bps）。影响成交率与滑点。
     生产端映射: strategy_hedge_independent_limit_offset_bps_entry
-    ⚠️ REPLAY 未模拟: replay 假设 bar close 即时成交，不模拟 limit order 匹配。
-    该参数仅做透传映射到生产端，replay 回测不验证其效果。"""
+    ⚠️ REPLAY 未模拟: causal harness 已禁止同 bar 成交，但仍没有按该 offset
+    做订单簿限价匹配。该参数仅做透传映射到生产端，replay 回测不验证其效果。"""
 
     # ── 信号噪声缓冲 ─────────────────────────────────────────
     noise_buffer_bps: float = 2.0
@@ -276,6 +285,11 @@ class ReplayParameterOverrides:
 
     def __post_init__(self) -> None:
         """参数约束校验（frozen dataclass 只能 raise，不能 mutate）。"""
+        if type(self.strategy_short_bias_enabled) is not bool:
+            raise ValueError(
+                "strategy_short_bias_enabled 必须是 bool，"
+                f"实际为 {type(self.strategy_short_bias_enabled).__name__}"
+            )
         if self.failed_thesis_net_edge_bps > self.de_risk_net_edge_bps:
             raise ValueError(
                 f"约束违反: failed_thesis_net_edge_bps ({self.failed_thesis_net_edge_bps}) "
@@ -370,6 +384,7 @@ class ReplayParameterOverrides:
             "scale_in_threshold": self.scale_in_threshold,
             "short_entry_threshold": self.short_entry_threshold,
             "short_close_threshold": self.short_close_threshold,
+            "strategy_short_bias_enabled": self.strategy_short_bias_enabled,
             "min_hold_seconds": self.min_hold_seconds,
             "rebalance_cooldown_seconds": self.rebalance_cooldown_seconds,
             "max_thesis_age_seconds": self.max_thesis_age_seconds,
@@ -409,6 +424,7 @@ class ReplayParameterOverrides:
             # Phase 1 扩展参数
             "entry_threshold", "close_threshold", "scale_in_threshold",
             "short_entry_threshold", "short_close_threshold",
+            "strategy_short_bias_enabled",
             "min_hold_seconds", "rebalance_cooldown_seconds",
             "max_thesis_age_seconds",
             "de_risk_net_edge_bps", "failed_thesis_net_edge_bps",
@@ -429,6 +445,16 @@ class ReplayParameterOverrides:
         def _v_opt(key: str) -> float | None:
             val = d.get(key)
             return float(val) if val is not None else None
+
+        def _v_bool(key: str, default: bool) -> bool:
+            val = d.get(key)
+            if val is None:
+                return default
+            if type(val) is not bool:
+                raise ValueError(
+                    f"{key} 必须是 JSON boolean，实际为 {type(val).__name__}"
+                )
+            return val
 
         # 成本配置：优先从平铺 keys 组装，其次从嵌套 cost_config
         has_flat_cost = "taker_fee_bps" in d or "slippage_bps" in d or "maker_fee_bps" in d
@@ -461,6 +487,7 @@ class ReplayParameterOverrides:
             scale_in_threshold=_v("scale_in_threshold", 0.40),
             short_entry_threshold=_v_opt("short_entry_threshold"),
             short_close_threshold=_v_opt("short_close_threshold"),
+            strategy_short_bias_enabled=_v_bool("strategy_short_bias_enabled", True),
             min_hold_seconds=_v("min_hold_seconds", 300.0),
             rebalance_cooldown_seconds=_v("rebalance_cooldown_seconds", 120.0),
             max_thesis_age_seconds=_v("max_thesis_age_seconds", 1800.0),

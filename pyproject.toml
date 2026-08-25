@@ -24,8 +24,12 @@ dependencies = [
 [project.optional-dependencies]
 # 常用测试依赖：补齐 pytest-asyncio 插件，以及 NATS 相关单测 import 所需模块。
 test = [
-  "pytest-asyncio>=0.23",
-  "nats-py>=2.7",
+  "pytest>=8,<10",
+  "pytest-asyncio>=0.23,<2",
+  "nats-py>=2.7,<3",
+]
+lint = [
+  "ruff==0.15.8",
 ]
 # Stage 4 多进程切片化重构使用：HybridEventBus 的关键 topic 走 NATS JetStream。
 # 仅在 AATS_EVENT_BUS_BACKEND=hybrid|nats 时需要安装；in_memory backend 不依赖。
@@ -68,6 +72,12 @@ otel = [
 
 [tool.setuptools.packages.find]
 include = ["aats*"]
+
+[tool.pytest.ini_options]
+markers = [
+  "asyncio: run an async test through pytest-asyncio",
+  "integration: requires an explicitly selected isolated integration environment",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "scripts/_verify_governance_db.py" = ["E402"]

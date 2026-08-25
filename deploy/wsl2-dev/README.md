@@ -12,7 +12,7 @@
 > 当前约定：`.env.wsl2` 的单一真相放在仓库根目录，例如 `~/aats/.env.wsl2`。
 > `scripts/deploy.sh` 仍兼容旧位置 `deploy/wsl2-dev/.env.wsl2`，但只建议作为迁移期兼容路径。
 >
-> 最后核对：2026-08-22（代码基线 `be9179e`）。本页说明基础设施构成；部署唯一入口仍是仓库根目录的 `scripts/deploy.sh`。
+> 最后核对：2026-08-25（Git 基线 `00b6df0` + 当前未提交 Phase 3A–3V 工作区覆盖层）。本页说明基础设施构成；部署唯一入口仍是仓库根目录的 `scripts/deploy.sh`。静态文档不能证明当前容器、网络、数据库、账户、交易所或风控状态。
 
 ## 拓扑
 
@@ -55,9 +55,20 @@
 | Promtail | 3.0  | 9080          | 256M    | Docker 容器日志采集 → Loki           | volume `promtail_positions` |
 | Jaeger   | 1.57 | 16686 / 4317 / 4318 | 1536M | 分布式 trace（OTLP gRPC + HTTP） | volume `jaeger_badger_data` |
 | Prometheus | 2.51 | 9090         | 256M    | AATS 进程指标采集                    | volume `prometheus_data` |
-| Grafana  | 10.4.4 | 3000        | 512M    | 4 数据源统一看板 + 5 条告警规则       | volume `grafana_data`   |
+| Grafana  | 12.4.3 | 3000        | 512M    | 4 数据源统一看板 + 5 条告警规则       | volume `grafana_data`   |
 
 基础设施合计约 **7.2 GB** 内存（9 个服务）。
+
+Phase 3T 起，上表九个 registry image 均在 Compose 中使用可读 tag 加 manifest digest，
+Python 两个 build stage 也固定 `python:3.12-slim` digest；运行时第三方 Python wheel 从
+`requirements/runtime-py312-linux-x86_64.lock` 按 SHA-256 安装。本地构建的
+`aats-base:dev` 由部署证据记录实际 image ID。该机制防止 tag 和 Python 解析静默漂移，
+不等价于 SBOM、漏洞/许可证/签名审计或成功构建；APT 与上述供应链门仍开放。
+
+Phase 3U 起，PostgreSQL 显式声明 `max_connections=200`、reserved=3；应用当前四进程完整
+声明 topology ceiling=150、普通连接容量 197、名义余量 47。该算术只由
+`scripts/verify_database_connection_budget.py` 做静态一致性检查，不证明目标负载、故障
+重连、瞬时 CLI/迁移/恢复/admin 或 `work_mem` 联合内存已经通过。
 
 ---
 
@@ -83,8 +94,10 @@ $EDITOR .env.wsl2     # 把 *_change_me 改成你自己的值
 然后回到 Windows 工作区根目录，通过唯一部署入口执行：
 
 ```bash
-bash scripts/deploy.sh --profile derivatives-live --skip-commit
+bash scripts/deploy.sh --profile derivatives --skip-commit
 ```
+
+profile 必填；当前只允许 `spot`/`derivatives`，所有 live profile 在副作用前失败且无 override。部署顺序由该入口固定为：预检与同步 → 生成本次 runtime readiness generation → 构建新镜像 → 停止旧栈 → 启动并检查基础设施 → 执行一次性 root + RDP schema migration job → 启动应用 → 应用健康检查 → 写入模拟证据包。四主进程只有在同 generation peer 就绪后启动 NATS/hybrid publisher；该代次同时写入 evidence。应用进程只做 schema exact validation，不得在 lifespan 或 daemon 启动路径隐式建表、补列或迁移。任一关键步骤失败必须中止；模拟证据明确不是 trading-ready，也不证明生产库已迁移或 NATS 目标故障矩阵已通过。
 
 部署报告完成后可做只读验证：
 
@@ -93,7 +106,7 @@ bash scripts/deploy.sh --profile derivatives-live --skip-commit
 bash scripts/sync_to_wsl2.sh check
 
 # 基础设施探针
-docker exec aats-postgres pg_isready -U aats  # Postgres
+docker exec aats-postgres sh -lc 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'  # Postgres
 docker exec aats-redis redis-cli ping         # Redis
 curl http://localhost:8222/healthz             # NATS
 curl http://localhost:3100/ready               # Loki
@@ -110,11 +123,13 @@ curl -s http://localhost:16686/ | head -1      # Jaeger UI
 
 ```bash
 # 发布 / 重建 / 健康检查
-bash scripts/deploy.sh --profile derivatives-live --skip-commit
+bash scripts/deploy.sh --profile derivatives --skip-commit
 
 # 确认 Windows 与 WSL2 checkout 是否一致
 bash scripts/sync_to_wsl2.sh check
 ```
+
+不要直接调用 `scripts/rdp_init_db.py` 或逐 stage 工具替代部署期复合迁移；前者是显式管理操作，后者只用于经批准的局部修复。标准路径是 `scripts/deploy.sh` 内部调用 `scripts/apply_schema_migrations.py`。
 
 ---
 
@@ -123,7 +138,7 @@ bash scripts/sync_to_wsl2.sh check
 这些连接信息由 `scripts/deploy.sh` 通过根目录 `.env.wsl2` 和 profile env 文件注入。
 不要再维护单独的旧式 WSL2 dev env 文件或手动启动 4 个进程。
 
-当前 Compose 公共环境使用 `AATS_DATABASE_URL`、`AATS_HOT_STATE_REDIS_URL`、`AATS_NATS_URL`、`AATS_ACTIVE_PARAMETER_DB_URL` 和 `AATS_OTEL_*`。连接串可能包含凭证，本文不复制示例值；以 `configs/templates/` 的无密钥模板和 Compose 声明为字段参考，以根目录受忽略的真实环境文件为运行输入。
+当前 Compose 公共环境使用 `AATS_DATABASE_URL`、`AATS_HOT_STATE_REDIS_URL`、`AATS_NATS_URL`、`AATS_ACTIVE_PARAMETER_DB_URL`、`AATS_RUNTIME_READINESS_GENERATION` 和 `AATS_OTEL_*`。generation 由 deploy 脚本临时生成，不写入 `.env.*`；缺失时 Compose 失败。连接串可能包含凭证，本文不复制示例值；以 `configs/templates/` 的无密钥模板和 Compose 声明为字段参考，以根目录受忽略的真实环境文件为运行输入。
 
 > 注意：`AATS_DATABASE_SINGLE_RUNTIME_GUARD_ENABLED=true` 是允许打开的 ——
 > 改造后的 `scoped_runtime_lock_key` 会按 `AATS_PROCESS_ROLE` 派生不同的 advisory lock，
@@ -181,15 +196,16 @@ RETENTION_DAYS=14 ./scripts/backup_postgres.sh
 
 ## 安全说明
 
-- 全部端口仅监听 `127.0.0.1`，**不会**暴露到局域网或公网
+- Compose 中全部宿主 published port（含 Gateway）固定到 `127.0.0.1`；模拟部署 evidence 还会拒绝实际 Gateway HostIp 漂移。静态配置不能单独证明既有容器已重建或目标宿主防火墙/NAT/VPN 不可达
+- 需要远程访问时必须使用另行批准的 proxy/VPN/mTLS 设计，不得把端口映射改回 all-interface
 - `.env.wsl2` 已在 `.gitignore` 排除，密码不会泄露到 git
 - 发布和重启统一使用 `scripts/deploy.sh`；不要把本文的基础设施细节当作第二套部署入口
 - NATS dev 配置未启用生产级认证/多节点 HA；只适合本机演练
-- live profile 即使能在本地跑起来，也必须按 `DEPLOYMENT.md` 和 Operator checklist 完成 trading-ready 检查。
+- 当前标准入口硬禁用 live profile；不得直接 Compose 绕过。重新开放必须按 `DEPLOYMENT.md` 完成全部 gate、克隆回滚演练和独立复核。
 
 ### 使用边界
 
-本 WSL2 栈默认只作为开发、模拟盘、演练和观测环境。若用于 live 演练，必须额外确认 profile、Operator auth、database、OKX account、kill switch、reconciliation、active parameter history 和 recovery status。
+本 WSL2 栈当前只用于开发、模拟盘、演练和观测。标准入口不允许 live 演练；未来重新开放前必须额外确认 profile、Operator auth、database、OKX account、kill switch、reconciliation、active parameter history、recovery status 和一致回滚。
 
 ---
 

@@ -63,15 +63,19 @@ class OrderbookPayloadMigrationPostgresTests(unittest.TestCase):
 
     def test_stage_12_forward_constraints_and_rollback(self) -> None:
         from aats.data_platform.migrations._batch_b import (
-            run_batch_b_migrations,
-            run_batch_b_rollback,
+            _load_sql,
+            _without_outer_transaction,
         )
 
-        forward = run_batch_b_migrations(
-            self.engine,
-            stages=("batch_b_12_orderbook_payloads",),
+        # This is a standalone SQL contract test.  The production runner
+        # intentionally rejects stage 12 without its complete predecessor
+        # ledger, so execute the normalized SQL directly in this isolated DB.
+        forward_sql = _without_outer_transaction(
+            _load_sql("batch_b_12_orderbook_payloads"),
+            stage="batch_b_12_orderbook_payloads",
         )
-        self.assertTrue(forward.ok, forward.error_message)
+        with self.engine.begin() as conn:
+            conn.execute(text(forward_sql))
 
         with self.engine.begin() as conn:
             table_exists = conn.execute(text(
@@ -158,11 +162,12 @@ class OrderbookPayloadMigrationPostgresTests(unittest.TestCase):
                     },
                 )
 
-        rollback = run_batch_b_rollback(
-            self.engine,
-            stages=("batch_b_12_orderbook_payloads",),
+        rollback_sql = _without_outer_transaction(
+            _load_sql("batch_b_12_orderbook_payloads", rollback=True),
+            stage="batch_b_12_orderbook_payloads:rollback",
         )
-        self.assertTrue(rollback.ok, rollback.error_message)
+        with self.engine.begin() as conn:
+            conn.execute(text(rollback_sql))
 
         with self.engine.begin() as conn:
             table_exists = conn.execute(text(

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -67,8 +68,11 @@ def test_backfill_release_effectiveness_only_processes_rolled_back(tmp_path: Pat
     assert result["error_count"] == 0
 
 
-def test_backfill_independent_blocked_bundles_reclassifies_review_required() -> None:
+def test_backfill_independent_blocked_bundles_reclassifies_review_required(
+    request: pytest.FixtureRequest,
+) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    request.addfinalizer(engine.dispose)
     Base.metadata.create_all(
         engine,
         tables=[StrategyExecutionBundleModel.__table__, OrderStateModel.__table__],
@@ -207,8 +211,11 @@ def test_backfill_independent_blocked_bundles_reclassifies_review_required() -> 
         assert refreshed.row_version == row_version_before
 
 
-def test_backfill_independent_blocked_bundles_supports_converged_execution_orders() -> None:
+def test_backfill_independent_blocked_bundles_supports_converged_execution_orders(
+    request: pytest.FixtureRequest,
+) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    request.addfinalizer(engine.dispose)
     Base.metadata.create_all(
         engine,
         tables=[StrategyExecutionBundleModel.__table__, ExecutionOrderModel.__table__],

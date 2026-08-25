@@ -1,7 +1,7 @@
 # AATS 上线前本地测试指南
 
 > 文档状态：现行操作说明  
-> 最后核对：2026-08-23（代码基线 `be9179ead5be6aba22fbe94e3baf72b9f46eedc3`）  
+> 最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`，包含 Phase 3A–3W 整改提交候选）
 > 核对范围：测试目录、仓库命令、managed profile、本地 API 入口和部署纪律的静态核对  
 > 运行时状态：未验证；本文不证明数据库、容器、交易所或实盘链路可用
 
@@ -13,8 +13,14 @@
 - 不读取、打印、提交或复制 `.env.*` 的内容。只检查文件是否按操作规范存在，不展示值。
 - 不用真实资金、真实下单或绕过 risk、kill switch、reconciliation、trading-ready 等硬门。
 - 不手工执行 `docker compose`，不使用 `rsync`；需要部署式演练时只走 [`../../DEPLOYMENT.md`](../../DEPLOYMENT.md) 规定的入口。
-- `scripts/run_local.py` 当前接口已经漂移，不能作为可信 paper loop。
+- `scripts/run_local.py` 是只输出迁移指引并 exit `2` 的失败关闭入口，不能作为 paper loop；有限迭代闭环使用明确选择的 integration scenario。
 - 测试失败、skip 原因不明、运行时证据缺失或文档与代码冲突时停止推进，不以人工“看起来正常”覆盖失败。
+- 回测验证必须同时记录 `next_bar_event_v2` 与 `ohlcv_participation_cap_v2`；OHLCV participation-cap 通过不能替代 L2/历史真实 fill 校准，也不能作为 live 容量或收益证明。
+- Dashboard 无障碍单元测试只锁定 modal/focus/reduced-motion 代码契约；上线前仍须在目标浏览器完成 keyboard-only、NVDA/VoiceOver、axe、缩放和 reduced-motion 人工验证。
+- Managed profile 测试必须证明 YAML 是 mapping 且零未知 `AATSSettings` key；静态/单元通过仍不能替代 committed candidate 的目标进程启动与仓库外 overlay 盘点。
+- 面向某个 profile 的 independent replay 必须把解析后的 `strategy_short_bias_enabled`
+  作为显式参数写入 artifact；字段缺失只能按兼容默认解释，不能据此声称验证了 long-only
+  配置。关闭值必须使 short raw score 为 `0.0`。
 
 ## 2. 证据分层
 
@@ -67,6 +73,45 @@ git status --short
 
 最窄测试通过后仍要执行完整 `tests/unit/`。记录 passed、failed、skipped、warnings 和耗时；skipped 不得计作已覆盖。
 
+仓库还定义了 `.github/workflows/quality.yml` 基础质量门：在 pull request、`main` push
+或人工触发时使用 Python 3.12 执行全仓 Ruff、完整 unit、strict markers 和新增 warning
+阻断。workflow 只读 checkout、不读取 secrets、不部署。当前唯一 warning allowlist 是
+精确匹配的 SQLite 默认 datetime adapter 弃用消息；不得扩大为整类忽略。
+
+Phase 3T 起，workflow 会先运行 `scripts/verify_dependency_locks.py`，再从
+`requirements/ci-py312-linux-x86_64.lock` 按 `--require-hashes --only-binary=:all:`
+安装。运行时 Docker 使用对应 runtime lock，外部 Compose image 使用 tag + digest。
+
+Phase 3U 又在安装第三方依赖前运行
+`scripts/verify_database_connection_budget.py`。该检查扫描应用 `create_engine` inventory、
+pool 单一真源、声明 topology 150、Compose 普通容量 197/名义余量 47 和 workflow 接入。
+它不连接数据库，也不能替代 WSL2 全拓扑负载、慢查询、故障重连、恢复/admin 竞争和联合
+内存测试。FS-008 详细边界见
+[`../task/fs_008_database_connection_budget_sow_2026_08_25.md`](../task/fs_008_database_connection_budget_sow_2026_08_25.md)。
+
+Phase 3V 的 FS-004 单元契约只证明 real-data v2 中 evaluator 收到 train/valid rows、双门
+失败关闭、test 内容变化只改变 seal，以及 candidate/recommendation lineage 闭合。它不
+访问历史 artifact 或 test 数据，不是最终 OOS 运行。上线前若任何策略依赖 Research
+Factory 证据，还必须执行只读历史 lineage 审计、独立一次性 holdout 评估、walk-forward/
+multiple-testing 复核和 production gate 验证；详见
+[`../task/fs_004_research_selection_holdout_sow_2026_08_25.md`](../task/fs_004_research_selection_holdout_sow_2026_08_25.md)。
+
+该文件存在不证明 GitHub 远端已经成功运行或 ruleset 已把它设为 required check；本地
+验证也不能替代远端日志。当前门禁尚不覆盖 integration、Node/browser、Compose/schema
+运行、APT、clean Docker build、SBOM、secret/CVE/license/provenance，详见
+[`../task/fs_021_ci_quality_gate_sow_2026_08_25.md`](../task/fs_021_ci_quality_gate_sow_2026_08_25.md)、
+[`../task/fs_022_reproducible_dependencies_sow_2026_08_25.md`](../task/fs_022_reproducible_dependencies_sow_2026_08_25.md)
+与 [`../../audit/full_system_2026_08_24/40-fs-022-reproducible-dependencies.md`](../../audit/full_system_2026_08_24/40-fs-022-reproducible-dependencies.md)。
+
+当前 Windows `.venv` 可能使用 Python 3.14，而 workflow/生产镜像目标为 3.12。3.14
+会额外报告未关闭 SQLite connection 的 `ResourceWarning`；这是真实兼容性信号，不能
+冒充 3.12 CI 结果，也不能据此给 workflow 增加宽泛豁免。
+
+当前 Windows 主机可能因用户系统临时目录 ACL 使原样 pytest 命令在 `tmp_path`
+fixture setup 报 `PermissionError`。必须先保留原样命令的失败证据，再使用仓库内全新、
+本次运行唯一的 `--basetemp` 目录复跑；不得复用旧目录或把环境错误记成测试通过。
+这一替代只用于区分临时目录权限与断言失败，不改变测试范围。
+
 ## 5. L2：场景与内存 smoke
 
 这两组不拉真实 Docker、不连接真实 Postgres/NATS，适合在单元测试后验证业务流程：
@@ -112,6 +157,8 @@ wsl -d Ubuntu bash -c "cd ~/aats && source ~/aats-venv/bin/activate && pytest te
 ```
 
 仓库模板中 `derivatives` 默认端口为 `8001`；以启动器实际打印 URL 为准。本地入口是 HTTP。不要把它写成标准 live TLS 地址，也不要将服务启动等价为 trading-ready。
+启动器会固定 `AATS_PROCESS_ROLE=monolith`，因此这里验证的是完整单进程 runtime，而不是缺少
+market/decision/execution slice 的孤立 Gateway。
 
 最小只读验证建议：
 
@@ -137,7 +184,10 @@ wsl -d Ubuntu bash -c "cd ~/aats && source ~/aats-venv/bin/activate && pytest te
 - active parameter version、审批和回滚证据；
 - 告警、日志、指标、备份与安全停机。
 
-当前 `scripts/deploy.sh` 的自动健康门未覆盖 derivatives-live 的两个采集器，因此不能只凭 deploy 脚本返回成功判断全栈健康。该限制修复并经测试前，必须把采集器单独验证列为人工检查项。
+当前所有 live profile 都在部署副作用前硬禁用，不能执行 live 验证。future
+`derivatives-live` required list 已包含 liquidation 与 microstructure 两个采集器，但该声明
+尚未在目标 Compose 环境验证；即使未来部署脚本返回成功，也仍须按 trading-readiness
+packet 核对组件 health、数据 freshness 与故障告警。
 
 ## 9. 测试记录模板
 

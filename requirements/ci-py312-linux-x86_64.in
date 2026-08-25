@@ -1,0 +1,2 @@
+.[test,lint]
+greenlet==3.2.5

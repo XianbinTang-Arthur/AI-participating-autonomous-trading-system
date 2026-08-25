@@ -56,7 +56,7 @@ class TestVolWeightedTfiLargeValue(unittest.TestCase):
     """
 
     def test_large_vol_weighted_tfi_upsert_roundtrip(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             sess.execute(
                 text("""
@@ -162,7 +162,7 @@ class TestMergerPartialFailRollback(unittest.TestCase):
         """Bug 2 核心: mock _build_volume_profile 抛 RuntimeError
         (模拟 NumericValueOutOfRange), 后续 step 5 liquidation_metrics
         仍然正常跑完 (session 没进 aborted state)。"""
-        env = make_env()
+        env = make_env(owner=self)
         self._seed_trades_and_books(env)
 
         with Session(env.engine) as sess:
@@ -193,7 +193,7 @@ class TestMergerPartialFailRollback(unittest.TestCase):
     def test_merger_logs_PARTIAL_warning_when_any_table_fails(self) -> None:
         """Bug 2: 任一 table written=0 → final log 级别=WARNING + 前缀 'PARTIAL'。
         原 bug 下这里是 INFO 级 'COMMITTED', 对 Loki 告警说谎。"""
-        env = make_env()
+        env = make_env(owner=self)
         self._seed_trades_and_books(env)
 
         # 捕获 merger 模块日志
@@ -236,7 +236,7 @@ class TestMergerPartialFailRollback(unittest.TestCase):
 
     def test_result_tables_failed_populated_with_multiple_failures(self) -> None:
         """Bug 2: 多个 step 失败时 tables_failed 按顺序记全。"""
-        env = make_env()
+        env = make_env(owner=self)
         self._seed_trades_and_books(env)
 
         with Session(env.engine) as sess:
@@ -387,7 +387,7 @@ class TestIdempotentRerun(unittest.TestCase):
     """同 bar 重跑两次, silver 表每张仍然 1 行, flags 一致, log 不打错误。"""
 
     def test_rerun_same_bar_preserves_row_count(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             result1 = build_silver_microstructure_15m(
                 session=sess, symbol=env.symbol,

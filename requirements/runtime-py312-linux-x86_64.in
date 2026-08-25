@@ -1,0 +1,4 @@
+.[nats,redis,otel]
+greenlet==3.2.5
+setuptools>=68
+wheel

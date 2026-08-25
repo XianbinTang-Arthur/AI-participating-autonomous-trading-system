@@ -2,7 +2,7 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](docs/project_positioning.md)。
 
-> 文档状态：现行约束。最后核对：2026-08-23（代码基线 `be9179e`）。代理权限、实施、验证或部署纪律变化时必须同步复核。
+> 文档状态：现行约束。最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`，包含 Phase 3A–3W 整改提交候选）。代理权限、实施、验证或部署纪律变化时必须同步复核。
 
 > **重要**：先阅读项目根目录的 `CLAUDE.md` 获取完整操作手册。
 
@@ -26,6 +26,7 @@ This is a **live trading system** handling real money — every change must be d
 - All text displayed on the front end must be written in clean UTF-8 Chinese; be sure to avoid encoding issues.
 - OrderState 持久化涉及三层（Postgres 列 + JSON payload + Redis），修改时三者必须同步。
 - SQLAlchemy 2.0: JSON 列用 `.as_string()`，不要用已废弃的 `.astext`。
+- Managed profile strategy YAML 必须是 mapping，且每个 key 都属于 `AATSSettings.model_fields`；禁止用全局 `extra="ignore"` 掩盖未知配置或添加没有行为消费者的伪开关。
 - 文档放置、命名、状态与迁移服从 `docs/DOCUMENTATION_GOVERNANCE.md`；新任务/SOW 不得写入 `docs/` 根层兼容区。
 
 ## Validation
@@ -41,7 +42,8 @@ After making code changes, run:
 If any command fails, explain the failure clearly. Do not claim success without running the command.
 
 ## Deployment
-- **唯一入口**: `bash scripts/deploy.sh --skip-commit`（代码已提交时）
+- **唯一入口**: `bash scripts/deploy.sh --profile derivatives --skip-commit`（代码已提交的本地模拟栈）
+- **当前 live 门禁**: `spot-live`、`derivatives-live`、`derivatives-live-monolith` 均在任何副作用前失败；无 override
 - **不要手动执行** `docker compose` 命令
 - **不要用 rsync** 同步代码到 WSL2
 - 详见 `CLAUDE.md` 的部署章节

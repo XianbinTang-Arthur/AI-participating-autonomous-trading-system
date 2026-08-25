@@ -1937,13 +1937,22 @@ h3 {
   position: fixed;
   inset: 0 0 0 auto;
   width: min(640px, 100vw);
+  height: 100dvh;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  color: inherit;
+  background: transparent;
   transform: translateX(100%);
   transition: transform 180ms ease;
   z-index: 40;
   pointer-events: none;
 }
 
-.detail-drawer.is-open {
+.detail-drawer[open].is-open {
   transform: translateX(0);
   pointer-events: auto;
 }
@@ -1954,20 +1963,18 @@ h3 {
   border-radius: 0;
   border-left: 1px solid var(--line-strong);
   background: rgba(8, 15, 23, 0.98);
+  overflow: hidden;
 }
 
 .detail-drawer__body {
   margin-top: 18px;
   display: grid;
   gap: 16px;
-  max-height: calc(100vh - 150px);
+  max-height: calc(100dvh - 150px);
   overflow: auto;
 }
 
-.drawer-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 35;
+.detail-drawer::backdrop {
   background: rgba(1, 4, 9, 0.54);
 }
 
@@ -2357,6 +2364,31 @@ input::placeholder {
 
   100% {
     background-position: -20% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html,
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .runtime-mode-badge:hover,
+  .workspace-tab:hover,
+  .workspace-link:hover,
+  .primary-button:hover,
+  .secondary-button:hover,
+  .warning-button:hover,
+  .danger-button:hover,
+  .ghost-button:hover,
+  .table-button:hover,
+  .inline-button:hover,
+  .command-panel--compact .toggle-pill--grid:hover {
+    transform: none;
   }
 }
 

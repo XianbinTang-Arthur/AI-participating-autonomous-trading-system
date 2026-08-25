@@ -15,6 +15,7 @@ __pycache__/
 # WSL2 dev infra runtime data
 deploy/wsl2-dev/jaeger/badger/
 deploy/wsl2-dev/runtime/operator-tls/
+deploy/wsl2-dev/runtime/deployment-evidence/
 
 .idea/
 .vscode/
@@ -24,6 +25,9 @@ dist/
 *.egg-info/
 
 .pytest_cache/
+/.pytest_tmp/
+/.pytest-basetemp-*/
+/audit/full_system_*/pytest-*/
 .mypy_cache/
 .ruff_cache/
 

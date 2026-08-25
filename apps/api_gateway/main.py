@@ -5,7 +5,7 @@ import os
 from contextlib import asynccontextmanager
 from time import monotonic
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from aats.api.auth_routes import (
@@ -17,12 +17,19 @@ from aats.api.auth_routes import (
 from aats.api.rdp_profile_routes import profile_router as rdp_profile_router
 from aats.api.rdp_routes import rdp_router
 from aats.api.routes import router
+from aats.api.security_headers import (
+    DEFAULT_GATEWAY_ALLOWED_HOSTS,
+    GatewayBrowserSecurityMiddleware,
+)
 from aats.api.ui import ui_router
 from aats.bootstrap.config import build_runtime, load_settings
 from aats.bootstrap.logging import get_logger as _get_lifecycle_logger
 from aats.bootstrap.process_lifecycle import (
     _announce_runtime_ready,
+    _runtime_readiness_generation,
+    _strict_peer_readiness_required,
     _wait_for_peer_roles_ready,
+    _withdraw_runtime_ready,
 )
 from aats.bootstrap.logging import configure_logging_for_settings
 from aats.bootstrap.settings import (
@@ -93,41 +100,56 @@ async def lifespan(app: FastAPI):
     settings = load_settings()
     configure_logging_for_settings(settings)
     resolved_role = _resolved_process_role()
+    readiness_required = _strict_peer_readiness_required(
+        role=resolved_role,
+        settings=settings,
+    )
+    readiness_generation = _runtime_readiness_generation(
+        role=resolved_role,
+        settings=settings,
+        required=readiness_required,
+    )
+    # FS-009：在构造业务 runtime、宣布 readiness 或启动任何后台任务之前，
+    # 只读验证 RDP schema。校验失败时本进程不能产生业务副作用。
+    from aats.data_platform.db import validate_rdp_schema
+
+    validate_rdp_schema()
     runtime = await build_runtime(settings, process_role=resolved_role)
     # Readiness barrier (B1) — gateway 用 FastAPI lifespan 而不是 process_lifecycle.run_process，
     # 所以要在这里手工挂钩。详见
     # docs/task/nats_retention_global_architecture_sow.md §B1。
     _lifespan_logger = _get_lifecycle_logger("apps.api_gateway.lifespan")
     _hot_state = getattr(runtime, "hot_state_store", None)
-    await _announce_runtime_ready(
-        role=resolved_role,
-        hot_state_store=_hot_state,
-        logger=_lifespan_logger,
-    )
-    await _wait_for_peer_roles_ready(
-        role=resolved_role,
-        hot_state_store=_hot_state,
-        logger=_lifespan_logger,
-    )
-    await runtime.start_background_tasks()
-    app.state.runtime = runtime
-    await start_dashboard_snapshot_plane(app, runtime)
+    dashboard_started = False
     try:
-        # RDP schema 初始化：确保 governance.rdp_task_queue 等当前 RDP schema 对象存在。
-        # 放在 try 内部：即使建表失败也不阻断启动、不泄漏后台任务。
-        # 复用 data_platform.db.run_migrations()，不另建 engine。
-        try:
-            from aats.data_platform.db import run_migrations
-            run_migrations()
-        except Exception:
-            import logging
-            logging.getLogger(__name__).warning(
-                "rdp_schema_ensure_failed: RDP tables may not exist, "
-                "AI Config page will be unavailable until manually initialized"
-            )
+        await _announce_runtime_ready(
+            role=resolved_role,
+            hot_state_store=_hot_state,
+            logger=_lifespan_logger,
+            generation=readiness_generation,
+            required=readiness_required,
+        )
+        await _wait_for_peer_roles_ready(
+            role=resolved_role,
+            hot_state_store=_hot_state,
+            logger=_lifespan_logger,
+            generation=readiness_generation,
+            required=readiness_required,
+        )
+        await runtime.start_background_tasks()
+        app.state.runtime = runtime
+        await start_dashboard_snapshot_plane(app, runtime)
+        dashboard_started = True
         yield
     finally:
-        await stop_dashboard_snapshot_plane(app)
+        if dashboard_started:
+            await stop_dashboard_snapshot_plane(app)
+        await _withdraw_runtime_ready(
+            role=resolved_role,
+            hot_state_store=_hot_state,
+            logger=_lifespan_logger,
+            generation=readiness_generation,
+        )
         await runtime.stop_background_tasks()
 
 
@@ -260,12 +282,33 @@ async def _gateway_trace_root_span(request: Request, call_next):
 #     reconciliation / market 状态，依赖 runtime 上多个 slice service。
 #     在 gateway-only role 下 runtime.market_gateway / runtime.execution_adapter
 #     都是 None（被 _SLICE_REQUIRED_ROLES 门控），调用会 NPE。
-#   * /healthz 只需要返回"FastAPI lifespan 已就绪"这一个事实，不依赖任何 slice
-#     service，所以在任何 process_role 下都能 200。
+#   * /healthz 不依赖 slice 业务查询，但会读取 runtime 的关键 task 监督快照；
+#     任一长期关键 task 非预期结束必须 503，不能让容器继续伪装 healthy。
 # 直接挂在 `app` 上而不是挂到 routes.py 的 router 上，是为了绕过 router 级
 # require_read_access dependency —— docker healthcheck curl 不带 Bearer token。
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
+    runtime = getattr(app.state, "runtime", None)
+    inspect_failure = getattr(runtime, "critical_background_task_failure", None)
+    critical_failure = inspect_failure() if callable(inspect_failure) else None
+    if critical_failure is not None:
+        detail = {
+            "status": "unhealthy",
+            "reason": "critical_background_task_failed",
+            "task_name": critical_failure.task_name,
+            "failure_kind": critical_failure.failure_kind,
+            "error_type": critical_failure.error_type,
+        }
+        stalled_seconds = getattr(critical_failure, "stalled_seconds", None)
+        timeout_seconds = getattr(critical_failure, "timeout_seconds", None)
+        if stalled_seconds is not None:
+            detail["stalled_seconds"] = stalled_seconds
+        if timeout_seconds is not None:
+            detail["timeout_seconds"] = timeout_seconds
+        raise HTTPException(
+            status_code=503,
+            detail=detail,
+        )
     return {"status": "ok", "process_role": _resolved_process_role()}
 
 
@@ -307,3 +350,10 @@ app.include_router(ui_router)
 app.include_router(router)
 app.include_router(rdp_router)
 app.include_router(rdp_profile_router)
+
+# Phase 3H / FS-020：最后注册，使其成为最外层 user middleware。当前 Gateway
+# 仅允许本机 Host；future 远程域名必须与 proxy/TLS/网络边界一起独立设计。
+app.add_middleware(
+    GatewayBrowserSecurityMiddleware,
+    allowed_hosts=DEFAULT_GATEWAY_ALLOWED_HOSTS,
+)

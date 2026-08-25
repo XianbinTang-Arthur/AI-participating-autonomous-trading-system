@@ -1,6 +1,6 @@
 # Production Parameter Change Runbook
 
-> 最后核对：2026-08-22（代码基线 `be9179e`）。这是 production 变更门禁；API payload 以运行时 `/openapi.json` 为准，基础 apply/rollback 语义见 [Parameter Apply 与 Rollback](parameter_apply_and_rollback.md)。
+> 最后核对：2026-08-24（起始 HEAD `00b6df0` + 未提交 Phase 3F 覆盖层）。这是 future production 变更门禁；当前全系统 `REAL-MONEY PRODUCTION: NO-GO`，标准 deploy/prewarm/wrapper 硬禁用所有 live profile。本页当前只可用于准备和审阅证据，不得执行 release/apply/runtime rebuild。API payload 以运行时 `/openapi.json` 为准，基础 apply/rollback 语义见 [Parameter Apply 与 Rollback](parameter_apply_and_rollback.md)。
 
 ## 1. 流程
 
@@ -67,11 +67,7 @@ HTTP 200 不等于参数必然已生效：组合端点会用 `ok=false` 表达 i
 
 active parameter 写入数据库后，主交易 runtime 需要重新构建/启动才会通过 `build_runtime()` 注入；不要只重启一个错误的 slice 并假设四个进程一致。
 
-标准发布/重建使用唯一部署入口：
-
-```bash
-bash scripts/deploy.sh --profile derivatives-live --skip-commit
-```
+标准 live 发布/重建入口当前失败关闭，没有 override；不得直接 Compose 绕过。若只验证部署脚本和模拟 runtime，使用 `bash scripts/deploy.sh --profile derivatives --skip-commit`，但该模拟结果不能证明参数已在 production 生效。
 
 验证：
 
@@ -108,7 +104,7 @@ runtime loader 数据库失败时会退化到 profile 参数并记录 error，�
 2. 当前 Operator session 调用 `POST /rdp/operator-tokens`，action 为 `rollback`。
 3. 携带 token 调用 `POST /rdp/parameters/rollback`。
 4. 核对 active set、apply history、release/observation 和主交易 runtime。
-5. 通过标准部署重建受影响 runtime，并重复 trading-ready 检查。
+5. 当前不得重建 live runtime；记录待执行动作。只有全系统 gate、克隆回滚演练和独立复核均通过并由后续变更重新开放 live 后，才可通过唯一标准入口重建并重复 trading-ready 检查。
 
 Rollback 是安全动作，代码不会因为 Step2 integrity 降级而阻断；但仍会拒绝非法 target、无 active set、无 previous target 或环境不允许的请求。
 

@@ -20,8 +20,8 @@ Design notes
   ``.env.*`` 文件原文 —— settings 内部已经处理 env 合并。
 * ``--rdp-db-name`` 允许覆盖 URL 末端数据库名（rsplit 替换），便于把
   同一份 Postgres 凭证切到不同研究库上。
-* 运行结果写 3 个文件 (``summary.json`` / ``equity_curve.csv`` /
-  ``cost_validation.json``) 到 ``--output-dir``。
+* 运行结果写 4 个文件 (``summary.json`` / ``equity_curve.csv`` /
+  ``cost_validation.json`` / ``execution_timeline.json``) 到 ``--output-dir``。
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from typing import Any
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from aats.data_platform.replay.backtest.evidence_scorecard import build_scorecard
 from aats.data_platform.replay.backtest.harness import (
@@ -106,8 +107,10 @@ def _add_backtest_parser(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument(
         "--output-dir",
         required=True,
-        help="Directory where summary.json / equity_curve.csv / cost_validation.json "
-             "will be written.",
+        help=(
+            "Directory where summary.json / equity_curve.csv / "
+            "cost_validation.json / execution_timeline.json will be written."
+        ),
     )
     p.add_argument(
         "--param",
@@ -139,6 +142,15 @@ def _add_backtest_parser(subparsers: argparse._SubParsersAction) -> None:
         type=float,
         default=1.0,
         help="FillSimulator IOC slippage (bps).",
+    )
+    p.add_argument(
+        "--max-volume-participation",
+        type=Decimal,
+        default=Decimal("0.01"),
+        help=(
+            "Maximum fraction of the causal OHLCV bar volume fillable by one "
+            "order; Decimal in (0, 1], default 0.01."
+        ),
     )
     p.add_argument(
         "--assumed-cost-bps",
@@ -321,7 +333,7 @@ def _resolve_database_url(rdp_db_name: str | None) -> str:
 
 def _build_session(url: str) -> Session:
     """Build a short-lived SQLAlchemy session bound to ``url``."""
-    engine = create_engine(url, pool_pre_ping=True, future=True)
+    engine = create_engine(url, pool_pre_ping=True, future=True, poolclass=NullPool)
     maker = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
     return maker()
 
@@ -348,6 +360,7 @@ def _run_backtest_cmd(args: argparse.Namespace) -> int:
         maker_fee_bps=args.maker_fee_bps,
         taker_fee_bps=args.taker_fee_bps,
         ioc_slippage_bps=args.ioc_slippage_bps,
+        max_volume_participation=args.max_volume_participation,
         assumed_cost_bps=args.assumed_cost_bps,
     )
 
@@ -405,10 +418,11 @@ def _dataclass_to_dict(obj: Any) -> dict[str, Any]:
 
 
 def _write_outputs(output_dir: Path, result: BacktestResult) -> None:
-    """Write summary.json / equity_curve.csv / cost_validation.json."""
+    """Write summary/equity/cost and causal execution-timeline artifacts."""
     summary_path = output_dir / "summary.json"
     equity_path = output_dir / "equity_curve.csv"
     cost_path = output_dir / "cost_validation.json"
+    timeline_path = output_dir / "execution_timeline.json"
 
     # summary.json := BacktestSummary + config + run window + counts
     summary_payload = {
@@ -444,6 +458,16 @@ def _write_outputs(output_dir: Path, result: BacktestResult) -> None:
     # cost_validation.json
     cost_path.write_text(
         json.dumps(_dataclass_to_dict(result.cost_summary), indent=2),
+        encoding="utf-8",
+    )
+
+    # FS-003: 时间契约必须随研究产物持久化，不能只靠进程内对象或日志证明。
+    timeline_path.write_text(
+        json.dumps(
+            [_dataclass_to_dict(record) for record in result.execution_timeline],
+            indent=2,
+            cls=_DecimalJSONEncoder,
+        ),
         encoding="utf-8",
     )
 

@@ -15,6 +15,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from aats.storage.connection_budget import GATEWAY_GOVERNANCE_API_POOL
+
 _governance_engine_cache: dict[str, Engine] = {}
 _governance_factory_cache: dict[str, sessionmaker[Session]] = {}
 
@@ -41,7 +43,12 @@ def get_governance_engine(url: str) -> Engine:
     cached = _governance_engine_cache.get(url)
     if cached is not None:
         return cached
-    engine = create_engine(url, pool_pre_ping=True, pool_size=2, max_overflow=1)
+    engine = create_engine(
+        url,
+        pool_pre_ping=True,
+        pool_size=GATEWAY_GOVERNANCE_API_POOL.pool_size,
+        max_overflow=GATEWAY_GOVERNANCE_API_POOL.max_overflow,
+    )
     _governance_engine_cache[url] = engine
     return engine
 

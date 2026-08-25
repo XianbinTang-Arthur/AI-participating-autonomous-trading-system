@@ -2,7 +2,7 @@
 
 > 本文件约束**所有贡献者**（含 AI agent）在本仓库的工作行为。
 > 用户（XianbinTang-Arthur）已授权 AI agent 自主迭代；以下纪律是 AI agent 的**自律底线**，不得违反。
-> 文档状态：现行约束。最后核对：2026-08-23（代码基线 `be9179e`）。安全、测试、部署、数据库或文档纪律变化时必须同步复核。
+> 文档状态：现行约束。最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；包含未提交 Phase 3A–3V 整改）。安全、测试、部署、数据库或文档纪律变化时必须同步复核。
 
 ---
 
@@ -48,6 +48,29 @@
   ```
 - 不 `git add -A`，按文件精确加
 - 不在一个 commit 里混两个不相关的改动
+
+### 测试与 CI
+
+- 提交前至少运行 `AGENTS.md` 规定的 Ruff、完整 unit 和受影响的最窄测试；CI 不是本地验证的替代品。
+- `.github/workflows/quality.yml` 当前只覆盖 Python 3.12 的依赖锁契约、全仓 Ruff、unit、strict markers 和新增 warning 阻断；它不覆盖 integration、Node/browser、Compose/schema runtime、SBOM、secret/CVE/license/provenance 或部署。
+- 发布/CI 依赖变更必须同时更新 `requirements/*.in`、对应 hashed lock、消费入口、`scripts/verify_dependency_locks.py` 的已审镜像摘要和 FS-022 证据；不得删除 `--require-hashes`、恢复开放 `pip install -e '.[...]'` 或把 tag-only image 引入 Compose。
+- digest/hash 只固定内容，不代表无漏洞或来源可信；合并前仍需审阅版本差异，并补 clean build、SBOM 与安全/许可证扫描证据。
+- SQLite datetime adapter 的精确 warning allowlist 是已登记技术债；不得扩大为按类别忽略，不得用 `continue-on-error`、`|| true` 或删除测试制造绿色。
+- workflow 文件存在不等于远端已运行或分支保护已启用；合并前必须查看对应 commit 的真实 check 与 required-check 状态。
+
+### 数据库连接预算
+
+- application 新增或移动 `create_engine` 时，必须更新 `aats/storage/connection_budget.py`、声明 topology、`scripts/verify_database_connection_budget.py` inventory、测试和 FS-008 证据；不得在业务模块写裸 `pool_size`/`max_overflow`。
+- 短命 CLI/一次性 engine 默认使用 `NullPool`；若需要持久 pool，必须说明实例生命周期、并发上限和对 PostgreSQL 普通容量/恢复余量的影响。
+- 声明 ceiling、单元测试或单次 `pg_stat_activity` 不能替代生产等价负载、故障重连、恢复/admin 竞争、告警与联合内存验证。
+
+### 研究证据与封存测试集
+
+- Research Factory candidate selection 只能消费 train/valid development evidence；不得把 test/OOS 数据用于 factor 设计、阈值调整、候选排名或 candidate gate。
+- v2 candidate 必须保留 selection protocol、development evidence ref、valid benchmark 和 test content seal；下游不得删除或弱化“sealed holdout 尚未评估”的限制。
+- test seal 只证明内容身份，不证明无人查看、一次性使用或统计有效；任何资本授权前仍需独立 holdout、访问账本、历史 lineage/multiple-testing 审计与 reviewer 复核。
+- 历史 v1 artifact 不得原地补字段后冒充 v2；必须明确失效、隔离或按新协议重跑。
+- execution realism 用作 v2 candidate evidence 时必须声明 valid、精确匹配 valid 时间窗且只合并 valid metrics；禁止用覆盖完整 train/valid/test 的 summary 间接影响选择。
 
 ### 部署
 - 只有跑过 **相关 regression 测试** 才能 `bash scripts/deploy.sh --skip-commit`

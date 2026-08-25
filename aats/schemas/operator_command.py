@@ -54,6 +54,7 @@ from aats.schemas.common import SchemaBase, utc_now
 #      的 gateway 分支里 client.invoke 调用的 command 参数里加新名字
 #   4) 在 test_operator_command_bridge / test_ai_command_bridge 加 unit test
 ExecutionCommandName = Literal[
+    "halt",
     "rebaseline",
     "resume",
     "validate_reconciliation",

@@ -2,7 +2,7 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
-> 最后核对：2026-08-22（代码基线 `be9179e`）。当前 scheduler/daemon 在容器内运行，workflow 共 10 个；`decision_cycle`、`release_cycle` disabled，旧 active JSON seed 和直写 rollback CLI 不可用。
+> 最后核对：2026-08-24（起始 HEAD `00b6df0` + 未提交 Phase 3F 覆盖层）。当前 scheduler/daemon 在容器内运行，workflow 共 10 个；`decision_cycle`、`release_cycle` disabled，旧 active JSON seed 和直写 rollback CLI 不可用。标准入口只允许模拟 profile。
 
 
 ## 概述
@@ -113,7 +113,7 @@
    psql ... -c "SELECT component, status, heartbeat_at FROM governance.rdp_runtime_status"
 3. 检查 daemon 容器日志:
    docker logs aats-rdp-daemon --tail 200
-4. 如 daemon 已停止或报错，修复原因后通过 bash scripts/deploy.sh --skip-commit 重建/恢复，禁止手工 restart 单个 Compose 服务。
+4. 如模拟栈 daemon 已停止或报错，修复原因后通过 `bash scripts/deploy.sh --profile derivatives --skip-commit` 重建/恢复，禁止手工 restart 单个 Compose 服务；live 当前不得恢复部署。
 5. 再次确认 /rdp/health 中 heartbeat 已恢复 < 45s
 ```
 

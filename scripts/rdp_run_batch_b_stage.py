@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Execute one or more Batch B migration stages against the RDP database.
+"""Advanced operator tool for selected Batch B apply/rollback stages.
 
-rdp_init_db 走 ORM create_all,对已存在的表不做 ALTER。而 Batch B Stage 11
-(batch_b_11_silver_numeric_widen) 是 ALTER COLUMN TYPE migration,必须走
-run_batch_b_migrations 路径手工执行。
+The canonical forward path is ``scripts/apply_schema_migrations.py`` (or the
+compatibility initializer ``scripts/rdp_init_db.py``), both of which run the
+complete ledgered chain.  This tool is reserved for an approved partial-stage
+operation and still enforces canonical predecessors/checksums.
 
 USAGE
 =====
@@ -41,7 +42,7 @@ log = logging.getLogger("rdp_run_batch_b_stage")
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Batch B 单 stage 执行器 (DDL ALTER 等 rdp_init_db 不覆盖的场景)",
+        description="Batch B 受控部分 stage apply/rollback 工具",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -108,10 +109,9 @@ def main() -> int:
     from aats.data_platform.db import get_engine
 
     settings = get_settings()
-    target = settings.database_url.split("@")[-1]
     log.info(
-        "running %s batch_b stages=%s against %s",
-        "rollback" if args.rollback else "apply", stages, target,
+        "running approved %s batch_b stages=%s",
+        "rollback" if args.rollback else "apply", stages,
     )
 
     engine = get_engine(settings)

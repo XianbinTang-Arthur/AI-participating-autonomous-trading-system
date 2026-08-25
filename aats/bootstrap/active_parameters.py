@@ -27,6 +27,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from aats.storage.connection_budget import ACTIVE_PARAMETER_TRANSIENT_POOL
+
 log = logging.getLogger(__name__)
 
 # ── 已知的 family × timeframe 组合 ─────────────────────────────────
@@ -206,7 +208,7 @@ PARAMETER_MAPPING_INDEPENDENT: dict[str, str] = {
 
     # [DIRECT] 开仓限价偏移
     # 单位一致: bps; 语义: bounded-limit IOC 的价格偏移
-    # ⚠️ REPLAY 未模拟: replay 假设 bar close 即时成交，无 limit order 匹配模型
+    # ⚠️ REPLAY 未模拟: causal harness 禁止同 bar 成交，但仍无 offset 订单簿匹配模型
     #    该参数仅透传到生产端，RDP 回测不验证其效果
     "limit_offset_bps_entry": "strategy_hedge_independent_limit_offset_bps_entry",
 }
@@ -332,6 +334,8 @@ _RDP_CORE_RESEARCH_PARAMS: frozenset[str] = _RDP_CORE_RESEARCH_PARAMS_BY_FAMILY[
 # 某些 key 不属于 "RDP 层需要注入生产端" 的范畴，例如:
 #   - cost_config / taker_fee_bps / slippage_bps: 仅供 replay 成本模型
 #   - directional_trend_weight / directional_return_clamp_bps: 仅供 replay adapter
+#   - strategy_short_bias_enabled: 目标 profile 的 replay 上下文快照；生产端是
+#     global 能力开关，不能由多个 family/timeframe active set 竞争覆盖
 #
 # 这些参数由 ReplayParameterOverrides 消费，无需透传到 AATSSettings。
 _RDP_REPLAY_ONLY_PARAMS: frozenset[str] = frozenset({
@@ -340,6 +344,7 @@ _RDP_REPLAY_ONLY_PARAMS: frozenset[str] = frozenset({
     "slippage_bps",
     "directional_trend_weight",
     "directional_return_clamp_bps",
+    "strategy_short_bias_enabled",
 })
 
 # ── 默认路径（兼容常量，外部调用方仍引用） ─────────────────────────
@@ -374,7 +379,12 @@ def _try_load_from_db(db_url: str | None = None) -> dict[str, Any] | None:
     try:
         from sqlalchemy import create_engine, text as sa_text
 
-        engine = create_engine(url, pool_pre_ping=True, pool_size=1, max_overflow=0)
+        engine = create_engine(
+            url,
+            pool_pre_ping=True,
+            pool_size=ACTIVE_PARAMETER_TRANSIENT_POOL.pool_size,
+            max_overflow=ACTIVE_PARAMETER_TRANSIENT_POOL.max_overflow,
+        )
         try:
             with engine.connect() as conn:
                 rows = conn.execute(sa_text(

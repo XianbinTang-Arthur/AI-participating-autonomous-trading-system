@@ -14,9 +14,10 @@ from aats.storage.event_store_postgres import PostgresEventStore
 from aats.storage.sqlalchemy_models import Base
 
 
-def _session_factory() -> sessionmaker[Session]:
+def _session_factory(owner: unittest.TestCase) -> sessionmaker[Session]:
     engine = create_engine("sqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
+    owner.addCleanup(engine.dispose)
     return sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
 
@@ -114,7 +115,7 @@ class TestEventStoreBatchLookup(unittest.TestCase):
         self.assertEqual(rows[new_event.event_id].event_id, new_event.event_id)
 
     def test_postgres_get_many_returns_hot_and_archived_rows(self) -> None:
-        store = PostgresEventStore(_session_factory())
+        store = PostgresEventStore(_session_factory(self))
         old_event = _event(age_hours=2)
         new_event = _event(age_hours=0)
         store.append(old_event)

@@ -1,5 +1,9 @@
 # Research Factory Execution Realism Metrics V1 SOW - 2026-05-16
 
+> 历史任务材料：本文的“merge before candidate”描述 v1/smoke 行为。Phase 3V real-data v2
+> 只允许精确 valid-segment execution evidence，并禁止它进入 train gate；当前契约见
+> [`task/fs_004_research_selection_holdout_sow_2026_08_25.md`](task/fs_004_research_selection_holdout_sow_2026_08_25.md)。
+
 ## Business objectives and boundaries
 
 Connect Research Factory candidate metrics to AATS execution realism evidence so candidate gates can evaluate executable net edge, not only toy baseline IC or return. This work remains research-only and must not mutate active parameters, call OKX write APIs, connect RD-Agent or Qlib runtime, deploy code, or read credential files.

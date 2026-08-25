@@ -27,7 +27,7 @@ class TestVolumeProfileColdStart(unittest.TestCase):
     """§8 case 14: silver 无历史 → z_score=NULL + flag='partial_baseline'。"""
 
     def test_cold_start_has_partial_baseline_flag(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             # 插 20 笔 trades 凑本 bar 的 volume
             trades = [
@@ -76,7 +76,7 @@ class TestVolumeProfileBaselineFullyPopulated(unittest.TestCase):
     """§5.4 4-week baseline: 造足 4 个同时段历史 silver row → z_score 计算。"""
 
     def test_z_score_computed_when_four_weeks_present(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             # 造 4 周前的同 slot silver 行 (每周往前推 7 天)
             slot = env.bar_start.strftime("%a").lower() + "_" + env.bar_start.strftime("%H:%M")

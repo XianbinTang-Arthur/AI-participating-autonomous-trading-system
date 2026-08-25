@@ -31,7 +31,7 @@ class TestBarAlignmentValidation(unittest.TestCase):
     """§7 总入口进来必须做 15m 对齐校验, 防止误用随意 ts。"""
 
     def test_naive_timestamp_rejected(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         naive = datetime(2026, 4, 20, 12, 0, 0)  # no tzinfo
         with Session(env.engine) as sess:
             with self.assertRaises(ValueError) as cm:
@@ -44,7 +44,7 @@ class TestBarAlignmentValidation(unittest.TestCase):
             self.assertIn("timezone", str(cm.exception).lower())
 
     def test_unaligned_minute_rejected(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         off = datetime(2026, 4, 20, 12, 7, 0, tzinfo=timezone.utc)
         with Session(env.engine) as sess:
             with self.assertRaises(ValueError) as cm:
@@ -57,7 +57,7 @@ class TestBarAlignmentValidation(unittest.TestCase):
             self.assertIn("multiple of 15", str(cm.exception))
 
     def test_end_minus_start_not_15min_rejected(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             with self.assertRaises(ValueError) as cm:
                 build_silver_microstructure_15m(
@@ -75,7 +75,7 @@ class TestEmptyBarGapFill(unittest.TestCase):
     """
 
     def test_all_sources_empty_writes_five_rows(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             result = build_silver_microstructure_15m(
                 session=sess, symbol=env.symbol,
@@ -123,7 +123,7 @@ class TestEmptyBarGapFill(unittest.TestCase):
 
     def test_no_etl_failed_flag_on_empty_bar(self) -> None:
         """空 bar 应该是 "gap fill" (打 *_no_data), 不应该是 etl_failed。"""
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             result = build_silver_microstructure_15m(
                 session=sess, symbol=env.symbol,
@@ -146,7 +146,7 @@ class TestIdempotency(unittest.TestCase):
     """
 
     def test_same_bar_run_twice_no_duplicate_rows(self) -> None:
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             bbo_rows = [
                 {
@@ -200,7 +200,7 @@ class TestIdempotency(unittest.TestCase):
         """换一个 ingest_run_id 跑同一 bar, silver 表仍只 1 行, 但
         ingest_run_id 列应该是最新那次的 (ON CONFLICT DO UPDATE 语义)。
         """
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             build_silver_microstructure_15m(
                 session=sess, symbol=env.symbol,
@@ -319,6 +319,7 @@ class TestBatchB06Rollback(unittest.TestCase):
             make_silver_sqlite_engine,
         )
         engine = make_silver_sqlite_engine()
+        self.addCleanup(engine.dispose)
 
         # 初始: 5 张表存在
         with engine.connect() as conn:
@@ -425,7 +426,7 @@ class TestSilverMetricsPlumbing(unittest.TestCase):
 
     def test_metrics_registry_none_is_noop(self) -> None:
         """Stage 3 既有行为: metrics_registry 未传 → 零副作用,结果数据不变。"""
-        env = make_env()
+        env = make_env(owner=self)
         with Session(env.engine) as sess:
             result = build_silver_microstructure_15m(
                 session=sess, symbol=env.symbol,
@@ -439,7 +440,7 @@ class TestSilverMetricsPlumbing(unittest.TestCase):
     def test_metrics_registry_accumulates_counters(self) -> None:
         """当 caller 注入 MetricsRegistry, ETL 每张表都产生 _success 与 rows_written 计数。"""
         from aats.bootstrap.metrics import MetricsRegistry
-        env = make_env()
+        env = make_env(owner=self)
         registry = MetricsRegistry()
         with Session(env.engine) as sess:
             build_silver_microstructure_15m(
@@ -476,7 +477,7 @@ class TestSilverMetricsPlumbing(unittest.TestCase):
         "ETL 成功+输入空"。
         """
         from aats.bootstrap.metrics import MetricsRegistry
-        env = make_env()
+        env = make_env(owner=self)
         registry = MetricsRegistry()
         with Session(env.engine) as sess:
             build_silver_microstructure_15m(

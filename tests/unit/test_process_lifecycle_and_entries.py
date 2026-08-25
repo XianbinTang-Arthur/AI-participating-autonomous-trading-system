@@ -11,7 +11,7 @@
    入口必须存在、必须显式声明各自的 process_role 常量。
 
 3. deploy/wsl2-dev/Dockerfile 与 docker-compose.aats.yml 的关键字段：
-   * Dockerfile 必须基于 python 3.12 + 安装 .[nats] + tini PID 1
+   * Dockerfile 必须基于 python 3.12 + 从 hashed lock 安装 NATS + tini PID 1
    * compose 必须有 4 个服务、共享同一个 image、各自 AATS_PROCESS_ROLE 不同
 
 这些测试都不依赖 docker / Postgres / NATS，纯静态/in-memory 检查。
@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -288,15 +289,20 @@ def test_api_gateway_entry_passes_explicit_process_role_to_build_runtime() -> No
 # ─────────────────────────────────────────────────────────────────────
 
 
-def test_dockerfile_uses_python_312_and_installs_nats_extra_with_tini() -> None:
+def test_dockerfile_uses_python_312_hashed_nats_lock_with_tini() -> None:
     dockerfile = REPO_ROOT / "deploy" / "wsl2-dev" / "Dockerfile"
+    runtime_lock = REPO_ROOT / "requirements" / "runtime-py312-linux-x86_64.lock"
     assert dockerfile.exists(), f"缺失 {dockerfile}"
+    assert runtime_lock.exists(), f"缺失 {runtime_lock}"
     text = dockerfile.read_text(encoding="utf-8")
+    lock_text = runtime_lock.read_text(encoding="utf-8")
 
     # 与 WSL2 venv 一致的 3.12 base image，避免 3.13/3.14 周边轮子缺口
     assert "python:3.12-slim" in text
-    # 4 进程拓扑必须装 nats extra
-    assert '.[nats]' in text or '.[nats]"' in text
+    # 4 进程拓扑必须从 hashed runtime lock 安装 nats，而非重新解析开放 extra
+    assert "requirements/runtime-py312-linux-x86_64.lock" in text
+    assert "--require-hashes" in text
+    assert re.search(r"^nats-py==[^\s]+", lock_text, re.MULTILINE)
     # tini 作为 PID 1 才能正确传 SIGTERM
     assert "tini" in text
     assert 'ENTRYPOINT ["/usr/bin/tini"' in text
@@ -324,9 +330,10 @@ def test_aats_compose_defines_four_slice_services_with_distinct_process_roles() 
     assert "image: aats-base:dev" in text
     # gateway 必须暴露端口（通过 AATS_API_PORT 变量，默认 8000），其他不暴露
     assert "${AATS_API_PORT:-8000}" in text
-    assert '"${AATS_API_PORT:-8000}:${AATS_API_PORT:-8000}"' in text, (
-        "gateway 端口映射必须显式暴露 AATS_API_PORT，便于 WSL 独立 dockerd 被 Windows 宿主机访问"
+    assert '"127.0.0.1:${AATS_API_PORT:-8000}:${AATS_API_PORT:-8000}"' in text, (
+        "gateway 端口映射必须只在宿主 loopback 暴露 AATS_API_PORT"
     )
+    assert '- "${AATS_API_PORT:-8000}:${AATS_API_PORT:-8000}"' not in text
     # event bus 必须切到 hybrid（4 进程拓扑跨进程通信）
     assert "AATS_EVENT_BUS_BACKEND: hybrid" in text
     # 必须复用基础设施 compose 的 aats network
@@ -350,9 +357,13 @@ def test_dockerfile_runtime_installs_curl_for_gateway_healthcheck() -> None:
     text = dockerfile.read_text(encoding="utf-8")
 
     # 找到 runtime stage 之后的 RUN apt-get install 段
-    runtime_marker = "FROM python:3.12-slim AS runtime"
-    runtime_idx = text.find(runtime_marker)
-    assert runtime_idx >= 0, "Dockerfile 必须有 runtime stage"
+    runtime_stage = re.search(
+        r"^FROM python:3\.12-slim@sha256:[0-9a-f]{64} AS runtime$",
+        text,
+        re.MULTILINE,
+    )
+    assert runtime_stage is not None, "Dockerfile 必须有 digest-pinned runtime stage"
+    runtime_idx = runtime_stage.start()
     runtime_section = text[runtime_idx:]
     # runtime 段的第一个 apt-get install 必须包含 curl
     install_idx = runtime_section.find("apt-get install")

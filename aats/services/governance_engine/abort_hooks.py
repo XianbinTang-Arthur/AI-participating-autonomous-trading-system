@@ -189,6 +189,11 @@ class AbortHookService:
     # 生命周期
     # ──────────────────────────────────────────────────────────────
 
+    @property
+    def background_task(self) -> asyncio.Task[None] | None:
+        """返回 service-owned abort guard task，供进程生命周期只读监督。"""
+        return self._task
+
     async def start(self) -> None:
         """启动后台 task。如果 enabled=False，no-op。"""
         if not self._config.enabled:

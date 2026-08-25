@@ -68,8 +68,9 @@ native ext4 上（脚本默认目标为 WSL 用户的 `$HOME/aats`）运行这�
 git add <files>
 git commit -m "..."
 
-# 发布到当前 profile。deploy.sh 会先同步 Windows committed HEAD 到 WSL2。
-bash scripts/deploy.sh --profile derivatives-live --skip-commit
+# 部署衍生品模拟栈。deploy.sh 会先同步 Windows committed HEAD 到 WSL2。
+# 当前审计 NO-GO 期间，标准入口拒绝所有 live profile。
+bash scripts/deploy.sh --profile derivatives --skip-commit
 
 # 如果只是想在 WSL2 native checkout 上跑测试，不发布：
 scripts/sync_to_wsl2.sh pull

@@ -1,0 +1,4 @@
+# pytest 只读验证生成的临时文件；不是审计证据正文。
+test-tmp/
+integration-collect-tmp/
+.pytest_tmp/

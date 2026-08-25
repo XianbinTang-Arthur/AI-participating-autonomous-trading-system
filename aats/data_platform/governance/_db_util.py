@@ -13,6 +13,11 @@ import threading
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from aats.storage.connection_budget import (
+    GOVERNANCE_TRANSIENT_ENGINE_POOL,
+    RDP_GOVERNANCE_CACHE_POOL,
+)
+
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
@@ -118,8 +123,8 @@ def get_cached_governance_engine() -> "Engine | None":
             _CACHED_GOVERNANCE_ENGINE = create_engine(
                 url,
                 pool_pre_ping=True,
-                pool_size=2,
-                max_overflow=3,
+                pool_size=RDP_GOVERNANCE_CACHE_POOL.pool_size,
+                max_overflow=RDP_GOVERNANCE_CACHE_POOL.max_overflow,
             )
             return _CACHED_GOVERNANCE_ENGINE
         except Exception as exc:
@@ -165,7 +170,12 @@ def try_governance_db():
     try:
         from sqlalchemy import create_engine, text as sa_text
 
-        engine = create_engine(url, pool_pre_ping=True, pool_size=1, max_overflow=0)
+        engine = create_engine(
+            url,
+            pool_pre_ping=True,
+            pool_size=GOVERNANCE_TRANSIENT_ENGINE_POOL.pool_size,
+            max_overflow=GOVERNANCE_TRANSIENT_ENGINE_POOL.max_overflow,
+        )
         with engine.connect() as conn:
             conn.execute(sa_text("SELECT 1"))
         return engine, True

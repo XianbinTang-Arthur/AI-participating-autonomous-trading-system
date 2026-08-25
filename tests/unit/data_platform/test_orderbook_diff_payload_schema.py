@@ -63,6 +63,14 @@ def _make_engine():
     return engine
 
 
+class _SQLiteEngineTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.engine = _make_engine()
+
+    def tearDown(self) -> None:
+        self.engine.dispose()
+
+
 def _payload_row(**overrides):
     row = {
         "snapshot_table": "bronze.market_orderbook_books5",
@@ -79,10 +87,9 @@ def _payload_row(**overrides):
     return row
 
 
-class TestOrderbookDiffPayloadSchema(unittest.TestCase):
+class TestOrderbookDiffPayloadSchema(_SQLiteEngineTestCase):
     def test_snapshot_only_payload_sidecar_roundtrip(self) -> None:
-        engine = _make_engine()
-        with Session(engine) as session:
+        with Session(self.engine) as session:
             session.add(BronzeMarketOrderbookPayloadModel(**_payload_row()))
             session.commit()
 
@@ -94,8 +101,7 @@ class TestOrderbookDiffPayloadSchema(unittest.TestCase):
             self.assertIsNone(row.raw_payload)
 
     def test_diff_persisted_requires_payload_fields(self) -> None:
-        engine = _make_engine()
-        with Session(engine) as session:
+        with Session(self.engine) as session:
             session.add(BronzeMarketOrderbookPayloadModel(**_payload_row(
                 capture_status="diff_payload_persisted",
             )))
@@ -104,8 +110,7 @@ class TestOrderbookDiffPayloadSchema(unittest.TestCase):
             session.rollback()
 
     def test_diff_persisted_payload_roundtrip(self) -> None:
-        engine = _make_engine()
-        with Session(engine) as session:
+        with Session(self.engine) as session:
             session.add(BronzeMarketOrderbookPayloadModel(**_payload_row(
                 capture_status="diff_payload_persisted",
                 payload_hash=_SHA_B,
@@ -124,8 +129,7 @@ class TestOrderbookDiffPayloadSchema(unittest.TestCase):
             self.assertIsNotNone(row.raw_payload)
 
     def test_invalid_snapshot_table_sequence_and_checksum_rejected(self) -> None:
-        engine = _make_engine()
-        with Session(engine) as session:
+        with Session(self.engine) as session:
             session.add(BronzeMarketOrderbookPayloadModel(**_payload_row(
                 snapshot_table="execution.orderbook_payloads",
                 collector_sequence=0,
@@ -136,7 +140,7 @@ class TestOrderbookDiffPayloadSchema(unittest.TestCase):
             session.rollback()
 
 
-class TestOrderbookDiffPayloadMigration(unittest.TestCase):
+class TestOrderbookDiffPayloadMigration(_SQLiteEngineTestCase):
     def test_batch_b_12_registered_after_numeric_widen(self) -> None:
         from aats.data_platform.migrations._batch_b import BATCH_B_STAGES
 
@@ -188,8 +192,7 @@ class TestOrderbookDiffPayloadMigration(unittest.TestCase):
         )
         sql_text = rollback_path.read_text(encoding="utf-8")
 
-        engine = _make_engine()
-        with engine.connect() as conn:
+        with self.engine.connect() as conn:
             row = conn.execute(text(
                 "SELECT name FROM bronze.sqlite_master "
                 "WHERE type='table' AND name='market_orderbook_payloads'"
@@ -206,11 +209,11 @@ class TestOrderbookDiffPayloadMigration(unittest.TestCase):
                 if statement and statement.upper() not in {"BEGIN", "COMMIT"}:
                     statements.append(statement)
 
-        with engine.begin() as conn:
+        with self.engine.begin() as conn:
             for statement in statements:
                 conn.execute(text(statement))
 
-        with engine.connect() as conn:
+        with self.engine.connect() as conn:
             row = conn.execute(text(
                 "SELECT name FROM bronze.sqlite_master "
                 "WHERE type='table' AND name='market_orderbook_payloads'"

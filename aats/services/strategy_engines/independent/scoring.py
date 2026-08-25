@@ -206,15 +206,10 @@ def compute_signal_edge_bps(
     优先走 RDP score-based 路径 (与 replay 对齐)，仅在 RDP 未启用时
     退回到 legacy component_edge 路径。
 
-    生产 vs replay 已知差异 (P2-8 修复后仍存在):
-        生产 `compute_raw_book_score` 在 leg=="short" 且 short_bias_enabled=False
-        时直接返回 0，导致 short leg signal_edge=0。
-        replay `independent_adapter._compute_edge_layers` 不区分 short_bias，
-        而是 dominant_leg = max(long_score, short_score)。
-        当 short_bias_enabled=False 但 short_score > long_score 时，
-        生产会跳过 short leg，replay 可能会进。
-        当前仅 P2-8 修复 component vs score_based 公式偏差，short_bias gating
-        差异属于另一个独立 issue (待 P2-9 跟进)。
+    Replay parity:
+        independent replay 通过同名参数 ``strategy_short_bias_enabled`` 在
+        score history 与 dominant-leg 选择前执行同一 short gate。两端输入因子模型
+        仍不同，但关闭 short 时的原始评分语义均固定为 0。
     """
     side_sign = 1.0 if leg == "long" else -1.0
     directional_alpha = max(0.0, side_sign * float(baseline.composite_alpha_score))

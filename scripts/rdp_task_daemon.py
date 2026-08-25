@@ -519,9 +519,9 @@ def main() -> int:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    from aats.data_platform.db import run_migrations
+    from aats.data_platform.db import validate_rdp_schema
 
-    run_migrations()
+    validate_rdp_schema()
     _recover_orphaned_running_tasks()
 
     log.info("RDP Task Daemon started (poll_interval=%ds, once=%s)",

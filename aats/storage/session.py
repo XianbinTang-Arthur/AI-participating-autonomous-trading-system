@@ -10,6 +10,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from aats.storage.connection_budget import primary_storage_pool_limit
 from aats.storage.sqlalchemy_models import Base
 
 
@@ -206,15 +207,18 @@ def scoped_runtime_lock_key(
     return derived or int(base_lock_key)
 
 
-def create_database_runtime(database_url: str) -> DatabaseRuntime:
+def create_database_runtime(
+    database_url: str,
+    *,
+    process_role: str | None = None,
+) -> DatabaseRuntime:
     parsed_url = make_url(database_url)
     if parsed_url.get_backend_name() != "postgresql":
         raise ValueError("database_url_must_use_postgresql")
 
-    # 2026-04-20 S4 改动（gateway_slow_query_systematic_fix_sow.md §S4.3）：
-    # pool_size 10→15, max_overflow 20→45. 理由：_parallel.py 嵌套守卫改为
-    # "本地小池" 后，线程总数上限从 12 变成 12 × (1 + 4) = 60, 需要 DB 连接池
-    # 相应匹配。PG max_connections=200 充裕，不会引爆。
+    # Phase 3U / FS-008：连接池按 process role 从单一预算真源解析。Gateway 的
+    # query thread 上限仍可高于 DB pool；多余工作必须在 pool_timeout 处背压，
+    # 不能让四个进程各自扩张到 60 并共同耗尽 PostgreSQL。
     #
     # 2026-04-21 idle-in-transaction 安全网（生产诊断发现）：
     # 观察到 gateway 在极端 parallel_fetch 场景下（recovery_view 137s +
@@ -241,12 +245,13 @@ def create_database_runtime(database_url: str) -> DatabaseRuntime:
             else idle_timeout_option
         )
 
+    pool_limits = primary_storage_pool_limit(process_role)
     engine = create_engine(
         database_url,
         future=True,
         pool_pre_ping=True,
-        pool_size=15,
-        max_overflow=45,
+        pool_size=pool_limits.pool_size,
+        max_overflow=pool_limits.max_overflow,
         pool_timeout=30,
         connect_args={
             "options": merged_options,
@@ -311,6 +316,44 @@ def applied_migrations(runtime: DatabaseRuntime) -> list[str]:
             )
         ).scalars().all()
     return [str(row) for row in rows]
+
+
+def validate_current_migrations(runtime: DatabaseRuntime) -> None:
+    """只读验证 root migration ledger 与当前 checkout 完全一致。"""
+    if runtime.engine.dialect.name != "postgresql":
+        return
+
+    migrations_dir = Path(__file__).resolve().parents[2] / "migrations"
+    expected = {
+        path.name: hashlib.sha256(
+            path.read_text(encoding="utf-8").encode("utf-8")
+        ).hexdigest()
+        for path in sorted(migrations_dir.glob("*.sql"))
+    }
+    with runtime.engine.connect() as connection:
+        ledger_exists = connection.execute(
+            text("SELECT to_regclass(:table_name)"),
+            {"table_name": _SCHEMA_MIGRATIONS_TABLE},
+        ).scalar_one_or_none()
+        if ledger_exists is None:
+            raise RuntimeError("database_schema_migrations_ledger_missing")
+        rows = connection.execute(
+            text(f"SELECT version, checksum FROM {_SCHEMA_MIGRATIONS_TABLE}")
+        ).mappings().all()
+
+    actual = {str(row["version"]): str(row["checksum"]) for row in rows}
+    missing = sorted(set(expected) - set(actual))
+    unknown = sorted(set(actual) - set(expected))
+    mismatched = sorted(
+        version
+        for version in set(expected) & set(actual)
+        if expected[version] != actual[version]
+    )
+    if missing or unknown or mismatched:
+        raise RuntimeError(
+            "database_schema_migration_contract_failed:"
+            f"missing={missing};unknown={unknown};mismatched={mismatched}"
+        )
 
 
 def validate_runtime_schema(runtime: DatabaseRuntime) -> None:

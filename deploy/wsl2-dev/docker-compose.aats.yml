@@ -5,15 +5,10 @@
 # Jaeger/Grafana）仍由 deploy/wsl2-dev/docker-compose.yml 提供。两份 compose
 # 通过 `name: aats-dev` 共用同一个 project，且都连到 `aats` 网络上。
 #
-# 启动顺序（以 derivatives 为例）：
-#   1) cd deploy/wsl2-dev
-#   2) docker compose --env-file ../../.env.wsl2 up -d                          # 基础设施
-#   3) docker compose -f docker-compose.aats.yml \
-#        -f docker-compose.aats.derivatives.yml \
-#        --env-file ../../.env.wsl2 --env-file ../../.env.derivatives build     # 构建
-#   4) docker compose -f docker-compose.aats.yml \
-#        -f docker-compose.aats.derivatives.yml \
-#        --env-file ../../.env.wsl2 --env-file ../../.env.derivatives up -d     # 启动
+# 运维入口（仓库根，以 derivatives 模拟盘为例）：
+#   scripts/deploy.sh --profile derivatives --skip-commit
+# 本文件是标准部署脚本管理的应用拓扑实现细节；不要手工执行 docker compose。部署脚本负责
+# 精确同步、readiness generation、构建、schema migration、健康检查与不可覆盖证据。
 #
 # 关键：--env-file ../../.env.<profile> 让 compose 模板层能读到 AATS_API_PORT
 #       等配置项，用于端口映射、uvicorn 命令行参数等。.env.<profile> 是所有
@@ -37,6 +32,9 @@ networks:
 
 # 4 个服务共享的环境变量片段
 x-aats-common-env: &aats-common-env
+  # FS-016：每次标准 deploy 生成同一非秘密代次，四主进程 readiness key 只接受
+  # 本代次 peer。required interpolation 阻止手工 Compose 静默使用空代次。
+  AATS_RUNTIME_READINESS_GENERATION: "${AATS_RUNTIME_READINESS_GENERATION:?runtime readiness generation required}"
   # 数据库名 AATS_DB_NAME 来自 .env.<profile>，用户名/密码来自 .env.wsl2。
   # 两份 env 文件都在项目根目录，通过 --env-file ../../.env.* 注入。
   AATS_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/${AATS_DB_NAME:-aats}
@@ -51,6 +49,9 @@ x-aats-common-env: &aats-common-env
   # Active Parameters 从 governance schema 加载，固定指向 aats_research 库。
   # 与 AATS_DATABASE_URL (按 profile 区分) 不同，这条连接只在启动时做一次只读查询。
   AATS_ACTIVE_PARAMETER_DB_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/aats_research
+  # FS-009：Gateway、RDP daemon 与 one-shot migration job 必须验证/迁移同一
+  # aats_research，禁止回落到容器内 localhost placeholder 后吞错继续。
+  RDP_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/aats_research
   AATS_HOT_STATE_BACKEND: redis
   AATS_HOT_STATE_REDIS_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/0
   # Stage 8：OpenTelemetry + Jaeger。4 进程共用同一个 OTLP gRPC endpoint，
@@ -116,9 +117,10 @@ services:
       - "120"
     # 端口值来自 .env.<profile> 的 AATS_API_PORT，通过启动命令的
     # --env-file ../../.env.<profile> 注入到 compose 模板插值层。
-    # 如果没传 --env-file 则 fallback 到 8000。
+    # 如果没传 --env-file 则 fallback 到 8000。宿主绑定固定为 loopback；
+    # 容器内 uvicorn 继续监听 0.0.0.0 以供 Docker network 访问。
     ports:
-      - "${AATS_API_PORT:-8000}:${AATS_API_PORT:-8000}"
+      - "127.0.0.1:${AATS_API_PORT:-8000}:${AATS_API_PORT:-8000}"
     volumes:
       - ../../deploy/wsl2-dev/runtime/operator-tls:/app/deploy/wsl2-dev/runtime/operator-tls:ro
     networks:
@@ -229,9 +231,8 @@ services:
     environment:
       <<: *aats-common-env
       AATS_PROCESS_ROLE: rdp-daemon
-      # daemon 通过 AATS_ACTIVE_PARAMETER_DB_URL 连接 governance schema
-      # （已在 x-aats-common-env 中定义，指向 aats_research）
-      RDP_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/aats_research
+      # daemon 与 Gateway 共用 x-aats-common-env 的 RDP_DATABASE_URL，固定指向
+      # aats_research；应用启动只验证，DDL 由 deploy one-shot job 执行。
       # RDP Bug 3 修复: pre_apply_gate 的 live_db_health check 需要读实盘 DB
       # 确认当前系统状态（持仓/告警/降级）才能 safely apply 新参数。
       # 未配置时该 check 降级为 warn (allow_apply=true)，保护维度失效。

@@ -5,11 +5,12 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Iterator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.data_platform.config import ResearchPlatformSettings, get_settings
+from aats.storage.connection_budget import RDP_RESEARCH_POOL
 
 _engine: Engine | None = None
 _session_factory: sessionmaker[Session] | None = None
@@ -21,8 +22,8 @@ def get_engine(settings: ResearchPlatformSettings | None = None) -> Engine:
         settings = settings or get_settings()
         _engine = create_engine(
             settings.database_url,
-            pool_size=5,
-            max_overflow=10,
+            pool_size=RDP_RESEARCH_POOL.pool_size,
+            max_overflow=RDP_RESEARCH_POOL.max_overflow,
             pool_pre_ping=True,
         )
     return _engine
@@ -50,16 +51,73 @@ def get_session(settings: ResearchPlatformSettings | None = None) -> Iterator[Se
         session.close()
 
 
-def run_migrations(settings: ResearchPlatformSettings | None = None) -> None:
-    """使用 ORM create_all() 初始化研究数据库全部 schema 和表。
-
-    替代旧的 migrations/research/*.sql 逐文件执行方式。
-    幂等——已存在的 schema/表不会被破坏。
-    """
+def apply_rdp_migrations(settings: ResearchPlatformSettings | None = None):
+    """显式创建 ORM baseline 并应用全部 ledgered Batch B migrations。"""
+    from aats.data_platform.migrations._batch_b import run_batch_b_migrations
     from aats.data_platform.rdp_models import create_rdp_schema
 
     engine = get_engine(settings)
     create_rdp_schema(engine)
+    report = run_batch_b_migrations(engine)
+    if not report.ok:
+        failed = next(stage for stage in report.stages if not stage.ok)
+        raise RuntimeError(
+            "rdp_schema_migration_failed:"
+            f"stage={failed.stage};error_type={failed.error_type}"
+        )
+    validate_rdp_schema(settings)
+    return report
+
+
+def run_migrations(settings: ResearchPlatformSettings | None = None):
+    """Backward-compatible explicit migration alias.
+
+    Runtime services must call :func:`validate_rdp_schema`; only initialization
+    and deployment migration jobs may call this mutating function.
+    """
+    return apply_rdp_migrations(settings)
+
+
+def validate_rdp_schema(settings: ResearchPlatformSettings | None = None) -> None:
+    """Read-only validation of ORM tables/columns and the Batch B ledger."""
+    from aats.data_platform.migrations._batch_b import validate_batch_b_migrations
+    from aats.data_platform.rdp_models import RdpBase, _RDP_SCHEMAS
+
+    engine = get_engine(settings)
+    inspector = inspect(engine)
+    if engine.dialect.name == "postgresql":
+        actual_schemas = set(inspector.get_schema_names())
+        missing_schemas = sorted(set(_RDP_SCHEMAS) - actual_schemas)
+        if missing_schemas:
+            raise RuntimeError(
+                f"rdp_schema_contract_missing_schemas:{missing_schemas}"
+            )
+
+    missing_tables: list[str] = []
+    missing_columns: list[str] = []
+    for table in RdpBase.metadata.sorted_tables:
+        schema = table.schema
+        qualified_name = f"{schema}.{table.name}" if schema else table.name
+        if not inspector.has_table(table.name, schema=schema):
+            missing_tables.append(qualified_name)
+            continue
+        actual_columns = {
+            str(column["name"])
+            for column in inspector.get_columns(table.name, schema=schema)
+        }
+        missing_columns.extend(
+            f"{qualified_name}.{column.name}"
+            for column in table.columns
+            if column.name not in actual_columns
+        )
+    if missing_tables or missing_columns:
+        raise RuntimeError(
+            "rdp_schema_orm_contract_failed:"
+            f"missing_tables={sorted(missing_tables)};"
+            f"missing_columns={sorted(missing_columns)}"
+        )
+
+    validate_batch_b_migrations(engine)
 
 
 def apply_batch_a_migrations(
@@ -129,4 +187,4 @@ def reset_engine() -> None:
 
 
 if __name__ == "__main__":
-    run_migrations()
+    apply_rdp_migrations()

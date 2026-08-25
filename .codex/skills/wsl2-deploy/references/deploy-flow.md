@@ -30,33 +30,34 @@ Implication:
 - To deploy WSL-only current code, use `--skip-sync`
 
 ## Standard deploy pipeline
-1. Resolve profile to:
+1. Require an explicit simulation profile and reject all live profiles before side effects.
+2. Resolve profile to:
    - overlay compose file
    - profile env file
    - required container set
-2. Locate `.env.wsl2`
+3. Locate `.env.wsl2`
    - prefer repo root
    - allow legacy fallback under `deploy/wsl2-dev/`
-3. Optional commit step
-4. Optional sync step
-5. `docker compose down`
-6. `docker compose build`
-7. `docker image prune -f`
-8. infra up from `docker-compose.yml`
-9. wait for Postgres readiness
-10. sync Postgres password from `.env.wsl2`
-11. app up with base compose + overlay
-12. health gate:
+4. Optional commit step
+5. Optional sync step
+6. Generate one non-secret runtime readiness generation from the deployed WSL HEAD, UTC time, process id, and random nonce
+7. `docker compose build` before stopping the old stack; required generation interpolation is already present
+8. `docker compose down`; nonzero is fatal
+9. `docker image prune -f`
+10. infra up with Compose `--wait`; nonzero is fatal
+11. wait for Postgres readiness and sync its password without printing it
+12. run the explicit root + RDP schema job; nonzero is fatal
+13. app up with base compose + overlay; nonzero is fatal
+14. health gate:
    - gateway `/healthz`
    - every required app container must be `running healthy`
-13. emit deploy report
+15. write a non-overwriting, no-secret simulation evidence packet containing the same readiness generation
+16. emit a simulation-only report; never claim trading-ready or production GO
 
 ## Profiles
-### Four-process profiles
+### Enabled four-process profiles
 - `spot`
-- `spot-live`
 - `derivatives`
-- `derivatives-live`
 
 Required containers:
 - `aats-gateway`
@@ -65,32 +66,27 @@ Required containers:
 - `aats-execution`
 - `aats-rdp-daemon`
 
-### Monolith fallback
-- `derivatives-live-monolith`
-
-Required containers:
-- `aats-gateway`
-- `aats-rdp-daemon`
+All live profiles and the monolith live fallback are currently rejected with no override. Their Compose files remain future validation inputs, not deployable profiles.
 
 ## Recommended commands
 ### Deploy latest committed Windows HEAD
 ```powershell
-.\scripts\deploy.sh --profile derivatives-live
+.\scripts\deploy.sh --profile derivatives
 ```
 
 ### Deploy through the bundled PowerShell wrapper
 ```powershell
-.\.codex\skills\wsl2-deploy\scripts\run-deploy.ps1 -Profile derivatives-live
+.\.codex\skills\wsl2-deploy\scripts\run-deploy.ps1 -Profile derivatives
 ```
 
 ### Deploy with auto-commit
 ```powershell
-.\scripts\deploy.sh --profile derivatives-live --commit "deploy message"
+.\scripts\deploy.sh --profile derivatives --commit "deploy message"
 ```
 
 ### Deploy existing WSL checkout only
 ```powershell
-.\scripts\deploy.sh --profile derivatives-live --skip-sync --skip-commit
+.\scripts\deploy.sh --profile derivatives --skip-sync --skip-commit
 ```
 
 ## Validation commands
@@ -109,11 +105,14 @@ wsl -d Ubuntu bash -n /mnt/d/文件/project/AIParticipatingAutonomousTradingSyst
 Inside WSL:
 ```bash
 cd ~/aats/deploy/wsl2-dev
-docker compose -f docker-compose.yml -f docker-compose.aats.yml -f docker-compose.aats.derivatives-live.yml \
+AATS_RUNTIME_READINESS_GENERATION=static-config-check \
+  docker compose -f docker-compose.yml -f docker-compose.aats.yml -f docker-compose.aats.derivatives.yml \
   --env-file ~/aats/.env.wsl2 \
-  --env-file ~/aats/.env.derivatives.live \
+  --env-file ~/aats/.env.derivatives \
   config >/dev/null
 ```
+
+`static-config-check` is only for template parsing. Never use it to start or restart application containers; real simulation deployment generations are created by `scripts/deploy.sh` and recorded in evidence.
 
 ## Common failure modes
 ### `bash.exe` unavailable in PowerShell
@@ -145,7 +144,7 @@ Check:
 ### Env file confusion
 Preferred layout:
 - `~/aats/.env.wsl2`
-- `~/aats/.env.derivatives.live`
+- `~/aats/.env.derivatives`
 
 Legacy fallback still accepted:
 - `~/aats/deploy/wsl2-dev/.env.wsl2`

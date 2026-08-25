@@ -7,8 +7,8 @@ Routes:
   POST /rdp/profile-recommendations/{id}/reject    session only
   POST /rdp/profile-recommendations/{id}/gate      运行 3 指标 gate 预检
   POST /rdp/profile-recommendations/{id}/release   session only
-  POST /rdp/profile-recommendations/{id}/apply     token v2 + cross-DB saga
-  POST /rdp/profile-recommendations/{id}/rollback  token v2 + saga reverse
+  POST /rdp/profile-recommendations/{id}/apply     token v2 + fail-closed until runtime activation/readback exists
+  POST /rdp/profile-recommendations/{id}/rollback  token v2 + fail-closed until reverse saga exists
   GET  /rdp/profile-type-reviews                   profile_type_review 列表
   POST /rdp/profile-type-reviews/{id}/resolve      session only
 
@@ -47,19 +47,6 @@ from aats.api.rdp_apply_token import InvalidTokenError, verify_token
 from aats.data_platform.gates.profile_gate import (
     check_profile_gate,
     compute_metrics_from_replay,
-)
-from aats.data_platform.governance.profile_apply_saga import (
-    SagaError,
-    Step3BaselineDriftError,
-    Step3TargetNotFoundError,
-    WhitelistViolationError,
-    apply_profile_saga,
-    find_or_create_saga_operation,
-)
-from aats.data_platform.runtime.live_session import (
-    LiveDbNotInitializedError,
-    get_live_session,
-    is_initialized as live_db_is_initialized,
 )
 
 logger = logging.getLogger(__name__)
@@ -422,7 +409,10 @@ async def release_profile_rec(
 # Apply (saga) / Rollback
 # =============================================================================
 
-@profile_router.post("/profile-recommendations/{rec_id}/apply")
+@profile_router.post(
+    "/profile-recommendations/{rec_id}/apply",
+    status_code=501,
+)
 async def apply_profile_rec(
     rec_id: str,
     request: Request,
@@ -430,17 +420,6 @@ async def apply_profile_rec(
 ) -> dict[str, Any]:
     token_actor = _extract_profile_token(request, action="apply", rec_id=rec_id)
     _enforce_token_actor(principal=principal, token_actor=token_actor, action="apply")
-
-    # Shadow 期检查(R2-06)— auto-apply flag 必须开;UI apply 绕开 shadow,
-    # 但 CLI-driven auto-apply 要看 flag。这里只检查 live pool 已初始化。
-    if not live_db_is_initialized():
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "live_pool_not_ready",
-                "message": "AATS_LIVE_DB_URL_RDP not configured; cannot apply",
-            },
-        )
 
     with _governance_session() as session:
         rec = _load_profile_rec(session, rec_id)
@@ -455,91 +434,37 @@ async def apply_profile_rec(
         _enforce_dual_operator(
             principal=principal, approver=rec.get("approved_by"), action="apply",
         )
-
-        ps = _load_parameter_set(session, rec["target_parameter_set_id"])
-        cur_ps, cur_vals = _load_current_active_profile_values(
-            session, rec["scope_ref"],
-        )
-        patches = _compute_threshold_patches(
-            current_values=cur_vals, new_values=ps["values"],
-        )
-
-        saga_op = find_or_create_saga_operation(
-            session,
-            recommendation_id=rec_id,
-            scope="profile",
-            actor=token_actor,
-        )
-
-    # saga 自己管理事务 — 开 live session
-    try:
-        live = get_live_session(mode="rw")
-    except LiveDbNotInitializedError as exc:
-        raise HTTPException(status_code=503, detail={"code": "live_pool_error", "message": str(exc)})
-
-    try:
-        with _governance_session() as research_session:
-            result = apply_profile_saga(
-                research_session=research_session,
-                live_session=live,
-                saga_op=saga_op,
-                profile_id=rec["scope_ref"],
-                parameter_set_id=ps["parameter_set_id"],
-                values=ps["values"],
-                from_parameter_set_id=cur_ps,
-                threshold_patches=patches,
-            )
-    except Step3BaselineDriftError as exc:
-        raise HTTPException(status_code=409, detail={"code": "baseline_drift", "message": str(exc)})
-    except Step3TargetNotFoundError as exc:
-        raise HTTPException(status_code=404, detail={"code": "live_profile_not_found", "message": str(exc)})
-    except WhitelistViolationError as exc:
-        raise HTTPException(status_code=422, detail={"code": "whitelist_violation", "message": str(exc)})
-    except SagaError as exc:
-        raise HTTPException(status_code=500, detail={"code": "saga_failed", "message": str(exc)})
-    finally:
-        try:
-            live.close()
-        except Exception:
-            pass
-
-    if not result.ok:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "code": "saga_incomplete",
-                "operation_id": result.operation_id,
-                "steps_completed": result.steps_completed,
-                "error": result.error,
-            },
-        )
-
-    # 更新 rec status = applied
-    with _governance_session() as session:
-        session.execute(text("""
-            UPDATE governance.recommendations
-            SET status = 'applied'
-            WHERE recommendation_id = :rid
-        """), {"rid": rec_id})
-        session.commit()
-
-    logger.info(
-        "profile apply: rec=%s op=%s actor=%s steps=%d",
-        rec_id, result.operation_id, token_actor, result.steps_completed,
+    # FS-001: research/live SQL 完成不能证明 execution runtime 已加载目标参数。
+    # 现有 Saga 查询错误的 profile_id 字段，并写入不属于 activation schema 的
+    # threshold；在 execution-owned generation/ack/readback 完成前只能零写入拒绝。
+    logger.warning(
+        "profile apply rejected fail-closed: rec=%s status=%s actor=%s",
+        rec_id,
+        rec.get("status"),
+        token_actor,
     )
-    return {
-        "ok": True,
-        "recommendation_id": rec_id,
-        "operation_id": result.operation_id,
-        "steps_completed": result.steps_completed,
-    }
+    raise HTTPException(
+        status_code=501,
+        detail={
+            "code": "profile_apply_not_implemented",
+            "message": (
+                "Profile 参数应用暂不可用：安全的运行时激活、代际确认与读回尚未实现。"
+            ),
+            "recommendation_id": rec_id,
+            "current_status": rec.get("status"),
+            "retryable": False,
+        },
+    )
 
 
 class _RollbackRequest(BaseModel):
     to_parameter_set_id: str | None = None
 
 
-@profile_router.post("/profile-recommendations/{rec_id}/rollback")
+@profile_router.post(
+    "/profile-recommendations/{rec_id}/rollback",
+    status_code=501,
+)
 async def rollback_profile_rec(
     rec_id: str,
     body: _RollbackRequest,
@@ -554,21 +479,29 @@ async def rollback_profile_rec(
         _enforce_dual_operator(
             principal=principal, approver=rec.get("approved_by"), action="rollback",
         )
-    # TODO(Phase 1.5): 实际 rollback 需要 saga 反向调用 + 指向上一版 parameter_set。
-    # 当前骨架只做 status 回滚,让 UI 链路通,live payload 写回由 Phase 1.5 补。
-    with _governance_session() as session:
-        session.execute(text("""
-            UPDATE governance.recommendations
-            SET status = 'rolled_back'
-            WHERE recommendation_id = :rid
-        """), {"rid": rec_id})
-        session.commit()
-    return {
-        "ok": True,
-        "recommendation_id": rec_id,
-        "status": "rolled_back",
-        "pending_live_rollback": True,
-    }
+    # FS-001: 不得把只更新 recommendation 状态表述为真实回滚。
+    # 当前没有 execution-owned reverse saga 或 runtime readback 契约；
+    # 在这些安全边界完成前只能明确、无写入地 fail-closed。
+    logger.warning(
+        "profile rollback rejected fail-closed: rec=%s status=%s actor=%s explicit_target=%s",
+        rec_id,
+        rec.get("status"),
+        token_actor,
+        body.to_parameter_set_id is not None,
+    )
+    raise HTTPException(
+        status_code=501,
+        detail={
+            "code": "profile_rollback_not_implemented",
+            "message": (
+                "Profile 参数回滚暂不可用：安全的反向 Saga 与运行时读回尚未实现。"
+            ),
+            "recommendation_id": rec_id,
+            "requested_parameter_set_id": body.to_parameter_set_id,
+            "current_status": rec.get("status"),
+            "retryable": False,
+        },
+    )
 
 
 # =============================================================================

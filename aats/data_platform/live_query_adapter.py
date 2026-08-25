@@ -23,6 +23,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.data_platform.config import ResearchPlatformSettings, get_settings
+from aats.storage.connection_budget import RDP_LIVE_QUERY_POOL
 
 log = logging.getLogger(__name__)
 
@@ -98,8 +99,8 @@ def _get_live_engine(settings: ResearchPlatformSettings | None = None) -> Engine
 
     _live_engine = create_engine(
         settings.live_database_url,
-        pool_size=3,
-        max_overflow=5,
+        pool_size=RDP_LIVE_QUERY_POOL.pool_size,
+        max_overflow=RDP_LIVE_QUERY_POOL.max_overflow,
         pool_pre_ping=True,
         # 只读标记（非 DB 级强制，逻辑层强制）
         echo=False,

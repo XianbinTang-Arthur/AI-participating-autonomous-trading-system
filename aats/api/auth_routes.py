@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import asyncio
-from time import perf_counter
+from collections import deque
+from dataclasses import dataclass, field
+from math import ceil
+from time import monotonic, perf_counter
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qsl, urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi import Query
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 
 from aats.api.auth import (
+    OperatorLoginResult,
     OperatorPrincipal,
     _write_api_key_compatibility_enabled,
     authenticate_operator_user,
@@ -83,7 +87,21 @@ _DASHBOARD_STALE_SYNC_FALLBACK_PANEL_KEYS = frozenset(
 
 class LoginRequest(BaseModel):
     username: str
-    password: str
+    password: SecretStr
+
+
+def _login_username(payload: LoginRequest) -> str:
+    username = payload.username
+    if not 1 <= len(username) <= 128:
+        raise HTTPException(status_code=422, detail="operator_login_payload_invalid")
+    return username
+
+
+def _login_password(payload: LoginRequest) -> str:
+    password = payload.password.get_secret_value()
+    if not 1 <= len(password) <= 1024:
+        raise HTTPException(status_code=422, detail="operator_login_payload_invalid")
+    return password
 
 
 class CreateOperatorUserRequest(BaseModel):
@@ -122,6 +140,268 @@ def _runtime(request: Request) -> ApplicationRuntime:
 
 def _query(request: Request) -> OperatorQueryService:
     return OperatorQueryService(_runtime(request))
+
+
+@dataclass(slots=True)
+class _OperatorLoginRateState:
+    global_attempts: deque[float] = field(default_factory=deque)
+    client_attempts: dict[str, deque[float]] = field(default_factory=dict)
+    identity_attempts: dict[str, deque[float]] = field(default_factory=dict)
+
+    @staticmethod
+    def _expire_queue(attempts: deque[float], cutoff: float) -> None:
+        while attempts and attempts[0] <= cutoff:
+            attempts.popleft()
+
+    @classmethod
+    def _expire_map(
+        cls,
+        attempts_by_key: dict[str, deque[float]],
+        cutoff: float,
+    ) -> None:
+        for key in tuple(attempts_by_key):
+            attempts = attempts_by_key[key]
+            cls._expire_queue(attempts, cutoff)
+            if not attempts:
+                attempts_by_key.pop(key, None)
+
+    def check_and_record(
+        self,
+        *,
+        now: float,
+        window_seconds: float,
+        global_limit: int,
+        client_key: str,
+        client_limit: int,
+        identity_key: str,
+        identity_limit: int,
+    ) -> str | None:
+        cutoff = now - window_seconds
+        self._expire_queue(self.global_attempts, cutoff)
+        self._expire_map(self.client_attempts, cutoff)
+        self._expire_map(self.identity_attempts, cutoff)
+
+        if len(self.global_attempts) >= global_limit:
+            return "global"
+        client_attempts = self.client_attempts.get(client_key)
+        if client_attempts is not None and len(client_attempts) >= client_limit:
+            return "client"
+        identity_attempts = self.identity_attempts.get(identity_key)
+        if identity_attempts is not None and len(identity_attempts) >= identity_limit:
+            return "identity"
+
+        self.global_attempts.append(now)
+        self.client_attempts.setdefault(client_key, deque()).append(now)
+        self.identity_attempts.setdefault(identity_key, deque()).append(now)
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class _OperatorLoginAttempt:
+    login_result: OperatorLoginResult
+    session_version: int | None = None
+
+
+_OPERATOR_LOGIN_RATE_STATE_ATTR = "_operator_login_rate_state"
+_OPERATOR_LOGIN_SEMAPHORE_ATTR = "_operator_login_semaphore"
+_OPERATOR_LOGIN_TASKS_ATTR = "_operator_login_worker_tasks"
+
+
+def _operator_login_rate_state(request: Request) -> _OperatorLoginRateState:
+    loop = asyncio.get_running_loop()
+    entry = getattr(request.app.state, _OPERATOR_LOGIN_RATE_STATE_ATTR, None)
+    if isinstance(entry, tuple) and len(entry) == 2 and entry[0] is loop:
+        return entry[1]
+    state = _OperatorLoginRateState()
+    setattr(request.app.state, _OPERATOR_LOGIN_RATE_STATE_ATTR, (loop, state))
+    return state
+
+
+def _operator_login_client_key(request: Request) -> str:
+    client = request.client
+    raw_host = getattr(client, "host", None) if client is not None else None
+    normalized = str(raw_host or "").strip().casefold()
+    return normalized or "<unknown-client>"
+
+
+def _operator_login_identity_key(username: str) -> str:
+    normalized = username.strip().casefold()
+    return normalized or "<empty-identity>"
+
+
+def _enforce_operator_login_rate_limit(request: Request, *, username: str) -> None:
+    settings = _runtime(request).settings
+    window_seconds = float(settings.operator_login_rate_limit_window_seconds)
+    dimension = _operator_login_rate_state(request).check_and_record(
+        now=monotonic(),
+        window_seconds=window_seconds,
+        global_limit=int(settings.operator_login_rate_limit_global_attempts),
+        client_key=_operator_login_client_key(request),
+        client_limit=int(settings.operator_login_rate_limit_client_attempts),
+        identity_key=_operator_login_identity_key(username),
+        identity_limit=int(settings.operator_login_rate_limit_identity_attempts),
+    )
+    if dimension is None:
+        return
+    log_event(
+        _logger,
+        "operator_login_rate_limited",
+        level="warning",
+        dimension=dimension,
+        window_seconds=window_seconds,
+    )
+    raise HTTPException(
+        status_code=429,
+        detail="operator_login_rate_limited",
+        headers={"Retry-After": str(max(1, ceil(window_seconds)))},
+    )
+
+
+def _operator_login_semaphore(request: Request, *, max_concurrency: int) -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    entry = getattr(request.app.state, _OPERATOR_LOGIN_SEMAPHORE_ATTR, None)
+    if isinstance(entry, tuple) and len(entry) == 3 and entry[0] is loop:
+        if entry[1] != max_concurrency:
+            raise RuntimeError("operator_login_max_concurrency_changed_at_runtime")
+        return entry[2]
+    semaphore = asyncio.Semaphore(max_concurrency)
+    setattr(
+        request.app.state,
+        _OPERATOR_LOGIN_SEMAPHORE_ATTR,
+        (loop, max_concurrency, semaphore),
+    )
+    return semaphore
+
+
+def _operator_login_worker_tasks(
+    request: Request,
+) -> set[asyncio.Task[_OperatorLoginAttempt]]:
+    loop = asyncio.get_running_loop()
+    entry = getattr(request.app.state, _OPERATOR_LOGIN_TASKS_ATTR, None)
+    if isinstance(entry, tuple) and len(entry) == 2 and entry[0] is loop:
+        return entry[1]
+    tasks: set[asyncio.Task[_OperatorLoginAttempt]] = set()
+    setattr(request.app.state, _OPERATOR_LOGIN_TASKS_ATTR, (loop, tasks))
+    return tasks
+
+
+def _track_operator_login_worker(
+    request: Request,
+    task: asyncio.Task[_OperatorLoginAttempt],
+    *,
+    semaphore: asyncio.Semaphore,
+) -> None:
+    tasks = _operator_login_worker_tasks(request)
+    tasks.add(task)
+
+    def _worker_done(completed: asyncio.Task[_OperatorLoginAttempt]) -> None:
+        tasks.discard(completed)
+        try:
+            if not completed.cancelled():
+                exc = completed.exception()
+                if exc is not None:
+                    log_event(
+                        _logger,
+                        "operator_login_worker_failed",
+                        level="warning",
+                        error=type(exc).__name__,
+                    )
+        finally:
+            semaphore.release()
+
+    task.add_done_callback(_worker_done)
+
+
+def _authenticate_operator_login_attempt(
+    runtime: ApplicationRuntime,
+    *,
+    username: str,
+    password: str,
+    query_service: OperatorQueryService | None = None,
+) -> _OperatorLoginAttempt:
+    if query_service is None:
+        query_service = OperatorQueryService(runtime)
+    login_result = authenticate_operator_user(
+        runtime,
+        username=username,
+        password=password,
+    )
+    principal = login_result.principal
+    if principal is None:
+        query_service.record_operator_login_failure(
+            actor_identity=username,
+            auth_source="session",
+            failure_code=login_result.failure_code or "operator_login_failed",
+        )
+        return _OperatorLoginAttempt(login_result=login_result)
+
+    user = runtime.operator_repo.get_by_username(username)
+    if user is None:
+        return _OperatorLoginAttempt(
+            login_result=OperatorLoginResult(
+                principal=None,
+                failure_code="operator_login_failed",
+            )
+        )
+    query_service.record_operator_login(
+        actor_identity=principal.identity or username,
+        actor_role=principal.role,
+        auth_source="session",
+    )
+    return _OperatorLoginAttempt(
+        login_result=login_result,
+        session_version=int(user.session_version),
+    )
+
+
+async def _run_operator_login_attempt(
+    request: Request,
+    *,
+    username: str,
+    password: str,
+) -> _OperatorLoginAttempt:
+    runtime = _runtime(request)
+    settings = runtime.settings
+    max_concurrency = int(settings.operator_login_max_concurrency)
+    queue_timeout_seconds = float(settings.operator_login_queue_timeout_seconds)
+    semaphore = _operator_login_semaphore(
+        request,
+        max_concurrency=max_concurrency,
+    )
+    try:
+        await asyncio.wait_for(
+            semaphore.acquire(),
+            timeout=queue_timeout_seconds,
+        )
+    except TimeoutError:
+        log_event(
+            _logger,
+            "operator_login_capacity_exhausted",
+            level="warning",
+            max_concurrency=max_concurrency,
+            queue_timeout_seconds=queue_timeout_seconds,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="operator_login_capacity_exhausted",
+            headers={"Retry-After": str(max(1, ceil(queue_timeout_seconds)))},
+        ) from None
+
+    try:
+        worker = asyncio.create_task(
+            asyncio.to_thread(
+                _authenticate_operator_login_attempt,
+                runtime,
+                username=username,
+                password=password,
+            ),
+            name="operator-login-worker",
+        )
+    except Exception:
+        semaphore.release()
+        raise
+    _track_operator_login_worker(request, worker, semaphore=semaphore)
+    return await asyncio.shield(worker)
 
 
 def _request_scheme(request: Request) -> str:
@@ -1149,6 +1429,8 @@ async def auth_session(request: Request) -> dict[str, Any]:
 async def auth_login(request: Request, payload: LoginRequest, response: Response) -> dict[str, Any]:
     runtime = _runtime(request)
     settings = runtime.settings
+    username = _login_username(payload)
+    password = _login_password(payload)
     if not settings.operator_auth_enabled:
         raise HTTPException(status_code=400, detail="operator_auth_disabled")
     if not settings.operator_session_configured:
@@ -1156,30 +1438,25 @@ async def auth_login(request: Request, payload: LoginRequest, response: Response
     transport = _session_transport_payload(request)
     if not transport["transport_compatible"]:
         raise HTTPException(status_code=400, detail=transport["auth_blocked_reason"])
-    login_result = authenticate_operator_user(runtime, username=payload.username, password=payload.password)
+    _enforce_operator_login_rate_limit(request, username=username)
+    attempt = await _run_operator_login_attempt(
+        request,
+        username=username,
+        password=password,
+    )
+    login_result = attempt.login_result
     principal = login_result.principal
     if principal is None:
-        _query(request).record_operator_login_failure(
-            actor_identity=payload.username,
-            auth_source="session",
-            failure_code=login_result.failure_code or "operator_login_failed",
-        )
         if login_result.failure_code == "operator_login_locked":
             raise HTTPException(status_code=429, detail="operator_login_locked")
         raise HTTPException(status_code=401, detail=login_result.failure_code or "operator_login_failed")
-    user = runtime.operator_repo.get_by_username(payload.username)
-    if user is None:
+    if attempt.session_version is None:
         raise HTTPException(status_code=401, detail="operator_login_failed")
-    _query(request).record_operator_login(
-        actor_identity=principal.identity or payload.username,
-        actor_role=principal.role,
-        auth_source="session",
-    )
     token = issue_session_token(
         settings=settings,
-        identity=principal.identity or payload.username,
+        identity=principal.identity or username,
         role=principal.role,
-        session_version=user.session_version,
+        session_version=attempt.session_version,
     )
     response.set_cookie(
         key=settings.operator_session_cookie_name,

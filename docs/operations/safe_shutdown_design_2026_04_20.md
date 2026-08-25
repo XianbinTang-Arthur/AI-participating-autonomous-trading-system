@@ -2,6 +2,8 @@
 
 > **状态（2026-08-22 核对）**：历史设计，已经由 `scripts/ops/safe_shutdown.sh` 实现。当前操作命令以根目录 `DEPLOYMENT.md` 为准；本文的“没有脚本”和设计阶段措辞只描述 2026-04-20 当时背景。
 
+> **当前禁止执行**：本文中的旧 restart/deploy 示例没有必填模拟 profile，且不满足 Phase 3F live 硬禁用与 evidence 契约；只可作为历史证据阅读。
+
 **背景（历史）**: 2026-04-20 用户指令 "关闭所有服务, 等路线稳定了再发布". 当时项目没有安全停机脚本, 之前用法是 `scripts/deploy.sh` (启动) 和 `docker compose down --timeout 5` (粗暴停). 后者对**真金白银系统**不安全.
 
 **目标**: 一个 operator-friendly 的停机脚本, 不让 OKX 端不一致, 不丢未落盘数据, 可审计, 可恢复.

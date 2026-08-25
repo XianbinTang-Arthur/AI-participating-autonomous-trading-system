@@ -25,7 +25,6 @@ closure 行为。
 from __future__ import annotations
 
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 
 class TestKillSwitchEarlyReturnLogic(unittest.IsolatedAsyncioTestCase):

@@ -91,6 +91,14 @@ def _make_sqlite_engine():
     return engine
 
 
+class _SQLiteEngineTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.engine = _make_sqlite_engine()
+
+    def tearDown(self) -> None:
+        self.engine.dispose()
+
+
 _SAMPLE_TS = datetime(2026, 3, 20, 0, 0, 0, tzinfo=timezone.utc)
 
 
@@ -99,12 +107,11 @@ _SAMPLE_TS = datetime(2026, 3, 20, 0, 0, 0, tzinfo=timezone.utc)
 # =====================================================================
 
 
-class TestStage5SchemaRoundtrip(unittest.TestCase):
+class TestStage5SchemaRoundtrip(_SQLiteEngineTestCase):
     def test_all_three_tables_insert_and_read(self) -> None:
-        engine = _make_sqlite_engine()
         run_id = str(uuid4())
 
-        with Session(engine) as session:
+        with Session(self.engine) as session:
             session.add(BronzeMarketOIHistory1hModel(
                 symbol="BTC-USDT-SWAP",
                 ts=_SAMPLE_TS,
@@ -163,11 +170,10 @@ class TestStage5SchemaRoundtrip(unittest.TestCase):
 # =====================================================================
 
 
-class TestStage5PrimaryKey(unittest.TestCase):
+class TestStage5PrimaryKey(_SQLiteEngineTestCase):
     def test_oi_duplicate_pk_raises(self) -> None:
-        engine = _make_sqlite_engine()
         run_id = str(uuid4())
-        with Session(engine) as session:
+        with Session(self.engine) as session:
             session.add(BronzeMarketOIHistory1hModel(
                 symbol="BTC-USDT-SWAP", ts=_SAMPLE_TS,
                 oi=Decimal("100"), ingest_run_id=run_id,
@@ -182,9 +188,8 @@ class TestStage5PrimaryKey(unittest.TestCase):
             session.rollback()
 
     def test_mark_candles_different_ts_ok(self) -> None:
-        engine = _make_sqlite_engine()
         run_id = str(uuid4())
-        with Session(engine) as session:
+        with Session(self.engine) as session:
             import datetime as d
             for i in range(3):
                 session.add(BronzeMarketMarkPriceCandles1mModel(
@@ -201,13 +206,12 @@ class TestStage5PrimaryKey(unittest.TestCase):
             )
 
     def test_ls_same_ts_different_sym_ok(self) -> None:
-        engine = _make_sqlite_engine()
         run_id = str(uuid4())
         # 逐条 flush 避开 SA 2.0 insert-many-values sentinel 在 SQLite 上
         # 对 TEXT 型时间戳列无法 match sentinel 的已知问题 (同 test_microstructure
         # _bronze_schema 里 TestMarketTradesPrimaryKey.test_same_ts_different_
         # trade_id_allowed 的 workaround)
-        with Session(engine) as session:
+        with Session(self.engine) as session:
             session.add(BronzeMarketLongShortRatio5mModel(
                 symbol="BTC-USDT-SWAP", ts=_SAMPLE_TS,
                 ls_ratio_accounts=Decimal("1.07"), ingest_run_id=run_id,
@@ -229,11 +233,10 @@ class TestStage5PrimaryKey(unittest.TestCase):
 # =====================================================================
 
 
-class TestMarkCandlesRequiredFields(unittest.TestCase):
+class TestMarkCandlesRequiredFields(_SQLiteEngineTestCase):
     def test_close_is_required(self) -> None:
-        engine = _make_sqlite_engine()
         run_id = str(uuid4())
-        with Session(engine) as session:
+        with Session(self.engine) as session:
             session.add(BronzeMarketMarkPriceCandles1mModel(
                 symbol="BTC-USDT-SWAP",
                 ts=_SAMPLE_TS,
@@ -253,15 +256,14 @@ class TestMarkCandlesRequiredFields(unittest.TestCase):
 # =====================================================================
 
 
-class TestStage5RollbackSQL(unittest.TestCase):
+class TestStage5RollbackSQL(_SQLiteEngineTestCase):
     """验证 rollback SQL 的 DROP IF EXISTS 语句在真 PG 下会成功;
     这里只校验 ORM 能真的 drop 表 (SQLAlchemy 的 drop_all() 等价于 rollback).
     真正的 PG 行为由集成测试覆盖.
     """
 
     def test_drop_all_round_trip(self) -> None:
-        engine = _make_sqlite_engine()
-        with Session(engine) as session:
+        with Session(self.engine) as session:
             # 建完能插入
             session.add(BronzeMarketOIHistory1hModel(
                 symbol="BTC-USDT-SWAP", ts=_SAMPLE_TS,
@@ -274,10 +276,10 @@ class TestStage5RollbackSQL(unittest.TestCase):
             BronzeMarketMarkPriceCandles1mModel.__table__,
             BronzeMarketOIHistory1hModel.__table__,
         ]
-        RdpBase.metadata.drop_all(engine, tables=tables)
+        RdpBase.metadata.drop_all(self.engine, tables=tables)
         # 重建后再 insert 应该再次成功 (幂等)
-        RdpBase.metadata.create_all(engine, tables=tables)
-        with Session(engine) as session:
+        RdpBase.metadata.create_all(self.engine, tables=tables)
+        with Session(self.engine) as session:
             session.add(BronzeMarketOIHistory1hModel(
                 symbol="BTC-USDT-SWAP", ts=_SAMPLE_TS,
                 oi=Decimal("200"), ingest_run_id=str(uuid4()),

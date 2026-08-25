@@ -101,7 +101,7 @@ aats/api/static/
   - 每个 view 对应一个 `<section class="workspace-view" data-view="...">`，`is-active` 类由 `app.js` 切换。
   - 每个 view 内部放一个挂载 DIV（如 `#homeContent`、`#strategyContent`），shell-renderer 把 view 返回的 HTML 写进去。
 - 首页状态卡片区（`#statusRibbon`）、会话面板（`#sessionIdentityValue` / `#authStateChip` / `#refreshStateChip` / `#lastRefreshLabel`）、命令面板（`#refreshButton` / `#resumeButton` / `#haltButton` / `#autoRefreshToggle` / `#actionPermissionHint`）全部写死在 home view 内。
-- `<aside id="detailDrawer">` + `<div id="drawerBackdrop">`：右侧抽屉 + 遮罩，`closeDrawerButton` 带 `data-refresh-ignore`，避免刷新锁。
+- `<dialog id="detailDrawer">`：原生右侧 modal drawer；标题/说明分别由 `drawerTitle`/`drawerSummary` 提供，`showModal()` 负责背景 inert 与焦点范围，`closeDrawerButton` 带 `data-refresh-ignore`，避免刷新锁。
 - 末尾 `<script type="module" charset="utf-8" src="/ui/app.js">`。
 
 ### 3.2 `login.html`（36 行）
@@ -184,10 +184,10 @@ aats/api/static/
 11. **KV List / Callout**（行 1155-1220）：`.kv-list` / `.kv-row` / `.callout`。
 12. **表格**（行 1222-1276）：`.data-table` 固定 18% + 20% 前两列宽度；`table-layout: fixed`。
 13. **Mobile record card**（行 1278-1406）：移动端替代表格的卡片形态，带 `::before` 左侧 4px 色条表示 tone。
-14. **Detail Drawer**（行 1646-1695）：`.detail-drawer` 固定右侧，`transform: translateX(100%)`，`.is-open` 时归位；`.drawer-backdrop` 遮罩 z-index=35、抽屉 z-index=40。
+14. **Detail Drawer**：`.detail-drawer` 是固定右侧的原生 dialog，`[open].is-open` 时归位，遮罩使用 `::backdrop`；打开聚焦关闭按钮，Escape/backdrop/按钮关闭后尽可能返回原触发元素。
 15. **Skeleton 骨架**（行 1797-1969）：`.skeleton-panel` / `.skeleton-card` / `.skeleton-tile` / `.skeleton-row` 加 `@keyframes skeleton-shimmer` 的闪动动画。
 16. **登录页**（行 1971-1993）。
-17. **`@keyframes`**（行 1999-2034）：`refresh-pulse` / `section-refresh-shimmer` / `skeleton-shimmer` / `button-spin`。
+17. **动效与 `@keyframes`**：`refresh-pulse` / `section-refresh-shimmer` / `skeleton-shimmer` / `button-spin`；`prefers-reduced-motion: reduce` 下禁用动画、过渡、平滑滚动和已知 hover 位移，保留静态加载状态。
 18. **响应式**（行 2036-2280）：
     - `@media (max-width: 1280px)`：status-ribbon 3 列、span-* 降级为 span-12。
     - `@media (max-width: 980px)`：masthead 堆叠、command-grid 单列、panel-head flex-direction column。
