@@ -20,6 +20,18 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from aats.data_platform.governance.rdp_runs_db import (
+    db_append_run_event,
+    db_create_run,
+    db_delete_unstarted_run,
+    db_mark_run_requeued,
+    db_mark_run_running,
+    db_mark_run_terminal,
+    new_run_id,
+    priority_class_for_trigger,
+    trigger_kind_for_request,
+)
+
 log = logging.getLogger(__name__)
 
 VALID_WORKFLOWS = {
@@ -99,20 +111,44 @@ def db_create_task(
     """
     _validate_workflow_can_enqueue(workflow)
     task_id = f"task_{uuid4().hex[:12]}"
+    run_id = new_run_id()
     now = datetime.now(timezone.utc)
+    trigger_kind = trigger_kind_for_request(requested_by)
+    db_create_run(
+        session,
+        workflow=workflow,
+        requested_by=requested_by,
+        eligible_at=now,
+        trigger_kind=trigger_kind,
+        run_id=run_id,
+    )
     session.execute(
         text("""
             INSERT INTO governance.rdp_task_queue
-                (task_id, workflow, status, requested_by, requested_at, created_at)
+                (task_id, run_id, attempt_no, workflow, status, requested_by,
+                 requested_at, earliest_start_at, trigger_kind, priority_class,
+                 created_at)
             VALUES
-                (:task_id, :workflow, 'pending', :requested_by, :now, :now)
+                (:task_id, :run_id, 1, :workflow, 'pending', :requested_by,
+                 :now, :now, :trigger_kind, :priority_class, :now)
         """),
         {
             "task_id": task_id,
+            "run_id": run_id,
             "workflow": workflow,
             "requested_by": requested_by,
+            "trigger_kind": trigger_kind,
+            "priority_class": priority_class_for_trigger(trigger_kind),
             "now": now,
         },
+    )
+    db_append_run_event(
+        session,
+        run_id=run_id,
+        event_type="run.queued",
+        attempt_no=1,
+        payload={"task_id": task_id, "eligible_at": now.isoformat()},
+        occurred_at=now,
     )
     log.info("DB created task: %s workflow=%s by=%s", task_id, workflow, requested_by)
     return task_id
@@ -124,6 +160,13 @@ def db_create_task_if_idle(
     workflow: str,
     requested_by: str = "operator",
     earliest_start_at: datetime | None = None,
+    run_id: str | None = None,
+    attempt_no: int = 1,
+    parent_task_id: str | None = None,
+    trigger_kind: str | None = None,
+    priority_class: str | None = None,
+    idempotency_key: str | None = None,
+    payload: dict[str, Any] | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """原子创建任务：同 workflow 已有 pending/running 时不插入。
 
@@ -150,20 +193,45 @@ def db_create_task_if_idle(
     """
     _validate_workflow_can_enqueue(workflow)
 
+    if attempt_no < 1:
+        raise ValueError("attempt_no must be >= 1")
     task_id = f"task_{uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
     # R3 Bug 6 retry: 未显式指定 earliest_start_at 时 = now() (立即可领)；
     # auto_retry 路径传 now()+15min 实现延迟入队。
     eligible_at = earliest_start_at if earliest_start_at is not None else now
+    normalized_trigger = trigger_kind_for_request(requested_by, trigger_kind)
+    effective_priority = priority_class or priority_class_for_trigger(normalized_trigger)
+    logical_run_id = run_id
+    created_run = False
+    if logical_run_id is None:
+        run, created_run = db_create_run(
+            session,
+            workflow=workflow,
+            requested_by=requested_by,
+            eligible_at=eligible_at,
+            trigger_kind=normalized_trigger,
+            idempotency_key=idempotency_key,
+            payload=payload,
+        )
+        logical_run_id = str(run["run_id"])
+        if not created_run:
+            existing_attempt = db_get_latest_task_for_run(session, logical_run_id)
+            if existing_attempt is not None:
+                existing_attempt["idempotent_replay"] = True
+                return None, existing_attempt
+
     result = session.execute(
         text(
             """
             INSERT INTO governance.rdp_task_queue
-                (task_id, workflow, status, requested_by, requested_at,
-                 earliest_start_at, created_at)
+                (task_id, run_id, attempt_no, parent_task_id, workflow, status,
+                 requested_by, requested_at, earliest_start_at, trigger_kind,
+                 priority_class, created_at)
             VALUES
-                (:task_id, :workflow, 'pending', :requested_by, :now,
-                 :eligible_at, :now)
+                (:task_id, :run_id, :attempt_no, :parent_task_id, :workflow,
+                 'pending', :requested_by, :now, :eligible_at, :trigger_kind,
+                 :priority_class, :now)
             ON CONFLICT (workflow) WHERE status IN ('pending', 'running')
             DO NOTHING
             RETURNING task_id
@@ -171,20 +239,48 @@ def db_create_task_if_idle(
         ),
         {
             "task_id": task_id,
+            "run_id": logical_run_id,
+            "attempt_no": attempt_no,
+            "parent_task_id": parent_task_id,
             "workflow": workflow,
             "requested_by": requested_by,
             "now": now,
             "eligible_at": eligible_at,
+            "trigger_kind": normalized_trigger,
+            "priority_class": effective_priority,
         },
     )
     row = result.fetchone()
     if row is not None:
+        if attempt_no > 1 and parent_task_id:
+            db_mark_run_requeued(
+                session,
+                run_id=logical_run_id,
+                attempt_no=attempt_no,
+                eligible_at=eligible_at,
+                parent_task_id=parent_task_id,
+            )
+        else:
+            db_append_run_event(
+                session,
+                run_id=logical_run_id,
+                event_type="run.queued",
+                attempt_no=attempt_no,
+                payload={
+                    "task_id": row.task_id,
+                    "eligible_at": eligible_at.isoformat(),
+                    "trigger_kind": normalized_trigger,
+                },
+                occurred_at=now,
+            )
         log.info(
-            "DB create_task_if_idle: created %s workflow=%s by=%s",
-            row.task_id, workflow, requested_by,
+            "DB create_task_if_idle: created %s run=%s attempt=%s workflow=%s by=%s",
+            row.task_id, logical_run_id, attempt_no, workflow, requested_by,
         )
         return row.task_id, None
 
+    if created_run:
+        db_delete_unstarted_run(session, logical_run_id)
     existing = db_has_active_task(session, workflow)
     log.info(
         "DB create_task_if_idle: skip (existing active task %s for %s)",
@@ -207,11 +303,21 @@ def db_claim_next_task(session: Session) -> dict[str, Any] | None:
     """
     row = session.execute(
         text("""
-            SELECT task_id, workflow, requested_by, requested_at
+            SELECT task_id, run_id, attempt_no, parent_task_id, workflow,
+                   requested_by, requested_at, earliest_start_at, trigger_kind,
+                   priority_class, cancel_requested_at
             FROM governance.rdp_task_queue
             WHERE status = 'pending'
               AND earliest_start_at <= now()
-            ORDER BY created_at ASC
+            ORDER BY
+                CASE priority_class
+                    WHEN 'operator_recovery' THEN 0
+                    WHEN 'operator' THEN 1
+                    WHEN 'retry' THEN 2
+                    WHEN 'scheduled' THEN 3
+                    ELSE 4
+                END ASC,
+                created_at ASC
             LIMIT 1
             FOR UPDATE SKIP LOCKED
         """)
@@ -224,24 +330,40 @@ def db_claim_next_task(session: Session) -> dict[str, Any] | None:
     session.execute(
         text("""
             UPDATE governance.rdp_task_queue
-            SET status = 'running', started_at = :now
+            SET status = 'running', started_at = :now, heartbeat_at = :now
             WHERE task_id = :task_id
         """),
         {"task_id": row.task_id, "now": now},
     )
 
+    db_mark_run_running(
+        session,
+        run_id=row.run_id,
+        attempt_no=int(row.attempt_no),
+        started_at=now,
+    )
+
     log.info("DB claimed task: %s workflow=%s", row.task_id, row.workflow)
     return {
         "task_id": row.task_id,
+        "run_id": row.run_id,
+        "attempt_no": int(row.attempt_no),
+        "parent_task_id": row.parent_task_id,
         "workflow": row.workflow,
         "requested_by": row.requested_by,
         "requested_at": row.requested_at.isoformat() if row.requested_at else None,
+        "earliest_start_at": row.earliest_start_at.isoformat() if row.earliest_start_at else None,
+        "trigger_kind": row.trigger_kind,
+        "priority_class": row.priority_class,
+        "cancel_requested_at": (
+            row.cancel_requested_at.isoformat() if row.cancel_requested_at else None
+        ),
     }
 
 
 # ── 更新任务状态（daemon 完成/失败时调用）──────────────────────────
 
-_TERMINAL_STATUSES = {"done", "failed"}
+_TERMINAL_STATUSES = {"done", "failed", "cancelled"}
 
 
 def db_update_task_status(
@@ -253,10 +375,21 @@ def db_update_task_status(
     error_message: str | None = None,
     log_tail: str | None = None,
 ) -> None:
-    """更新任务状态（done / failed）."""
+    """更新任务状态（done / failed / cancelled）."""
     if status not in _TERMINAL_STATUSES:
         raise ValueError(f"Invalid terminal status: {status!r}, expected one of {_TERMINAL_STATUSES}")
     now = datetime.now(timezone.utc)
+    task_row = session.execute(
+        text(
+            """
+            SELECT run_id, attempt_no
+            FROM governance.rdp_task_queue
+            WHERE task_id = :task_id
+            FOR UPDATE
+            """
+        ),
+        {"task_id": task_id},
+    ).fetchone()
     session.execute(
         text("""
             UPDATE governance.rdp_task_queue
@@ -276,6 +409,26 @@ def db_update_task_status(
             "now": now,
         },
     )
+    if task_row is not None:
+        run_status = {
+            "done": "succeeded",
+            "failed": "failed",
+            "cancelled": "cancelled",
+        }[status]
+        error_code = None
+        if status == "failed":
+            error_code = "worker_orphan_recovered" if exit_code == _ORPHAN_RECOVERY_EXIT_CODE else "workflow_failed"
+        elif status == "cancelled":
+            error_code = "operator_cancelled"
+        db_mark_run_terminal(
+            session,
+            run_id=task_row.run_id,
+            attempt_no=int(task_row.attempt_no),
+            status=run_status,
+            finished_at=now,
+            error_code=error_code,
+            error_summary=error_message,
+        )
     log.info("DB updated task: %s -> %s (exit=%s)", task_id, status, exit_code)
 
 
@@ -289,7 +442,7 @@ def db_recover_orphaned_running_tasks(
     rows = session.execute(
         text(
             """
-            SELECT task_id, workflow, requested_at, started_at
+            SELECT task_id, run_id, attempt_no, workflow, requested_at, started_at
             FROM governance.rdp_task_queue
             WHERE status = 'running'
             ORDER BY started_at ASC NULLS LAST, requested_at ASC
@@ -319,9 +472,22 @@ def db_recover_orphaned_running_tasks(
         },
     )
 
+    for row in rows:
+        db_mark_run_terminal(
+            session,
+            run_id=row.run_id,
+            attempt_no=int(row.attempt_no),
+            status="failed",
+            finished_at=now,
+            error_code="worker_orphan_recovered",
+            error_summary=error_message,
+        )
+
     recovered = [
         {
             "task_id": row.task_id,
+            "run_id": row.run_id,
+            "attempt_no": int(row.attempt_no),
             "workflow": row.workflow,
             "requested_at": row.requested_at.isoformat() if row.requested_at else None,
             "started_at": row.started_at.isoformat() if row.started_at else None,
@@ -342,9 +508,10 @@ def db_get_recent_tasks(
     """查询最近 N 条任务，按 created_at DESC 排序."""
     rows = session.execute(
         text("""
-            SELECT task_id, workflow, status,
+            SELECT task_id, run_id, attempt_no, parent_task_id, workflow, status,
                    requested_by, requested_at,
-                   started_at, finished_at,
+                   earliest_start_at, trigger_kind, priority_class,
+                   started_at, finished_at, heartbeat_at, cancel_requested_at,
                    exit_code, error_message, log_tail
             FROM governance.rdp_task_queue
             ORDER BY created_at DESC
@@ -356,12 +523,22 @@ def db_get_recent_tasks(
     return [
         {
             "task_id": r.task_id,
+            "run_id": r.run_id,
+            "attempt_no": int(r.attempt_no),
+            "parent_task_id": r.parent_task_id,
             "workflow": r.workflow,
             "status": r.status,
             "requested_by": r.requested_by,
             "requested_at": r.requested_at.isoformat() if r.requested_at else None,
+            "earliest_start_at": r.earliest_start_at.isoformat() if r.earliest_start_at else None,
+            "trigger_kind": r.trigger_kind,
+            "priority_class": r.priority_class,
             "started_at": r.started_at.isoformat() if r.started_at else None,
             "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+            "heartbeat_at": r.heartbeat_at.isoformat() if r.heartbeat_at else None,
+            "cancel_requested_at": (
+                r.cancel_requested_at.isoformat() if r.cancel_requested_at else None
+            ),
             "exit_code": r.exit_code,
             "error_message": r.error_message,
             "log_tail": r.log_tail,
@@ -394,9 +571,10 @@ def db_get_latest_task_for_workflow(
     row = session.execute(
         text(
             f"""
-            SELECT task_id, workflow, status,
+            SELECT task_id, run_id, attempt_no, parent_task_id, workflow, status,
                    requested_by, requested_at,
-                   started_at, finished_at,
+                   earliest_start_at, trigger_kind, priority_class,
+                   started_at, finished_at, heartbeat_at, cancel_requested_at,
                    exit_code, error_message, log_tail
             FROM governance.rdp_task_queue
             WHERE {' AND '.join(clauses)}
@@ -412,12 +590,70 @@ def db_get_latest_task_for_workflow(
 
     return {
         "task_id": row.task_id,
+        "run_id": row.run_id,
+        "attempt_no": int(row.attempt_no),
+        "parent_task_id": row.parent_task_id,
         "workflow": row.workflow,
         "status": row.status,
         "requested_by": row.requested_by,
         "requested_at": row.requested_at.isoformat() if row.requested_at else None,
+        "earliest_start_at": row.earliest_start_at.isoformat() if row.earliest_start_at else None,
+        "trigger_kind": row.trigger_kind,
+        "priority_class": row.priority_class,
         "started_at": row.started_at.isoformat() if row.started_at else None,
         "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+        "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
+        "cancel_requested_at": (
+            row.cancel_requested_at.isoformat() if row.cancel_requested_at else None
+        ),
+        "exit_code": row.exit_code,
+        "error_message": row.error_message,
+        "log_tail": row.log_tail,
+    }
+
+
+def db_get_latest_task_for_run(
+    session: Session,
+    run_id: str,
+) -> dict[str, Any] | None:
+    """Return the newest queue attempt for one logical RDP run."""
+    row = session.execute(
+        text(
+            """
+            SELECT task_id, run_id, attempt_no, parent_task_id, workflow, status,
+                   requested_by, requested_at,
+                   earliest_start_at, trigger_kind, priority_class,
+                   started_at, finished_at, heartbeat_at, cancel_requested_at,
+                   exit_code, error_message, log_tail
+            FROM governance.rdp_task_queue
+            WHERE run_id = :run_id
+            ORDER BY attempt_no DESC, created_at DESC
+            LIMIT 1
+            """
+        ),
+        {"run_id": run_id},
+    ).fetchone()
+
+    if row is None:
+        return None
+    return {
+        "task_id": row.task_id,
+        "run_id": row.run_id,
+        "attempt_no": int(row.attempt_no),
+        "parent_task_id": row.parent_task_id,
+        "workflow": row.workflow,
+        "status": row.status,
+        "requested_by": row.requested_by,
+        "requested_at": row.requested_at.isoformat() if row.requested_at else None,
+        "earliest_start_at": row.earliest_start_at.isoformat() if row.earliest_start_at else None,
+        "trigger_kind": row.trigger_kind,
+        "priority_class": row.priority_class,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+        "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
+        "cancel_requested_at": (
+            row.cancel_requested_at.isoformat() if row.cancel_requested_at else None
+        ),
         "exit_code": row.exit_code,
         "error_message": row.error_message,
         "log_tail": row.log_tail,
@@ -436,7 +672,9 @@ def db_has_active_task(
     """
     row = session.execute(
         text("""
-            SELECT task_id, status, requested_at, started_at
+            SELECT task_id, run_id, attempt_no, parent_task_id, status,
+                   requested_by, requested_at, earliest_start_at, started_at,
+                   trigger_kind, priority_class, cancel_requested_at
             FROM governance.rdp_task_queue
             WHERE workflow = :workflow
               AND status IN ('pending', 'running')
@@ -450,9 +688,19 @@ def db_has_active_task(
         return None
     return {
         "task_id": row.task_id,
+        "run_id": row.run_id,
+        "attempt_no": int(row.attempt_no),
+        "parent_task_id": row.parent_task_id,
         "status": row.status,
+        "requested_by": row.requested_by,
         "requested_at": row.requested_at.isoformat() if row.requested_at else None,
+        "earliest_start_at": row.earliest_start_at.isoformat() if row.earliest_start_at else None,
         "started_at": row.started_at.isoformat() if row.started_at else None,
+        "trigger_kind": row.trigger_kind,
+        "priority_class": row.priority_class,
+        "cancel_requested_at": (
+            row.cancel_requested_at.isoformat() if row.cancel_requested_at else None
+        ),
     }
 
 
@@ -465,16 +713,21 @@ def db_get_task_queue_summary(session: Session) -> dict[str, Any]:
                 COUNT(*) FILTER (WHERE status = 'running') AS running_count,
                 COUNT(*) FILTER (WHERE status = 'done') AS done_count,
                 COUNT(*) FILTER (WHERE status = 'failed') AS failed_count,
+                COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelled_count,
                 MAX(requested_at) FILTER (WHERE status = 'pending') AS latest_pending_at,
                 MAX(started_at) FILTER (WHERE status = 'running') AS latest_running_at,
-                MAX(finished_at) FILTER (WHERE status IN ('done', 'failed')) AS latest_finished_at
+                MAX(finished_at) FILTER (
+                    WHERE status IN ('done', 'failed', 'cancelled')
+                ) AS latest_finished_at
             FROM governance.rdp_task_queue
         """),
     ).fetchone()
 
     recent_rows = session.execute(
         text("""
-            SELECT task_id, workflow, status, requested_at, started_at, finished_at, exit_code
+            SELECT task_id, run_id, attempt_no, workflow, status, trigger_kind,
+                   priority_class, requested_at, earliest_start_at, started_at,
+                   finished_at, heartbeat_at, exit_code
             FROM governance.rdp_task_queue
             ORDER BY created_at DESC
             LIMIT 5
@@ -486,6 +739,7 @@ def db_get_task_queue_summary(session: Session) -> dict[str, Any]:
         "running_count": int(counts_row.running_count or 0),
         "done_count": int(counts_row.done_count or 0),
         "failed_count": int(counts_row.failed_count or 0),
+        "cancelled_count": int(counts_row.cancelled_count or 0),
         "latest_pending_at": (
             counts_row.latest_pending_at.isoformat()
             if counts_row.latest_pending_at else None
@@ -501,11 +755,19 @@ def db_get_task_queue_summary(session: Session) -> dict[str, Any]:
         "recent_tasks": [
             {
                 "task_id": row.task_id,
+                "run_id": row.run_id,
+                "attempt_no": int(row.attempt_no),
                 "workflow": row.workflow,
                 "status": row.status,
+                "trigger_kind": row.trigger_kind,
+                "priority_class": row.priority_class,
                 "requested_at": row.requested_at.isoformat() if row.requested_at else None,
+                "earliest_start_at": (
+                    row.earliest_start_at.isoformat() if row.earliest_start_at else None
+                ),
                 "started_at": row.started_at.isoformat() if row.started_at else None,
                 "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+                "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
                 "exit_code": row.exit_code,
             }
             for row in recent_rows

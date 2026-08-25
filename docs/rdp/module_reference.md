@@ -1,6 +1,6 @@
 # RDP 代码模块参考
 
-> 最后核对：2026-08-22（代码基线 `be9179e`）。本页按当前目录和运行入口组织，不再沿用早期“少量 Phase 文件清单”。RDP 总览见 [`aats/data_platform/README.md`](../../aats/data_platform/README.md)。
+> 最后核对：2026-08-25（代码基线 `0b58dbad` + RDP 2.0 未提交工作区）。本页按当前目录和运行入口组织，不再沿用早期“少量 Phase 文件清单”。RDP 总览见 [`aats/data_platform/README.md`](../../aats/data_platform/README.md)。
 
 ## 1. 根模块
 
@@ -8,14 +8,14 @@
 | --- | --- |
 | `config.py` | `ResearchPlatformSettings`；读取 `RDP_DATABASE_URL`、live 只读库、采集和 artifact 配置；容器中可复用 `AATS_ACTIVE_PARAMETER_DB_URL` |
 | `db.py` | Engine/Session、迁移入口和数据库生命周期 |
-| `rdp_models.py` | `RdpBase` 的 81 张 ORM 表，覆盖 staging/bronze/silver/gold/meta/research/governance |
+| `rdp_models.py` | `RdpBase` 的 84 张 ORM 表，覆盖 staging/bronze/silver/gold/meta/research/governance |
 | `models.py` | 采集、replay 等轻量领域数据结构和表名解析 |
 | `live_query_adapter.py` | 主交易数据库只读查询适配层 |
 | `orderbook_diff_payload_contract.py` | orderbook diff payload 契约 |
 
 ## 2. 目录总览
 
-当前 `aats/data_platform/` 有 185 个 Python 文件。目录职责如下；数量用于发现明显漏扫，不是公共 API 保证。
+当前 `aats/data_platform/` 有 215 个 Python 文件。目录职责如下；数量用于发现明显漏扫，不是公共 API 保证。
 
 | 目录 | Python 文件数 | 职责 |
 | --- | ---: | --- |
@@ -29,9 +29,9 @@
 | `attribution/` | 6 | live/replay 对齐、瀑布归因、聚合、报告 |
 | `execution_realism/` | 7 | fill feasibility、slippage、cost、market alignment |
 | `decision_system/` | 8 | evidence、candidate、decision、readiness、recommendation registry |
-| `governance/` | 27 | 参数/推荐/active set、任务队列、调度状态、snapshot、tuning 与 apply saga |
+| `governance/` | 29 | 参数/推荐/active set、Run/Attempt/Step/Event、任务队列、调度状态、snapshot、tuning 与 apply saga |
 | `production_workflow/` | 9 | gate、release、observation、rollback policy |
-| `operations/` | 11 | dispatcher、scheduler、failure/retry、reliability、daemon health、tuning review |
+| `operations/` | 16 | dispatcher、Run observer、scheduler、failure/retry、reliability、daemon health、tuning review |
 | `metrics/` | 9 | 指标、baseline、release effectiveness、periodic review、backlog |
 | `live_facts/` | 4 | live 事实只读访问和模型 |
 | `research/` | 3 | profile research job 与结果 |
@@ -99,6 +99,7 @@ Research Factory 是当前最大的 RDP 子域，覆盖：
 | `active_params_db.py` | `governance.active_parameter_sets` DB 操作 |
 | `profile_apply_saga.py` | 跨 research/live 边界的 profile apply saga 与补偿 |
 | `rdp_task_db.py` | 10 个 workflow allowlist、原子入队、SKIP LOCKED claim、状态与孤儿恢复 |
+| `rdp_runs_db.py` | 逻辑 Run、attempt 投影、step/event、幂等、心跳、取消与重试状态真源 |
 | `operational_state_db.py` | scheduler 等运行状态真源 |
 | `snapshot_db.py` | 治理和 research round DB-first snapshot |
 | `quality_monitor.py` | 治理质量巡检 |
@@ -120,6 +121,7 @@ Research Factory 是当前最大的 RDP 子域，覆盖：
 | 文件 | 职责 |
 | --- | --- |
 | `workflow_dispatcher.py` | 加载 10 份 JSON 定义、校验任务并执行 |
+| `rdp_run_observer.py` | 从 daemon 继承 `run_id/attempt_no`，best-effort 上报顶层步骤与事件 |
 | `workflow_scheduler.py` | UTC slot 计算、bootstrap、数据库调度状态、到期入队 |
 | `rdp_daemon_health.py` | daemon heartbeat/healthcheck |
 | `failure_registry.py` / `retry_manager.py` | workflow failure 与补跑 |
@@ -134,11 +136,12 @@ RDP daemon 的标准容器入口是 `scripts/rdp_task_daemon.py --poll-interval 
 | --- | --- |
 | `aats/bootstrap/active_parameters.py` | runtime active parameter DB-only loader；数据库失败返回空 registry，不读 JSON fallback |
 | `aats/api/rdp_routes.py` | RDP 核心查询、审批、token、apply/rollback、workflow、workbench 和 tuning API |
+| `aats/api/rdp_v2.py` | `/rdp/v2/runs` 创建、列表、详情、协作取消与 retry API；actor 绑定 Principal |
 | `aats/api/rdp_profile_routes.py` | profile recommendation、profile type review、sleeve advice API |
 | `aats/api/rdp_apply_token.py` | v2 HMAC apply/rollback token 签发与验证 |
 | `aats/services/operator/rdp_queries.py` | Operator RDP 查询聚合 |
 
-FastAPI 当前共有 50 个 `/rdp/*` 路由。完整清单以运行时 `/openapi.json` 和 [项目代码审查与系统说明](../code_review/README.md) 为准。
+FastAPI 当前共有 55 个 `/rdp/*` 路由，其中 5 个是 Run V2 路由。完整清单以运行时 `/openapi.json` 和 [项目代码审查与系统说明](../code_review/README.md) 为准。
 
 ## 8. 维护规则
 

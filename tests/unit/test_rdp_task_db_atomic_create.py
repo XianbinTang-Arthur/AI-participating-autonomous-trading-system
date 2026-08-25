@@ -9,7 +9,8 @@ API handler 与 scheduler 在高并发下可能同时通过 step 1，再双双 I
 workflow WHERE status IN ('pending','running')) 抛 IntegrityError，被上层
 except Exception 抹平成 "创建任务失败" 的误导错误。
 
-新路径把判断+插入收敛到 INSERT ... ON CONFLICT DO NOTHING RETURNING，用
+新路径先建立逻辑 run，再把队列 attempt 的判断+插入收敛到
+INSERT ... ON CONFLICT DO NOTHING RETURNING，用
 partial unique index 的冲突语义直接吸收 race：
   * 抢到索引 → RETURNING 返回 task_id → (task_id, None).
   * 冲突 → RETURNING 为空 → 回查现有 active task → (None, existing_dict).
@@ -35,8 +36,13 @@ from aats.data_platform.governance.rdp_task_db import (
 
 class _FakeRow:
     def __init__(self, data: dict[str, Any]) -> None:
+        self._data = data
         for key, value in data.items():
             setattr(self, key, value)
+
+    @property
+    def _mapping(self) -> dict[str, Any]:
+        return self._data
 
 
 class _FakeResult:
@@ -46,11 +52,17 @@ class _FakeResult:
     def fetchone(self) -> _FakeRow | None:
         return self._rows[0] if self._rows else None
 
+    def scalar_one(self) -> int:
+        assert self._rows
+        return int(self._rows[0].value)
+
 
 class _FakeSession:
-    """仅覆盖 db_create_task_if_idle 触达的三条 SQL 形态：
+    """仅覆盖 db_create_task_if_idle 触达的 SQL 形态：
+      * INSERT INTO governance.rdp_runs ...
       * INSERT INTO governance.rdp_task_queue ... ON CONFLICT (workflow) WHERE ...
-      * SELECT task_id, status ... FROM rdp_task_queue WHERE workflow = ... AND status IN (...)
+      * logical run event / conflict cleanup
+      * SELECT active task ... WHERE workflow = ... AND status IN (...)
     """
 
     def __init__(
@@ -66,6 +78,27 @@ class _FakeSession:
     def execute(self, statement: Any, params: dict[str, Any] | None = None) -> _FakeResult:
         sql = str(statement).strip()
         self.statements.append((sql, dict(params or {})))
+
+        if sql.startswith("INSERT INTO governance.rdp_runs"):
+            values = dict(params or {})
+            values.update(
+                {
+                    "status": "queued",
+                    "research_outcome": "unknown",
+                    "started_at": None,
+                    "finished_at": None,
+                    "heartbeat_at": None,
+                    "current_step_key": None,
+                    "completed_steps": 0,
+                    "total_steps": 0,
+                    "cancel_requested_at": None,
+                    "error_code": None,
+                    "error_summary": None,
+                    "created_at": values.get("now"),
+                    "updated_at": values.get("now"),
+                }
+            )
+            return _FakeResult([_FakeRow(values)])
 
         if sql.startswith("INSERT INTO governance.rdp_task_queue"):
             # 契约校验：SQL 里必须出现 ON CONFLICT ... DO NOTHING 和 RETURNING，
@@ -95,10 +128,35 @@ class _FakeSession:
             # ON CONFLICT DO NOTHING → 不返回行
             return _FakeResult([])
 
-        if sql.startswith("SELECT task_id, status"):
+        if sql.startswith("DELETE FROM governance.rdp_runs"):
+            return _FakeResult([])
+
+        if sql.startswith("SELECT run_id FROM governance.rdp_runs"):
+            return _FakeResult([_FakeRow({"run_id": (params or {}).get("run_id")})])
+
+        if sql.startswith("SELECT COALESCE(MAX(sequence_no)"):
+            return _FakeResult([_FakeRow({"value": 1})])
+
+        if sql.startswith("INSERT INTO governance.rdp_run_events"):
+            return _FakeResult([])
+
+        if sql.startswith("SELECT task_id, run_id") and "status IN ('pending', 'running')" in sql:
             # db_has_active_task 的查询
             if self.existing_active is not None:
-                return _FakeResult([_FakeRow(self.existing_active)])
+                complete = {
+                    "run_id": "run_existing",
+                    "attempt_no": 1,
+                    "parent_task_id": None,
+                    "requested_by": "operator",
+                    "requested_at": None,
+                    "earliest_start_at": None,
+                    "started_at": None,
+                    "trigger_kind": "manual",
+                    "priority_class": "operator",
+                    "cancel_requested_at": None,
+                    **self.existing_active,
+                }
+                return _FakeResult([_FakeRow(complete)])
             return _FakeResult([])
 
         raise AssertionError(f"Unexpected SQL: {sql[:100]}...")
@@ -117,11 +175,15 @@ def test_insert_succeeds_returns_task_id_and_no_existing() -> None:
     assert task_id is not None, "insert 成功必须返回非空 task_id"
     assert task_id.startswith("task_"), "task_id 必须保留 task_<hex12> 前缀契约"
     assert existing is None, "insert 成功不应回查 existing"
-    # 仅发一条 INSERT，不回查
-    sql_types = [sql.split()[0] for sql, _ in session.statements]
-    assert sql_types == ["INSERT"], (
-        f"成功路径只应发一条 INSERT，实际: {sql_types}"
-    )
+    queue_inserts = [sql for sql, _ in session.statements if sql.startswith(
+        "INSERT INTO governance.rdp_task_queue"
+    )]
+    active_reads = [
+        sql for sql, _ in session.statements
+        if sql.startswith("SELECT") and "status IN ('pending', 'running')" in sql
+    ]
+    assert len(queue_inserts) == 1
+    assert active_reads == [], "insert 成功不应回查 active task"
 
 
 # =====================================================================
@@ -148,11 +210,15 @@ def test_conflict_returns_none_task_id_and_queries_existing() -> None:
     assert returned_existing["task_id"] == "task_existing_abc"
     assert returned_existing["status"] == "running"
 
-    # 契约：INSERT → 冲突 → SELECT 回查，共两条 SQL
-    sql_types = [sql.split()[0] for sql, _ in session.statements]
-    assert sql_types == ["INSERT", "SELECT"], (
-        f"冲突路径：一条 INSERT + 一条回查 SELECT，实际: {sql_types}"
-    )
+    queue_inserts = [sql for sql, _ in session.statements if sql.startswith(
+        "INSERT INTO governance.rdp_task_queue"
+    )]
+    active_reads = [
+        sql for sql, _ in session.statements
+        if sql.startswith("SELECT") and "status IN ('pending', 'running')" in sql
+    ]
+    assert len(queue_inserts) == 1
+    assert len(active_reads) == 1
 
 
 def test_conflict_without_existing_row_returns_none_existing() -> None:
@@ -227,7 +293,10 @@ def test_requested_by_is_bound_into_insert_params() -> None:
         session, workflow="decision_cycle", requested_by="scheduler_daemon",
     )
 
-    insert_sql, params = session.statements[0]
+    insert_sql, params = next(
+        item for item in session.statements
+        if item[0].startswith("INSERT INTO governance.rdp_task_queue")
+    )
     assert insert_sql.startswith("INSERT INTO governance.rdp_task_queue")
     assert params["requested_by"] == "scheduler_daemon"
     assert params["workflow"] == "decision_cycle"
@@ -250,7 +319,10 @@ def test_earliest_start_at_defaults_to_now_when_not_specified() -> None:
     db_create_task_if_idle(session, workflow="research_cycle")
     after = datetime.now(timezone.utc)
 
-    _, params = session.statements[0]
+    _, params = next(
+        item for item in session.statements
+        if item[0].startswith("INSERT INTO governance.rdp_task_queue")
+    )
     assert "eligible_at" in params, "SQL 必须绑定 eligible_at 参数"
     # eligible_at 必须落在 [before, after] 窗口内（= now())
     assert before <= params["eligible_at"] <= after, (
@@ -271,7 +343,10 @@ def test_earliest_start_at_honors_explicit_future_timestamp() -> None:
         earliest_start_at=retry_eligible,
     )
 
-    insert_sql, params = session.statements[0]
+    insert_sql, params = next(
+        item for item in session.statements
+        if item[0].startswith("INSERT INTO governance.rdp_task_queue")
+    )
     assert "earliest_start_at" in insert_sql, (
         "INSERT SQL 必须包含 earliest_start_at 列才能让 claim 延迟生效"
     )

@@ -1540,6 +1540,12 @@ h3 {
   gap: var(--space-item);
 }
 
+.rdp-run-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  gap: var(--space-item);
+}
+
 .rdp-workitem,
 .rdp-checkitem {
   display: grid;
@@ -1560,6 +1566,11 @@ h3 {
 .rdp-checkitem.tone-warning {
   border-color: rgba(244, 180, 94, 0.28);
   background: linear-gradient(180deg, rgba(49, 34, 10, 0.38), rgba(255, 255, 255, 0.02));
+}
+
+.rdp-workitem.tone-info {
+  border-color: rgba(96, 165, 250, 0.3);
+  background: linear-gradient(180deg, rgba(13, 39, 67, 0.42), rgba(255, 255, 255, 0.02));
 }
 
 .rdp-workitem.tone-danger,

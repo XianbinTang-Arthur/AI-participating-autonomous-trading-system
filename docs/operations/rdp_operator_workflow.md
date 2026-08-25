@@ -1,6 +1,6 @@
 # RDP Operator 工作流 SOP
 
-> 最后核对：2026-08-22（代码基线 `be9179e`）。本 SOP 只使用当前 Operator API/UI 和 task queue；旧直写 CLI、4-workflow 清单和 active JSON fallback 已移除。
+> 最后核对：2026-08-25（代码基线 `0b58dbad` + RDP 2.0 未提交工作区）。本 SOP 只使用当前 Operator API/UI 和 Run/attempt queue；旧直写 CLI、4-workflow 清单和 active JSON fallback 已移除。
 
 ## 1. 每日观察
 
@@ -9,7 +9,7 @@
 | 目标 | API/页面 | 判断 |
 | --- | --- | --- |
 | RDP health | `GET /rdp/health` | DB、artifact、workflow、daemon 无不可接受错误 |
-| Task queue | `GET /rdp/tasks/status` | 无长期 pending/running；失败有 exit/log tail |
+| Run center | `GET /rdp/v2/runs`、`GET /rdp/v2/runs/{run_id}` | queued 有明确 eligible time；running 有 heartbeat/current step；retry 仍属于同一 run |
 | Active parameters | `GET /rdp/parameters/active` | combo/version/actor 完整，无异常 missing |
 | Recommendations | `GET /rdp/recommendations/latest` | 新 draft、已批准、被替代状态合理 |
 | Decision/readiness | `GET /rdp/decisions/latest`、`GET /rdp/readiness` | pause/review 与证据一致 |
@@ -68,13 +68,17 @@
 
 ## 5. 手工触发 Workflow
 
-通过 UI 或 `POST /rdp/tasks/trigger` 触发，`GET /rdp/tasks/status` 跟踪。
+新 UI 通过 `POST /rdp/v2/runs` 触发，以 `GET /rdp/v2/runs/{run_id}` 跟踪；
+旧 `/rdp/tasks/trigger` 与 `/rdp/tasks/status` 仅作兼容入口。
 
 - 可识别 workflow 共 10 个；
 - `release_cycle` disabled 且禁止入队；
 - 同 workflow 已有 pending/running 时不会重复创建；
+- 手动 Run 会立即取得稳定 `run_id`，并优先于尚未启动的定时任务；单 daemon
+  正在执行时仍需等待执行槽，UI 会显示真实等待原因；
 - daemon 通过数据库 claim 执行，不能手工把状态改为 running；
-- 重试遵循 `earliest_start_at` 和 failure history。
+- 自动重试复用同一 `run_id`、递增 attempt，并遵循 `earliest_start_at`；
+- queued Run 可立即取消；running Run 的取消先登记，再由 daemon 终止当前子进程并写 `cancelled` 终态。
 
 完整 schedule 见 [平台运行手册](platform_runbook.md)。
 
@@ -87,8 +91,8 @@
 | Gate blocked | 根据 failed checks 修复后重跑；不跳 gate |
 | Active set 与预期不符 | 停止发布，查 DB active set/history/release/runtime provenance |
 | DB active loader 失败 | runtime 已退化到 profile 参数；恢复数据库，不能靠 JSON fallback |
-| Task pending | 查 daemon heartbeat、earliest_start_at、同 workflow active task |
-| Task running 无 heartbeat | 查 orphan recovery；旧 task 应变 failed/-3，再走 retry |
+| Run queued | 看 `eligible_at`、trigger kind、当前执行槽和 daemon heartbeat；不要把合法等待写成 DB 故障 |
+| Run running 无 heartbeat | 查 orphan recovery；旧 attempt 应变 failed/-3，Run 错误码为 `worker_orphan_recovered` |
 | Rollback 无 target | 不猜测版本；人工审查合法 parameter set |
 
 ## 7. 禁止事项

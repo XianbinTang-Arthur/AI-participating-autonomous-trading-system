@@ -1,9 +1,13 @@
 import { ensureNotBusy as ensureNotBusyHelper, setFlash } from "../flash.js";
+import { escapeHtml } from "../formatters.js";
 
 export function createRdpActionHandlers({
   beginAction,
+  openDrawer,
   renderBanners,
+  renderShell,
   refreshDashboard,
+  refreshPanels,
   requestJson,
   state,
   windowRef = window,
@@ -36,6 +40,80 @@ export function createRdpActionHandlers({
     return defaultObservationWindowHours();
   }
 
+  function formatRunTime(value) {
+    if (!value) return "—";
+    const parsed = new Date(value);
+    if (!Number.isFinite(parsed.getTime())) return String(value);
+    return parsed.toLocaleString("zh-CN", { hour12: false });
+  }
+
+  function buildRunDrawer(detail) {
+    const run = detail?.run || {};
+    const attempts = detail?.attempts || [];
+    const steps = detail?.steps || [];
+    const events = detail?.events || [];
+    const attemptRows = attempts.length
+      ? attempts.map((attempt) => `
+          <article class="rdp-workitem tone-${attempt.status === "done" ? "positive" : (attempt.status === "failed" ? "danger" : "warning")}">
+            <div class="rdp-workitem__header">
+              <strong>尝试 ${escapeHtml(String(attempt.attempt_no || 1))}</strong>
+              <span>${escapeHtml(String(attempt.status || "unknown"))}</span>
+            </div>
+            <p class="meta-copy">任务 ${escapeHtml(String(attempt.task_id || "—"))}</p>
+            <p class="meta-copy">可执行时间 ${escapeHtml(formatRunTime(attempt.earliest_start_at))}；退出码 ${escapeHtml(String(attempt.exit_code ?? "—"))}</p>
+            ${attempt.error_message ? `<p class="meta-copy">${escapeHtml(attempt.error_message)}</p>` : ""}
+          </article>
+        `).join("")
+      : '<p class="meta-copy">尚无执行尝试。</p>';
+    const stepRows = steps.length
+      ? steps.map((step) => `
+          <div class="kv-row">
+            <span class="kv-row__label">${escapeHtml(step.step_key || "未命名步骤")}</span>
+            <strong class="kv-row__value">${escapeHtml(step.status || "pending")}</strong>
+            <span class="meta-copy">尝试 ${escapeHtml(String(step.attempt_no || 1))}${step.error_summary ? ` · ${escapeHtml(step.error_summary)}` : ""}</span>
+          </div>
+        `).join("")
+      : '<p class="meta-copy">步骤尚未开始上报。</p>';
+    const eventRows = events.slice(-20).reverse().map((event) => `
+      <li><strong>${escapeHtml(event.event_type || "event")}</strong> · ${escapeHtml(formatRunTime(event.occurred_at))}</li>
+    `).join("");
+    return {
+      eyebrow: "RDP 运行详情",
+      title: String(run.run_id || "运行详情"),
+      summary: `${run.workflow || "未知流程"} · ${run.status || "unknown"}`,
+      body: `
+        <div class="kv-list">
+          <div class="kv-row"><span class="kv-row__label">触发来源</span><strong class="kv-row__value">${escapeHtml(run.trigger_kind || "unknown")}</strong></div>
+          <div class="kv-row"><span class="kv-row__label">进度</span><strong class="kv-row__value">${escapeHtml(`${run.completed_steps || 0}/${run.total_steps || 0}`)}</strong><span class="meta-copy">${escapeHtml(run.current_step_key || "当前无执行步骤")}</span></div>
+          <div class="kv-row"><span class="kv-row__label">开始 / 完成</span><strong class="kv-row__value">${escapeHtml(formatRunTime(run.started_at))}</strong><span class="meta-copy">${escapeHtml(formatRunTime(run.finished_at))}</span></div>
+        </div>
+        ${run.error_summary ? `<div class="notice tone-danger">${escapeHtml(run.error_summary)}</div>` : ""}
+        <h3 class="rdp-subtle-heading">执行尝试</h3>
+        <div class="rdp-worklist">${attemptRows}</div>
+        <h3 class="rdp-subtle-heading">步骤</h3>
+        <div class="kv-list">${stepRows}</div>
+        <h3 class="rdp-subtle-heading">最近事件</h3>
+        ${eventRows ? `<ul class="rdp-bullet-list">${eventRows}</ul>` : '<p class="meta-copy">暂无事件。</p>'}
+      `,
+    };
+  }
+
+  function mergeRunIntoState(run) {
+    if (!run?.run_id) return;
+    const current = Array.isArray(state.data.rdpRuns?.items)
+      ? state.data.rdpRuns.items
+      : [];
+    state.data.rdpRuns = {
+      ...(state.data.rdpRuns || {}),
+      items: [
+        run,
+        ...current.filter((item) => item?.run_id !== run.run_id),
+      ].slice(0, Number(state.data.rdpRuns?.limit || 20)),
+      limit: Number(state.data.rdpRuns?.limit || 20),
+    };
+    if (typeof renderShell === "function") renderShell();
+  }
+
   async function triggerWorkflow(workflow) {
     if (!workflow) return;
     const labels = {
@@ -48,22 +126,98 @@ export function createRdpActionHandlers({
 
     if (!ensureNotBusy()) return;
     const finishAction = beginAction(null, `正在触发${label}…`);
+    let actionFinished = false;
+    state.ui.rdp = state.ui.rdp || { idempotencyKeys: {} };
+    state.ui.rdp.idempotencyKeys = state.ui.rdp.idempotencyKeys || {};
+    const idempotencyKey = state.ui.rdp.idempotencyKeys[workflow]
+      || `ui-${workflow}-${windowRef.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`}`;
+    state.ui.rdp.idempotencyKeys[workflow] = idempotencyKey;
     try {
-      const result = await requestJson("/rdp/tasks/trigger", {
+      const result = await requestJson("/rdp/v2/runs", {
         method: "POST",
-        body: { workflow, actor: "operator" },
+        headers: { "Idempotency-Key": idempotencyKey },
+        body: {
+          workflow,
+          idempotency_key: idempotencyKey,
+          payload: { source: "operator_ui" },
+        },
       });
-      if (result.ok) {
-        setFlash(state, "info", `${label}任务已提交（${result.task_id}），daemon 会继续处理。`);
-      } else {
-        setFlash(state, "warning", result.message || `${label}触发失败。`);
-      }
-      await refreshDashboard({ manual: true });
+      delete state.ui.rdp.idempotencyKeys[workflow];
+      const run = result?.run || {};
+      const replayText = result?.idempotent_replay ? "（已识别为同一次请求）" : "";
+      mergeRunIntoState(run);
+      setFlash(
+        state,
+        "info",
+        `${label}已创建：${run.run_id || "Run"}，状态 ${run.status || "queued"}${replayText}。`,
+      );
+      finishAction();
+      actionFinished = true;
+      await refreshPanels(["rdpRuns"]);
+    } catch (error) {
+      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
+      renderBanners();
+    } finally {
+      if (!actionFinished) finishAction();
+    }
+  }
+
+  async function openRun(runId, target = null) {
+    if (!runId) return;
+    if (!ensureNotBusy()) return;
+    const finishAction = beginAction(null, "正在读取运行详情…");
+    try {
+      const detail = await requestJson(`/rdp/v2/runs/${encodeURIComponent(runId)}`);
+      openDrawer(buildRunDrawer(detail), target);
     } catch (error) {
       setFlash(state, "danger", error instanceof Error ? error.message : String(error));
       renderBanners();
     } finally {
       finishAction();
+    }
+  }
+
+  async function cancelRun(runId) {
+    if (!runId || !windowRef.confirm(`确认取消运行 ${truncateForConfirm(runId)} 吗？`)) return;
+    if (!ensureNotBusy()) return;
+    const finishAction = beginAction(null, "正在请求取消运行…");
+    let actionFinished = false;
+    try {
+      const result = await requestJson(`/rdp/v2/runs/${encodeURIComponent(runId)}/cancel`, {
+        method: "POST",
+      });
+      mergeRunIntoState(result?.run);
+      setFlash(state, "info", `运行 ${truncateForConfirm(runId)} 已进入 ${result?.run?.status || "取消流程"}。`);
+      finishAction();
+      actionFinished = true;
+      await refreshPanels(["rdpRuns"]);
+    } catch (error) {
+      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
+      renderBanners();
+    } finally {
+      if (!actionFinished) finishAction();
+    }
+  }
+
+  async function retryRun(runId) {
+    if (!runId) return;
+    if (!ensureNotBusy()) return;
+    const finishAction = beginAction(null, "正在创建新的执行尝试…");
+    let actionFinished = false;
+    try {
+      const result = await requestJson(`/rdp/v2/runs/${encodeURIComponent(runId)}/retry`, {
+        method: "POST",
+      });
+      mergeRunIntoState(result?.run);
+      setFlash(state, "info", `运行 ${truncateForConfirm(runId)} 已创建尝试 ${result?.attempts?.length || "—"}。`);
+      finishAction();
+      actionFinished = true;
+      await refreshPanels(["rdpRuns"]);
+    } catch (error) {
+      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
+      renderBanners();
+    } finally {
+      if (!actionFinished) finishAction();
     }
   }
 
@@ -96,6 +250,39 @@ export function createRdpActionHandlers({
         setFlash(state, "warning", result.message || "审批失败。");
       }
       await refreshDashboard({ manual: true });
+      if (result.ok && result.recommendation) {
+        const approved = result.recommendation;
+        const pending = state.data.rdpControl?.pending_recommendations || [];
+        const controlItem = pending.find((item) => item.recommendation_id === recommendationId);
+        if (controlItem) Object.assign(controlItem, approved);
+        const workbench = state.data.rdpWorkbenchItems;
+        if (workbench?.items) {
+          workbench.items = workbench.items.filter(
+            (item) => item.recommendation_id !== recommendationId,
+          );
+        }
+        if (recommendationType === "parameter_upgrade" && workbench) {
+          workbench.release_candidates = workbench.release_candidates || { items: [] };
+          workbench.release_candidates.items = [
+            {
+              family: approved.family,
+              timeframe: approved.timeframe,
+              recommendation_id: recommendationId,
+              headline: "已批准，待发布",
+              decision_summary: "这组参数已经批准，下一步可以运行 Gate 或创建发布。",
+              created_at: approved.approved_at || approved.created_at,
+              actions: [
+                { label: "运行 Gate", ui_action: "rdp-run-gate", value: recommendationId, enabled: true },
+                { label: "创建发布", ui_action: "rdp-create-release", value: recommendationId, enabled: true },
+              ],
+            },
+            ...(workbench.release_candidates.items || []).filter(
+              (item) => item.recommendation_id !== recommendationId,
+            ),
+          ];
+        }
+        if (typeof renderShell === "function") renderShell();
+      }
     } catch (error) {
       setFlash(state, "danger", error instanceof Error ? error.message : String(error));
       renderBanners();
@@ -351,6 +538,9 @@ export function createRdpActionHandlers({
 
   return {
     "rdp-trigger-workflow": (workflow) => triggerWorkflow(workflow),
+    "rdp-open-run": (runId, target) => openRun(runId, target),
+    "rdp-cancel-run": (runId) => cancelRun(runId),
+    "rdp-retry-run": (runId) => retryRun(runId),
     "rdp-approve-and-apply": (recommendationId) => approveAndCreateRelease(recommendationId),
     "rdp-approve-only": (recommendationId) => approveOnly(recommendationId),
     "rdp-apply-only": (recommendationId) => applyOnly(recommendationId),

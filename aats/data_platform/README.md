@@ -25,7 +25,7 @@ RDP 是研究和治理子系统，不是实时交易执行器。
 
 ## 2. 数据架构
 
-`aats/data_platform/rdp_models.py::RdpBase` 当前声明 81 张表：
+`aats/data_platform/rdp_models.py::RdpBase` 当前声明 84 张表：
 
 | Schema | 表数 | 主要职责 |
 | --- | ---: | --- |
@@ -35,10 +35,10 @@ RDP 是研究和治理子系统，不是实时交易执行器。
 | `gold` | 8 | replay、对齐和研究消费数据集 |
 | `meta` | 6 | ingest run、checkpoint、quality、dataset 元数据 |
 | `research` | 3 | experiment 与研究结果 |
-| `governance` | 22 | 参数、推荐、发布、观察、任务队列、holdout、参数代次和运行状态 |
-| **合计** | **81** | — |
+| `governance` | 25 | 参数、推荐、发布、观察、任务队列、逻辑 Run/Step/Event、holdout、参数代次和运行状态 |
+| **合计** | **84** | — |
 
-迁移定义位于 `aats/data_platform/migrations/`。显式前向入口是 `scripts/apply_schema_migrations.py`（部署综合作业）或兼容初始化入口 `scripts/rdp_init_db.py`；它们均执行 ORM baseline + 全部 16 个有序 Batch B stage，并在 `governance.rdp_schema_migrations` 保存 version/checksum。应用、daemon 和研究 job 不在启动期执行 DDL，只读校验 ORM table/column surface 与迁移账本。不能用旧文档中的“48/78 张表”或单纯“表存在”判断 schema 完整。
+迁移定义位于 `aats/data_platform/migrations/`。显式前向入口是 `scripts/apply_schema_migrations.py`（部署综合作业）或兼容初始化入口 `scripts/rdp_init_db.py`；它们均执行 ORM baseline + 全部 17 个有序 Batch B stage，并在 `governance.rdp_schema_migrations` 保存 version/checksum。应用、daemon 和研究 job 不在启动期执行 DDL，只读校验 ORM table/column surface 与迁移账本。不能用旧文档中的“48/78/81 张表”或单纯“表存在”判断 schema 完整。
 
 ### 数据流
 
@@ -60,10 +60,10 @@ OKX REST / 历史 ZIP / live 只读事实
 
 | 组件 | 入口 | 职责 |
 | --- | --- | --- |
-| RDP task daemon | `scripts/rdp_task_daemon.py` | 在容器内启用 scheduler、轮询 `governance.rdp_task_queue`、领取并执行 workflow、写 heartbeat/status |
+| RDP task daemon | `scripts/rdp_task_daemon.py` | 在容器内启用 scheduler、领取 attempt、同步 Run heartbeat、执行/取消 workflow、写终态与重试关系 |
 | Workflow scheduler | `scripts/rdp_schedule_workflows.py` / `operations/workflow_scheduler.py` | 从数据库调度状态和 JSON 定义计算到期 slot，原子入队 |
-| Workflow dispatcher | `operations/workflow_dispatcher.py` | 校验 workflow 和任务、按顺序执行、写运行报告 |
-| Gateway RDP API | `aats/api/rdp_routes.py`、`rdp_profile_routes.py` | 查询、审批、gate、release/apply/rollback、任务触发、workbench、profile/sleeve 治理 |
+| Workflow dispatcher | `operations/workflow_dispatcher.py` | 校验 workflow 和任务、按顺序执行、写运行报告并上报结构化 Run Step/Event |
+| Gateway RDP API | `aats/api/rdp_routes.py`、`rdp_v2.py`、`rdp_profile_routes.py` | Run 创建/详情/取消/重试，以及查询、审批、gate、release/apply/rollback、workbench、profile/sleeve 治理 |
 | Rolling collectors | `collectors/rolling/`、相关 `scripts/rdp_*` | Candle、funding、OI、mark、long/short 等增量采集 |
 | Research Factory | `research_factory/`、`research/` | 证据输入、实验、verdict、治理审查与人工应用设计 |
 

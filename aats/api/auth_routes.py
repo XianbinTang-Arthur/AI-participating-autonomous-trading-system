@@ -84,6 +84,11 @@ _DASHBOARD_STALE_SYNC_FALLBACK_PANEL_KEYS = frozenset(
     }
 )
 
+# AI 配置页包含管理员刚刚选择的当前策略档位。快照缺失时的默认值只有
+# ``{"ai": {}}``，不能作为完整控制面事实返回；已有快照也可能在外部写入后
+# 落后于激活状态。因此 bundle 对这个 panel 始终走请求时权威读取。
+_DASHBOARD_REQUEST_TIME_AUTHORITATIVE_PANEL_KEYS = frozenset({"aiConfigModel"})
+
 
 class LoginRequest(BaseModel):
     username: str
@@ -778,6 +783,8 @@ def _dashboard_snapshot_default_payload(snapshot_key: str) -> dict[str, Any]:
         }
     if panel_key == "aiRuntime":
         return {}
+    if panel_key == "rdpRuns":
+        return {"items": [], "limit": 20}
     if panel_key == "metrics":
         return {}
     if panel_key == "accountState":
@@ -936,6 +943,10 @@ async def _load_dashboard_snapshot_panel(runtime: ApplicationRuntime, snapshot_k
             return query.profile_control_summary_dashboard()
         if panel_key.startswith("rdp"):
             request = _dashboard_snapshot_rdp_request(runtime)
+            if panel_key == "rdpRuns":
+                from aats.api.rdp_v2 import build_rdp_runs_panel
+
+                return build_rdp_runs_panel()
             if panel_key == "rdpControl":
                 from aats.api.rdp_control_summary import build_rdp_control_summary
 
@@ -1353,6 +1364,10 @@ def _protected_dashboard_panel_payload(
         return query.ai_shadow_recent(limit=recent_ai_shadow_decisions_limit, offset=0)
     if panel_key == "aiShadowEvaluations":
         return query.ai_shadow_evaluations(limit=recent_ai_shadow_evaluations_limit, offset=0)
+    if panel_key == "rdpRuns":
+        from aats.api.rdp_v2 import build_rdp_runs_panel
+
+        return build_rdp_runs_panel()
     if panel_key == "rdpControl":
         from aats.api.rdp_control_summary import build_rdp_control_summary
 
@@ -1650,6 +1665,8 @@ async def dashboard_bundle(
         snapshot_plane = _dashboard_snapshot_plane(request)
 
         async def _load_snapshot_panel(panel_key: str) -> tuple[str, dict[str, Any], float] | None:
+            if panel_key in _DASHBOARD_REQUEST_TIME_AUTHORITATIVE_PANEL_KEYS:
+                return None
             if snapshot_plane is None or panel_key not in DASHBOARD_SNAPSHOT_PANEL_KEYS:
                 return None
             if read_error is not None:

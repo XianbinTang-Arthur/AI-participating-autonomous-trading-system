@@ -234,8 +234,11 @@ const adminActions = createAdminActions({
 const adminActionHandlers = adminActions.actionHandlers;
 const rdpActionHandlers = createRdpActionHandlers({
   beginAction,
+  openDrawer,
   renderBanners,
+  renderShell,
   refreshDashboard,
+  refreshPanels,
   requestJson,
   state,
 });
@@ -257,6 +260,32 @@ function init() {
     updateLastRefreshRelativeTime();
     tickFlashExpiry();
   }, 1000);
+  // Run 状态是 RDP 操作期间唯一需要秒级更新的轻量数据。只在 RDP 页面可见且
+  // 存在活跃 Run 时做 5 秒定向刷新，避免为了一个进度条重拉整套重型工作台。
+  window.setInterval(() => {
+    const runs = state.data.rdpRuns?.items || [];
+    const hasActiveRun = runs.some((run) => [
+      "queued",
+      "running",
+      "cancellation_requested",
+    ].includes(run?.status));
+    const pendingRdpPanels = Object.entries(mergedPendingPanels(state))
+      .filter(([key, pending]) => key.startsWith("rdp") && pending)
+      .map(([key]) => key);
+    const panelsToRefresh = Array.from(new Set([
+      ...(hasActiveRun ? ["rdpRuns"] : []),
+      ...pendingRdpPanels,
+    ]));
+    if (
+      state.activeView === "rdp"
+      && document.visibilityState === "visible"
+      && panelsToRefresh.length > 0
+      && !state.actionInFlight
+      && !isRefreshInFlight()
+    ) {
+      void refreshPanels(panelsToRefresh);
+    }
+  }, 5000);
 }
 
 function bindEvents() {
@@ -492,6 +521,7 @@ function renderActiveView() {
       renderRdpView({
         session: state.data.session || {},
         authProviders: state.data.authProviders || {},
+        rdpRuns: state.data.rdpRuns || {},
         rdpControl: state.data.rdpControl || {},
         rdpWorkbenchOverview: state.data.rdpWorkbenchOverview || {},
         rdpWorkbenchItems: state.data.rdpWorkbenchItems || {},

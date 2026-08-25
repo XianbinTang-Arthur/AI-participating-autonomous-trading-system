@@ -53,6 +53,7 @@ from aats.api.rdp_control_summary import (
     build_rdp_workbench_overview,
 )
 from aats.api.auth import OperatorPrincipal, require_read_access, require_write_access
+from aats.api.rdp_v2 import rdp_v2_router
 from aats.data_platform.governance.step2_integrity_guard import (
     step2_integrity_blocking_reason as _step2_integrity_blocking_reason,
 )
@@ -106,6 +107,7 @@ rdp_router = APIRouter(
     prefix="/rdp",
     tags=["RDP"],
 )
+rdp_router.include_router(rdp_v2_router)
 
 
 def _require_apply_token(required_action: str):

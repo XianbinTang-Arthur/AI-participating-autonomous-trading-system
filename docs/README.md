@@ -122,7 +122,8 @@
 - 本地 `start_api.py` 是 HTTP，只接受模拟 profile 与 loopback host；live TLS 配置仍保留，但当前 deploy/prewarm/wrapper/local launcher 都禁止 live。
 - `scripts/run_local.py` 现为明确迁移失败入口：不加载 profile/runtime，输出指引并 exit `2`；不是可用 paper loop，仓库外旧调用方仍需迁移。
 - JetStream 是 3 条 stream，全部 1 天上限/兜底；总声明容量 6.5 GiB，server 8 GiB。
-- RDP ORM 是 81 张表，不是历史材料中的 48/78 张。
+- RDP ORM 是 84 张表；新增 `rdp_runs`、`rdp_run_steps`、`rdp_run_events` 后，
+  旧材料中的 48/78/81 张均已过时。
 - RDP workflow 是 10 个定义、8 个 enabled；decision/release disabled，release 还禁止入队。
 - runtime active parameter 是 Postgres DB-only；JSON 文件不是 fallback。
 - `apply_active_parameter_set.py`、`approve_recommendation_and_apply.py`、`rdp_rollback_active_parameter_set.py`、`rdp_freeze_parameter_set.py`、`rdp_run_release_cycle.py` 已禁用。

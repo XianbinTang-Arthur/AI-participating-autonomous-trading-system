@@ -150,6 +150,14 @@ P0_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
 P0_DASHBOARD_SNAPSHOT_PANEL_KEYS = frozenset(P0_DASHBOARD_SNAPSHOT_POLICIES)
 
 P1_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
+    "rdpRuns": DashboardSnapshotPolicy(
+        panel_key="rdpRuns",
+        ttl_seconds=3.0,
+        stale_after_seconds=10.0,
+        hard_expire_seconds=120.0,
+        timeout_seconds=3.0,
+        priority="p1",
+    ),
     "latestDecision": DashboardSnapshotPolicy(
         panel_key="latestDecision",
         ttl_seconds=5.0,

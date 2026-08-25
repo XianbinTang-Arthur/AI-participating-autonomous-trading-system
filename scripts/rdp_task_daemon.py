@@ -153,6 +153,7 @@ def _publish_heartbeat(
         from aats.data_platform.governance.rdp_runtime_status_db import (
             db_upsert_runtime_status,
         )
+        from aats.data_platform.governance.rdp_runs_db import db_touch_run_heartbeat
 
         with get_session() as session:
             db_upsert_runtime_status(
@@ -162,6 +163,13 @@ def _publish_heartbeat(
                 heartbeat_at=heartbeat_at,
                 details=payload,
             )
+            if active_task and active_task.get("run_id") and active_task.get("task_id"):
+                db_touch_run_heartbeat(
+                    session,
+                    run_id=str(active_task["run_id"]),
+                    task_id=str(active_task["task_id"]),
+                    heartbeat_at=heartbeat_at,
+                )
     except Exception:
         log.exception("Failed to publish daemon heartbeat")
 
@@ -251,6 +259,9 @@ def execute_workflow(
     workflow: str,
     *,
     on_progress: Callable[[], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    run_id: str | None = None,
+    attempt_no: int | None = None,
 ) -> tuple[int, str, str]:
     """执行一个 workflow，返回 (exit_code, stdout_tail, error_message)."""
     if workflow in _blocked_workflows():
@@ -288,6 +299,14 @@ def execute_workflow(
                 stderr=output_file,
                 text=True,
                 cwd=str(_PROJECT_ROOT),
+                env={
+                    **os.environ,
+                    **({"AATS_RDP_RUN_ID": run_id} if run_id else {}),
+                    **(
+                        {"AATS_RDP_ATTEMPT_NO": str(attempt_no)}
+                        if attempt_no is not None else {}
+                    ),
+                },
             )
             start = time.monotonic()
             while True:
@@ -298,6 +317,18 @@ def execute_workflow(
                     combined = output_file.read()
                     _emit_subprocess_output_to_parent_stdout(workflow, combined)
                     return exit_code, tail_lines(combined, LOG_TAIL_LINES), ""
+                if should_cancel is not None and should_cancel():
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                    output_file.flush()
+                    output_file.seek(0)
+                    combined = output_file.read()
+                    _emit_subprocess_output_to_parent_stdout(workflow, combined)
+                    return -4, tail_lines(combined, LOG_TAIL_LINES), "Cancellation requested"
                 if time.monotonic() - start >= timeout:
                     proc.kill()
                     proc.wait(timeout=5)
@@ -368,12 +399,16 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
         return {"processed": False, "status": "idle"}
 
     task_id = task["task_id"]
+    run_id = task["run_id"]
+    attempt_no = int(task["attempt_no"])
     workflow = task["workflow"]
     requested_by = task.get("requested_by")  # R3: auto_retry 防循环判定用
     log.info("=== Processing task %s: workflow=%s ===", task_id, workflow)
 
     active_task = {
         "task_id": task_id,
+        "run_id": run_id,
+        "attempt_no": attempt_no,
         "workflow": workflow,
         "status": "running",
         "started_at": _utcnow().isoformat(),
@@ -385,17 +420,31 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
         last_task=active_task,
     )
 
-    exit_code, log_tail, error_message = execute_workflow(
-        workflow,
-        on_progress=lambda: _publish_heartbeat(
-            status="busy",
-            poll_interval=poll_interval,
-            active_task=active_task,
-            last_task=active_task,
-        ),
-    )
+    def _cancel_requested() -> bool:
+        from aats.data_platform.governance.rdp_runs_db import (
+            db_is_run_cancel_requested,
+        )
 
-    status = "done" if exit_code == 0 else "failed"
+        with get_session() as cancel_session:
+            return db_is_run_cancel_requested(cancel_session, str(run_id))
+
+    if task.get("cancel_requested_at"):
+        exit_code, log_tail, error_message = -4, "", "Cancellation requested"
+    else:
+        exit_code, log_tail, error_message = execute_workflow(
+            workflow,
+            on_progress=lambda: _publish_heartbeat(
+                status="busy",
+                poll_interval=poll_interval,
+                active_task=active_task,
+                last_task=active_task,
+            ),
+            should_cancel=_cancel_requested,
+            run_id=str(run_id),
+            attempt_no=attempt_no,
+        )
+
+    status = "done" if exit_code == 0 else ("cancelled" if exit_code == -4 else "failed")
     if error_message == "" and exit_code != 0:
         error_message = f"Process exited with code {exit_code}"
 
@@ -454,6 +503,10 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
                         workflow=workflow,
                         requested_by=f"auto_retry_of_{task_id}",
                         earliest_start_at=retry_eligible,
+                        run_id=str(run_id),
+                        attempt_no=attempt_no + 1,
+                        parent_task_id=str(task_id),
+                        trigger_kind="auto_retry",
                     )
                     retry_session.commit()
                 if retry_task_id:
@@ -496,6 +549,8 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
     return {
         "processed": True,
         "task_id": task_id,
+        "run_id": run_id,
+        "attempt_no": attempt_no,
         "workflow": workflow,
         "status": status,
         "exit_code": exit_code,

@@ -90,6 +90,9 @@ export function createState() {
       replay: {
         parentFilter: "all",
       },
+      rdp: {
+        idempotencyKeys: {},
+      },
     },
   };
 }
@@ -233,6 +236,7 @@ export function viewSpecs(view, state = null) {
       ["aiRuntime", "/ai/runtime"],
     ],
     rdp: [
+      ["rdpRuns", "/rdp/v2/runs?limit=20&offset=0"],
       ["rdpControl", "/rdp/control-summary"],
       ["rdpWorkbenchOverview", "/rdp/workbench/overview"],
       ["rdpWorkbenchItems", "/rdp/workbench/items"],

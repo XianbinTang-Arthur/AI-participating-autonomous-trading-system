@@ -14,8 +14,12 @@ _ROOT = Path(__file__).resolve().parents[3]
 _MIGRATIONS = _ROOT / "aats" / "data_platform" / "migrations"
 
 
-def test_profit_readiness_governance_migration_is_registered_last() -> None:
-    assert BATCH_B_STAGES[-1] == "batch_b_16_profit_readiness_governance"
+def test_profit_readiness_governance_migration_precedes_rdp_run_observability() -> None:
+    stage_16 = "batch_b_16_profit_readiness_governance"
+    stage_17 = "batch_b_17_rdp_run_observability"
+    assert stage_16 in BATCH_B_STAGES
+    assert stage_17 in BATCH_B_STAGES
+    assert BATCH_B_STAGES.index(stage_17) == BATCH_B_STAGES.index(stage_16) + 1
 
 
 def test_profit_readiness_governance_schema_has_fail_closed_constraints() -> None:

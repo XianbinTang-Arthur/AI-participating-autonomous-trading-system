@@ -7,6 +7,7 @@
 
 - [`../../aats/data_platform/README.md`](../../aats/data_platform/README.md)：RDP 总览、模块边界和安全原则；
 - [`module_reference.md`](module_reference.md)：当前代码模块、API 与数据层导航；
+- [`../task/rdp_2_run_observability_sow_2026_08_25.md`](../task/rdp_2_run_observability_sow_2026_08_25.md)：RDP 2.0 Run/Attempt/Step/Event 纵向切片、验收与兼容边界；
 - [`../operations/platform_runbook.md`](../operations/platform_runbook.md)：daemon、队列、调度和恢复；
 - [`../operations/rdp_operator_workflow.md`](../operations/rdp_operator_workflow.md)：Operator 标准流程；
 - [`../operations/rdp_workflow_calendar.md`](../operations/rdp_workflow_calendar.md)：当前 workflow 日历。

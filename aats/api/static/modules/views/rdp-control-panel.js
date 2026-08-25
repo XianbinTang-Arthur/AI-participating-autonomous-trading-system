@@ -81,6 +81,24 @@ const WORKFLOW_LABELS = {
   release_cycle: "发布与观察",
 };
 
+const RUN_STATUS_LABELS = {
+  queued: "等待执行",
+  running: "运行中",
+  cancellation_requested: "正在取消",
+  succeeded: "成功",
+  succeeded_with_warnings: "成功（有警告）",
+  partially_succeeded: "部分成功",
+  failed: "失败",
+  cancelled: "已取消",
+};
+
+const TRIGGER_KIND_LABELS = {
+  manual: "手动触发",
+  schedule: "定时触发",
+  auto_retry: "自动重试",
+  recovery: "恢复任务",
+};
+
 const EVIDENCE_PHASE_LABELS = {
   phase2: "Step2 研究",
   phase3: "Phase3 归因",
@@ -216,6 +234,14 @@ function toneForObservationStatus(status) {
 function toneForApplyResult(status) {
   if (status === "success") return "positive";
   if (status === "failed" || status === "blocked_by_gate") return "danger";
+  return "outline";
+}
+
+function toneForRunStatus(status) {
+  if (["succeeded", "succeeded_with_warnings"].includes(status)) return "positive";
+  if (["failed", "partially_succeeded"].includes(status)) return "danger";
+  if (["running", "cancellation_requested"].includes(status)) return "info";
+  if (status === "queued") return "warning";
   return "outline";
 }
 
@@ -527,6 +553,83 @@ function renderWorkbenchHero({
   });
 }
 
+function renderRunsCard({
+  payload = {},
+  canAdmin = false,
+  loading = false,
+}) {
+  const items = payload.items || [];
+  if (loading && !items.length) {
+    return surfaceCard({
+      title: "运行中心",
+      kicker: "Run / Attempt / Step",
+      copy: "正在读取真实运行状态。",
+      content: callout({
+        title: "运行账本正在加载",
+        copy: "这里会显示排队原因、当前步骤、重试关系与最终结果。",
+        tone: "info",
+        pills: [actorTags("system")],
+      }),
+    });
+  }
+  const cards = items.slice(0, 8).map((run) => {
+    const status = String(run.status || "unknown");
+    const totalSteps = Number(run.total_steps || 0);
+    const completedSteps = Number(run.completed_steps || 0);
+    const progress = totalSteps > 0
+      ? `${completedSteps}/${totalSteps} 步`
+      : (status === "queued" ? "等待 daemon 领取" : "步骤尚未上报");
+    const eligibleAt = run.eligible_at ? new Date(run.eligible_at).getTime() : Number.NaN;
+    const waitingForTimeGate = status === "queued"
+      && Number.isFinite(eligibleAt)
+      && eligibleAt > Date.now();
+    const statusCopy = waitingForTimeGate
+      ? `将在 ${new Date(eligibleAt).toLocaleString("zh-CN", { hour12: false })} 后可执行`
+      : status === "queued"
+        ? (run.trigger_kind === "manual"
+          ? "正在等待执行槽；会优先于尚未启动的定时任务"
+          : "正在等待执行槽，不代表请求丢失")
+        : status === "running"
+          ? `当前步骤：${run.current_step_key || "等待步骤上报"}`
+          : (run.error_summary || "运行已结束");
+    const canCancel = canAdmin && ["queued", "running", "cancellation_requested"].includes(status);
+    const canRetry = canAdmin && ["failed", "partially_succeeded"].includes(status);
+    return `
+      <article class="rdp-workitem tone-${escapeHtml(toneForRunStatus(status))}">
+        <div class="rdp-workitem__header">
+          <div>
+            <p class="panel-kicker">${escapeHtml(labelForWorkflow(run.workflow))}</p>
+            <h4>${escapeHtml(shortId(run.run_id))}</h4>
+          </div>
+          ${statusPill(RUN_STATUS_LABELS[status] || readableState(status, "未知"), toneForRunStatus(status))}
+        </div>
+        <div class="rdp-workitem__body">
+          <p class="meta-copy">${escapeHtml(statusCopy)}</p>
+          <div class="rdp-inline-meta">
+            <span>${escapeHtml(TRIGGER_KIND_LABELS[run.trigger_kind] || run.trigger_kind || "触发来源未知")}</span>
+            <span>${escapeHtml(progress)}</span>
+            <span>${escapeHtml(run.heartbeat_at ? `心跳 ${relativeTime(run.heartbeat_at)}` : `创建于 ${relativeTime(run.created_at)}`)}</span>
+          </div>
+        </div>
+        <div class="rdp-workitem__actions">
+          ${actionButton("查看详情", "rdp-open-run", run.run_id || "", "ghost")}
+          ${canCancel ? actionButton(status === "queued" ? "取消排队" : "停止运行", "rdp-cancel-run", run.run_id || "", "warning") : ""}
+          ${canRetry ? actionButton("重新尝试", "rdp-retry-run", run.run_id || "", "secondary") : ""}
+        </div>
+      </article>
+    `;
+  });
+  return surfaceCard({
+    title: "运行中心",
+    kicker: "Run / Attempt / Step",
+    copy: "手动请求会立即创建 Run；单执行器繁忙时会透明显示等待，而不是只显示“排队”。",
+    content: cards.length
+      ? `<div class="rdp-run-grid">${cards.join("")}</div>`
+      : notice("还没有 RDP 运行记录。点击上方动作后会在这里持续更新。", "info"),
+    panelKey: "rdpRuns",
+  });
+}
+
 function renderWorkbenchItemsCard({
   items = [],
   canAdmin = false,
@@ -596,6 +699,78 @@ function renderWorkbenchItemsCard({
       ? `<div class="rdp-worklist">${cards.join("")}</div>`
       : notice("当前没有新的待处理组合。", "info"),
   });
+}
+
+function legacyWorkbenchItemsFromControl(rdpControl = {}) {
+  const recommendations = rdpControl.pending_recommendations || [];
+  return recommendations
+    .filter((item) => item && item.status === "draft")
+    .map((item) => ({
+      family: item.family,
+      timeframe: item.timeframe,
+      headline: `${DECISION_STATUS_LABELS[item.recommendation_type] || "治理建议"}待处理`,
+      confidence: item.confidence,
+      decision_summary: item.reason || "请复核当前建议及证据后再决定。",
+      approval_effect_summary: _approvalEffectSummaryForLegacy(item.recommendation_type),
+      created_at: item.created_at,
+      actions: [
+        {
+          label: _approvalActionLabelForLegacy(item.recommendation_type),
+          ui_action: "rdp-approve-only",
+          value: item.recommendation_id,
+          enabled: true,
+        },
+        {
+          label: "拒绝",
+          ui_action: "rdp-reject-recommendation",
+          value: item.recommendation_id,
+          enabled: true,
+        },
+      ],
+    }));
+}
+
+function legacyReleaseCandidatesFromControl(rdpControl = {}) {
+  return (rdpControl.pending_recommendations || [])
+    .filter((item) => (
+      item
+      && item.status === "approved"
+      && item.recommendation_type === "parameter_upgrade"
+    ))
+    .map((item) => ({
+      family: item.family,
+      timeframe: item.timeframe,
+      headline: "参数候选已批准，等待发布",
+      decision_summary: item.reason || "先运行 Gate，再创建受观察窗口约束的发布。",
+      recommendation_id: item.recommendation_id,
+      created_at: item.approved_at || item.created_at,
+      actions: [
+        {
+          label: "运行 Gate",
+          ui_action: "rdp-run-gate",
+          value: item.recommendation_id,
+          enabled: true,
+        },
+        {
+          label: "创建发布",
+          ui_action: "rdp-create-release",
+          value: item.recommendation_id,
+          enabled: true,
+        },
+      ],
+    }));
+}
+
+function _approvalActionLabelForLegacy(recommendationType) {
+  if (recommendationType === "parameter_upgrade") return "批准参数候选";
+  if (recommendationType === "pause") return "确认暂停";
+  return "批准建议";
+}
+
+function _approvalEffectSummaryForLegacy(recommendationType) {
+  if (recommendationType === "parameter_upgrade") return "进入 Gate 与发布候选阶段，不会直接改实盘参数。";
+  if (recommendationType === "pause") return "记录暂停结论，不会自动恢复交易。";
+  return "记录治理结论，不会绕过后续门禁。";
 }
 
 function renderReleaseCandidatesCard({
@@ -835,6 +1010,7 @@ function renderTuningCard({
 }
 
 export function renderRdpControlPanelV2({
+  rdpRuns = {},
   rdpControl = {},
   rdpWorkbenchOverview = {},
   rdpWorkbenchItems = {},
@@ -846,9 +1022,16 @@ export function renderRdpControlPanelV2({
   pendingPanels = {},
 }) {
   void uiState;
+  const effectiveWorkbenchItems = Object.keys(rdpWorkbenchItems).length
+    ? rdpWorkbenchItems
+    : {
+        items: legacyWorkbenchItemsFromControl(rdpControl),
+        release_candidates: { items: legacyReleaseCandidatesFromControl(rdpControl) },
+      };
   const workbenchItemsPending = Boolean(pendingPanels.rdpWorkbenchItems) && Object.keys(rdpWorkbenchItems).length === 0;
   const workbenchAlertsPending = Boolean(pendingPanels.rdpWorkbenchAlerts) && Object.keys(rdpWorkbenchAlerts).length === 0;
   const tuningProposalsPending = Boolean(pendingPanels.rdpTuningProposals) && Object.keys(rdpTuningProposals).length === 0;
+  const runsPending = Boolean(pendingPanels.rdpRuns) && Object.keys(rdpRuns).length === 0;
 
   // 内部三大工作区（当前待处理 / 侧栏告警与观察窗口 / 调优提案）各自标为
   // aria-label 化的 region，方便屏幕阅读器按 landmark 跳转，也让键盘用户
@@ -860,17 +1043,22 @@ export function renderRdpControlPanelV2({
         overview: rdpWorkbenchOverview,
         canAdmin,
       })}
+      ${renderRunsCard({
+        payload: rdpRuns,
+        canAdmin,
+        loading: runsPending,
+      })}
       <div class="panel-grid ai-config-layout">
         <section class="span-8 workspace-stack" role="region" aria-label="RDP 当前待处理、发布与后台状态">
           ${renderWorkbenchItemsCard({
-            items: rdpWorkbenchItems.items || [],
+            items: effectiveWorkbenchItems.items || [],
             canAdmin,
             loading: workbenchItemsPending,
           })}
           ${rdpWorkbenchOverview.overall_status === "rollback_required" || workbenchItemsPending
             ? ""
             : renderReleaseCandidatesCard({
-              payload: rdpWorkbenchItems.release_candidates || {},
+              payload: effectiveWorkbenchItems.release_candidates || {},
               canAdmin,
             })}
           ${renderTuningCard({

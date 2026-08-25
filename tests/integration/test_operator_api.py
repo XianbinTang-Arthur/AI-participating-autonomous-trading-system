@@ -954,7 +954,6 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             "aiLatest",
             "aiShadowLatest",
             "profileControlSummary",
-            "aiConfigModel",
             "rdpControl",
             "rdpWorkbenchOverview",
             "rdpWorkbenchItems",
@@ -1115,6 +1114,37 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(payload["panels"][key]["error"])
             self.assertEqual(payload["panels"][key]["meta"]["source"], "dashboard_snapshot")
         self.assertEqual(payload["panels"]["guardedLiveRunPacket"]["meta"]["priority"], "p2")
+
+    async def test_dashboard_bundle_ai_config_ignores_incomplete_snapshot_placeholder(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+        plane = DashboardSnapshotPlane(
+            loader=lambda panel_key: (_ for _ in ()).throw(
+                AssertionError(f"request path refreshed snapshot panel {panel_key}")
+            ),
+            default_factory=lambda _panel_key: {"ai": {}},
+            policies={"aiConfigModel": DASHBOARD_SNAPSHOT_POLICIES["aiConfigModel"]},
+        )
+        await plane.seed_panel("aiConfigModel", {"ai": {}})
+        app.state.dashboard_snapshot_plane = plane
+
+        with TestClient(app) as client:
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="aiConfigAuthoritativeTruthTest",
+                    panels=["aiConfigModel"],
+                )
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        panel = response.json()["panels"]["aiConfigModel"]
+        self.assertIsNone(panel["error"])
+        self.assertNotIn("meta", panel)
+        self.assertEqual(
+            panel["data"]["strategy_profile"]["activation"]["active_profile_id"],
+            "trend_normal",
+        )
+        self.assertEqual(panel["data"]["strategy_profile"]["active_revision"]["profile_id"], "trend_normal")
 
     async def test_dashboard_bundle_supports_exit_execution_action_history_page_panel(self) -> None:
         runtime = await self._runtime()

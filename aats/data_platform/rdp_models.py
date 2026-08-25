@@ -1,7 +1,7 @@
 """RDP (Research Data Platform) SQLAlchemy ORM 模型。
 
 替代 migrations/research/*.sql，通过 RdpBase.metadata.create_all() 自动建表。
-81 张表分布在 7 个 PostgreSQL schema：meta / staging / bronze / silver /
+84 张表分布在 7 个 PostgreSQL schema：meta / staging / bronze / silver /
 gold / research / governance。
 
 设计决策：
@@ -1738,23 +1738,187 @@ class ResearchRoundSnapshotModel(RdpBase):
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 
+class RdpRunModel(RdpBase):
+    """一次逻辑 RDP 运行；自动重试通过 attempt 复用同一 run_id。"""
+
+    __tablename__ = "rdp_runs"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_rdp_run_id"),
+        UniqueConstraint("idempotency_key", name="uq_rdp_run_idempotency"),
+        Index("ix_rdp_runs_status_created", "status", "created_at"),
+        Index("ix_rdp_runs_workflow_created", "workflow", "created_at"),
+        ForeignKeyConstraint(
+            ["source_run_id"],
+            ["governance.rdp_runs.run_id"],
+            name="fk_rdp_run_source",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        CheckConstraint(
+            "status IN ('queued','running','cancellation_requested','succeeded',"
+            "'succeeded_with_warnings','partially_succeeded','failed','cancelled')",
+            name="chk_rdp_run_status",
+        ),
+        CheckConstraint(
+            "research_outcome IN ('unknown','eligible','not_eligible','inconclusive',"
+            "'blocked_by_data','blocked_by_attribution','blocked_by_execution')",
+            name="chk_rdp_run_outcome",
+        ),
+        CheckConstraint(
+            "trigger_kind IN ('manual','schedule','auto_retry','recovery')",
+            name="chk_rdp_run_trigger",
+        ),
+        CheckConstraint(
+            "completed_steps >= 0 AND total_steps >= 0 AND completed_steps <= total_steps",
+            name="chk_rdp_run_step_counts",
+        ),
+        {"schema": "governance"},
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    run_id = Column(String(128), nullable=False, unique=True)
+    workflow = Column(String(64), nullable=False)
+    status = Column(String(32), nullable=False, server_default=text("'queued'"))
+    research_outcome = Column(String(64), nullable=False, server_default=text("'unknown'"))
+    trigger_kind = Column(String(32), nullable=False, server_default=text("'manual'"))
+    requested_by = Column(String(128), nullable=False, server_default=text("'operator'"))
+    idempotency_key = Column(String(160), unique=True)
+    source_run_id = Column(String(128))
+    eligible_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    started_at = Column(DateTime(timezone=True))
+    finished_at = Column(DateTime(timezone=True))
+    heartbeat_at = Column(DateTime(timezone=True))
+    current_step_key = Column(String(128))
+    completed_steps = Column(Integer, nullable=False, server_default=text("0"))
+    total_steps = Column(Integer, nullable=False, server_default=text("0"))
+    cancel_requested_at = Column(DateTime(timezone=True))
+    error_code = Column(String(128))
+    error_summary = Column(Text)
+    payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class RdpRunStepModel(RdpBase):
+    __tablename__ = "rdp_run_steps"
+    __table_args__ = (
+        UniqueConstraint("step_run_id", name="uq_rdp_run_step_id"),
+        UniqueConstraint("run_id", "attempt_no", "step_key", name="uq_rdp_run_attempt_step"),
+        Index("ix_rdp_run_steps_run_order", "run_id", "attempt_no", "step_order"),
+        Index("ix_rdp_run_steps_status", "status", "updated_at"),
+        ForeignKeyConstraint(
+            ["run_id"],
+            ["governance.rdp_runs.run_id"],
+            name="fk_rdp_run_step_run",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        CheckConstraint("attempt_no >= 1", name="chk_rdp_run_step_attempt"),
+        CheckConstraint("step_order >= 0", name="chk_rdp_run_step_order"),
+        CheckConstraint(
+            "status IN ('pending','running','succeeded','failed','skipped','cancelled')",
+            name="chk_rdp_run_step_status",
+        ),
+        {"schema": "governance"},
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    step_run_id = Column(String(160), nullable=False, unique=True)
+    run_id = Column(String(128), nullable=False)
+    attempt_no = Column(Integer, nullable=False)
+    step_key = Column(String(128), nullable=False)
+    step_order = Column(Integer, nullable=False)
+    status = Column(String(32), nullable=False, server_default=text("'pending'"))
+    allow_failure = Column(Boolean, nullable=False, server_default=text("false"))
+    started_at = Column(DateTime(timezone=True))
+    finished_at = Column(DateTime(timezone=True))
+    exit_code = Column(Integer)
+    error_code = Column(String(128))
+    error_summary = Column(Text)
+    log_ref = Column(Text)
+    artifact_refs = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class RdpRunEventModel(RdpBase):
+    __tablename__ = "rdp_run_events"
+    __table_args__ = (
+        UniqueConstraint("run_id", "sequence_no", name="uq_rdp_run_event_sequence"),
+        Index("ix_rdp_run_events_run_sequence", "run_id", "sequence_no"),
+        Index("ix_rdp_run_events_occurred", "occurred_at"),
+        ForeignKeyConstraint(
+            ["run_id"],
+            ["governance.rdp_runs.run_id"],
+            name="fk_rdp_run_event_run",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        CheckConstraint("attempt_no IS NULL OR attempt_no >= 1", name="chk_rdp_run_event_attempt"),
+        {"schema": "governance"},
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    run_id = Column(String(128), nullable=False)
+    sequence_no = Column(BigInteger, nullable=False)
+    attempt_no = Column(Integer)
+    step_key = Column(String(128))
+    event_type = Column(String(96), nullable=False)
+    payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    occurred_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
 class RdpTaskQueueModel(RdpBase):
     __tablename__ = "rdp_task_queue"
     __table_args__ = (
         UniqueConstraint("task_id", name="uq_rdp_task_id"),
         Index("ix_rdp_task_queue_status", "status", "created_at"),
+        Index("ix_rdp_task_run_attempt", "run_id", "attempt_no"),
+        Index(
+            "ix_rdp_task_eligible_priority",
+            "status",
+            "earliest_start_at",
+            "priority_class",
+            "created_at",
+        ),
         Index(
             "ix_rdp_task_one_active_per_workflow",
             "workflow",
             unique=True,
             postgresql_where=text("status IN ('pending', 'running')"),
         ),
-        CheckConstraint("status IN ('pending','running','done','failed')", name="chk_rdp_task_status"),
+        CheckConstraint(
+            "status IN ('pending','running','done','failed','cancelled')",
+            name="chk_rdp_task_status",
+        ),
+        CheckConstraint("attempt_no >= 1", name="chk_rdp_task_attempt_no"),
+        CheckConstraint(
+            "trigger_kind IN ('manual','schedule','auto_retry','recovery')",
+            name="chk_rdp_task_trigger_kind",
+        ),
+        ForeignKeyConstraint(
+            ["run_id"],
+            ["governance.rdp_runs.run_id"],
+            name="fk_rdp_task_run",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["parent_task_id"],
+            ["governance.rdp_task_queue.task_id"],
+            name="fk_rdp_task_parent",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
         {"schema": "governance"},
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     task_id = Column(String(128), nullable=False, unique=True)
+    run_id = Column(String(128), nullable=False)
+    attempt_no = Column(Integer, nullable=False, server_default=text("1"))
+    parent_task_id = Column(String(128))
     workflow = Column(String(64), nullable=False)
     status = Column(String(32), nullable=False, server_default=text("'pending'"))
     requested_by = Column(String(128), nullable=False, server_default=text("'operator'"))
@@ -1764,6 +1928,10 @@ class RdpTaskQueueModel(RdpBase):
     # 15min 后才被领取。scheduler 正常入队时默认 = created_at（立即可领）。
     # 现有数据 server_default='now()' 自动兼容（升级后旧 row 立刻 claimable）。
     earliest_start_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    trigger_kind = Column(String(32), nullable=False, server_default=text("'manual'"))
+    priority_class = Column(String(32), nullable=False, server_default=text("'normal'"))
+    heartbeat_at = Column(DateTime(timezone=True))
+    cancel_requested_at = Column(DateTime(timezone=True))
     started_at = Column(DateTime(timezone=True))
     finished_at = Column(DateTime(timezone=True))
     exit_code = Column(Integer)

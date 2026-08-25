@@ -15,6 +15,7 @@ import { localizeError } from "../terms.js";
 import { renderRdpControlPanelV2 } from "./rdp-control-panel.js";
 
 const AUTH_PANEL_KEYS = [
+  "rdpRuns",
   "rdpControl",
   "rdpWorkbenchOverview",
   "rdpWorkbenchItems",
@@ -54,6 +55,7 @@ function resolveRdpAuthError(data) {
 
 export function renderRdpView(data) {
   const session = data.session || {};
+  const rdpRuns = data.rdpRuns || {};
   const rdpControl = data.rdpControl || {};
   const rdpWorkbenchOverview = data.rdpWorkbenchOverview || {};
   const rdpWorkbenchItems = data.rdpWorkbenchItems || {};
@@ -62,7 +64,8 @@ export function renderRdpView(data) {
   const rdpTuningProposals = data.rdpTuningProposals || {};
   const uiState = data.uiState?.rdp || {};
   const pendingPanels = data.uiHints?.pendingPanels || {};
-  const canAdmin = session.role === "admin" || session.identity === "api_key_write";
+  const canAdmin = ["admin", "operator"].includes(session.role)
+    || session.identity === "api_key_write";
   const rdpAuthError = resolveRdpAuthError(data);
 
   if (rdpAuthError) {
@@ -81,23 +84,27 @@ export function renderRdpView(data) {
   // RDP 读接口集体为空（很可能是后端尚未返回）——给一个温和的等待态，
   // 避免空白页误导为"数据已加载完、但什么都没有"。
   if (
-    Object.keys(rdpWorkbenchOverview).length === 0
+    Object.keys(rdpRuns).length === 0
+    && Object.keys(rdpWorkbenchOverview).length === 0
     && Object.keys(rdpWorkbenchItems).length === 0
     && Object.keys(rdpWorkbenchAlerts).length === 0
   ) {
     return surfaceCard({
       title: "RDP 数据暂未就绪",
       kicker: "等待后端",
-      copy: "工作台数据正在加载中，或 RDP 读接口尚未成功返回。请稍候刷新。",
+      copy: "工作台首次快照正在生成；完成后页面会自动更新。",
       content: callout({
-        title: "尚未拿到 workbench 数据",
-        copy: "如果长时间不刷新，请检查 rdp-daemon 容器是否启动、DB 是否可达。",
+        title: "正在生成首次快照",
+        copy: Object.values(pendingPanels).some(Boolean)
+          ? "后端正在读取运行、治理与证据状态，不需要重复点击刷新。"
+          : "如果持续没有结果，请再检查 RDP 读接口与 governance DB 状态。",
         pills: [actorTags("system")],
       }),
     });
   }
 
   return renderRdpControlPanelV2({
+    rdpRuns,
     rdpControl,
     rdpWorkbenchOverview,
     rdpWorkbenchItems,

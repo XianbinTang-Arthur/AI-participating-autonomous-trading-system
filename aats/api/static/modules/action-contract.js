@@ -45,6 +45,9 @@ export const KNOWN_DYNAMIC_CLIENT_ACTIONS = new Set([
 ]);
 
 export const KNOWN_RDP_UI_ACTIONS = new Set([
+  "rdp-cancel-run",
+  "rdp-open-run",
+  "rdp-retry-run",
   "rdp-apply-only",
   "rdp-approve-and-apply",
   "rdp-approve-only",

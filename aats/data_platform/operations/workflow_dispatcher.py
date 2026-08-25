@@ -269,6 +269,11 @@ def run_workflow(
     config = load_workflow_config(project_root, workflow_name)
     tasks = config.get("tasks", [])
     run_id = _make_run_id()
+    from aats.data_platform.operations.rdp_run_observer import RdpRunObserver
+
+    observer = RdpRunObserver.from_environment()
+    if observer is not None:
+        observer.initialize(tasks)
 
     report: dict[str, Any] = {
         "run_id": run_id,
@@ -286,18 +291,26 @@ def run_workflow(
     failed_but_allowed = 0
     skipped = 0
 
-    for task in tasks:
+    for task_index, task in enumerate(tasks, start=1):
         enabled = task.get("enabled", True)
         if not enabled:
-            report["tasks"].append({
+            disabled_result = {
                 "name": task.get("name", "?"),
                 "status": "disabled",
-            })
+                "allow_failure": bool(task.get("allow_failure", False)),
+            }
+            report["tasks"].append(disabled_result)
+            if observer is not None:
+                observer.step_finished(disabled_result, task_index)
             skipped += 1
             continue
 
+        if observer is not None:
+            observer.step_started(task, task_index)
         task_result = _run_task(project_root, task, dry_run=dry_run)
         report["tasks"].append(task_result)
+        if observer is not None:
+            observer.step_finished(task_result, task_index)
 
         if task_result["status"] == "success" or task_result["status"] == "dry_run":
             succeeded += 1
@@ -314,11 +327,18 @@ def run_workflow(
                 if stop_on_failure:
                     # 后续任务标记为 skipped
                     remaining = tasks[tasks.index(task) + 1:]
-                    for rt in remaining:
-                        report["tasks"].append({
+                    for remaining_index, rt in enumerate(
+                        remaining,
+                        start=task_index + 1,
+                    ):
+                        skipped_result = {
                             "name": rt.get("name", "?"),
                             "status": "skipped_due_to_failure",
-                        })
+                            "allow_failure": bool(rt.get("allow_failure", False)),
+                        }
+                        report["tasks"].append(skipped_result)
+                        if observer is not None:
+                            observer.step_finished(skipped_result, remaining_index)
                         skipped += 1
                     break
         else:
