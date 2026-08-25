@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -78,6 +79,11 @@ def experiment_id_for_plan(plan: Mapping[str, Any], *, phase: str) -> str:
     phase_tag = "dev" if phase == "development" else "evidence"
     source = str(plan["source_experiment_id"])
     suffix = str(plan["plan_id"]).removeprefix("v2replay_")
+    safe_identifier = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+    if safe_identifier.fullmatch(source) is None:
+        raise ValueError("replay_plan_source_experiment_id_unsafe")
+    if safe_identifier.fullmatch(suffix) is None:
+        raise ValueError("replay_plan_id_suffix_unsafe")
     return f"{source}_v2_{phase_tag}_{suffix}"
 
 

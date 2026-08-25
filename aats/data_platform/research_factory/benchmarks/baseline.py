@@ -81,6 +81,32 @@ def run_factor_baseline(
     )
 
 
+def factor_baseline_return_series(
+    factor_values: Sequence[NumericValue | None],
+    label_values: Sequence[NumericValue | None],
+    cost_config: Mapping[str, NumericValue] | None = None,
+) -> tuple[float, ...]:
+    """Return the deterministic net-return series used by the factor baseline.
+
+    The public helper exists so statistical evidence can be derived from the
+    exact same return and cost convention as :func:`run_factor_baseline`.
+    It intentionally exposes no holdout-selection behavior; callers decide
+    which already-authorized dataset segment is supplied.
+    """
+    if not isinstance(factor_values, Sequence) or not isinstance(label_values, Sequence):
+        raise ValueError("factor_values and label_values must be sequences")
+    if len(factor_values) != len(label_values):
+        raise ValueError("factor_values and label_values must have the same length")
+    costs = _normalize_cost_config(cost_config or {})
+    _, net_returns, _ = _long_flat_returns(
+        factor_values,
+        label_values,
+        trade_cost_bps=costs["trade_cost_bps"],
+        funding_bps=costs["funding_bps"],
+    )
+    return tuple(net_returns)
+
+
 def _normalize_cost_config(cost_config: Mapping[str, NumericValue]) -> dict[str, float]:
     if not isinstance(cost_config, Mapping):
         raise ValueError("cost_config must be a mapping")

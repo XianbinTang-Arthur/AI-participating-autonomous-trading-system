@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -12,6 +15,16 @@ from scripts.rdp_run_candidate_v2_batch import (
     load_and_validate_plan,
     main,
 )
+
+
+@pytest.fixture
+def tmp_path() -> Iterator[Path]:
+    path = Path(".pytest_workspace_tmp") / f"candidate_v2_batch_{uuid.uuid4().hex}"
+    path.mkdir(parents=True)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _write_plan(tmp_path: Path) -> tuple[Path, Path, dict]:
@@ -57,6 +70,19 @@ def test_phase_is_part_of_experiment_identity() -> None:
     plan = {"source_experiment_id": "old", "plan_id": "v2replay_abc"}
     assert experiment_id_for_plan(plan, phase="development") == "old_v2_dev_abc"
     assert experiment_id_for_plan(plan, phase="evidence-complete") == "old_v2_evidence_abc"
+
+
+def test_experiment_identity_rejects_path_traversal() -> None:
+    with pytest.raises(ValueError, match="source_experiment_id_unsafe"):
+        experiment_id_for_plan(
+            {"source_experiment_id": "../outside", "plan_id": "v2replay_abc"},
+            phase="development",
+        )
+    with pytest.raises(ValueError, match="plan_id_suffix_unsafe"):
+        experiment_id_for_plan(
+            {"source_experiment_id": "old", "plan_id": "v2replay_../outside"},
+            phase="development",
+        )
 
 
 def test_execution_summary_is_bound_to_exact_plan_and_symbol(tmp_path: Path) -> None:

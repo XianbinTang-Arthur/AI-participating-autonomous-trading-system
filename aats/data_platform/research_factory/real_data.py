@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from collections.abc import Mapping, Sequence
@@ -14,7 +15,10 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from aats.data_platform.models import replay_bar_table_name
-from aats.data_platform.research_factory.benchmarks.baseline import run_factor_baseline
+from aats.data_platform.research_factory.benchmarks.baseline import (
+    factor_baseline_return_series,
+    run_factor_baseline,
+)
 from aats.data_platform.research_factory.datasets.gold_bars import (
     GoldBarDatasetHandler,
     GoldBarRecord,
@@ -71,6 +75,7 @@ DEFAULT_EXPERIMENT_ARTIFACT_ROOT = Path("artifacts") / "research" / "research_fa
 REAL_DATA_CODE_VERSION = "research_factory_real_data_runner_v2"
 SELECTION_PROTOCOL_VERSION = "train_valid_selection_test_holdout_v2"
 DEVELOPMENT_EVIDENCE_REF = "development_evidence.json"
+DEVELOPMENT_RETURN_SERIES_REF = "development_return_series.json"
 DEVELOPMENT_SEGMENTS = ("train", "valid")
 BENCHMARK_SEGMENT = "valid"
 HOLDOUT_SEGMENT = "test"
@@ -503,7 +508,7 @@ def run_research_factory_experiment(
             failures = "; ".join(evidence_bundle.failures)
             raise ValueError(f"evidence quality gate failed: {failures}")
 
-        train_metrics, train_gate = _evaluate_development_segment(
+        train_metrics, train_gate, train_returns = _evaluate_development_segment(
             prepared=prepared,
             segment_name="train",
             feature=feature,
@@ -512,7 +517,7 @@ def run_research_factory_experiment(
             research_profile=research_profile,
             execution_metrics=None,
         )
-        valid_metrics, valid_gate = _evaluate_development_segment(
+        valid_metrics, valid_gate, valid_returns = _evaluate_development_segment(
             prepared=prepared,
             segment_name="valid",
             feature=feature,
@@ -526,6 +531,22 @@ def run_research_factory_experiment(
             holdout_rows,
             segment_name=HOLDOUT_SEGMENT,
             dataset_fingerprint_value=research_dataset_fingerprint,
+        )
+        development_return_series = _build_development_return_series(
+            experiment_id=experiment_id,
+            dataset_fingerprint_value=research_dataset_fingerprint,
+            holdout_content_fingerprint=holdout_content_fingerprint,
+            train_row_count=len(prepared.rows_for_segment("train")),
+            train_returns=train_returns,
+            valid_row_count=len(prepared.rows_for_segment("valid")),
+            valid_returns=valid_returns,
+            config=config,
+        )
+        recorder.record_json_artifact(
+            experiment_id,
+            "development_return_series",
+            DEVELOPMENT_RETURN_SERIES_REF,
+            development_return_series,
         )
         development_evidence = _build_development_evidence(
             prepared=prepared,
@@ -801,22 +822,28 @@ def _evaluate_development_segment(
     config: ResearchFactoryExperimentConfig,
     research_profile: ResearchProfile | None,
     execution_metrics: MetricsSnapshot | None,
-) -> tuple[MetricsSnapshot, CandidateGateResult]:
+) -> tuple[MetricsSnapshot, CandidateGateResult, tuple[float, ...]]:
     if segment_name not in DEVELOPMENT_SEGMENTS:
         raise ValueError(f"unsupported development segment: {segment_name!r}")
     rows = prepared.rows_for_segment(segment_name)
     factor_values = evaluate_factor_expression(feature.expression, rows).values
     label_values = _future_simple_returns(rows, label.horizon_bars)
+    cost_config = {
+        "fee_bps": config.fee_bps,
+        "slippage_bps": config.slippage_bps,
+        "funding_bps": config.funding_bps,
+        "periods_per_year": _periods_per_year(config),
+    }
     metrics = run_factor_baseline(
         prepared,
         factor_values,
         label_values,
-        cost_config={
-            "fee_bps": config.fee_bps,
-            "slippage_bps": config.slippage_bps,
-            "funding_bps": config.funding_bps,
-            "periods_per_year": _periods_per_year(config),
-        },
+        cost_config=cost_config,
+    )
+    net_returns = factor_baseline_return_series(
+        factor_values,
+        label_values,
+        cost_config=cost_config,
     )
     if execution_metrics is not None:
         metrics = merge_metric_snapshots(
@@ -824,7 +851,84 @@ def _evaluate_development_segment(
             execution_metrics,
             conflict_strategy="prefer_right",
         )
-    return metrics, _deterministic_gate(metrics, config.timestamp, research_profile)
+    return (
+        metrics,
+        _deterministic_gate(metrics, config.timestamp, research_profile),
+        net_returns,
+    )
+
+
+def _return_series_fingerprint(values: Sequence[float]) -> str:
+    payload = json.dumps(
+        list(values),
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
+def _build_development_return_series(
+    *,
+    experiment_id: str,
+    dataset_fingerprint_value: str,
+    holdout_content_fingerprint: str,
+    train_row_count: int,
+    train_returns: Sequence[float],
+    valid_row_count: int,
+    valid_returns: Sequence[float],
+    config: ResearchFactoryExperimentConfig,
+) -> dict[str, Any]:
+    def segment_payload(
+        *,
+        role: str,
+        row_count: int,
+        net_returns: Sequence[float],
+    ) -> dict[str, Any]:
+        return {
+            "role": role,
+            "row_count": row_count,
+            "sample_count": len(net_returns),
+            "net_returns": list(net_returns),
+            "series_fingerprint": _return_series_fingerprint(net_returns),
+        }
+
+    return {
+        "schema_version": "research_development_return_series_v1",
+        "selection_protocol_version": SELECTION_PROTOCOL_VERSION,
+        "experiment_id": experiment_id,
+        "dataset_fingerprint": dataset_fingerprint_value,
+        "benchmark_segment": BENCHMARK_SEGMENT,
+        "segments": {
+            "train": segment_payload(
+                role="development_stability",
+                row_count=train_row_count,
+                net_returns=train_returns,
+            ),
+            "valid": segment_payload(
+                role="candidate_selection",
+                row_count=valid_row_count,
+                net_returns=valid_returns,
+            ),
+        },
+        "cost_assumptions": {
+            "fee_bps": config.fee_bps,
+            "slippage_bps": config.slippage_bps,
+            "funding_bps": config.funding_bps,
+            "periods_per_year": _periods_per_year(config),
+        },
+        "holdout": {
+            "segment": HOLDOUT_SEGMENT,
+            "status": HOLDOUT_STATUS,
+            "content_fingerprint": holdout_content_fingerprint,
+            "values_exposed": False,
+        },
+        "code_version": REAL_DATA_CODE_VERSION,
+        "created_at": config.timestamp,
+        "authorization_boundary": (
+            "development train/valid returns only; holdout sealed; "
+            "no live-trading authorization"
+        ),
+    }
 
 
 def _require_segment_spec(
@@ -928,6 +1032,7 @@ def _build_candidate(
             "benchmark_segment": BENCHMARK_SEGMENT,
             "selection_protocol_version": SELECTION_PROTOCOL_VERSION,
             "development_evidence_ref": DEVELOPMENT_EVIDENCE_REF,
+            "development_return_series_ref": DEVELOPMENT_RETURN_SERIES_REF,
             "development_segments": DEVELOPMENT_SEGMENTS,
             "holdout_segment": HOLDOUT_SEGMENT,
             "holdout_status": HOLDOUT_STATUS,
@@ -956,6 +1061,7 @@ def _recommendation_evidence_refs(
         "candidate_artifact": "candidate_artifact.json",
         "dataset_quality_report": DATASET_QUALITY_REPORT_REF,
         "development_evidence": development_evidence_ref,
+        "development_return_series": DEVELOPMENT_RETURN_SERIES_REF,
         "evidence_bundle": EVIDENCE_BUNDLE_REF,
         "experiment_manifest": "experiment_manifest.json",
         "metrics_snapshot": "metrics_snapshot.json",

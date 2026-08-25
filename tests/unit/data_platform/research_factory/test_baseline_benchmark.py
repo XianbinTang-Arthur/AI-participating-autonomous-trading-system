@@ -1,6 +1,9 @@
 import pytest
 
-from aats.data_platform.research_factory.benchmarks.baseline import run_factor_baseline
+from aats.data_platform.research_factory.benchmarks.baseline import (
+    factor_baseline_return_series,
+    run_factor_baseline,
+)
 from aats.data_platform.research_factory.specs import MetricsSnapshot
 
 
@@ -86,6 +89,23 @@ def test_run_factor_baseline_charges_exit_turnover_cost() -> None:
     expected_net_mean = ((0.01 - 15.0 / 10_000.0) + (0.0 - 15.0 / 10_000.0)) / 2
     assert metrics.net_annualized_return == pytest.approx(expected_net_mean)
     assert metrics.turnover == pytest.approx(1.0)
+
+
+def test_factor_baseline_return_series_uses_same_net_return_convention() -> None:
+    factor_values = [1.0, 0.0, 2.0]
+    label_values = [0.01, 0.02, -0.005]
+    costs = {
+        "fee_bps": 10.0,
+        "slippage_bps": 5.0,
+        "funding_bps": 2.0,
+        "periods_per_year": 1.0,
+    }
+
+    series = factor_baseline_return_series(factor_values, label_values, costs)
+    metrics = run_factor_baseline(DATASET, factor_values, label_values, costs)
+
+    assert series == pytest.approx((0.0083, -0.0015, -0.0067))
+    assert sum(series) / len(series) == pytest.approx(metrics.net_annualized_return)
 
 
 def test_run_factor_baseline_all_null_factor_returns_failed_metrics_without_candidate() -> None:

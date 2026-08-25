@@ -246,6 +246,7 @@ def test_real_data_runner_writes_recommendation_and_registry(tmp_path: Path) -> 
     source_integrity = read_json(experiment_dir / "source_integrity_report.json")
     execution_evidence = read_json(experiment_dir / "execution_evidence_report.json")
     development_evidence = read_json(experiment_dir / "development_evidence.json")
+    development_returns = read_json(experiment_dir / "development_return_series.json")
     candidate = read_json(experiment_dir / "candidate_artifact.json")
     registry_entries = read_jsonl(root.parent / "registry" / "research_memory.jsonl")
 
@@ -262,6 +263,10 @@ def test_real_data_runner_writes_recommendation_and_registry(tmp_path: Path) -> 
     assert manifest["output_refs"]["execution_evidence_report"] == "execution_evidence_report.json"
     assert manifest["output_refs"]["evidence_bundle"] == "evidence_bundle.json"
     assert manifest["output_refs"]["development_evidence"] == "development_evidence.json"
+    assert (
+        manifest["output_refs"]["development_return_series"]
+        == "development_return_series.json"
+    )
     assert manifest["output_refs"]["novelty_gate_result"] == "novelty_gate_result.json"
     assert manifest["output_refs"]["research_recommendation"] == "research_recommendation.json"
     assert evidence_bundle["passed"] is True
@@ -289,6 +294,10 @@ def test_real_data_runner_writes_recommendation_and_registry(tmp_path: Path) -> 
         recommendation["evidence"]["evidence_refs"]["development_evidence"]
         == "development_evidence.json"
     )
+    assert (
+        recommendation["evidence"]["evidence_refs"]["development_return_series"]
+        == "development_return_series.json"
+    )
     assert development_evidence["schema_version"] == "train_valid_selection_test_holdout_v2"
     assert development_evidence["selection_rule"] == "train_and_valid_must_pass"
     assert development_evidence["benchmark_segment"] == "valid"
@@ -308,8 +317,28 @@ def test_real_data_runner_writes_recommendation_and_registry(tmp_path: Path) -> 
     assert development_evidence["holdout"]["status"] == "sealed_not_evaluated"
     assert development_evidence["holdout"]["metrics_exposed"] is False
     assert "metrics" not in development_evidence["holdout"]
+    assert development_returns["schema_version"] == "research_development_return_series_v1"
+    assert set(development_returns["segments"]) == {"train", "valid"}
+    assert development_returns["benchmark_segment"] == "valid"
+    assert development_returns["segments"]["valid"]["net_returns"]
+    assert development_returns["segments"]["valid"]["sample_count"] == len(
+        development_returns["segments"]["valid"]["net_returns"]
+    )
+    assert development_returns["segments"]["valid"]["series_fingerprint"].startswith(
+        "sha256:"
+    )
+    assert development_returns["holdout"] == {
+        "segment": "test",
+        "status": "sealed_not_evaluated",
+        "content_fingerprint": development_evidence["holdout"]["content_fingerprint"],
+        "values_exposed": False,
+    }
     assert candidate["payload"]["benchmark_segment"] == "valid"
     assert candidate["payload"]["development_segments"] == ["train", "valid"]
+    assert (
+        candidate["payload"]["development_return_series_ref"]
+        == "development_return_series.json"
+    )
     assert candidate["payload"]["holdout_status"] == "sealed_not_evaluated"
     assert (
         candidate["payload"]["holdout_content_fingerprint"]
@@ -374,12 +403,16 @@ def test_real_data_runner_requires_train_and_valid_gates_to_pass(tmp_path: Path)
 
     experiment_dir = root / "rf_real_train_gate_failure"
     development_evidence = read_json(experiment_dir / "development_evidence.json")
+    development_returns = read_json(experiment_dir / "development_return_series.json")
     assert result.status == "failed"
     assert result.candidate_generated is False
     assert "development selection gate failed: train:" in result.error
     assert development_evidence["segments"]["train"]["gate"]["passed"] is False
     assert development_evidence["segments"]["valid"]["gate"]["passed"] is True
     assert development_evidence["holdout"]["metrics_exposed"] is False
+    assert development_returns["segments"]["train"]["net_returns"]
+    assert development_returns["segments"]["valid"]["net_returns"]
+    assert development_returns["holdout"]["values_exposed"] is False
     assert not (experiment_dir / "candidate_artifact.json").exists()
 
 
