@@ -415,11 +415,16 @@ class PortfolioAllocatorV2Phase2:
         allocation_id: str,
     ) -> tuple[StrategySleeveIntent, AllocatorBudgetSnapshot]:
         requested_notional = self._requested_notional(intent=intent, base_target=base_target, assignment=assignment)
-        full_close_exempt_notional = self._independent_full_close_requested_notional(
+        independent_full_close_exempt_notional = self._independent_full_close_requested_notional(
             intent=intent,
             base_target=base_target,
         )
-        capped_requested_notional = max(requested_notional - full_close_exempt_notional, Decimal("0"))
+        de_risk_exempt_notional = self._derivatives_de_risk_requested_notional(
+            intent=intent,
+            requested_notional=requested_notional,
+        )
+        exempt_notional = max(independent_full_close_exempt_notional, de_risk_exempt_notional)
+        capped_requested_notional = max(requested_notional - exempt_notional, Decimal("0"))
         requested_delta_qty = to_decimal(intent.delta_position_qty)
         budget_multiplier = self._budget_multiplier_for(intent=intent, assignment=assignment)
         allocator_weight = self._allocator_weight_for(intent=intent, assignment=assignment)
@@ -427,7 +432,15 @@ class PortfolioAllocatorV2Phase2:
         margin_limit = None if assignment is None else assignment.effective_margin_budget_limit
         notional_cap = None if assignment is None else assignment.effective_notional_cap
         max_symbol_notional = None if assignment is None else assignment.effective_max_symbol_notional
-        cap_candidates = [value for value in (notional_cap, max_symbol_notional, quote_limit, margin_limit) if value is not None]
+        margin_notional_limit = margin_limit
+        if margin_limit is not None and intent.product_type == "derivatives":
+            target_leverage = max(to_decimal(base_target.target_leverage), Decimal("1"))
+            margin_notional_limit = quantize_decimal(to_decimal(margin_limit) * target_leverage)
+        cap_candidates = [
+            value
+            for value in (notional_cap, max_symbol_notional, quote_limit, margin_notional_limit)
+            if value is not None
+        ]
         effective_cap = min(cap_candidates) if cap_candidates else None
         approved_notional = requested_notional
         approved_delta_qty = requested_delta_qty
@@ -446,15 +459,19 @@ class PortfolioAllocatorV2Phase2:
                 intent=intent,
                 scaled_delta_qty=requested_delta_qty,
                 budget_ratio=ratio,
-                preserve_independent_full_close_legs=full_close_exempt_notional > EPSILON_DECIMAL_12,
+                preserve_independent_full_close_legs=(
+                    independent_full_close_exempt_notional > EPSILON_DECIMAL_12
+                ),
             )
             approved_delta_qty = to_decimal(scaled_intent.delta_position_qty)
             approved_notional = quantize_decimal(
-                full_close_exempt_notional
+                exempt_notional
                 + (capped_requested_notional * ratio)
             )
-        elif full_close_exempt_notional > EPSILON_DECIMAL_12:
+        elif independent_full_close_exempt_notional > EPSILON_DECIMAL_12:
             reason_codes.append("allocator_budget_cap_bypassed_for_independent_full_close")
+        elif de_risk_exempt_notional > EPSILON_DECIMAL_12:
+            reason_codes.append("allocator_budget_cap_bypassed_for_derisk")
         snapshot = AllocatorBudgetSnapshot(
             allocation_id=allocation_id,
             strategy_sleeve_id=intent.strategy_sleeve_id,
@@ -493,10 +510,24 @@ class PortfolioAllocatorV2Phase2:
         budget_cut_reason_codes: list[str] = []
         portfolio_cap = self._portfolio_notional_cap()
         portfolio_requested_notional = sum((item.approved_notional for item in budget_snapshots), start=Decimal("0"))
-        exempt_notional_by_sleeve = {
+        independent_close_exempt_by_sleeve = {
             intent.strategy_sleeve_id: self._independent_full_close_requested_notional(
                 intent=intent,
                 base_target=base_target,
+            )
+            for intent in approved
+        }
+        exempt_notional_by_sleeve = {
+            intent.strategy_sleeve_id: max(
+                independent_close_exempt_by_sleeve[intent.strategy_sleeve_id],
+                self._derivatives_de_risk_requested_notional(
+                    intent=intent,
+                    requested_notional=self._requested_notional(
+                        intent=intent,
+                        base_target=base_target,
+                        assignment=None,
+                    ),
+                ),
             )
             for intent in approved
         }
@@ -564,7 +595,12 @@ class PortfolioAllocatorV2Phase2:
                 if approved_notional <= EPSILON_DECIMAL_12:
                     snapshot_reason_codes.append("allocator_portfolio_budget_zeroed")
             if exempt_notional > EPSILON_DECIMAL_12:
-                snapshot_reason_codes.append("allocator_portfolio_cap_exempt_for_independent_full_close")
+                snapshot_reason_codes.append(
+                    "allocator_portfolio_cap_exempt_for_independent_full_close"
+                    if independent_close_exempt_by_sleeve.get(intent.strategy_sleeve_id, Decimal("0"))
+                    > EPSILON_DECIMAL_12
+                    else "allocator_portfolio_cap_exempt_for_derisk"
+                )
             redistributed_snapshot = snapshot.model_copy(
                 update={
                     "approved_notional": approved_notional,
@@ -643,16 +679,17 @@ class PortfolioAllocatorV2Phase2:
                         },
                     )
                 )
-        resolved_delta_qty = (
-            quantize_decimal(
+        if scaled_legs:
+            resolved_delta_qty = quantize_decimal(
                 sum(
                     (to_decimal(leg.delta_position_qty or Decimal("0")) for leg in scaled_legs),
                     start=Decimal("0"),
                 )
             )
-            if scaled_legs
-            else scaled_delta_qty
-        )
+        elif budget_ratio is not None:
+            resolved_delta_qty = quantize_decimal(to_decimal(scaled_delta_qty) * budget_ratio)
+        else:
+            resolved_delta_qty = to_decimal(scaled_delta_qty)
         return intent.model_copy(
             update={
                 "delta_position_qty": resolved_delta_qty,
@@ -1018,6 +1055,42 @@ class PortfolioAllocatorV2Phase2:
         if reference_price <= EPSILON_DECIMAL_12:
             return Decimal("0")
         return abs(to_decimal(intent.current_position_qty)) * reference_price
+
+    @staticmethod
+    def _derivatives_de_risk_requested_notional(
+        *,
+        intent: StrategySleeveIntent,
+        requested_notional: Decimal,
+    ) -> Decimal:
+        """Return budget-exempt notional for exposure-reducing derivatives intents.
+
+        Budget caps protect against *new* risk.  Applying them to a close or a
+        same-side reduction can leave an oversized position trapped.  Mixed
+        close/open bundles are deliberately excluded here; their independent
+        close legs are handled by the dedicated full-close exemption above.
+        """
+        if intent.product_type != "derivatives":
+            return Decimal("0")
+        if intent.legs:
+            actions = {
+                str(getattr(leg, "action", "") or "").strip().lower()
+                for leg in intent.legs
+                if abs(to_decimal(leg.delta_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12
+            }
+            if actions and actions <= {"close", "reduce"}:
+                return max(to_decimal(requested_notional), Decimal("0"))
+            return Decimal("0")
+        current_qty = to_decimal(intent.current_position_qty)
+        target_qty = to_decimal(intent.target_position_qty)
+        if abs(current_qty) <= EPSILON_DECIMAL_12:
+            return Decimal("0")
+        same_side_or_flat = (
+            abs(target_qty) <= EPSILON_DECIMAL_12
+            or current_qty * target_qty > Decimal("0")
+        )
+        if same_side_or_flat and abs(target_qty) <= abs(current_qty) + EPSILON_DECIMAL_12:
+            return max(to_decimal(requested_notional), Decimal("0"))
+        return Decimal("0")
 
     def _smart_arbitrage_requested_notional(
         self,

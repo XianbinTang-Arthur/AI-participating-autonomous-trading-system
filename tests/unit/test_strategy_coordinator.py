@@ -321,6 +321,254 @@ def _independent_full_close_intent(
 
 
 class TestStrategyCoordinator(unittest.TestCase):
+    @staticmethod
+    def _directional_intent(
+        *,
+        current_qty: str,
+        target_qty: str,
+        target_notional: str,
+    ) -> StrategySleeveIntent:
+        current = Decimal(current_qty)
+        target = Decimal(target_qty)
+        return StrategySleeveIntent(
+            decision_id="decision_allocator_directional",
+            family="directional",
+            strategy_sleeve_id="sleeve-directional-budget-test",
+            state="ready",
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            inventory_policy="account_net_inventory",
+            route_action="override_target",
+            family_action="hold_family",
+            headline="directional budget test",
+            selectable=True,
+            execution_compatible=True,
+            current_position_qty=current,
+            target_position_qty=target,
+            delta_position_qty=target - current,
+            account_current_position_qty=current,
+            account_target_position_qty=target,
+            target_notional=Decimal(target_notional),
+            requested_delta_position_qty=target - current,
+        )
+
+    @staticmethod
+    def _budget_assignment(
+        *,
+        notional_cap: str,
+        margin_budget_limit: str,
+    ) -> SleeveBudgetAssignment:
+        cap = Decimal(notional_cap)
+        return SleeveBudgetAssignment(
+            budget_profile_id="budget-profile-directional-test",
+            strategy_sleeve_id="sleeve-directional-budget-test",
+            family="directional",
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            effective_margin_budget_limit=Decimal(margin_budget_limit),
+            effective_max_symbol_notional=cap,
+            effective_notional_cap=cap,
+            effective_quote_budget_limit=cap,
+        )
+
+    def test_allocator_scales_directional_intent_without_explicit_legs(self) -> None:
+        allocator = PortfolioAllocatorV2Phase2(
+            settings=AATSSettings.model_validate(
+                {"trading_product_type": "derivatives", "margin_mode": "cross"}
+            )
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0",
+            target_qty="10",
+            target_leverage=1.0,
+        )
+        intent = self._directional_intent(
+            current_qty="0",
+            target_qty="10",
+            target_notional="1000",
+        )
+
+        scaled, snapshot = allocator._apply_budget_assignment(
+            intent=intent,
+            base_target=base_target,
+            assignment=self._budget_assignment(
+                notional_cap="250",
+                margin_budget_limit="250",
+            ),
+            allocation_id="alloc-directional-no-legs",
+        )
+
+        self.assertEqual(scaled.delta_position_qty, Decimal("2.500000000000"))
+        self.assertEqual(scaled.target_position_qty, Decimal("2.500000000000"))
+        self.assertEqual(snapshot.approved_delta_qty, Decimal("2.500000000000"))
+        self.assertEqual(snapshot.approved_notional, Decimal("250.000000000000"))
+
+    def test_allocator_produces_risk_sized_flat_directional_target_end_to_end(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "max_total_open_notional": 5000,
+            }
+        )
+        allocator = PortfolioAllocatorV2Phase2(settings=settings)
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0",
+            target_qty="0.633085311327",
+            target_leverage=5.0,
+        ).model_copy(
+            update={"target_notional": Decimal("49922.5120014707793")}
+        )
+        intent = self._directional_intent(
+            current_qty="0",
+            target_qty="0.633085311327",
+            target_notional="49922.5120014707793",
+        ).model_copy(update={"allocation_id": "alloc-directional-runtime-regression"})
+
+        allocation = allocator.allocate(
+            base_target=base_target,
+            selected_family="directional",
+            selection_reason_codes=["runtime_regression"],
+            sleeve_intents=[intent],
+            budget_assignments=[
+                self._budget_assignment(
+                    notional_cap="1250",
+                    margin_budget_limit="250",
+                )
+            ],
+        )
+
+        self.assertGreater(abs(allocation.target_position_qty), Decimal("0"))
+        self.assertLessEqual(allocation.target_notional, Decimal("1250.000001"))
+        self.assertLessEqual(
+            allocation.budget_snapshots[0].approved_notional,
+            Decimal("1250.000000000000"),
+        )
+        self.assertEqual(
+            allocation.target_position_qty,
+            allocation.budget_snapshots[0].approved_delta_qty,
+        )
+
+    def test_allocator_converts_derivatives_margin_budget_to_notional_capacity(self) -> None:
+        allocator = PortfolioAllocatorV2Phase2(
+            settings=AATSSettings.model_validate(
+                {"trading_product_type": "derivatives", "margin_mode": "cross"}
+            )
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0",
+            target_qty="10",
+            target_leverage=5.0,
+        )
+        intent = self._directional_intent(
+            current_qty="0",
+            target_qty="10",
+            target_notional="1000",
+        )
+
+        scaled, snapshot = allocator._apply_budget_assignment(
+            intent=intent,
+            base_target=base_target,
+            assignment=self._budget_assignment(
+                notional_cap="1000",
+                margin_budget_limit="100",
+            ),
+            allocation_id="alloc-directional-margin",
+        )
+
+        self.assertEqual(scaled.delta_position_qty, Decimal("5.000000000000"))
+        self.assertEqual(snapshot.approved_notional, Decimal("500.000000000000"))
+
+    def test_directional_derivatives_profile_uses_strictest_existing_risk_cap(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "max_notional_per_symbol": 100000,
+                "max_gross_notional_per_symbol": 2500,
+                "max_pending_notional_per_symbol": 1250,
+                "max_total_open_notional": 5000,
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway(
+                {"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "100")}
+            ),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0",
+            target_qty="10",
+            target_leverage=5.0,
+        )
+
+        profile = coordinator._budget_profile_for_intent(
+            base_target=base_target,
+            intent=self._directional_intent(
+                current_qty="0",
+                target_qty="10",
+                target_notional="1000",
+            ),
+        )
+
+        self.assertEqual(profile.notional_cap, Decimal("1250.000000000000"))
+        self.assertEqual(profile.quote_budget_limit, Decimal("1250.000000000000"))
+        self.assertEqual(profile.margin_budget_limit, Decimal("250.000000000000"))
+
+    def test_allocator_does_not_cap_directional_derisk_intent(self) -> None:
+        allocator = PortfolioAllocatorV2Phase2(
+            settings=AATSSettings.model_validate(
+                {"trading_product_type": "derivatives", "margin_mode": "cross"}
+            )
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="20",
+            target_qty="10",
+            target_leverage=1.0,
+        )
+        intent = self._directional_intent(
+            current_qty="20",
+            target_qty="10",
+            target_notional="1000",
+        )
+
+        scaled, snapshot = allocator._apply_budget_assignment(
+            intent=intent,
+            base_target=base_target,
+            assignment=self._budget_assignment(
+                notional_cap="100",
+                margin_budget_limit="100",
+            ),
+            allocation_id="alloc-directional-derisk",
+        )
+
+        self.assertEqual(scaled.delta_position_qty, Decimal("-10"))
+        self.assertEqual(scaled.target_position_qty, Decimal("10"))
+        self.assertFalse(snapshot.clamped)
+        self.assertIn("allocator_budget_cap_bypassed_for_derisk", snapshot.reason_codes)
+
     def test_recent_market_snapshots_fetch_each_symbol_independently(self) -> None:
         settings = AATSSettings.model_validate(
             {

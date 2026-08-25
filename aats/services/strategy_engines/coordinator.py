@@ -2086,6 +2086,8 @@ class StrategyCoordinatorService:
             allocator_base_weight = Decimal("0.80")
             hedge_priority_class = "inventory"
         else:
+            if family == "directional" and base_target.product_type == "derivatives":
+                max_notional = self._directional_derivatives_step_notional_cap()
             quote_budget_limit = max_notional
             notional_cap = max_notional
             allocator_base_weight = Decimal("1.00")
@@ -2126,6 +2128,21 @@ class StrategyCoordinatorService:
             created_at=now,
             updated_at=now,
         )
+
+    def _directional_derivatives_step_notional_cap(self) -> Decimal:
+        """Use the strictest configured positive cap for one directional step."""
+        candidates = [
+            to_decimal(self.settings.max_notional_per_symbol),
+            to_decimal(self.settings.max_gross_notional_per_symbol),
+            to_decimal(self.settings.max_pending_notional_per_symbol),
+            to_decimal(self.settings.max_total_open_notional),
+            to_decimal(self.settings.risk_max_long_notional),
+            to_decimal(self.settings.risk_max_short_notional),
+            to_decimal(self.settings.risk_max_gross_notional),
+            to_decimal(self.settings.risk_max_net_notional),
+        ]
+        positive_candidates = [value for value in candidates if value > EPSILON_DECIMAL_12]
+        return min(positive_candidates) if positive_candidates else Decimal("0")
 
     def _budget_assignment_for_intent(
         self,
