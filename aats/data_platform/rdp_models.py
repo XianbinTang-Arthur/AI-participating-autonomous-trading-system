@@ -997,7 +997,7 @@ class SilverMarketVolumeProfile15mModel(RdpBase):
     )
     dow_hod_slot = Column(Text)
     # Interaction
-    vol_weighted_tfi = Column(Numeric(14, 8))
+    vol_weighted_tfi = Column(Numeric(28, 10))
     # Cold-start diagnostic
     baseline_sample_weeks = Column(
         Integer, nullable=False, server_default=text("0"),

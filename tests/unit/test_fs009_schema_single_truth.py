@@ -152,6 +152,28 @@ def test_batch_b_migration_script_bypasses_sqlalchemy_bind_parsing() -> None:
     assert engine.driver_execution_options == [{"no_parameters": True}]
 
 
+def test_batch_b_recommendation_source_round_migration_is_registered() -> None:
+    stage = "batch_b_15_recommendation_source_round"
+
+    assert _batch_b.BATCH_B_STAGES[-1] == stage
+    sql = _batch_b._load_sql(stage)
+    assert "ADD COLUMN IF NOT EXISTS source_round_id VARCHAR(128)" in sql
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS uq_rec_round_family_tf_active" in sql
+    assert "status NOT IN ('superseded', 'rejected')" in sql
+
+    rollback = _batch_b._load_sql(stage, rollback=True)
+    assert "DROP INDEX IF EXISTS governance.uq_rec_round_family_tf_active" in rollback
+    assert "DROP COLUMN IF EXISTS source_round_id" in rollback
+
+
+def test_volume_profile_orm_matches_widened_numeric_migration() -> None:
+    from aats.data_platform.rdp_models import SilverMarketVolumeProfile15mModel
+
+    column_type = SilverMarketVolumeProfile15mModel.__table__.c.vol_weighted_tfi.type
+    assert column_type.precision == 28
+    assert column_type.scale == 10
+
+
 def test_batch_b_rejects_sql_without_one_outer_transaction_wrapper() -> None:
     engine = _FakeEngine()
     stage = _batch_b.BATCH_B_STAGES[0]

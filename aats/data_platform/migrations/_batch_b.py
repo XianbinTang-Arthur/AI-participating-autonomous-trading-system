@@ -2,7 +2,7 @@
 
 参考: docs/task/rdp_scope_expansion_detailed_design_v3.md §7
 
-Batch B 做十件事:
+Batch B 按顺序执行版本化 schema 演进:
   - batch_b_01_core_schema.sql: scope 列 + system_config + saga + heartbeat
   - batch_b_02_profile_research.sql: profile_research_runs + streak
   - batch_b_03_cost_calibration.sql: cost_calibration_runs
@@ -16,6 +16,7 @@ Batch B 做十件事:
   - batch_b_12_orderbook_payloads.sql: execution science orderbook payload sidecar
   - batch_b_13_rdp_collection_modeling_hygiene.sql: collection/modeling hygiene
   - batch_b_14_ls_ratio_1h_schedule.sql: official 1H long-short ratio bronze table
+  - batch_b_15_recommendation_source_round.sql: recommendation source round column + active uniqueness
 
 每个 stage 对应一个 rollback SQL,逆序回滚。
 
@@ -57,6 +58,7 @@ BATCH_B_STAGES: tuple[str, ...] = (
     "batch_b_12_orderbook_payloads",
     "batch_b_13_rdp_collection_modeling_hygiene",
     "batch_b_14_ls_ratio_1h_schedule",
+    "batch_b_15_recommendation_source_round",
 )
 
 
