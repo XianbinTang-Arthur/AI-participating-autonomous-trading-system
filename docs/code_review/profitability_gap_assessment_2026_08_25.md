@@ -1,7 +1,7 @@
 # AATS 从当前状态到真实收益的差距评估与落地路线
 
 > 文档状态：现行代码审查与收益就绪判断
-> 最后核对：2026-08-25 18:29 UTC
+> 最后核对：2026-08-25 18:32 UTC
 > 静态实现基线：Git `52cd026a98b073ff2d25693c38f8fe5f643688f9`
 > 模拟运行基线：`derivatives`，deployment generation
 > `52cd026a98b0-20260825T182622Z-180-19894`
@@ -126,7 +126,7 @@ critical、exception 或 traceback，正常 flat/0 决策也不再产生 WARNING
 在任何实际操作前仍须重新登录读取。
 
 预算修复的第一代部署观察产生了 25 个 position target 和 25 个 risk decision；最新部署后的
-首个 target/risk 也已正常产生。两代观察中 risk 均批准，但目标均为 flat/0，因此没有形成
+前 6 个 target/risk 也已正常产生。两代观察中 risk 均批准，但目标均为 flat/0，因此没有形成
 plan/order/fill。结论是：**修复已通过确定性测试并成功部署，但自然非零信号下的运行验收仍为
 UNKNOWN，而不是 PASS。**
 

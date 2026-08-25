@@ -45,7 +45,7 @@
   有 return series 的代表候选全部为负收益且统计失败，`representative_pass_count=0`、
   `capital_eligible=false`、holdout=`sealed_not_evaluated`；
 - 预算修复第一代部署后的 25 个 position target 均为 flat/0，25 个 risk decision 均批准；
-  最新部署后的首个 target/risk 也正常产生，但仍为 flat/0，未产生 execution plan、order
+  最新部署后的前 6 个 target/risk 也正常产生，但仍为 flat/0，未产生 execution plan、order
   intent、order 或 fill；这证明所观测窗口没有风险阻断，但自然非零信号下的预算修复仍为
   `UNKNOWN`；
 - 签名 Operator 页面显示模拟栈对账一致、当前阻断 0、活动委托 0、敞口 0、恢复资格为是；
