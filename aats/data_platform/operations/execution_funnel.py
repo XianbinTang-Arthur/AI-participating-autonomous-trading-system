@@ -41,6 +41,7 @@ SIZING_REJECTION_REASONS = frozenset(
     }
 )
 _EPSILON = Decimal("0.000000000001")
+_NOTIONAL_QUANTIZATION_TOLERANCE = Decimal("0.000001")
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,7 +343,11 @@ def evaluate_simulation_execution_funnel(
             elif stage_presence["order"]:
                 decision_reasons.add("order_observed_after_risk_rejection")
 
-        if new_risk and target_notional > normalized_cap + _EPSILON:
+        if (
+            new_risk
+            and target_notional
+            > normalized_cap + _NOTIONAL_QUANTIZATION_TOLERANCE
+        ):
             oversized_count += 1
             decision_reasons.add("new_risk_target_notional_above_cap")
 

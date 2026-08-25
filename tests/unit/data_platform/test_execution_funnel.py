@@ -191,6 +191,33 @@ def test_oversized_target_and_sizing_rejection_fail() -> None:
     assert "sizing_risk_rejection_observed" in evidence.reason_codes
 
 
+def test_sub_microunit_notional_quantization_does_not_exceed_cap() -> None:
+    rows, order = _complete_decision(
+        1,
+        target_notional="1250.00000002",
+    )
+    assert order is not None
+
+    evidence = _evaluate(event_rows=rows, order_rows=[order], minimum=1)
+
+    assert evidence.status == "PASS"
+    assert evidence.oversized_new_risk_target_count == 0
+
+
+def test_notional_above_quantization_tolerance_exceeds_cap() -> None:
+    rows, order = _complete_decision(
+        1,
+        target_notional="1250.000002",
+    )
+    assert order is not None
+
+    evidence = _evaluate(event_rows=rows, order_rows=[order], minimum=1)
+
+    assert evidence.status == "FAIL"
+    assert evidence.oversized_new_risk_target_count == 1
+    assert "new_risk_target_notional_above_cap" in evidence.reason_codes
+
+
 def test_approved_risk_requires_plan_intent_and_order() -> None:
     rows, _ = _complete_decision(
         1,

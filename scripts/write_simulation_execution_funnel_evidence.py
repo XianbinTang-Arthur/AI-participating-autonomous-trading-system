@@ -31,16 +31,25 @@ from aats.data_platform.operations.execution_funnel import (  # noqa: E402
 
 _EVENT_ROWS = text(
     """
+    WITH scoped_decisions AS (
+        SELECT DISTINCT decision_id
+        FROM event_store
+        WHERE created_at >= :window_start
+          AND created_at < :window_end
+          AND topic = 'strategy.position_target'
+          AND COALESCE(symbol, event_key) = :symbol
+          AND decision_id IS NOT NULL
+    )
     SELECT sequence_id, event_id, created_at, topic, decision_id, symbol,
            product_type, margin_mode, payload
     FROM event_store
     WHERE created_at >= :window_start
       AND created_at < :window_end
       AND topic = ANY(:topics)
-      -- Older RiskDecision rows predate event-store key-to-symbol indexing.
-      -- Their envelope key is still the authoritative target symbol, so the
-      -- fallback keeps historical deployment evidence auditable.
-      AND COALESCE(symbol, event_key) = :symbol
+      -- Scope the complete chain by its position-target decision ID.  This
+      -- recovers older RiskDecision rows whose symbol lives only in event_key
+      -- and excludes unrelated recovery fills projected during startup.
+      AND decision_id IN (SELECT decision_id FROM scoped_decisions)
     ORDER BY sequence_id
     LIMIT :row_limit
     """
@@ -52,6 +61,7 @@ _ORDER_ROWS = text(
     WHERE created_at >= :window_start
       AND created_at < :window_end
       AND symbol = :symbol
+      AND decision_id = ANY(:decision_ids)
     ORDER BY created_at, order_id
     """
 )
@@ -63,6 +73,7 @@ _FILL_ROWS = text(
     WHERE created_at >= :window_start
       AND created_at < :window_end
       AND symbol = :symbol
+      AND decision_id = ANY(:decision_ids)
     ORDER BY created_at, fill_id
     """
 )
@@ -131,8 +142,27 @@ def main(argv: list[str] | None = None) -> int:
             event_rows = connection.execute(_EVENT_ROWS, params).mappings().all()
             if len(event_rows) > args.max_events:
                 raise ValueError("execution_funnel_event_limit_exceeded")
-            order_rows = connection.execute(_ORDER_ROWS, params).mappings().all()
-            fill_rows = connection.execute(_FILL_ROWS, params).mappings().all()
+            decision_ids = sorted(
+                {
+                    str(row["decision_id"])
+                    for row in event_rows
+                    if row["topic"] == "strategy.position_target"
+                    and row["decision_id"]
+                }
+            )
+            if decision_ids:
+                scoped_params = {**params, "decision_ids": decision_ids}
+                order_rows = connection.execute(
+                    _ORDER_ROWS,
+                    scoped_params,
+                ).mappings().all()
+                fill_rows = connection.execute(
+                    _FILL_ROWS,
+                    scoped_params,
+                ).mappings().all()
+            else:
+                order_rows = []
+                fill_rows = []
     except SQLAlchemyError:
         print("ERROR: database_query_failed", file=sys.stderr)
         return 2
