@@ -1693,7 +1693,9 @@ RiskDecision symbol 只在 event key、启动恢复 fill 污染观察窗和亚�
 300 秒 post-close cooldown。根因不是 target guard 缺失，而是 Fill 热缓存重启时仅信任不完整的
 Redis index，Decision Context 无法把平仓 fill 与此前开仓生命周期关联。提交
 `ad1c68b24d8865e06ad6f57b71ffe22c24ea7e2e` 已改为启动时用 Postgres truth 重建、失败时回退 PG，
-并为当前 flat 的明确 close fill 保留冷静期锚点；运行态结论必须以该提交后的标准部署复核为准。
+并为当前 flat 的明确 close fill 保留冷静期锚点。最终标准部署的四个主进程均用 Postgres 恢复
+15 条 fill；最新自然决策恢复出真实平仓时间，并在约 444 秒后才重新开仓，超过 300 秒门禁。
+累计现场样本现为 3 个新风险订单、2 个平仓订单和 24 个 fill，仍不构成收益证明。
 
 ## 27. 尚未通过本次静态审阅确认的运行事实
 

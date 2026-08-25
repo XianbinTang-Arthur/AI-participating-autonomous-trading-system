@@ -258,8 +258,8 @@
   `UNKNOWN`，也没有任何通过收益门的候选可与这些成交绑定。
 - 2026-08-25 同一时间线发现一次完整平仓后约 17 秒重入场，违反 300 秒 post-close cooldown。
   根因是 Fill 热缓存重启时把不完整 Redis 历史当作完整真相；当前实现已增加 Postgres truth
-  hydrate、失败回退和显式 close fill 锚点。运行态仍须绑定该实现后的标准部署证据，不能只凭
-  单元测试声明关闭。
+  hydrate、失败回退和显式 close fill 锚点。最终标准部署四个主进程均完成 Postgres 对齐，后续
+  自然决策也恢复了真实平仓锚点，并在 300 秒门禁过期后才开仓；窗口内阻断样本仍需继续观察。
 - 2026-08-25 新候选预注册已把经济机制、失效条件、容量假设、Factor DSL、Gold 窗口及
   fee/slippage/funding 成本固定在结果之前，并完成 4 个唯一假设的真实 development campaign。
   四者 train/valid 成本后收益全部失败，统计通过数仍为 0，holdout 继续封存；实施任务书见

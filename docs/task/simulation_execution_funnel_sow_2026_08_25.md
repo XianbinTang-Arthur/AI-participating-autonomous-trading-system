@@ -141,8 +141,9 @@ symbol 索引缺失、启动恢复 fill 污染和亚微量化尾差误判；未�
 
 平仓后约 17 秒重入场又暴露 Fill 热缓存重启后历史不完整会漏掉 close anchor。`ad1c68b2` 已补
 Postgres truth hydrate、失败回退和显式 close fill 锚点；完整单元回归为
-`4577 passed, 30 skipped, 94 subtests passed`，运行态仍须以随后标准部署证据为准。
+`4577 passed, 30 skipped, 94 subtests passed`。最终标准部署 `1beba655` 的四个主进程均从
+Postgres 恢复 15 条 fill；最新自然决策恢复出真实平仓锚点，并在 300 秒门禁到期后才重新开仓。
 
 当前执行链实现验证和服务部署验证为 PASS，但统计门要求 100 个成熟非零目标，现只有 1，故
-漏斗运行验收仍为 UNKNOWN；两个自然订单也未绑定合格候选，不得写成“已证明模拟盈利”。详见
+漏斗运行验收仍为 UNKNOWN；累计 5 个自然订单也未绑定合格候选，不得写成“已证明模拟盈利”。详见
 [`../code_review/profitability_gap_assessment_2026_08_25.md`](../code_review/profitability_gap_assessment_2026_08_25.md)。

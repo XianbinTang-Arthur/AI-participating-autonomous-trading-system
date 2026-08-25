@@ -1,7 +1,7 @@
 # 收益证据与模拟交易就绪运行手册
 
 > 文档状态：现行操作说明
-> 最后核对：2026-08-25（当前静态实现见本文所在 HEAD；现场快照基线 `8ff96eb6530fb2cc5768fcb3398b8212b3b86e06`）
+> 最后核对：2026-08-25（当前静态实现见本文所在 HEAD；现场部署基线 `1beba655f32183cc1edc99619150f5737303c00e`）
 > 适用范围：`derivatives` 本地模拟栈、RDP 研究库、Research Factory 研究产物
 > 禁止范围：真实资金、live profile、真实订单、手工绕过部署入口
 
@@ -19,7 +19,7 @@
 | v2 复跑 | 已生成计划并提供两阶段批处理 | development 不读 holdout；完整阶段强制要求 L2 成本摘要 |
 | Campaign 统计门禁 | 已自动串联预注册、实验 return series、全试验计数、重复假设、walk-forward、bootstrap、Holm、deflated Sharpe | 历史重放 3 个和新预注册 4 个代表候选均失败，不具备资本资格 |
 | 模拟执行预算 | 已修复方向 intent 只缩审计预算、不缩 qty 的错误，并按最严格现有 cap 限制单步目标 | 已观察两条自然订单链；最强单链完整且无尺度拒绝，但成熟非零目标仅 1/100，运行验收仍是 `UNKNOWN` |
-| 平仓冷静期 | Fill 热缓存启动时以 Postgres truth 重建；失败回退数据库；明确平仓 fill 可恢复 close anchor | 现场曾发生 17 秒重入场；修复必须经标准重部署和后续自然平仓窗口复核，未验证前不升级就绪结论 |
+| 平仓冷静期 | Fill 热缓存启动时以 Postgres truth 重建；失败回退数据库；明确平仓 fill 可恢复 close anchor | 标准重部署已验证四个主进程 truth reconcile 和后续 close anchor；窗口内恰有新信号的自然阻断样本仍待积累 |
 | 一次性 holdout | 已实现 DB 唯一账本和先占用后读取协议 | 失败也消耗访问；不允许事后补登记已看过的 test 指标 |
 | L2/event 回放 | 已实现 top-5、共享深度、partial/no-fill、post-only 队列近似 | 盘口研究证据，不等于交易所撮合真值 |
 | 模拟生命周期校准 | 已实现 order/command/transition/fill 对齐 | 只接受 `paper_local`，不读取 live 凭证 |
