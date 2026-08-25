@@ -94,6 +94,7 @@ def test_historical_candidate_is_invalidated_and_gets_deterministic_v2_plan(
     assert plan.train_ratio == pytest.approx(0.6)
     assert plan.valid_ratio == pytest.approx(0.2)
     assert plan.test_ratio == pytest.approx(0.2)
+    assert plan.funding_bps == pytest.approx(0.5)
 
 
 def test_replay_plan_rejects_candidate_spec_factor_mismatch(

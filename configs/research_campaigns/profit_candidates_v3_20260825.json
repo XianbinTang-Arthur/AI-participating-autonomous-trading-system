@@ -1,0 +1,59 @@
+{
+  "campaign_id": "profit_candidates_v3_20260825",
+  "dataset_version": "v1.0",
+  "end": "2026-04-17T06:00:00+00:00",
+  "fee_bps": 5.0,
+  "funding_bps": 0.5,
+  "hypotheses": [
+    {
+      "capacity_assumption": "Hourly BTC swap bars; position changes are charged seven bps and no capacity claim is made before L2 evidence.",
+      "factor_expression": "-ZScore(Return(close, 4), 24)",
+      "falsification_condition": "Reject if either development segment has non-positive net annualized return or if campaign statistics fail after all trials are counted.",
+      "holding_period_bars": 1,
+      "hypothesis": "A four-hour price displacement that is extreme relative to the prior day mean-reverts over the next hour after explicit costs.",
+      "hypothesis_id": "short_horizon_reversal",
+      "mechanism": "Temporary price-pressure reversal",
+      "rationale": "Inventory pressure and short-lived liquidation flow can push price beyond a one-hour equilibrium before liquidity replenishes."
+    },
+    {
+      "capacity_assumption": "Hourly BTC swap bars; volume is only a coarse participation proxy and cannot establish executable size.",
+      "factor_expression": "Return(close, 8) * Rank(volume, 24)",
+      "falsification_condition": "Reject if cost-adjusted edge is non-positive, drawdown exceeds the development gate, or walk-forward and multiple-testing gates do not all pass.",
+      "holding_period_bars": 1,
+      "hypothesis": "Eight-hour directional continuation is more likely to persist for one additional hour when current volume ranks high within the prior day.",
+      "hypothesis_id": "volume_confirmed_momentum",
+      "mechanism": "Participation-confirmed momentum",
+      "rationale": "Price moves accompanied by elevated participation may reflect information arrival rather than low-liquidity noise."
+    },
+    {
+      "capacity_assumption": "Funding is an hourly aligned research field; no assumption is made about exchange settlement timing beyond the recorded cost model.",
+      "factor_expression": "-ZScore(funding_rate, 24)",
+      "falsification_condition": "Reject if low funding does not predict positive next-hour net return in both train and valid or any campaign statistical gate fails.",
+      "holding_period_bars": 1,
+      "hypothesis": "Unusually low funding marks crowded short positioning whose next-hour unwind creates a positive long-side return after costs.",
+      "hypothesis_id": "funding_crowding_reversal",
+      "mechanism": "Crowded-position unwind",
+      "rationale": "Funding extremes proxy positioning pressure; negative funding can precede short covering when the imbalance cannot deepen."
+    },
+    {
+      "capacity_assumption": "The signal uses closed hourly bars and the prior 24 highs only; bar volume does not prove fill capacity.",
+      "factor_expression": "close / Max(Ref(high, 1), 24) - 1",
+      "falsification_condition": "Reject if sparse breakouts cannot overcome seven bps of turnover cost or if stability, bootstrap, Holm, DSR, or walk-forward gates fail.",
+      "holding_period_bars": 1,
+      "hypothesis": "A close above the highest high of the previous 24 completed bars continues upward for one hour after explicit costs.",
+      "hypothesis_id": "prior_day_breakout",
+      "mechanism": "Information-driven breakout continuation",
+      "rationale": "A new daily-range close can reveal persistent information flow when the comparison excludes the current bar."
+    }
+  ],
+  "registered_at": "2026-08-25T19:00:00+00:00",
+  "research_profile": "real_factor_research",
+  "schema_version": "research_preregistered_campaign_v1",
+  "slippage_bps": 2.0,
+  "start": "2026-01-14T16:00:00+00:00",
+  "symbol": "BTC-USDT-SWAP",
+  "test_ratio": 0.2,
+  "timeframe": "1h",
+  "train_ratio": 0.6,
+  "valid_ratio": 0.2
+}

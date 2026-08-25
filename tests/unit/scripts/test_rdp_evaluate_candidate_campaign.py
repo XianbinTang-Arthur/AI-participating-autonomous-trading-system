@@ -9,7 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from scripts.rdp_evaluate_candidate_campaign import evaluate_campaign, write_campaign
+from scripts.rdp_evaluate_candidate_campaign import (
+    _planned_hypothesis_fingerprint,
+    evaluate_campaign,
+    write_campaign,
+)
 from scripts.rdp_run_candidate_v2_batch import experiment_id_for_plan
 
 
@@ -229,3 +233,26 @@ def test_campaign_outputs_are_immutable(tmp_path: Path) -> None:
     assert (output_root / "campaign_evidence.json").is_file()
     with pytest.raises(FileExistsError, match="campaign_output_exists"):
         write_campaign(summary, evidence, output_root=output_root)
+
+
+def test_planned_hypothesis_fingerprint_binds_funding_cost() -> None:
+    plan = {
+        "factor_expression": "Return(close, 1)",
+        "dataset_version": "v1.0",
+        "symbol": "BTC-USDT-SWAP",
+        "timeframe": "1h",
+        "start": "2026-01-01T00:00:00+00:00",
+        "end": "2026-04-01T00:00:00+00:00",
+        "label_horizon_bars": 1,
+        "train_ratio": 0.6,
+        "valid_ratio": 0.2,
+        "test_ratio": 0.2,
+        "fee_bps": 5.0,
+        "slippage_bps": 2.0,
+        "funding_bps": 0.5,
+    }
+    changed = dict(plan, funding_bps=-0.5)
+
+    assert _planned_hypothesis_fingerprint(plan) != _planned_hypothesis_fingerprint(
+        changed
+    )

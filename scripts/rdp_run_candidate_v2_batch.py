@@ -26,6 +26,14 @@ from aats.data_platform.research_factory.real_data import (
     ResearchFactoryExperimentConfig,
     run_research_factory_experiment,
 )
+from aats.data_platform.research_factory.preregistered_campaign import (
+    PREREGISTERED_CAMPAIGN_SCHEMA,
+    PREREGISTERED_HYPOTHESIS_CARD_SCHEMA,
+    PREREGISTERED_PLAN_FORMAT_VERSION,
+    PREREGISTERED_PLAN_TYPE,
+)
+from aats.data_platform.research_factory.proposals import FactorDSLProposal
+from aats.data_platform.research_factory.registry import factor_signature_from_expression
 
 
 def _sha256(path: Path) -> str:
@@ -53,24 +61,88 @@ def load_and_validate_plan(path: Path, *, artifact_root: Path) -> dict[str, Any]
     if plan.get("status") != "planned_not_run":
         raise ValueError("replay_plan_not_planned")
     root = artifact_root.resolve()
-    source_candidate = (root / str(plan["source_candidate_ref"])).resolve()
-    source_spec = (root / str(plan["source_experiment_spec_ref"])).resolve()
-    for source in (source_candidate, source_spec):
-        try:
-            source.relative_to(root)
-        except ValueError as exc:
-            raise ValueError("replay_plan_source_outside_artifact_root") from exc
-        if not source.is_file():
-            raise ValueError(f"replay_plan_source_missing:{source.name}")
-    if _sha256(source_candidate) != plan.get("source_candidate_sha256"):
-        raise ValueError("replay_plan_candidate_sha256_mismatch")
-    if _sha256(source_spec) != plan.get("source_experiment_spec_sha256"):
-        raise ValueError("replay_plan_spec_sha256_mismatch")
+    if plan.get("plan_type") == PREREGISTERED_PLAN_TYPE:
+        _validate_preregistered_plan(plan, root=root)
+    else:
+        _validate_historical_replay_plan(plan, root=root)
     if not str(plan.get("symbol", "")).strip() or not str(plan.get("timeframe", "")).strip():
         raise ValueError("replay_plan_market_scope_missing")
     _parse_datetime(str(plan["start"]))
     _parse_datetime(str(plan["end"]))
+    plan.setdefault("funding_bps", 0.5)
     return plan
+
+
+def _validate_historical_replay_plan(plan: Mapping[str, Any], *, root: Path) -> None:
+    source_candidate = _bound_source(
+        root,
+        plan["source_candidate_ref"],
+    )
+    source_spec = _bound_source(
+        root,
+        plan["source_experiment_spec_ref"],
+    )
+    if _sha256(source_candidate) != plan.get("source_candidate_sha256"):
+        raise ValueError("replay_plan_candidate_sha256_mismatch")
+    if _sha256(source_spec) != plan.get("source_experiment_spec_sha256"):
+        raise ValueError("replay_plan_spec_sha256_mismatch")
+
+
+def _validate_preregistered_plan(plan: dict[str, Any], *, root: Path) -> None:
+    if plan.get("format_version") != PREREGISTERED_PLAN_FORMAT_VERSION:
+        raise ValueError("preregistered_plan_format_version_mismatch")
+    manifest_path = _bound_source(root, plan["campaign_manifest_ref"])
+    proposal_path = _bound_source(root, plan["proposal_ref"])
+    card_path = _bound_source(root, plan["hypothesis_card_ref"])
+    for source, digest_key, reason in (
+        (manifest_path, "campaign_manifest_sha256", "campaign_manifest_sha256_mismatch"),
+        (proposal_path, "proposal_sha256", "proposal_sha256_mismatch"),
+        (card_path, "hypothesis_card_sha256", "hypothesis_card_sha256_mismatch"),
+    ):
+        if _sha256(source) != plan.get(digest_key):
+            raise ValueError(reason)
+    manifest = _load_mapping(manifest_path, "campaign_manifest")
+    card = _load_mapping(card_path, "hypothesis_card")
+    proposal_payload = _load_mapping(proposal_path, "proposal")
+    if manifest.get("schema_version") != PREREGISTERED_CAMPAIGN_SCHEMA:
+        raise ValueError("preregistered_campaign_manifest_schema_mismatch")
+    if card.get("schema_version") != PREREGISTERED_HYPOTHESIS_CARD_SCHEMA:
+        raise ValueError("preregistered_hypothesis_card_schema_mismatch")
+    proposal = FactorDSLProposal.from_mapping(
+        proposal_payload,
+        created_by="preregistered_campaign",
+        created_at=_parse_datetime(str(plan["created_at"])),
+    )
+    factor_expression = str(plan.get("factor_expression", ""))
+    if proposal.factor_expression != factor_expression:
+        raise ValueError("preregistered_plan_proposal_factor_mismatch")
+    if card.get("factor_expression") != factor_expression:
+        raise ValueError("preregistered_plan_card_factor_mismatch")
+    signature = factor_signature_from_expression(factor_expression)
+    if card.get("factor_signature") != signature:
+        raise ValueError("preregistered_plan_card_signature_mismatch")
+    manifest_signatures = manifest.get("factor_signatures")
+    if not isinstance(manifest_signatures, list) or signature not in manifest_signatures:
+        raise ValueError("preregistered_plan_manifest_signature_missing")
+    plan["_proposal_payload"] = proposal_payload
+
+
+def _bound_source(root: Path, ref: Any) -> Path:
+    source = (root / str(ref)).resolve()
+    try:
+        source.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("replay_plan_source_outside_artifact_root") from exc
+    if not source.is_file():
+        raise ValueError(f"replay_plan_source_missing:{source.name}")
+    return source
+
+
+def _load_mapping(path: Path, label: str) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"{label}_must_be_object")
+    return dict(payload)
 
 
 def experiment_id_for_plan(plan: Mapping[str, Any], *, phase: str) -> str:
@@ -78,7 +150,8 @@ def experiment_id_for_plan(plan: Mapping[str, Any], *, phase: str) -> str:
         raise ValueError("invalid_v2_batch_phase")
     phase_tag = "dev" if phase == "development" else "evidence"
     source = str(plan["source_experiment_id"])
-    suffix = str(plan["plan_id"]).removeprefix("v2replay_")
+    plan_id = str(plan["plan_id"])
+    suffix = plan_id.removeprefix("v2replay_").removeprefix("v2hyp_")
     safe_identifier = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
     if safe_identifier.fullmatch(source) is None:
         raise ValueError("replay_plan_source_experiment_id_unsafe")
@@ -181,6 +254,16 @@ def main(argv: list[str] | None = None) -> int:
         for plan, summary in prepared:
             experiment_id = experiment_id_for_plan(plan, phase=args.phase)
             try:
+                proposal_payload = plan.get("_proposal_payload")
+                proposal = (
+                    FactorDSLProposal.from_mapping(
+                        proposal_payload,
+                        created_by="preregistered_campaign",
+                        created_at=_parse_datetime(str(plan["created_at"])),
+                    )
+                    if isinstance(proposal_payload, Mapping)
+                    else None
+                )
                 with session_factory() as session:
                     result = run_research_factory_experiment(
                         ResearchFactoryExperimentConfig(
@@ -189,6 +272,7 @@ def main(argv: list[str] | None = None) -> int:
                             start=_parse_datetime(str(plan["start"])),
                             end=_parse_datetime(str(plan["end"])),
                             factor_expression=str(plan["factor_expression"]),
+                            proposal=proposal,
                             research_profile=(
                                 "real_factor_development"
                                 if args.phase == "development"
@@ -203,6 +287,7 @@ def main(argv: list[str] | None = None) -> int:
                             test_ratio=float(plan["test_ratio"]),
                             fee_bps=float(plan["fee_bps"]),
                             slippage_bps=float(plan["slippage_bps"]),
+                            funding_bps=float(plan["funding_bps"]),
                             execution_cost_summary_path=summary,
                             require_execution_realism=args.phase == "evidence-complete",
                             timestamp=timestamp,

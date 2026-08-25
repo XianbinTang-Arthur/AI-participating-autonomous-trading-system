@@ -57,6 +57,7 @@ class CandidateReplayPlan:
     label_horizon_bars: int
     fee_bps: float
     slippage_bps: float
+    funding_bps: float
     research_profile: str
     selection_protocol_version: str
     train_ratio: float
@@ -197,6 +198,7 @@ def build_candidate_v2_replay_plan(
         label_horizon_bars=int(label.get("horizon_bars", 0)),
         fee_bps=float(label.get("fee_bps", 0.0)),
         slippage_bps=float(label.get("slippage_bps", 0.0)),
+        funding_bps=float(label.get("funding_bps", 0.5)),
         research_profile="real_factor_research",
         selection_protocol_version=CURRENT_SELECTION_PROTOCOL,
         train_ratio=0.6,

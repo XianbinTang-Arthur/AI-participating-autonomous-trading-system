@@ -145,6 +145,7 @@ def _planned_hypothesis_fingerprint(plan: Mapping[str, Any]) -> str:
         "test_ratio": float(plan["test_ratio"]),
         "fee_bps": float(plan["fee_bps"]),
         "slippage_bps": float(plan["slippage_bps"]),
+        "funding_bps": float(plan.get("funding_bps", 0.5)),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"

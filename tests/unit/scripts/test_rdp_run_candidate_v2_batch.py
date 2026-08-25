@@ -61,6 +61,7 @@ def test_plan_validation_checks_source_hashes(tmp_path: Path) -> None:
     root, plan_path, payload = _write_plan(tmp_path)
     loaded = load_and_validate_plan(plan_path, artifact_root=root)
     assert loaded["plan_id"] == payload["plan_id"]
+    assert loaded["funding_bps"] == pytest.approx(0.5)
     (root / payload["source_candidate_ref"]).write_text("changed", encoding="utf-8")
     with pytest.raises(ValueError, match="candidate_sha256_mismatch"):
         load_and_validate_plan(plan_path, artifact_root=root)
@@ -70,6 +71,11 @@ def test_phase_is_part_of_experiment_identity() -> None:
     plan = {"source_experiment_id": "old", "plan_id": "v2replay_abc"}
     assert experiment_id_for_plan(plan, phase="development") == "old_v2_dev_abc"
     assert experiment_id_for_plan(plan, phase="evidence-complete") == "old_v2_evidence_abc"
+
+
+def test_preregistered_plan_prefix_is_removed_from_experiment_identity() -> None:
+    plan = {"source_experiment_id": "new_hypothesis", "plan_id": "v2hyp_abc"}
+    assert experiment_id_for_plan(plan, phase="development") == "new_hypothesis_v2_dev_abc"
 
 
 def test_experiment_identity_rejects_path_traversal() -> None:
