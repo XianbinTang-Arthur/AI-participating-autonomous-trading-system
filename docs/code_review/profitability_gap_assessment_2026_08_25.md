@@ -1,11 +1,11 @@
 # AATS 从当前状态到真实收益的差距评估与落地路线
 
 > 文档状态：现行代码审查与收益就绪判断
-> 最后核对：2026-08-25 18:32 UTC
-> 静态实现基线：Git `52cd026a98b073ff2d25693c38f8fe5f643688f9`
+> 最后核对：2026-08-25 18:51 UTC
+> 静态实现基线：Git `6749ea8a515fc84f8ab8b38de5790c8f5c0fc17c`
 > 模拟运行基线：`derivatives`，deployment generation
-> `52cd026a98b0-20260825T182622Z-180-19894`
-> 运行证据：`/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260825T182745833825Z-derivatives-52cd026a98b0.json`
+> `6749ea8a515f-20260825T184221Z-1957-27998`
+> 运行证据：`/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260825T184345080927Z-derivatives-6749ea8a515f.json`
 > 禁止外推：本文不构成投资建议，不证明未来收益，不授权 live profile、真实资金或真实订单。
 
 ## 1. 结论
@@ -47,7 +47,7 @@
 | 研究数据与协议 | development/valid/封存 holdout 分段、artifact fingerprint、真实试验族计数已实现 | 研究纪律基本成形 | 候选必须升级到 `paper_review`/`preapply_review` 的更高样本与成本证据门 |
 | 候选经济性 | 10 个计划中只有 3 个唯一假设有 return series；三者 train、valid 均为负，bootstrap p 值均远高于 0.05 | **明确失败** | 淘汰现有三类假设；提出有经济机制、可证伪且真正不同的新候选，不能继续微调失败候选直到“显著” |
 | 多重检验 | campaign 自动计入 10 次计划、识别 6 个预先重复计划，并执行 bootstrap、Holm、DSR、purged walk-forward | 工具已具备，结果未通过 | 新 campaign 必须继续计入全部尝试和失败项，禁止只汇报赢家 |
-| 下单前资金尺度 | 历史 517 个非零目标中 516 个同时触发多个名义额度拒绝；本轮定位为 allocator 只缩审计金额、未缩 qty | 根因已修复并部署 | 等待自然非零信号，证明同一 decision 的 target notional 不超过 1,250，且 policy/risk 不因同一尺度问题拒绝 |
+| 下单前资金尺度 | 历史 517 个非零目标中 516 个同时触发多个名义额度拒绝；本轮定位为 allocator 只缩审计金额、未缩 qty | 根因已修复并部署；不可覆盖漏斗证据已自动化 | 等待 100 个已成熟自然非零信号，证明同一 decision 的 target notional 不超过现场 cap，且 policy/risk 不因同一尺度问题拒绝 |
 | 模拟执行 | 部署后 10 个新 target 均为 flat/0；risk 均批准，但没有 plan、order intent、order 或 fill | **尚未形成运行证据** | 收集真实自然信号产生的完整 paper 生命周期；不得人工伪造业务成功或放宽风控凑成交 |
 | 成交真实性 | L2 partial/no-fill/队列近似和 paper lifecycle 校准器已有实现 | 工具可用，样本为零 | 至少 20 个匹配 paper order，并满足生命周期 100%、fill ratio MAE ≤ 0.20、均价误差 ≤ 10 bps、费用误差 ≤ 1 bps、终态 p95 ≤ 5 秒 |
 | 已实现净收益 | 当前执行订单总量只有一条历史 BLOCKED 记录，成交与已实现交易 PnL 均为 0 | **没有盈利证据** | 先获得可校准模拟成交，再形成扣除 fee、funding、slippage 后的 forward paper 净收益序列 |
@@ -125,20 +125,38 @@ critical、exception 或 traceback，正常 flat/0 决策也不再产生 WARNING
 快照显示 runtime normal、reconciliation 一致、blocker 0、敞口 0、活动委托 0；这些动态字段
 在任何实际操作前仍须重新登录读取。
 
-预算修复的第一代部署观察产生了 25 个 position target 和 25 个 risk decision；最新部署后的
-前 6 个 target/risk 也已正常产生。两代观察中 risk 均批准，但目标均为 flat/0，因此没有形成
-plan/order/fill。结论是：**修复已通过确定性测试并成功部署，但自然非零信号下的运行验收仍为
-UNKNOWN，而不是 PASS。**
+预算修复的前两代部署观察分别产生了 25 组和 6 组 target/risk；risk 均批准，但目标均为
+flat/0，因此没有形成 plan/order/fill。最新部署已运行新的漏斗证据 CLI；当前 artifact 绑定
+`6749ea8a` deployment evidence 并覆盖 8 个自然 flat/0 决策周期，结果为 `UNKNOWN`：成熟
+自然非零目标 0、订单 0、成交 0，
+`production_ready=false`、`trading_ready=false`。结论是：**修复已通过确定性测试并成功部署，
+但自然非零信号下的运行验收仍为 UNKNOWN，而不是 PASS。**
+
+### 6.4 模拟执行漏斗证据自动化
+
+提交 `6749ea8a515fc84f8ab8b38de5790c8f5c0fc17c` 新增只读、不可覆盖的漏斗 evaluator/CLI：
+
+- 绑定 deployment evidence 的 SHA-256、commit、generation 与生成时间；
+- 按 decision ID 串联 allocation、target、policy、risk、plan、intent、order、fill；
+- 只统计经过 settle delay 的自然非零 target，重复事件不能充样本；
+- 100 个样本不足为 `UNKNOWN`，超 cap、尺度拒绝或链路矛盾为 `FAIL`；
+- 数据库 transaction 强制 read-only，输出不含连接串和原始 payload；
+- 无论结果如何都不产生 live 或资金授权。
+
+当前现场证据位于
+`/root/aats/deploy/wsl2-dev/runtime/execution-funnel-evidence/6749ea8a515f-20260825T1850Z.json`，
+文件 SHA-256 为 `9aa131ff7a54ce0f027037900c62673e2934ce007281b006ddff5e6a4199f0c4`，
+证据 fingerprint 为 `funnel_070e6cf3f0fdd32bec78537ba2709b54a21fe47172d41af1c863b6ad14bbefa3`。
 
 ## 7. 后续可落地工作包与硬验收门
 
 以下顺序是依赖关系，不应并行跳过前置门。
 
-### P0：关闭模拟执行漏斗（当前进行中）
+### P0：关闭模拟执行漏斗（证据工具已完成，样本积累进行中）
 
-工作：持续只读观察自然非零 target，按 decision ID 串联 allocation、target、policy、risk、plan、
-intent、order、fill；增加可重复的漏斗报告脚本，按部署 generation 输出数量、notional、拒绝原因和
-生命周期完整性。
+工作：持续只读观察自然非零 target；现有 CLI 已按 decision ID 串联 allocation、target、policy、
+risk、plan、intent、order、fill，并按部署 generation 输出数量、notional、拒绝原因和链路完整性。
+后续只需以新的不可覆盖输出周期复跑，不能修改旧 artifact。
 
 通过条件：
 

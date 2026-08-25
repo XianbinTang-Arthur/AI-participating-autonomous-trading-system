@@ -145,6 +145,24 @@ portfolio allocation -> position target -> policy -> risk
 放宽上限。默认校准门为：至少 20 个匹配订单、生命周期有效率 100%、fill ratio MAE ≤ 0.20、
 均价误差均值 ≤ 10 bps、费用误差均值 ≤ 1 bps、command-to-terminal p95 ≤ 5 秒。
 
+用标准 deployment evidence 锁定观察起点，在已经注入 `AATS_DATABASE_URL` 的受控模拟运行环境
+执行只读漏斗报告：
+
+```bash
+python scripts/write_simulation_execution_funnel_evidence.py \
+  --deployment-evidence <deployment-evidence.json> \
+  --output deploy/wsl2-dev/runtime/execution-funnel-evidence/<generation>.json \
+  --max-new-risk-notional <现场最严格正值 cap> \
+  --min-nonzero-targets 100 \
+  --settle-delay-seconds 30
+```
+
+脚本不读 `.env`，数据库 transaction 强制 read-only，输出不可覆盖，并绑定 deployment evidence
+的 SHA-256、deployed commit、generation 和生成时间。`PASS` 退出 0；结构/尺度/链路失败写
+`FAIL` 并退出 1；自然非零 target 不足写 `UNKNOWN` 并退出 2。重复 target、超 cap、尺度型
+风险拒绝、risk 批准后缺 plan/intent/order、risk 拒绝后仍出现订单或孤儿 fill 均不能通过。
+Artifact 仍固定 `production_ready=false`、`trading_ready=false`。
+
 ## 6. 一次性 holdout
 
 账本唯一键是 `(candidate_id, holdout_content_fingerprint)`。候选专用 evaluator 必须先校验

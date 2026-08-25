@@ -1,7 +1,7 @@
 # 收益可信度整改验收矩阵
 
 > 文档状态：现行测试说明
-> 最后核对：2026-08-25（实现与模拟部署基线 `52cd026a98b073ff2d25693c38f8fe5f643688f9`）
+> 最后核对：2026-08-25（实现与模拟部署基线 `6749ea8a515fc84f8ab8b38de5790c8f5c0fc17c`）
 > 边界：本文定义可执行验收，不把未运行的项目标记为通过。
 
 | 层级 | 验收项 | 通过条件 | 失败/未知处理 |
@@ -16,6 +16,7 @@
 | 数据 | collector/eligibility | heartbeat、Silver 最新行和窗口门禁现场通过 | `UNKNOWN`/NO-GO |
 | 统计 | 完整 campaign | 全计划计数、重复假设折叠，不使用 test，walk-forward/bootstrap/Holm/DSR 全通过 | candidate 不合格；禁止打开 holdout |
 | 漏斗 | 模拟预算与风险 | 自然非零 target 不超过现场最严格 cap，且同 decision 全链可追踪 | `UNKNOWN`/修复尺度，不放宽风险 |
+| 漏斗 | 不可覆盖证据 | 绑定健康 deployment；≥100 个成熟非零 target；无超 cap、尺度拒绝、阶段断链、拒绝后订单或孤儿 fill | `UNKNOWN`/`FAIL`，production/trading 固定 false |
 | 成交 | L2 + paper calibration | 窗口无缺口，生命周期来源和误差门通过 | candidate 不合格 |
 | OOS | one-time holdout | claim 先于读取、fingerprint 一致、第二次拒绝 | 保留失败访问 |
 | 参数 | generation | 所有 role prepare/commit/readback 精确匹配 | FAILED/ROLLBACK_REQUIRED |
@@ -24,30 +25,34 @@
 
 ## 现场验收快照（非持续状态证明）
 
-下列结论只对应 2026-08-25 18:15--18:31 UTC、实现基线 `52cd026a` 的本地
+下列结论只对应 2026-08-25 18:30--18:51 UTC、实现基线 `6749ea8a` 的本地
 `derivatives` 模拟栈；容器、账户、交易所和数据新鲜度会随时间变化，后续测试必须重新生成
 证据，不得引用本节代替现场核验。
 
-- 全量单元回归：`4551 passed, 30 skipped, 94 subtests passed`；Ruff 通过；
+- 全量单元回归：`4559 passed, 30 skipped, 94 subtests passed`；Ruff 通过；
 - 已部署 decision 容器在显式执行 managed-profile 注入后读取到 `derivatives`，现场最严格
   单步 cap 为 1,250；无 legs intent 的 10 × 0.25 缩放结果为 2.5，断言通过；
 - 标准部署证据：
-  `/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260825T182745833825Z-derivatives-52cd026a98b0.json`；
+  `/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260825T184345080927Z-derivatives-6749ea8a515f.json`；
 - 七个必需应用容器均为 `running/healthy`、重启计数为 0，最近 15 分钟无
   `ERROR`/`CRITICAL`/未解析 traceback；
-- 2026-08-25 18:15--18:30 UTC 微观结构窗口现场重算成功：BBO 762、books5 1359、
-  trades 7196、OI 72、liquidations 2，四类数据 lineage 使用同一 `ingest_run_id`；
+- 2026-08-25 18:30--18:45 UTC 微观结构窗口现场重算成功：BBO 756、books5 1323、
+  trades 6296、OI 69、liquidations 0（允许稀疏），四类数据 lineage 使用同一 `ingest_run_id`；
 - collector heartbeat SHA-256 为
-  `097104361c9ea7705d0f32540cd13ad6ca499ed1eeb009daed8202f1ef4d306c`；窗口资格证据
-  fingerprint 为 `fdd268122c1125bd5b29ea2133aa79c741a0acc1d29a010605b2c9507a659e32`，
+  `fc38aa69b92f264fa83f788bcc65d8c86939040e2944734aa2c2c97d4d919ca9`；窗口资格证据
+  fingerprint 为 `ec14f9b61b6d35a0065e13c8bd6a1061a69d170b2f81ab4e21b76fc4bd7b4429`，
   现场结果为 `eligible_for_research=true`、`reason_codes=[]`；
 - development campaign 计入全部 10 个计划，预先识别 4 个唯一假设与 6 个重复计划；3 个
   有 return series 的代表候选全部为负收益且统计失败，`representative_pass_count=0`、
   `capital_eligible=false`、holdout=`sealed_not_evaluated`；
-- 预算修复第一代部署后的 25 个 position target 均为 flat/0，25 个 risk decision 均批准；
-  最新部署后的前 6 个 target/risk 也正常产生，但仍为 flat/0，未产生 execution plan、order
-  intent、order 或 fill；这证明所观测窗口没有风险阻断，但自然非零信号下的预算修复仍为
-  `UNKNOWN`；
+- 预算修复前两代部署观察分别产生 25 组和 6 组 target/risk，均被 risk 批准但均为 flat/0，
+  未产生 execution plan、order intent、order 或 fill；这证明这些窗口没有风险阻断，但自然
+  非零信号下的预算修复仍为 `UNKNOWN`；
+- 新漏斗 CLI 的当前现场 artifact 为
+  `/root/aats/deploy/wsl2-dev/runtime/execution-funnel-evidence/6749ea8a515f-20260825T1850Z.json`，
+  SHA-256=`9aa131ff7a54ce0f027037900c62673e2934ce007281b006ddff5e6a4199f0c4`；
+  它绑定当前 deployment 并覆盖 8 个自然 flat/0 决策周期，结果为 `UNKNOWN`，成熟非零目标、
+  订单、成交均为 0，两个 readiness 布尔值固定 false；
 - 签名 Operator 页面显示模拟栈对账一致、当前阻断 0、活动委托 0、敞口 0、恢复资格为是；
   同页仍明确暴露真实资金报单路径未知、试盘守护未配置，因此不构成实盘或盈利证明；
 - 上一代 WARNING 主要是 dev HTTP/insecure-cookie 的模拟环境声明，以及 flat/0 target 的

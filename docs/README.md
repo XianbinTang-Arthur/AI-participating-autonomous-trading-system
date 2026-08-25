@@ -246,6 +246,12 @@
   allocator 预算只缩金额不缩 qty 的问题；代码与部署已通过，但部署后首批 25 个自然目标均为
   flat/0，订单/成交运行证据仍为 `UNKNOWN`。正式 NO-GO 和后续硬门见
   [`code_review/profitability_gap_assessment_2026_08_25.md`](code_review/profitability_gap_assessment_2026_08_25.md)。
+- 2026-08-25 模拟执行漏斗又新增绑定 deployment evidence 的只读不可覆盖报告：只有至少
+  100 个已成熟自然非零 target 且不存在超 cap、尺度拒绝或阶段矛盾才可 PASS；当前现场
+  证据覆盖 8 个自然 flat/0 决策周期，因非零样本为 0 正确输出 `UNKNOWN`，不会被包装成成交
+  或盈利成功。命令与退出码见
+  [`operations/profit_readiness_runbook.md`](operations/profit_readiness_runbook.md)，实现与证据边界见
+  [`code_review/profitability_gap_assessment_2026_08_25.md`](code_review/profitability_gap_assessment_2026_08_25.md)。
 
 ## 8. 易漂移事实与代码真源
 

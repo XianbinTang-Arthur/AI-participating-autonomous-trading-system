@@ -1656,7 +1656,7 @@ Phase 3W 对 Phase 3A–3V 的叠加候选重新进行入口到执行/部署的�
 四进程、NATS/Redis、恢复、模拟交易所或持续日志健康。详见
 [`../../audit/full_system_2026_08_24/43-phase3w-post-audit-full-change-review.md`](../../audit/full_system_2026_08_24/43-phase3w-post-audit-full-change-review.md)。
 
-### 26.18 收益证据 campaign 已落地，当前候选明确失败
+### 26.18 收益证据 campaign 与执行漏斗证据已落地，当前候选明确失败
 
 提交 `d026bc19455f2e6a21e0695b5e98294d930db9dc` 将每次 development 实验的 train/valid
 净收益序列与 metrics 绑定，并以完整计划族自动执行重复假设识别、block bootstrap、Holm、
@@ -1668,6 +1668,12 @@ qty 分裂，以及衍生品 margin/notional 量纲错误。当前 derivatives �
 首批 25 个 target 均为 flat/0，risk 均批准，但没有 plan/order/fill。因此代码修复与部署为
 PASS，自然非零信号运行验收仍为 UNKNOWN，真实收益仍为 NO-GO。量化差距、后续阶段与硬门见
 [`profitability_gap_assessment_2026_08_25.md`](profitability_gap_assessment_2026_08_25.md)。
+
+提交 `6749ea8a515fc84f8ab8b38de5790c8f5c0fc17c` 进一步把上述人工 SQL 观察收口为不可覆盖的
+只读漏斗证据：绑定健康 deployment 的 SHA/commit/generation，以 settle delay 后的唯一
+decision 为样本，自动识别超 cap、尺度型风险拒绝、阶段断链、拒绝后订单和孤儿成交。当前现场
+artifact 覆盖 8 个自然 flat/0 决策周期，因成熟自然非零目标为 0 正确输出 `UNKNOWN`，并固定
+`production_ready=false`、`trading_ready=false`。
 
 ## 27. 尚未通过本次静态审阅确认的运行事实
 
