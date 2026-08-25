@@ -1,7 +1,7 @@
 # 候选收益证据 Campaign 自动化 SOW
 
-> 文档状态：实施中任务书
-> 最后核对：2026-08-25（起始 HEAD `cd0e4daa`）
+> 文档状态：已实施任务书
+> 最后核对：2026-08-25（起始 HEAD `cd0e4daa`；实现提交 `d026bc19455f2e6a21e0695b5e98294d930db9dc`）
 > 核对范围：Research Factory v2 development 实验、候选回放计划、统计证据与测试契约
 > 运行时边界：本任务只处理研究开发段证据，不读取封存 test/holdout，不写运行参数，
 > 不提交订单，不解除任何 live profile 的失败关闭门禁，也不承诺盈利。
@@ -145,3 +145,10 @@ CLI 标准输出只给出输出路径、SHA、计划数、唯一假设数、代�
 - 输出不可覆盖、无秘密、无数据库/参数/订单副作用；
 - Ruff、完整 unit、最窄 WSL2 集成/运行验收通过，或对任何环境阻塞给出准确证据；
 - live profile 继续失败关闭，结果不得声称资本资格或可盈利。
+
+### 实施结果
+
+本任务已按实现提交完成。WSL2 development campaign 实际计入 10 个计划、预先识别 4 个
+唯一假设与 6 个重复计划；其中 3 个代表候选具备 return series，统计通过数为 0，
+`capital_eligible=false`，holdout 保持 `sealed_not_evaluated`。当前结论与后续动作见
+[`../code_review/profitability_gap_assessment_2026_08_25.md`](../code_review/profitability_gap_assessment_2026_08_25.md)。

@@ -1,7 +1,7 @@
 # 收益证据与模拟交易就绪运行手册
 
 > 文档状态：现行操作说明
-> 最后核对：2026-08-25（实现基线 `a658164134101f62617865160105ef35d57328f9`）
+> 最后核对：2026-08-25（实现基线 `0762a4aeed87075b9001717383b9565416c7271b`）
 > 适用范围：`derivatives` 本地模拟栈、RDP 研究库、Research Factory 研究产物
 > 禁止范围：真实资金、live profile、真实订单、手工绕过部署入口
 
@@ -17,7 +17,8 @@
 | 微观结构资格 | 已实现 15 分钟窗口门禁 | 连续频道满足样本、完整性和 lineage 后才可用于研究 |
 | 历史候选资金资格 | 已完成确定性审计 | 旧 `benchmark_segment=test` 等产物全部不可作为资金证据 |
 | v2 复跑 | 已生成计划并提供两阶段批处理 | development 不读 holdout；完整阶段强制要求 L2 成本摘要 |
-| 统计门禁 | 已实现 walk-forward、bootstrap、Holm、deflated Sharpe | 只证明输入收益序列通过指定统计规则 |
+| Campaign 统计门禁 | 已自动串联实验 return series、全试验计数、重复假设、walk-forward、bootstrap、Holm、deflated Sharpe | 本次 3 个可评估代表候选全部失败，不具备资本资格 |
+| 模拟执行预算 | 已修复方向 intent 只缩审计预算、不缩 qty 的错误，并按最严格现有 cap 限制单步目标 | 确定性测试通过；部署后尚未出现自然非零信号，运行验收仍是 `UNKNOWN` |
 | 一次性 holdout | 已实现 DB 唯一账本和先占用后读取协议 | 失败也消耗访问；不允许事后补登记已看过的 test 指标 |
 | L2/event 回放 | 已实现 top-5、共享深度、partial/no-fill、post-only 队列近似 | 盘口研究证据，不等于交易所撮合真值 |
 | 模拟生命周期校准 | 已实现 order/command/transition/fill 对齐 | 只接受 `paper_local`，不读取 live 凭证 |
@@ -86,7 +87,22 @@ timeframe 不一致都会停止。两个阶段都不会写 active parameters 或
 
 ## 5. 统计、L2 与模拟校准
 
-统计输入只能使用 development/OOS fold 收益，并包含真实试验族与 trial count：
+统计输入只能使用 development/OOS fold 收益，并包含真实试验族与 trial count。完整候选族应优先
+使用 campaign 命令，从对应实验的不可变 return-series artifact 自动推导 p 值：
+
+```bash
+python scripts/rdp_evaluate_candidate_campaign.py \
+  --output-root artifacts/research/research_factory/campaigns/<campaign_id> \
+  --replications 2000 \
+  --seed 7
+```
+
+输出目录不可预先存在。命令必须在所有 development 实验结束后运行；没有 return series 的计划
+仍以失败试验计入，不得从 plan root 删除。输出中的 `representative_pass_count=0`、任一代表候选
+失败或 `capital_eligible=false` 都意味着停止后续 L2/holdout 流程。本次现场结果见
+[`../code_review/profitability_gap_assessment_2026_08_25.md`](../code_review/profitability_gap_assessment_2026_08_25.md)。
+
+旧的单候选 CLI 保留兼容，只能用于诊断已经构造好的输入，不能替代完整 campaign：
 
 ```bash
 python scripts/rdp_evaluate_candidate_statistics.py \
@@ -113,6 +129,21 @@ python scripts/rdp_calibrate_l2_against_paper.py \
 
 校准只接受只读连接和 `source_system=paper_local`。状态链错误、submit 未 ACK、fill 数量/状态
 不一致、来源错误或误差超限均失败。
+
+### 5.1 模拟执行漏斗
+
+每次部署后必须按同一个 `decision_id` 串联以下事实：
+
+```text
+portfolio allocation -> position target -> policy -> risk
+  -> execution plan -> order intent -> order state -> fill
+```
+
+空仓新增风险的名义目标不得超过当前 profile 所有正值额度中的最小值。当前 derivatives 模拟
+配置下该值为 1,250，但运行检查必须读取现场配置，不能永久写死该数字。flat/0 target 只证明
+系统选择观望；它不能作为预算缩放、订单或成交样本。风险拒绝必须保留原因，严禁为凑成交数
+放宽上限。默认校准门为：至少 20 个匹配订单、生命周期有效率 100%、fill ratio MAE ≤ 0.20、
+均价误差均值 ≤ 10 bps、费用误差均值 ≤ 1 bps、command-to-terminal p95 ≤ 5 秒。
 
 ## 6. 一次性 holdout
 
@@ -177,3 +208,7 @@ python scripts/write_trading_readiness_evidence.py \
 不完整、校准来源不是 paper、holdout 已访问、worker readback 缺失、故障证据靠人工断言、
 reconciliation 非 normal、Kill Switch 代次/许可不一致或 live profile 被意外注册时，立即停止。
 保留错误证据，不修改为 PASS，不使用 override。
+
+当前项目到真实收益的逐层差距、完成顺序和 NO-GO 结论以
+[`../code_review/profitability_gap_assessment_2026_08_25.md`](../code_review/profitability_gap_assessment_2026_08_25.md)
+为准；该评估仍不能替代每次操作前的现场检查。

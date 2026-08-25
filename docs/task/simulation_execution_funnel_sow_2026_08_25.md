@@ -1,7 +1,7 @@
 # 模拟盘执行漏斗预算一致性整改 SOW
 
-> 文档状态：实施中任务书  
-> 最后核对：2026-08-25（起始 HEAD `d026bc19`）  
+> 文档状态：已实施、待自然信号运行验收的任务书
+> 最后核对：2026-08-25（起始 HEAD `d026bc19`；实现提交 `0762a4aeed87075b9001717383b9565416c7271b`）
 > 核对范围：方向策略 sleeve、Portfolio Allocator v2、衍生品风险额度及 derivatives 模拟盘  
 > 运行时边界：只修复本地 derivatives 模拟栈的预算一致性；不提高风险上限，不启动 live profile，
 > 不接触真实资金，也不把模拟成交解释为盈利证明。
@@ -117,3 +117,11 @@ simulation 验收，且不因此解除 live 门禁。
 - Ruff、完整 unit 和最窄相关测试通过；
 - 标准部署脚本完成 derivatives 模拟部署，容器健康；
 - 实际订单/成交只按观测结果陈述，若仍被其他门禁阻塞则准确列出原因。
+
+### 实施结果
+
+代码、单元回归和 derivatives 标准部署已完成。部署后的首批 25 个 position target 均为
+flat/0，25 个 risk decision 均批准，未产生 plan/order/fill。因此预算缩放的确定性实现验证为
+PASS，服务部署验证为 PASS，自然非零信号下的执行漏斗运行验证仍为 UNKNOWN。不得将本状态
+写成“已完成模拟成交”。详见
+[`../code_review/profitability_gap_assessment_2026_08_25.md`](../code_review/profitability_gap_assessment_2026_08_25.md)。

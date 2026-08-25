@@ -2,7 +2,7 @@
 
 > 文档性质：当前实现说明、代码导航、运行与安全边界、维护手册
 > 原始全景审阅基线：Git `be9179ead5be6aba22fbe94e3baf72b9f46eedc3`（`main`，2026-05-19）
-> 整改覆盖层最后复核：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；Phase 3A–3W 整改分支，以本文档所在 HEAD 为准）
+> 整改覆盖层最后复核：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；Phase 3A–3W 与收益证据/模拟漏斗整改，以本文档所在 HEAD 为准）
 > 适用边界：正文原始全景数量仍是带基线的静态快照；2026-08-24/25 明确标注的 FS 整改段描述当前分支代码，不证明任何 live runtime 状态
 > 适用对象：重新接手项目的维护者、代码审阅者、交易与风控负责人、Operator
 > 事实优先级：固定行为以当前可执行代码为准；有效运行值以现场 runtime/数据库为准；自动化测试用于交叉验证；历史设计文档仅作背景
@@ -29,7 +29,7 @@ AATS（AI Participating Autonomous Trading System）不是一个简单的“策�
 5. **成交是财务投影的核心事实输入。** `FillEvent` 驱动组合、余额、费用、已实现盈亏、lot、ledger、settlement 与 reconciliation；费用在系统内按正成本记录，并从余额/盈亏扣除。
 6. **四进程运行依赖 NATS 与 Redis。** exchange-coupled 的四进程模式若仍使用纯内存事件总线或纯内存热状态，启动会失败，而不是带着错误拓扑继续运行。
 7. **RDP 的研究结论默认不能直接改实盘。** Research Factory 明确禁止 runtime mutation、active parameter write、runtime config write 和 OKX write；研究产物先形成证据、verdict、recommendation，再进入审批、gate、发布和观察链路。
-8. **当前代码与若干旧文档存在漂移。** Phase 3Q 已把失效的 `scripts/run_local.py` 收口为明确迁移失败入口；Phase 3R 又修复 replay short-bias gate，并重写已漂移的参数映射参考；Phase 3S 增加基础 CI/warning gate，Phase 3T 再加入 Python hashed lock 与外部镜像 digest，但远端 required check、integration 和完整供应链扫描仍未启用；本次新增三张收益治理表后，RDP ORM 元数据是 81 张表；JetStream 主事件流当前代码默认 1 天而部分旧注释仍写 7 天。具体见第 26 章。
+8. **当前代码与若干旧文档存在漂移。** Phase 3Q 已把失效的 `scripts/run_local.py` 收口为明确迁移失败入口；Phase 3R 又修复 replay short-bias gate，并重写已漂移的参数映射参考；Phase 3S 增加基础 CI/warning gate，Phase 3T 再加入 Python hashed lock 与外部镜像 digest，但远端 required check、integration 和完整供应链扫描仍未启用；本次新增三张收益治理表后，RDP ORM 元数据是 81 张表；JetStream 主事件流当前代码默认 1 天而部分旧注释仍写 7 天。最新收益复核还证明本轮 3 个可评估代表候选全部负收益，当前项目不能因模拟部署健康而被描述为“接近盈利上线”。具体见第 26 章与[真实收益差距评估](profitability_gap_assessment_2026_08_25.md)。
 
 ## 1. 文档范围、方法与可信边界
 
@@ -1655,6 +1655,19 @@ Phase 3W 对 Phase 3A–3V 的叠加候选重新进行入口到执行/部署的�
 `4423 passed, 30 skipped, 94 subtests passed`。这仍是 Windows 静态/隔离证据，不证明 WSL2
 四进程、NATS/Redis、恢复、模拟交易所或持续日志健康。详见
 [`../../audit/full_system_2026_08_24/43-phase3w-post-audit-full-change-review.md`](../../audit/full_system_2026_08_24/43-phase3w-post-audit-full-change-review.md)。
+
+### 26.18 收益证据 campaign 已落地，当前候选明确失败
+
+提交 `d026bc19455f2e6a21e0695b5e98294d930db9dc` 将每次 development 实验的 train/valid
+净收益序列与 metrics 绑定，并以完整计划族自动执行重复假设识别、block bootstrap、Holm、
+deflated Sharpe 和 purged walk-forward。2026-08-25 WSL2 实际 campaign 计入 10 个计划；
+3 个具备 return series 的代表候选全部为负收益、统计通过数为 0，holdout 未读取。
+
+提交 `0762a4aeed87075b9001717383b9565416c7271b` 又修复方向 intent 的 allocator 预算金额与
+qty 分裂，以及衍生品 margin/notional 量纲错误。当前 derivatives 模拟栈已按标准入口部署；
+首批 25 个 target 均为 flat/0，risk 均批准，但没有 plan/order/fill。因此代码修复与部署为
+PASS，自然非零信号运行验收仍为 UNKNOWN，真实收益仍为 NO-GO。量化差距、后续阶段与硬门见
+[`profitability_gap_assessment_2026_08_25.md`](profitability_gap_assessment_2026_08_25.md)。
 
 ## 27. 尚未通过本次静态审阅确认的运行事实
 

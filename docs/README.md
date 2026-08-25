@@ -1,6 +1,6 @@
 # AATS 文档地图与适用边界
 
-最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；包含 Phase 3A–3W 整改提交候选）
+最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；包含 Phase 3A–3W 与收益证据/模拟漏斗整改，以本文档所在 HEAD 为准）
 
 本页解决一个长期问题：仓库同时保存当前规范、专题参考、历史设计、审查报告、任务书和一次性观察记录。文件仍在仓库中，不代表它描述当前行为。
 
@@ -46,6 +46,7 @@
 | [上线前本地测试指南](testing/README.md) | 现行操作说明 | 本地静态、单元、场景、WSL2 集成、模拟运行与现场门 |
 | [文档治理规范](DOCUMENTATION_GOVERNANCE.md) | 现行约束 | 放置、命名、状态、复核、迁移和验收规则 |
 | [文档纠错审计报告](code_review/DOCUMENTATION_AUDIT.md) | 现行审计记录 | 本轮纠错范围、代码事实、验证方法与未改代码风险 |
+| [真实收益差距评估与落地路线](code_review/profitability_gap_assessment_2026_08_25.md) | 现行代码审查与收益判断 | 当前候选、模拟执行、统计/成交/前向/live 门禁的实际差距与实施顺序 |
 | [收益证据与模拟交易就绪运行手册](operations/profit_readiness_runbook.md) | 现行操作说明 | 公共微观结构、v2 候选、L2、holdout、参数代次、故障矩阵和 readiness |
 | [收益可信度整改验收矩阵](testing/profit_readiness_acceptance.md) | 现行测试说明 | 静态、单元、WSL2、模拟运行及明确 NO-GO 边界 |
 
@@ -239,6 +240,12 @@
   并删除当前 Compose 注释中的手工运维误导。Windows 严格全量单测为
   `4423 passed, 30 skipped, 94 subtests passed`；WSL2 集成和模拟栈运行事实仍须现场验证。
   详见 [`../audit/full_system_2026_08_24/43-phase3w-post-audit-full-change-review.md`](../audit/full_system_2026_08_24/43-phase3w-post-audit-full-change-review.md)。
+- 2026-08-25 收益证据整改已把 development return series、完整 campaign、全试验计数、
+  重复假设、bootstrap/Holm/DSR 串成不可覆盖证据链。实际 10 个计划中仅 3 个代表候选
+  具备 return series，三者全部负收益且统计失败，holdout 正确保持封存。模拟漏斗另修复
+  allocator 预算只缩金额不缩 qty 的问题；代码与部署已通过，但部署后首批 25 个自然目标均为
+  flat/0，订单/成交运行证据仍为 `UNKNOWN`。正式 NO-GO 和后续硬门见
+  [`code_review/profitability_gap_assessment_2026_08_25.md`](code_review/profitability_gap_assessment_2026_08_25.md)。
 
 ## 8. 易漂移事实与代码真源
 

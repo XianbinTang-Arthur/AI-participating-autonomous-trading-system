@@ -1,7 +1,7 @@
 # 收益可信度整改验收矩阵
 
 > 文档状态：现行测试说明
-> 最后核对：2026-08-25（实现基线 `a658164134101f62617865160105ef35d57328f9`）
+> 最后核对：2026-08-25（实现基线 `0762a4aeed87075b9001717383b9565416c7271b`，另含本文档所在 HEAD 的日志降噪改动）
 > 边界：本文定义可执行验收，不把未运行的项目标记为通过。
 
 | 层级 | 验收项 | 通过条件 | 失败/未知处理 |
@@ -14,7 +14,8 @@
 | 研究 | 历史审计 | 所有旧候选 `capital_eligible=false` | 禁止引用旧结果 |
 | 研究 | v2 dry-run | 源 SHA/协议通过，零 DB/holdout/参数写 | 修复计划或源漂移 |
 | 数据 | collector/eligibility | heartbeat、Silver 最新行和窗口门禁现场通过 | `UNKNOWN`/NO-GO |
-| 统计 | walk-forward/多重检验 | 不使用 test，独立门全部通过 | candidate 不合格 |
+| 统计 | 完整 campaign | 全计划计数、重复假设折叠，不使用 test，walk-forward/bootstrap/Holm/DSR 全通过 | candidate 不合格；禁止打开 holdout |
+| 漏斗 | 模拟预算与风险 | 自然非零 target 不超过现场最严格 cap，且同 decision 全链可追踪 | `UNKNOWN`/修复尺度，不放宽风险 |
 | 成交 | L2 + paper calibration | 窗口无缺口，生命周期来源和误差门通过 | candidate 不合格 |
 | OOS | one-time holdout | claim 先于读取、fingerprint 一致、第二次拒绝 | 保留失败访问 |
 | 参数 | generation | 所有 role prepare/commit/readback 精确匹配 | FAILED/ROLLBACK_REQUIRED |
@@ -23,28 +24,35 @@
 
 ## 现场验收快照（非持续状态证明）
 
-下列结论只对应 2026-08-25 17:17--17:18 UTC、实现基线 `a6581641` 的本地
+下列结论只对应 2026-08-25 18:07--18:17 UTC、实现基线 `0762a4ae` 的本地
 `derivatives` 模拟栈；容器、账户、交易所和数据新鲜度会随时间变化，后续测试必须重新生成
 证据，不得引用本节代替现场核验。
 
-- 全量单元回归：`4540 passed, 30 skipped, 94 subtests passed`；Ruff 通过；
+- 全量单元回归：`4551 passed, 30 skipped, 94 subtests passed`；Ruff 通过；
 - 标准部署证据：
-  `/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260825T171727161865Z-derivatives-a65816413410.json`；
+  `/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260825T180738016567Z-derivatives-0762a4aeed87.json`；
 - 七个必需应用容器均为 `running/healthy`、重启计数为 0，最近 15 分钟无
   `ERROR`/`CRITICAL`/未解析 traceback；
-- 2026-08-25 17:00 UTC 微观结构窗口在新聚合代码下重算成功：BBO 782、books5 1387、
-  trades 20375、OI 80、liquidations 15，四类数据 lineage 使用同一 `ingest_run_id`；
+- 2026-08-25 18:00--18:15 UTC 微观结构窗口现场重算成功：BBO 779、books5 1382、
+  trades 12082、OI 72、liquidations 7，四类数据 lineage 使用同一 `ingest_run_id`；
 - collector heartbeat SHA-256 为
-  `daef817b8b2bd226020912ab2dc29796ac433cf6e23ff4291154cf6c995c3771`；窗口资格证据
-  SHA-256 为 `05b8227a285886c82598e78b4d14b5e2d52c4caae7b46d3d990e596857b0a745`，
+  `6fb70a9d706a67d6843b96e004fa365d6f09f7e9c87e3805f3b970fc749a35a3`；窗口资格证据
+  fingerprint 为 `e0edd0b985bd82eb432b7f3e7f4587234ab2fbeababe122a8240419db8cdc3fa`，
   现场结果为 `eligible_for_research=true`、`reason_codes=[]`；
+- development campaign 计入全部 10 个计划，预先识别 4 个唯一假设与 6 个重复计划；3 个
+  有 return series 的代表候选全部为负收益且统计失败，`representative_pass_count=0`、
+  `capital_eligible=false`、holdout=`sealed_not_evaluated`；
+- 部署后的首批 25 个 position target 均为 flat/0，25 个 risk decision 均批准，未产生
+  execution plan、order intent、order 或 fill；这证明当前窗口没有风险阻断，但自然非零信号下
+  的预算修复仍为 `UNKNOWN`；
 - 签名 Operator 页面显示模拟栈对账一致、当前阻断 0、活动委托 0、敞口 0、恢复资格为是；
   同页仍明确暴露真实资金报单路径未知、试盘守护未配置，因此不构成实盘或盈利证明；
-- 系统仍有 OKX `system/status` 端点一次 `50011` 限频并执行 300 秒退避；数据 WebSocket
-  collector 持续写入且未报错。该告警不阻断模拟栈，但上线评审必须重新观察其频率。
+- 当前 WARNING 主要是 dev HTTP/insecure-cookie 的模拟环境声明，以及 flat/0 target 的
+  `normalize_delta` 跳过；后者已在本文档所在 HEAD 降为 DEBUG，避免正常观望污染告警面。
 
-本快照只证明一条数据窗口通过研究资格门禁。它不证明候选策略具备正期望，不证明
-参数 runtime ACK 已接入，也不解除任何 live profile 的 NO-GO。
+本快照证明数据窗口可研究、模拟服务可运行，并明确证明本轮候选没有正期望证据。它不证明
+模拟成交可信，不证明参数 runtime ACK 已接入，也不解除任何 live profile 的 NO-GO。完整差距
+见 [`../code_review/profitability_gap_assessment_2026_08_25.md`](../code_review/profitability_gap_assessment_2026_08_25.md)。
 
 Windows 必跑：
 
