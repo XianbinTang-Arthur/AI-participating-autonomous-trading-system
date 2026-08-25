@@ -280,7 +280,10 @@ def run_batch_b_migrations(
                     # Stage 04) and can therefore fail before PostgreSQL sees
                     # otherwise-valid SQL.  Execute the script at the driver
                     # layer; keep the ledger write parameterized below.
-                    conn.exec_driver_sql(sql)
+                    conn.exec_driver_sql(
+                        sql,
+                        execution_options={"no_parameters": True},
+                    )
                     conn.execute(
                         text(
                             f"""
@@ -357,7 +360,10 @@ def run_batch_b_rollback(
                     stage=f"{stage}:rollback",
                 )
                 with engine.begin() as conn:
-                    conn.exec_driver_sql(sql)
+                    conn.exec_driver_sql(
+                        sql,
+                        execution_options={"no_parameters": True},
+                    )
                     conn.execute(
                         text(
                             f"DELETE FROM {RDP_SCHEMA_MIGRATIONS_TABLE} "

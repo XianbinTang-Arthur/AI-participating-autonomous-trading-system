@@ -60,8 +60,15 @@ class _FakeConnection:
                 raise RuntimeError(f"simulated stage failure: {stage}")
         return _RowsResult()
 
-    def exec_driver_sql(self, statement):
+    def exec_driver_sql(
+        self,
+        statement,
+        parameters=None,
+        execution_options=None,
+    ):
         self.engine.executed_driver_sql.append(str(statement))
+        self.engine.driver_execution_options.append(execution_options)
+        assert parameters is None
         return self.execute(statement)
 
 
@@ -73,6 +80,7 @@ class _FakeEngine:
         self.fail_stages: set[str] = set()
         self.executed_sql: list[str] = []
         self.executed_driver_sql: list[str] = []
+        self.driver_execution_options: list[dict[str, bool] | None] = []
         self.executed_transactions: list[tuple[str, int | None]] = []
         self.transaction_count = 0
 
@@ -132,15 +140,16 @@ def test_batch_b_schema_change_and_ledger_row_share_one_transaction() -> None:
 def test_batch_b_migration_script_bypasses_sqlalchemy_bind_parsing() -> None:
     engine = _FakeEngine()
     stage = _batch_b.BATCH_B_STAGES[0]
-    sql = "BEGIN;\n-- documentation:sleeve\nSELECT 1;\nCOMMIT;"
+    sql = "BEGIN;\n-- documentation:sleeve is 100% literal\nSELECT 1;\nCOMMIT;"
 
     with patch.object(_batch_b, "_load_sql", return_value=sql):
         report = _batch_b.run_batch_b_migrations(engine, stages=[stage])
 
     assert report.ok is True
     assert engine.executed_driver_sql == [
-        "-- documentation:sleeve\nSELECT 1;"
+        "-- documentation:sleeve is 100% literal\nSELECT 1;"
     ]
+    assert engine.driver_execution_options == [{"no_parameters": True}]
 
 
 def test_batch_b_rejects_sql_without_one_outer_transaction_wrapper() -> None:
