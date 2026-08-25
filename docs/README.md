@@ -254,12 +254,13 @@
   [`code_review/profitability_gap_assessment_2026_08_25.md`](code_review/profitability_gap_assessment_2026_08_25.md)。
 - 2026-08-25 后续现场观察首次取得自然端到端模拟成交：两个 deployment generation 各有
   1 个订单，最强单链包含全部八阶段和 11 个 partial fill，且没有尺度型风险拒绝。证据工具已
-  修复 risk symbol、启动恢复 fill scope 和亚微量化尾差误判；但成熟非零目标仅 1/100，状态仍为
+  修复 risk symbol、启动恢复 fill scope 和亚微量化尾差误判；最终部署窗成熟可执行目标仅 2/100，状态仍为
   `UNKNOWN`，也没有任何通过收益门的候选可与这些成交绑定。
 - 2026-08-25 同一时间线发现一次完整平仓后约 17 秒重入场，违反 300 秒 post-close cooldown。
   根因是 Fill 热缓存重启时把不完整 Redis 历史当作完整真相；当前实现已增加 Postgres truth
   hydrate、失败回退和显式 close fill 锚点。最终标准部署四个主进程均完成 Postgres 对齐，后续
-  自然决策也恢复了真实平仓锚点，并在 300 秒门禁过期后才开仓；窗口内阻断样本仍需继续观察。
+  自然决策也恢复了真实平仓锚点，并在 300 秒门禁过期后才开仓；后续平仓约 2 秒后的上下文已
+  报告 298.12 秒剩余冷静期和 active guard，但强竞争入场信号阻断样本仍需继续观察。
 - 2026-08-25 新候选预注册已把经济机制、失效条件、容量假设、Factor DSL、Gold 窗口及
   fee/slippage/funding 成本固定在结果之前，并完成 4 个唯一假设的真实 development campaign。
   四者 train/valid 成本后收益全部失败，统计通过数仍为 0，holdout 继续封存；实施任务书见

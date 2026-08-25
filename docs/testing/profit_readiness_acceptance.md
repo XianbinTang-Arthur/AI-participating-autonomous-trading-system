@@ -27,7 +27,7 @@
 
 ## 现场验收快照（非持续状态证明）
 
-下列结论只对应 2026-08-25 19:12--20:00 UTC、最终部署基线 `1beba655` 的本地
+下列结论只对应 2026-08-25 19:12--20:07 UTC、最终部署基线 `1beba655` 的本地
 `derivatives` 模拟栈；容器、账户、交易所和数据新鲜度会随时间变化，后续测试必须重新生成
 证据，不得引用本节代替现场核验。
 
@@ -36,8 +36,9 @@
   单步 cap 为 1,250；无 legs intent 的 10 × 0.25 缩放结果为 2.5，断言通过；
 - 标准部署证据：
   `/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260825T195837932361Z-derivatives-1beba655f321.json`；
-- 七个必需应用容器均为 `running/healthy`、重启计数为 0，本次部署以来无
-  `ERROR`/`CRITICAL`/未解析 traceback；
+- 七个必需应用容器均为 `running/healthy`、重启计数为 0。六个应用无
+  `ERROR`/`CRITICAL`/未解析 traceback；execution 有 1 次私有 WebSocket ping timeout，约 5 秒
+  后自动重连，后续账户刷新、成交同步和平仓均成功；
 - 2026-08-25 18:30--18:45 UTC 微观结构窗口现场重算成功：BBO 756、books5 1323、
   trades 6296、OI 69、liquidations 0（允许稀疏），四类数据 lineage 使用同一 `ingest_run_id`；
 - collector heartbeat SHA-256 为
@@ -51,25 +52,26 @@
   development experiment 均因 train/valid 净收益或成本后 edge 为负而失败。完整 2,000 次
   bootstrap campaign 的代表通过数为 0、`capital_eligible=false`，holdout 保持封存；evidence
   SHA-256=`a67403ace4b6197005f161ce1b88aaf42f4231341afa00ab0f2d2966f84d968a`；
-- 累计已产生 3 个自然新风险订单和 2 个平仓订单，共 24 个 fill。最强单链包含 allocation、target、policy、
+- 累计已产生 3 个自然新风险订单和 3 个平仓订单，共 28 个 fill。最强单链包含 allocation、target、policy、
   risk、plan、intent、order、fill 全阶段，risk 批准，1 个订单形成 11 个 partial fill，未发生
-  超 cap 或尺度型拒绝；但样本只有 1/100，故仍为 `UNKNOWN`；
+  超 cap 或尺度型拒绝；最终 deployment 窗样本只有 2/100，故仍为 `UNKNOWN`；
 - 最强单链 artifact 为
   `/root/aats/deploy/wsl2-dev/runtime/execution-funnel-evidence/2a13eb3ba4d1-20260825T1931Z-v2.json`，
   SHA-256=`7de9b88872f6089e3b1bb3acce4a870189ba0ae100cd0835fece00eb8fae3b59`；
   最终 `1beba655` 部署的最新 artifact 为
-  `/root/aats/deploy/wsl2-dev/runtime/execution-funnel-evidence/1beba655f321-20260825T2000Z.json`，
-  SHA-256=`bf0a1c6f8e3cbbfa538d01cbec532f33e420ce52ec79c4a79d8c6ea9bba536c1`；该窗有 1 个成熟
-  非零 target、1 个订单和 9 个 fill，仅因 1/100 保持 `UNKNOWN`，
+  `/root/aats/deploy/wsl2-dev/runtime/execution-funnel-evidence/1beba655f321-20260825T2007Z.json`，
+  SHA-256=`9fe99963d9eedf4cec90fce6fdf4f5565049dc3b62e5465c6423ad5f1da5b179`；该窗有 2 个成熟
+  可执行 target、2 个订单和 13 个 fill，仅因 2/100 保持 `UNKNOWN`，
   两个 readiness 布尔值仍固定 false；
 - 现场曾发现平仓后约 17 秒重新开空，违反 profile 的 300 秒冷静期。最终部署四个主进程均从
   Postgres 对齐 15 条 fill；decision 的 Redis 快照仅 11 条。最新自然决策成功恢复 19:51:41Z
-  平仓锚点，并在约 444 秒后才开仓，证明重启历史恢复已生效；窗口内自然阻断样本仍待积累；
+  平仓锚点，并在约 444 秒后才开仓。下一次自然平仓约 2 秒后的上下文又报告 298.12 秒冷静期、
+  active guard 与 target=0；因 baseline 同时未达到入场阈值，强竞争信号阻断样本仍待积累；
 - 签名 Operator 页面显示模拟栈对账一致、当前阻断 0、活动委托 0、敞口 0、恢复资格为是；
   同页仍明确暴露真实资金报单路径未知、试盘守护未配置，因此不构成实盘或盈利证明；
 - 上一代 WARNING 主要是 dev HTTP/insecure-cookie 的模拟环境声明，以及 flat/0 target 的
-  `normalize_delta` 跳过；后者已降为 DEBUG。最新部署日志复核中七个应用 error 匹配数为 0，
-  flat/0 的 `normalize_delta` WARNING 匹配数也为 0。
+  `normalize_delta` 跳过；后者已降为 DEBUG。最新部署日志还记录 system-status 429、stale feature
+  拒绝及上述一次已恢复私有 WS timeout；flat/0 的 `normalize_delta` WARNING 匹配数为 0。
 
 本快照证明数据窗口可研究、模拟服务可运行，并明确证明本轮候选没有正期望证据。它不证明
 模拟成交可信，不证明参数 runtime ACK 已接入，也不解除任何 live profile 的 NO-GO。完整差距

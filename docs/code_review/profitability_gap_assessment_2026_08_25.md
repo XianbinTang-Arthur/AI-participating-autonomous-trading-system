@@ -18,11 +18,11 @@
 - **系统工程与风控基础完成度约为 75%--85%**：多进程、持久化、风控、恢复、对账、审计、
   研究治理和 Operator 控制面已经形成体系；当前模拟栈可健康运行。
 - **可信模拟盈利证据成熟度约为 10%--20%**：评估、预注册和数据门禁进一步完善，但累计两轮
-  7 个可评估唯一候选全部为负收益；模拟盘虽已出现 3 个自然新风险订单、2 个平仓订单和
-  24 个 fill 事件，仍远低于校准门，且这些成交没有绑定合格候选。
+  7 个可评估唯一候选全部为负收益；模拟盘虽已出现 3 个自然新风险订单、3 个平仓订单和
+  28 个 fill 事件，仍远低于校准门，且这些成交没有绑定合格候选。
 - **小额真实资金 canary 就绪度低于 10%**：除收益证据为空外，runtime parameter ACK/readback、
   隔离故障矩阵、forward paper 观察和 live 部署入口均未完成；当前 live profile 仍应硬性 NO-GO。
-- **“长期稳定真实收益”不能给出可信日历承诺**：在尚无正期望候选、仅 5 个模拟订单样本、
+- **“长期稳定真实收益”不能给出可信日历承诺**：在尚无正期望候选、仅 6 个模拟订单样本、
   零前向盈利窗口时，用“两周上线”或“完成 80%”描述都会制造虚假确定性。
 
 换成最直接的业务语言：**当前不是“已有赚钱机器，只差打开实盘开关”，而是“安全、治理和研究
@@ -49,9 +49,9 @@
 | 候选经济性 | 历史 replay 的 3 个代表候选与新预注册的 4 个唯一候选均为负收益；累计通过数 0 | **明确失败** | 淘汰已评估七类表达式；下一轮必须来自新增数据域或更强经济机制，不能继续围绕同一 OHLCV/funding DSL 做参数寻优 |
 | 多重检验 | campaign 自动计入 10 次计划、识别 6 个预先重复计划，并执行 bootstrap、Holm、DSR、purged walk-forward | 工具已具备，结果未通过 | 新 campaign 必须继续计入全部尝试和失败项，禁止只汇报赢家 |
 | 下单前资金尺度 | 历史 517 个非零目标中 516 个同时触发多个名义额度拒绝；本轮定位为 allocator 只缩审计金额、未缩 qty | 根因已修复并部署；不可覆盖漏斗证据已自动化 | 等待 100 个已成熟自然非零信号，证明同一 decision 的 target notional 不超过现场 cap，且 policy/risk 不因同一尺度问题拒绝 |
-| 模拟执行 | 已产生 3 个自然新风险订单和 2 个平仓订单；一次 17 秒重入暴露的重启缓存缺陷已修复，最终部署四个主进程均以 Postgres truth 恢复 15 条历史 fill | **链路已走通；冷静期重启一致性已验证，样本仍不足** | 在同一受控 observation 中累计 ≥100 个成熟非零 target；不得放宽风控凑成交 |
+| 模拟执行 | 已产生 3 个自然新风险订单和 3 个平仓订单；一次 17 秒重入暴露的重启缓存缺陷已修复，最终部署四个主进程均以 Postgres truth 恢复 15 条历史 fill | **链路已走通；冷静期重启一致性已验证，样本仍不足** | 在同一受控 observation 中累计 ≥100 个成熟非零 target；不得放宽风控凑成交 |
 | 成交真实性 | L2 partial/no-fill/队列近似和 paper lifecycle 校准器已有实现；自然订单样本累计 2，仍未绑定合格候选/L2 prediction | 工具可用，证据不足 | 至少 20 个匹配 paper order，并满足生命周期 100%、fill ratio MAE ≤ 0.20、均价误差 ≤ 10 bps、费用误差 ≤ 1 bps、终态 p95 ≤ 5 秒 |
-| 已实现净收益 | 已观察到 2 次完整模拟开平仓及第 3 次开仓，但快速重入场曾产生额外 taker fee；这些交易未绑定合格候选，极小样本没有统计意义 | **仍没有可信盈利证据** | 先通过候选门，再形成扣除 fee、funding、slippage 后的冻结 forward paper 净收益序列 |
+| 已实现净收益 | 已观察到 3 次完整模拟开平仓，但快速重入场曾产生额外 taker fee；这些交易未绑定合格候选，极小样本没有统计意义 | **仍没有可信盈利证据** | 先通过候选门，再形成扣除 fee、funding、slippage 后的冻结 forward paper 净收益序列 |
 | 参数生效 | generation schema 与治理状态机已实现；worker ACK/readback 未接入，apply/rollback 返回 501 | 失败关闭是正确行为 | 所有预期 role 完成 prepare/commit/readback，一致读取同一 parameter set ID；失败可确定回滚 |
 | 韧性 | 关键任务监督、恢复、对账、kill switch 已较完整；固定故障矩阵 schema 已实现 | 缺现场隔离故障证据 | 在独立 stack/volume 中完成 Redis、NATS、execution restart、stale generation、TTL 五场景，证明无意外新增风险 |
 | 前向验证 | 没有合格候选，也没有 paper observation | **0 个有效窗口** | 先通过 paper review，再通过 preapply review；任何 abort、负成本后 edge 或超回撤均淘汰 |
@@ -146,9 +146,10 @@ SHA-256=`a67403ace4b6197005f161ce1b88aaf42f4231341afa00ab0f2d2966f84d968a`。
 ### 6.3 当前部署观察
 
 最终标准部署后，七个应用容器均 healthy 且 restart count 为 0，`/healthz` 为 200；匿名访问认证端点
-`/system/health`、`/system/recovery` 均为预期 401。七个应用日志未匹配到 error-level、fatal、
-critical 或 traceback。启动 WARNING 包含模拟环境 insecure-cookie 声明、一次 OKX system-status
-429 后 300 秒退避和一次 stale feature 拒绝；账户刷新继续成功，但这些警告仍需持续观察。上一代签名 Operator
+`/system/health`、`/system/recovery` 均为预期 401。六个应用没有 ERROR/CRITICAL/traceback；
+execution 出现 1 次私有 WebSocket application ping timeout，并在约 5 秒后自动重连，容器未重启，
+后续账户刷新、成交同步和自然平仓成功。启动 WARNING 还包含模拟环境 insecure-cookie 声明、一次
+OKX system-status 429 后 300 秒退避和一次 stale feature 拒绝；这些外部链路/数据警告仍需持续观察。上一代签名 Operator
 快照显示 runtime normal、reconciliation 一致、blocker 0、敞口 0、活动委托 0；这些动态字段
 在任何实际操作前仍须重新登录读取。
 
@@ -181,8 +182,9 @@ Decision Context 看到了平仓 fill，却看不到此前开仓 fill，无法�
 均记录 `fill_event_cache_bootstrap_truth_reconciled cached_count=15`；decision 的 Redis 启动快照
 当时只有 11 条，证明 Postgres 对齐实际补回了生命周期历史。随后 19:59 UTC 的自然决策上下文
 恢复出 `last_position_closed_at=19:51:41Z`，新开仓发生在约 444 秒后，已经超过 300 秒门禁。
-因此重启一致性已获得运行验证；“窗口内恰有新信号且被阻断”的自然样本仍未发生，继续由单测契约
-与后续观察覆盖。
+20:05:53Z 再次自然平仓后，约 2 秒后的上下文又恢复同一平仓锚点，报告 298.12 秒剩余冷静期、
+`post_close_cooldown_active`、target=0，且未产生新增风险订单。因此 close anchor 与活动窗口均已获
+运行验证；该时点 baseline 本来也未达到入场阈值，尚不能声称观察到“一笔原本应入场的信号被门禁否决”。
 
 ### 6.5 模拟执行漏斗证据自动化
 
@@ -200,10 +202,11 @@ Decision Context 看到了平仓 fill，却看不到此前开仓 fill，无法�
 文件 SHA-256 为 `7de9b88872f6089e3b1bb3acce4a870189ba0ae100cd0835fece00eb8fae3b59`，
 证据 fingerprint 为 `funnel_040fd87c736593e635b14af10a2d49aee4e6a91decdeb3cd8ee857897ae730be`。
 最终部署的最新证据为
-`/root/aats/deploy/wsl2-dev/runtime/execution-funnel-evidence/1beba655f321-20260825T2000Z.json`，
-SHA-256=`bf0a1c6f8e3cbbfa538d01cbec532f33e420ce52ec79c4a79d8c6ea9bba536c1`，
-fingerprint=`funnel_d149ed476b77b7e88a2c7d73b01ab5764ab544d988ab5872674b671764af0b77`；
-该窗有 1 个成熟非零 target、1 个订单和 9 个 fill，无失败原因，仅因 1/100 输出 `UNKNOWN`。
+`/root/aats/deploy/wsl2-dev/runtime/execution-funnel-evidence/1beba655f321-20260825T2007Z.json`，
+SHA-256=`9fe99963d9eedf4cec90fce6fdf4f5565049dc3b62e5465c6423ad5f1da5b179`，
+fingerprint=`funnel_8632e0e041c0aa4950508bd0a51268b9e5a58daa75d85055cab6d2078f55a855`；
+该窗有 2 个成熟可执行 target（开仓与平仓）、2 个订单和 13 个 fill，无结构/尺度失败，仅因
+2/100 输出 `UNKNOWN`。
 
 ### 6.6 新候选预注册与完整失败保留
 
@@ -318,7 +321,7 @@ holdout 失败即淘汰，不得第二次读取，不得更换 actor 重试，�
 ```text
 simulation_runtime_operational = PASS (snapshot only)
 candidate_statistical_edge = FAIL
-paper_execution_calibration = UNKNOWN / 5 natural orders, below 20 and no L2 binding
+paper_execution_calibration = UNKNOWN / 6 natural orders, below 20 and no L2 binding
 forward_paper_profitability = UNKNOWN / no eligible candidate
 parameter_runtime_readback = UNKNOWN
 fault_matrix = UNKNOWN

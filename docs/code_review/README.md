@@ -1695,7 +1695,9 @@ Redis index，Decision Context 无法把平仓 fill 与此前开仓生命周期�
 `ad1c68b24d8865e06ad6f57b71ffe22c24ea7e2e` 已改为启动时用 Postgres truth 重建、失败时回退 PG，
 并为当前 flat 的明确 close fill 保留冷静期锚点。最终标准部署的四个主进程均用 Postgres 恢复
 15 条 fill；最新自然决策恢复出真实平仓时间，并在约 444 秒后才重新开仓，超过 300 秒门禁。
-累计现场样本现为 3 个新风险订单、2 个平仓订单和 24 个 fill，仍不构成收益证明。
+随后一次自然平仓约 2 秒后的决策上下文明确报告 298.12 秒剩余冷静期、active guard 和零 target。
+累计现场样本现为 3 个新风险订单、3 个平仓订单和 28 个 fill；最终 deployment 漏斗窗仍只有
+2/100 个成熟可执行 target，状态为 `UNKNOWN`，不构成收益证明。
 
 ## 27. 尚未通过本次静态审阅确认的运行事实
 

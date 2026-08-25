@@ -145,5 +145,5 @@ Postgres truth hydrate、失败回退和显式 close fill 锚点；完整单元�
 Postgres 恢复 15 条 fill；最新自然决策恢复出真实平仓锚点，并在 300 秒门禁到期后才重新开仓。
 
 当前执行链实现验证和服务部署验证为 PASS，但统计门要求 100 个成熟非零目标，现只有 1，故
-漏斗运行验收仍为 UNKNOWN；累计 5 个自然订单也未绑定合格候选，不得写成“已证明模拟盈利”。详见
+漏斗运行验收仍为 UNKNOWN；累计 6 个自然订单也未绑定合格候选，不得写成“已证明模拟盈利”。详见
 [`../code_review/profitability_gap_assessment_2026_08_25.md`](../code_review/profitability_gap_assessment_2026_08_25.md)。
