@@ -17,6 +17,13 @@ EVIDENCE_SCRIPT = REPO_ROOT / "scripts" / "write_deployment_evidence.py"
 READINESS_GENERATION = "aaaaaaaaaaaa-20260824T000000Z-123-456"
 
 
+def test_deployment_evidence_supports_wsl_system_python_310() -> None:
+    source = EVIDENCE_SCRIPT.read_text(encoding="utf-8")
+
+    assert "from datetime import UTC" not in source
+    assert "timezone.utc" in source
+
+
 def _load_evidence_module() -> ModuleType:
     spec = importlib.util.spec_from_file_location("write_deployment_evidence", EVIDENCE_SCRIPT)
     assert spec is not None and spec.loader is not None

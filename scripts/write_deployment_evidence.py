@@ -8,7 +8,7 @@ import json
 import os
 import re
 import subprocess
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -145,7 +145,7 @@ def build_evidence(
 
     container_facts = [_container_fact(name, run) for name in required_containers]
     gateway_bindings = _gateway_published_bindings(run)
-    now = generated_at or datetime.now(UTC)
+    now = generated_at or datetime.now(timezone.utc)
     return {
         "format_version": 1,
         "generated_at": now.isoformat(),
@@ -177,7 +177,7 @@ def write_evidence(*, repo_root: Path, payload: dict[str, object]) -> Path:
     evidence_dir = repo_root / "deploy" / "wsl2-dev" / "runtime" / "deployment-evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.fromisoformat(str(payload["generated_at"]))
-    timestamp = generated_at.astimezone(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    timestamp = generated_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     commit = str(payload["deployed_commit"])
     profile = str(payload["profile"])
     target = evidence_dir / f"{timestamp}-{profile}-{commit[:12]}.json"
