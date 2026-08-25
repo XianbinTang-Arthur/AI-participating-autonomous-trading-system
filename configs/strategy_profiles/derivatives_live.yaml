@@ -17,7 +17,7 @@ active_parameters_enabled: true
 
 # AI 与自动降级
 # [常用可调] ai_operating_mode：AI 运行模式。可选值：baseline_only / ai_assisted / ai_decision_maker；推荐值：ai_decision_maker（AI 功能全面开放）。自动换档已独立，单独由 strategy_profile_auto_control_enabled 控制。
-ai_operating_mode: ai_decision_maker
+ai_operating_mode: baseline_only
 # [常用可调] ai_provider：AI 提供方。可选值：disabled / openai / deepseek；推荐值：deepseek。运行时可用 AI_SELECTOR 环境变量覆盖（AI_SELECTOR=DEEPSEEK|OPENAI）。
 ai_provider: deepseek
 # [常用可调] ai_model_name：AI 模型名。DeepSeek 可选：deepseek-v4-pro / deepseek-v4-flash；OpenAI 可选：gpt-4.1-mini / gpt-4o-mini 等；当前实盘试运行 deepseek-v4-flash 以降低同步决策延迟。
