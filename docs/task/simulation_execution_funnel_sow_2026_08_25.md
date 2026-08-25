@@ -1,7 +1,7 @@
 # 模拟盘执行漏斗预算一致性整改 SOW
 
 > 文档状态：已实施、待 100 个自然非零目标运行验收的任务书
-> 最后核对：2026-08-25（起始 HEAD `d026bc19`；预算实现 `0762a4aeed87075b9001717383b9565416c7271b`；漏斗证据实现 `6749ea8a515fc84f8ab8b38de5790c8f5c0fc17c`）
+> 最后核对：2026-08-25（起始 HEAD `d026bc19`；预算实现 `0762a4aeed87075b9001717383b9565416c7271b`；漏斗证据实现 `6749ea8a515fc84f8ab8b38de5790c8f5c0fc17c`；现场纠偏 `2a13eb3ba4d16e0b7391bf874b00d90a227ea726`、`8ff96eb6530fb2cc5768fcb3398b8212b3b86e06`、`ad1c68b24d8865e06ad6f57b71ffe22c24ea7e2e`）
 > 核对范围：方向策略 sleeve、Portfolio Allocator v2、衍生品风险额度及 derivatives 模拟盘  
 > 运行时边界：只修复本地 derivatives 模拟栈的预算一致性；不提高风险上限，不启动 live profile，
 > 不接触真实资金，也不把模拟成交解释为盈利证明。
@@ -93,6 +93,8 @@ cap 来源和原因码。运行验收对比 allocation、position target、risk�
 5. 运行 Ruff、相关单测、完整 unit，并在 WSL2 derivatives 模拟栈复测执行漏斗。
 6. 漏斗 evaluator 单测覆盖无信号、100 条完整链、超 cap、尺度拒绝、缺阶段、拒绝后订单和
    deployment identity 失败关闭；CLI 在已部署容器内使用 read-only transaction 生成现场证据。
+7. 重启后 Fill 热缓存必须从 Postgres truth hydrate；truth loader 失败时 Context Builder 回退 PG；
+   仅保留明确平仓 fill 时仍能生成 post-close cooldown。
 
 ## 12. Migration、Rollback 与兼容
 
@@ -132,8 +134,15 @@ simulation 验收，且不因此解除 live 门禁。
 
 ### 实施结果
 
-代码、单元回归和 derivatives 标准部署已完成。部署后的首批 25 个 position target 均为
-flat/0，25 个 risk decision 均批准，未产生 plan/order/fill。因此预算缩放的确定性实现验证为
-PASS，服务部署验证为 PASS，自然非零信号下的执行漏斗运行验证仍为 UNKNOWN。不得将本状态
-写成“已完成模拟成交”。详见
+预算与漏斗代码、单元回归和 derivatives 标准部署已完成。早期 flat/0 窗口之后，两个 generation 各产生
+1 个自然新风险订单；两者之间另有 1 个自然平仓订单。最强单链的 allocation/target/policy/risk/plan/intent/order/fill 全部存在，
+1 个订单产生 11 个 partial fill，risk 批准且无尺度型拒绝。现场复算还修复了旧 RiskDecision
+symbol 索引缺失、启动恢复 fill 污染和亚微量化尾差误判；未提高风险 cap。
+
+平仓后约 17 秒重入场又暴露 Fill 热缓存重启后历史不完整会漏掉 close anchor。`ad1c68b2` 已补
+Postgres truth hydrate、失败回退和显式 close fill 锚点；完整单元回归为
+`4577 passed, 30 skipped, 94 subtests passed`，运行态仍须以随后标准部署证据为准。
+
+当前执行链实现验证和服务部署验证为 PASS，但统计门要求 100 个成熟非零目标，现只有 1，故
+漏斗运行验收仍为 UNKNOWN；两个自然订单也未绑定合格候选，不得写成“已证明模拟盈利”。详见
 [`../code_review/profitability_gap_assessment_2026_08_25.md`](../code_review/profitability_gap_assessment_2026_08_25.md)。

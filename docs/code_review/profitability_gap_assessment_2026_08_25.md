@@ -1,11 +1,11 @@
 # AATS 从当前状态到真实收益的差距评估与落地路线
 
 > 文档状态：现行代码审查与收益就绪判断
-> 最后核对：2026-08-25 19:17 UTC
-> 静态实现基线：Git `66be4f5c4fbb180e2a286ff7b6d3844b3064ea9f`
+> 最后核对：2026-08-25（本文所在 HEAD；平仓冷静期修复 `ad1c68b24d8865e06ad6f57b71ffe22c24ea7e2e`）
+> 静态实现基线：本文所在 HEAD
 > 模拟运行基线：`derivatives`，deployment generation
-> `66be4f5c4fbb-20260825T191234Z-375-2537`
-> 运行证据：`/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260825T191403351222Z-derivatives-66be4f5c4fbb.json`
+> `8ff96eb6530f-20260825T193502Z-662-11149`
+> 运行证据：`/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260825T193624458617Z-derivatives-8ff96eb6530f.json`
 > 禁止外推：本文不构成投资建议，不证明未来收益，不授权 live profile、真实资金或真实订单。
 
 ## 1. 结论
@@ -18,10 +18,11 @@
 - **系统工程与风控基础完成度约为 75%--85%**：多进程、持久化、风控、恢复、对账、审计、
   研究治理和 Operator 控制面已经形成体系；当前模拟栈可健康运行。
 - **可信模拟盈利证据成熟度约为 10%--20%**：评估、预注册和数据门禁进一步完善，但累计两轮
-  7 个可评估唯一候选全部为负收益，且模拟盘尚无可用于成交模型校准的订单/成交样本。
+  7 个可评估唯一候选全部为负收益；模拟盘虽已出现 2 个自然新风险订单、1 个平仓订单和
+  13 个 fill 事件，仍远低于校准门，且这些成交没有绑定合格候选。
 - **小额真实资金 canary 就绪度低于 10%**：除收益证据为空外，runtime parameter ACK/readback、
   隔离故障矩阵、forward paper 观察和 live 部署入口均未完成；当前 live profile 仍应硬性 NO-GO。
-- **“长期稳定真实收益”不能给出可信日历承诺**：在尚无正期望候选、零模拟成交校准样本、
+- **“长期稳定真实收益”不能给出可信日历承诺**：在尚无正期望候选、仅 2 个模拟订单样本、
   零前向盈利窗口时，用“两周上线”或“完成 80%”描述都会制造虚假确定性。
 
 换成最直接的业务语言：**当前不是“已有赚钱机器，只差打开实盘开关”，而是“安全、治理和研究
@@ -48,9 +49,9 @@
 | 候选经济性 | 历史 replay 的 3 个代表候选与新预注册的 4 个唯一候选均为负收益；累计通过数 0 | **明确失败** | 淘汰已评估七类表达式；下一轮必须来自新增数据域或更强经济机制，不能继续围绕同一 OHLCV/funding DSL 做参数寻优 |
 | 多重检验 | campaign 自动计入 10 次计划、识别 6 个预先重复计划，并执行 bootstrap、Holm、DSR、purged walk-forward | 工具已具备，结果未通过 | 新 campaign 必须继续计入全部尝试和失败项，禁止只汇报赢家 |
 | 下单前资金尺度 | 历史 517 个非零目标中 516 个同时触发多个名义额度拒绝；本轮定位为 allocator 只缩审计金额、未缩 qty | 根因已修复并部署；不可覆盖漏斗证据已自动化 | 等待 100 个已成熟自然非零信号，证明同一 decision 的 target notional 不超过现场 cap，且 policy/risk 不因同一尺度问题拒绝 |
-| 模拟执行 | 部署后 10 个新 target 均为 flat/0；risk 均批准，但没有 plan、order intent、order 或 fill | **尚未形成运行证据** | 收集真实自然信号产生的完整 paper 生命周期；不得人工伪造业务成功或放宽风控凑成交 |
-| 成交真实性 | L2 partial/no-fill/队列近似和 paper lifecycle 校准器已有实现 | 工具可用，样本为零 | 至少 20 个匹配 paper order，并满足生命周期 100%、fill ratio MAE ≤ 0.20、均价误差 ≤ 10 bps、费用误差 ≤ 1 bps、终态 p95 ≤ 5 秒 |
-| 已实现净收益 | 当前执行订单总量只有一条历史 BLOCKED 记录，成交与已实现交易 PnL 均为 0 | **没有盈利证据** | 先获得可校准模拟成交，再形成扣除 fee、funding、slippage 后的 forward paper 净收益序列 |
+| 模拟执行 | 两个部署 generation 已各产生 1 个自然新风险订单；其间一次自然平仓后约 17 秒重新开空，暴露重启后 Fill 热缓存历史不完整会绕过 300 秒冷静期 | **链路已走通；冷静期根因已静态修复，样本仍不足** | 部署验证 Postgres truth hydrate/fallback；随后在同一受控 observation 中累计 ≥100 个成熟非零 target，不得放宽风控凑成交 |
+| 成交真实性 | L2 partial/no-fill/队列近似和 paper lifecycle 校准器已有实现；自然订单样本累计 2，仍未绑定合格候选/L2 prediction | 工具可用，证据不足 | 至少 20 个匹配 paper order，并满足生命周期 100%、fill ratio MAE ≤ 0.20、均价误差 ≤ 10 bps、费用误差 ≤ 1 bps、终态 p95 ≤ 5 秒 |
+| 已实现净收益 | 已观察到 1 次完整模拟开平仓和正的单笔已实现结果，但随后快速重入场又产生额外 taker fee；样本未绑定合格候选，单笔结果没有统计意义 | **仍没有可信盈利证据** | 先通过候选门，再形成扣除 fee、funding、slippage 后的冻结 forward paper 净收益序列 |
 | 参数生效 | generation schema 与治理状态机已实现；worker ACK/readback 未接入，apply/rollback 返回 501 | 失败关闭是正确行为 | 所有预期 role 完成 prepare/commit/readback，一致读取同一 parameter set ID；失败可确定回滚 |
 | 韧性 | 关键任务监督、恢复、对账、kill switch 已较完整；固定故障矩阵 schema 已实现 | 缺现场隔离故障证据 | 在独立 stack/volume 中完成 Redis、NATS、execution restart、stale generation、TTL 五场景，证明无意外新增风险 |
 | 前向验证 | 没有合格候选，也没有 paper observation | **0 个有效窗口** | 先通过 paper review，再通过 preapply review；任何 abort、负成本后 edge 或超回撤均淘汰 |
@@ -150,14 +151,35 @@ critical、exception 或 traceback，正常 flat/0 决策也不再产生 WARNING
 快照显示 runtime normal、reconciliation 一致、blocker 0、敞口 0、活动委托 0；这些动态字段
 在任何实际操作前仍须重新登录读取。
 
-预算修复的前两代部署观察分别产生了 25 组和 6 组 target/risk；risk 均批准，但目标均为
-flat/0，因此没有形成 plan/order/fill。最新部署已运行新的漏斗证据 CLI；当前 artifact 绑定
-`66be4f5c` deployment evidence 并覆盖 5 个自然 flat/0 决策周期，结果为 `UNKNOWN`：成熟
-自然非零目标 0、订单 0、成交 0，
-`production_ready=false`、`trading_ready=false`。结论是：**修复已通过确定性测试并成功部署，
-但自然非零信号下的运行验收仍为 UNKNOWN，而不是 PASS。**
+预算修复的早期部署只产生 flat/0。随后两个部署 generation 各产生 1 个自然新风险订单：
+`66be4f5c` 的单链形成 1 个 fill；`2a13eb3b` 的单链形成 1 个订单和 11 个 partial fill。后者
+target notional 为 `1250.0000000147308`，只含数量/价格乘积的亚微量化尾差；risk 批准，
+allocation/target/policy/risk/plan/intent/order/fill 全阶段存在，未发生尺度型拒绝。
 
-### 6.4 模拟执行漏斗证据自动化
+证据工具现场复算同时发现并修复三类审计误判：旧 `RiskDecision` 的 symbol 只存于 event key，
+以及启动恢复投影的历史 fill 污染新 decision 观察窗。提交 `2a13eb3b`、`8ff96eb6` 分别补齐
+symbol 索引/历史回退和 decision-scoped 查询，并设置仅 `0.000001` quote currency 的量化容差；
+没有提高 1,250 风险 cap。修复后最强单链只因成熟非零目标为 1/100 输出 `UNKNOWN`，而不是
+`FAIL` 或 `PASS`。最终 `8ff96eb6` 部署后的短窗口尚无新 target，也正确输出 `UNKNOWN`。
+
+### 6.4 平仓冷静期与重启一致性
+
+现场成交时间线证明：系统先把已有空仓完整平掉，约 17 秒后又重新开空；profile 明确配置
+`strategy_post_close_cooldown_seconds=300`，因此这不是合理的策略切换。根因是
+`FillEventHotCache` 重启后只从 Redis index 恢复；index 缺失或不完整时仍返回列表，导致
+Decision Context 看到了平仓 fill，却看不到此前开仓 fill，无法生成 `last_position_closed_at`。
+
+提交 `ad1c68b24d8865e06ad6f57b71ffe22c24ea7e2e` 已实施两层失败关闭：
+
+- 每个运行进程启动时从 Postgres source of truth 读取最近 2,000 条 scoped fill，替换可能不完整的
+  Redis 快照；truth load 失败时返回 cache miss，让 Context Builder 回退 Postgres；
+- 当前仓位为零且存在明确 `close_only`、`close_long/close_short` 或 close action fill 时，即使对应
+  开仓已超出热缓存窗口，也保留最近平仓时间并启动冷静期。
+
+相关回归与完整单元测试已通过；本段只有在标准 derivatives 部署及启动日志复核后才升级为运行
+验证通过，不能用静态测试替代现场事实。
+
+### 6.5 模拟执行漏斗证据自动化
 
 提交 `6749ea8a515fc84f8ab8b38de5790c8f5c0fc17c` 新增只读、不可覆盖的漏斗 evaluator/CLI：
 
@@ -168,12 +190,15 @@ flat/0，因此没有形成 plan/order/fill。最新部署已运行新的漏斗�
 - 数据库 transaction 强制 read-only，输出不含连接串和原始 payload；
 - 无论结果如何都不产生 live 或资金授权。
 
-当前现场证据位于
-`/root/aats/deploy/wsl2-dev/runtime/execution-funnel-evidence/66be4f5c4fbb-20260825T1917Z.json`，
-文件 SHA-256 为 `9fcdb540256dc2c9e555b4fbc1d1e667909f105e8358be6488b6fe2cd9391eee`，
-证据 fingerprint 为 `funnel_742ac5d16e2c933d00c5e0ca423c0729bdd6e5a31e4455fb59a4e89f8b0849f3`。
+最强自然非零链证据位于
+`/root/aats/deploy/wsl2-dev/runtime/execution-funnel-evidence/2a13eb3ba4d1-20260825T1931Z-v2.json`，
+文件 SHA-256 为 `7de9b88872f6089e3b1bb3acce4a870189ba0ae100cd0835fece00eb8fae3b59`，
+证据 fingerprint 为 `funnel_040fd87c736593e635b14af10a2d49aee4e6a91decdeb3cd8ee857897ae730be`。
+最终部署的最新短窗证据为
+`/root/aats/deploy/wsl2-dev/runtime/execution-funnel-evidence/8ff96eb6530f-20260825T1937Z.json`，
+SHA-256=`a0bba8c267713a88301c321a361a944fa3a2226c497d47b63bc78c0d82df8090`；该窗尚无 target。
 
-### 6.5 新候选预注册与完整失败保留
+### 6.6 新候选预注册与完整失败保留
 
 新模块要求 campaign 至少含三个唯一 Factor DSL 签名，严格拒绝未知字段、重复假设、来源 SHA
 漂移、非有限成本和重叠持有期。生成阶段无数据库访问；development runner 才读取 Gold，且
@@ -286,7 +311,7 @@ holdout 失败即淘汰，不得第二次读取，不得更换 actor 重试，�
 ```text
 simulation_runtime_operational = PASS (snapshot only)
 candidate_statistical_edge = FAIL
-paper_execution_calibration = UNKNOWN / no samples
+paper_execution_calibration = UNKNOWN / 3 natural orders, below 20 and no L2 binding
 forward_paper_profitability = UNKNOWN / no eligible candidate
 parameter_runtime_readback = UNKNOWN
 fault_matrix = UNKNOWN

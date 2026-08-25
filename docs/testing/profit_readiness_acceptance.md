@@ -1,7 +1,7 @@
 # 收益可信度整改验收矩阵
 
 > 文档状态：现行测试说明
-> 最后核对：2026-08-25（实现与模拟部署基线 `66be4f5c4fbb180e2a286ff7b6d3844b3064ea9f`）
+> 最后核对：2026-08-25（静态修复 `ad1c68b24d8865e06ad6f57b71ffe22c24ea7e2e`；下列现场部署快照仍绑定 `8ff96eb6530fb2cc5768fcb3398b8212b3b86e06`）
 > 边界：本文定义可执行验收，不把未运行的项目标记为通过。
 
 | 层级 | 验收项 | 通过条件 | 失败/未知处理 |
@@ -18,6 +18,7 @@
 | 统计 | 完整 campaign | 全计划计数、重复假设折叠，不使用 test，walk-forward/bootstrap/Holm/DSR 全通过 | candidate 不合格；禁止打开 holdout |
 | 漏斗 | 模拟预算与风险 | 自然非零 target 不超过现场最严格 cap，且同 decision 全链可追踪 | `UNKNOWN`/修复尺度，不放宽风险 |
 | 漏斗 | 不可覆盖证据 | 绑定健康 deployment；≥100 个成熟非零 target；无超 cap、尺度拒绝、阶段断链、拒绝后订单或孤儿 fill | `UNKNOWN`/`FAIL`，production/trading 固定 false |
+| 执行健康 | 平仓冷静期 | 重启后 Fill 热缓存由 Postgres truth hydrate；失败回退 PG；平仓后配置窗口内不允许新增风险 | 任一 truth 对齐失败却继续信任缓存，或窗口内重入场即 NO-GO |
 | 成交 | L2 + paper calibration | 窗口无缺口，生命周期来源和误差门通过 | candidate 不合格 |
 | OOS | one-time holdout | claim 先于读取、fingerprint 一致、第二次拒绝 | 保留失败访问 |
 | 参数 | generation | 所有 role prepare/commit/readback 精确匹配 | FAILED/ROLLBACK_REQUIRED |
@@ -26,16 +27,16 @@
 
 ## 现场验收快照（非持续状态证明）
 
-下列结论只对应 2026-08-25 19:12--19:17 UTC、实现基线 `66be4f5c` 的本地
+下列结论只对应 2026-08-25 19:12--19:38 UTC、最终实现基线 `8ff96eb6` 的本地
 `derivatives` 模拟栈；容器、账户、交易所和数据新鲜度会随时间变化，后续测试必须重新生成
 证据，不得引用本节代替现场核验。
 
-- 全量单元回归：`4566 passed, 30 skipped, 94 subtests passed`；Ruff 通过；
+- 全量单元回归：`4577 passed, 30 skipped, 94 subtests passed`；Ruff 通过；
 - 已部署 decision 容器在显式执行 managed-profile 注入后读取到 `derivatives`，现场最严格
   单步 cap 为 1,250；无 legs intent 的 10 × 0.25 缩放结果为 2.5，断言通过；
 - 标准部署证据：
-  `/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260825T191403351222Z-derivatives-66be4f5c4fbb.json`；
-- 七个必需应用容器均为 `running/healthy`、重启计数为 0，最近 15 分钟无
+  `/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260825T193624458617Z-derivatives-8ff96eb6530f.json`；
+- 七个必需应用容器均为 `running/healthy`、重启计数为 0，本次部署以来无
   `ERROR`/`CRITICAL`/未解析 traceback；
 - 2026-08-25 18:30--18:45 UTC 微观结构窗口现场重算成功：BBO 756、books5 1323、
   trades 6296、OI 69、liquidations 0（允许稀疏），四类数据 lineage 使用同一 `ingest_run_id`；
@@ -50,14 +51,19 @@
   development experiment 均因 train/valid 净收益或成本后 edge 为负而失败。完整 2,000 次
   bootstrap campaign 的代表通过数为 0、`capital_eligible=false`，holdout 保持封存；evidence
   SHA-256=`a67403ace4b6197005f161ce1b88aaf42f4231341afa00ab0f2d2966f84d968a`；
-- 预算修复前两代部署观察分别产生 25 组和 6 组 target/risk，均被 risk 批准但均为 flat/0，
-  未产生 execution plan、order intent、order 或 fill；这证明这些窗口没有风险阻断，但自然
-  非零信号下的预算修复仍为 `UNKNOWN`；
-- 新漏斗 CLI 的当前现场 artifact 为
-  `/root/aats/deploy/wsl2-dev/runtime/execution-funnel-evidence/66be4f5c4fbb-20260825T1917Z.json`，
-  SHA-256=`9fcdb540256dc2c9e555b4fbc1d1e667909f105e8358be6488b6fe2cd9391eee`；
-  它绑定当前 deployment 并覆盖 5 个自然 flat/0 决策周期，结果为 `UNKNOWN`，成熟非零目标、
-  订单、成交均为 0，两个 readiness 布尔值固定 false；
+- 两个部署 generation 已各产生 1 个自然新风险订单，两者之间另有 1 个自然平仓订单。最强单链包含 allocation、target、policy、
+  risk、plan、intent、order、fill 全阶段，risk 批准，1 个订单形成 11 个 partial fill，未发生
+  超 cap 或尺度型拒绝；但样本只有 1/100，故仍为 `UNKNOWN`；
+- 最强单链 artifact 为
+  `/root/aats/deploy/wsl2-dev/runtime/execution-funnel-evidence/2a13eb3ba4d1-20260825T1931Z-v2.json`，
+  SHA-256=`7de9b88872f6089e3b1bb3acce4a870189ba0ae100cd0835fece00eb8fae3b59`；
+  最终 `8ff96eb6` 部署的最新短窗 artifact 为
+  `/root/aats/deploy/wsl2-dev/runtime/execution-funnel-evidence/8ff96eb6530f-20260825T1937Z.json`，
+  SHA-256=`a0bba8c267713a88301c321a361a944fa3a2226c497d47b63bc78c0d82df8090`；该窗尚无新 target，
+  两个 readiness 布尔值仍固定 false；
+- 现场同时发现平仓后约 17 秒重新开空，违反 profile 的 300 秒冷静期。静态根因已定位为
+  Fill 热缓存重启后缺少开仓历史，并由 `ad1c68b2` 修复；该提交在本节绑定的旧部署之后，故现场
+  状态暂记“待标准重部署验证”，不能提前写 PASS；
 - 签名 Operator 页面显示模拟栈对账一致、当前阻断 0、活动委托 0、敞口 0、恢复资格为是；
   同页仍明确暴露真实资金报单路径未知、试盘守护未配置，因此不构成实盘或盈利证明；
 - 上一代 WARNING 主要是 dev HTTP/insecure-cookie 的模拟环境声明，以及 flat/0 target 的

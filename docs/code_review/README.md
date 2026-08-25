@@ -1682,6 +1682,19 @@ funding 成本纳入 plan、experiment 和 hypothesis fingerprint。实际 v3 ca
 `66be4f5c4fbb180e2a286ff7b6d3844b3064ea9f` 同时修复运行证据目录导致标准 WSL 同步自阻断的问题。
 该部署的最新漏斗 artifact 覆盖后续 5 个自然 flat/0 决策周期，仍正确输出 `UNKNOWN`。
 
+后续自然信号首次走通端到端模拟链，两个 generation 各产生 1 个新风险订单；最强单链为 1 个成熟
+非零 target、risk 批准、1 个订单、11 个 partial fill，且所有八个阶段齐全。现场同时发现旧
+RiskDecision symbol 只在 event key、启动恢复 fill 污染观察窗和亚微量化尾差三类证据误判；
+提交 `2a13eb3ba4d16e0b7391bf874b00d90a227ea726`、
+`8ff96eb6530fb2cc5768fcb3398b8212b3b86e06` 已修复。最终状态仍为 `UNKNOWN`（1/100），
+不构成候选盈利、paper calibration 或 live 就绪证明。
+
+同一现场时间线还发现，已有空仓完整平仓后约 17 秒又重新开空，违反 derivatives profile 的
+300 秒 post-close cooldown。根因不是 target guard 缺失，而是 Fill 热缓存重启时仅信任不完整的
+Redis index，Decision Context 无法把平仓 fill 与此前开仓生命周期关联。提交
+`ad1c68b24d8865e06ad6f57b71ffe22c24ea7e2e` 已改为启动时用 Postgres truth 重建、失败时回退 PG，
+并为当前 flat 的明确 close fill 保留冷静期锚点；运行态结论必须以该提交后的标准部署复核为准。
+
 ## 27. 尚未通过本次静态审阅确认的运行事实
 
 以下项目必须现场检查：

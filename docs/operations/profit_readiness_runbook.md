@@ -1,7 +1,7 @@
 # 收益证据与模拟交易就绪运行手册
 
 > 文档状态：现行操作说明
-> 最后核对：2026-08-25（实现与模拟部署基线 `66be4f5c4fbb180e2a286ff7b6d3844b3064ea9f`）
+> 最后核对：2026-08-25（当前静态实现见本文所在 HEAD；现场快照基线 `8ff96eb6530fb2cc5768fcb3398b8212b3b86e06`）
 > 适用范围：`derivatives` 本地模拟栈、RDP 研究库、Research Factory 研究产物
 > 禁止范围：真实资金、live profile、真实订单、手工绕过部署入口
 
@@ -18,7 +18,8 @@
 | 历史候选资金资格 | 已完成确定性审计 | 旧 `benchmark_segment=test` 等产物全部不可作为资金证据 |
 | v2 复跑 | 已生成计划并提供两阶段批处理 | development 不读 holdout；完整阶段强制要求 L2 成本摘要 |
 | Campaign 统计门禁 | 已自动串联预注册、实验 return series、全试验计数、重复假设、walk-forward、bootstrap、Holm、deflated Sharpe | 历史重放 3 个和新预注册 4 个代表候选均失败，不具备资本资格 |
-| 模拟执行预算 | 已修复方向 intent 只缩审计预算、不缩 qty 的错误，并按最严格现有 cap 限制单步目标 | 确定性测试通过；部署后尚未出现自然非零信号，运行验收仍是 `UNKNOWN` |
+| 模拟执行预算 | 已修复方向 intent 只缩审计预算、不缩 qty 的错误，并按最严格现有 cap 限制单步目标 | 已观察两条自然订单链；最强单链完整且无尺度拒绝，但成熟非零目标仅 1/100，运行验收仍是 `UNKNOWN` |
+| 平仓冷静期 | Fill 热缓存启动时以 Postgres truth 重建；失败回退数据库；明确平仓 fill 可恢复 close anchor | 现场曾发生 17 秒重入场；修复必须经标准重部署和后续自然平仓窗口复核，未验证前不升级就绪结论 |
 | 一次性 holdout | 已实现 DB 唯一账本和先占用后读取协议 | 失败也消耗访问；不允许事后补登记已看过的 test 指标 |
 | L2/event 回放 | 已实现 top-5、共享深度、partial/no-fill、post-only 队列近似 | 盘口研究证据，不等于交易所撮合真值 |
 | 模拟生命周期校准 | 已实现 order/command/transition/fill 对齐 | 只接受 `paper_local`，不读取 live 凭证 |
@@ -184,6 +185,11 @@ python scripts/write_simulation_execution_funnel_evidence.py \
 `FAIL` 并退出 1；自然非零 target 不足写 `UNKNOWN` 并退出 2。重复 target、超 cap、尺度型
 风险拒绝、risk 批准后缺 plan/intent/order、risk 拒绝后仍出现订单或孤儿 fill 均不能通过。
 Artifact 仍固定 `production_ready=false`、`trading_ready=false`。
+
+查询必须先以观察窗内 `position_target` 的 decision ID 定义样本域，再读取这些 decision 的
+order/fill；不能把启动恢复投影的历史 fill 计入新部署漏斗。旧 `risk.decisions` 若 symbol 列为空，
+以其 envelope key 恢复 scope。target notional 比 cap 高不超过 `0.000001` quote currency 只视为
+Decimal/lot 量化尾差；更大差额仍为硬 `FAIL`，这不改变运行时风险上限。
 
 ## 6. 一次性 holdout
 
