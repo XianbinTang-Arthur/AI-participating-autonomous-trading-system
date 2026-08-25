@@ -30,6 +30,10 @@
 schema。输出必须满足 `approved_delta_qty × reference_price` 与 `approved_notional` 一致，允许
 Decimal 量化误差但不得出现数量未缩放、金额已缩放的分裂状态。
 
+运行验收另新增只读 CLI：输入标准 deployment evidence、观察结束时间、现场新风险 cap 和主交易
+数据库环境变量名；输出不可覆盖的执行漏斗 JSON。它只保存聚合计数、decision ID、数值、阶段
+存在性和原因码，不保存原始 payload 或数据库连接信息。
+
 ## 4. 数据库 Schema、表、索引与约束
 
 不修改数据库 schema、migration、索引或约束。现有 `event_store` 中的 allocation、target、
@@ -77,6 +81,9 @@ THEORETICAL_TARGET
 cap 来源和原因码。运行验收对比 allocation、position target、risk、execution、order、fill 的
 同一 decision ID，并记录事件数量与拒绝原因；不输出完整环境变量。
 
+漏斗证据必须区分 `PASS`、`FAIL`、`UNKNOWN`：少于 100 个已成熟自然非零 target 只能是
+`UNKNOWN`；超 cap、纯尺度风险拒绝、阶段断链、风险拒绝后仍有订单或孤儿成交属于 `FAIL`。
+
 ## 11. 测试策略
 
 1. 单测证明无显式 legs 的方向 intent 会按预算比例缩放数量；
@@ -84,6 +91,8 @@ cap 来源和原因码。运行验收对比 allocation、position target、risk�
 3. 单测证明方向策略的单步目标不超过现有待成交/敞口额度；
 4. 回归证明平仓和减仓不因新增风险预算而被截断；
 5. 运行 Ruff、相关单测、完整 unit，并在 WSL2 derivatives 模拟栈复测执行漏斗。
+6. 漏斗 evaluator 单测覆盖无信号、100 条完整链、超 cap、尺度拒绝、缺阶段、拒绝后订单和
+   deployment identity 失败关闭；CLI 在已部署容器内使用 read-only transaction 生成现场证据。
 
 ## 12. Migration、Rollback 与兼容
 
@@ -106,6 +115,7 @@ simulation 验收，且不因此解除 live 门禁。
 
 完成后更新收益就绪 runbook、验收记录和正式差距评估，明确区分代码修复、模拟运行证据、
 尚未发生的成交/PnL 事实和盈利未知项。若模拟信号窗口内没有新信号，必须记录为未验证而非通过。
+漏斗 artifact 的命令、字段、退出码和不可覆盖语义必须登记到现行 runbook。
 
 ## 16. 部署与验收标准
 
@@ -117,6 +127,8 @@ simulation 验收，且不因此解除 live 门禁。
 - Ruff、完整 unit 和最窄相关测试通过；
 - 标准部署脚本完成 derivatives 模拟部署，容器健康；
 - 实际订单/成交只按观测结果陈述，若仍被其他门禁阻塞则准确列出原因。
+- 漏斗 evidence 绑定标准 deployment evidence 的 profile、deployed commit、generation、生成时间
+  和 SHA-256；缺少自然非零样本时退出 `2` 并写 `UNKNOWN`，绝不写伪 PASS。
 
 ### 实施结果
 
