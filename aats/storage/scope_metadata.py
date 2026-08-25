@@ -20,6 +20,13 @@ def envelope_scope_metadata(envelope: EventEnvelope) -> dict[str, str | None]:
     if symbol is None:
         symbol = _first_string(payload.get("allowed_symbols")) or _first_string(details.get("allowed_symbols"))
 
+    # RiskDecision intentionally carries only decision-level risk fields; its
+    # publisher uses the target symbol as the envelope key.  Preserve that
+    # contract in the indexed scope columns so symbol-scoped audit queries do
+    # not lose the risk stage of an otherwise complete execution chain.
+    if symbol is None and envelope.topic == "risk.decisions":
+        symbol = _string(envelope.key)
+
     if product_type is None and symbol is not None:
         product_type = infer_product_type_from_symbol(symbol)
     if margin_mode is None and product_type == "spot":

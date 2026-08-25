@@ -37,7 +37,10 @@ _EVENT_ROWS = text(
     WHERE created_at >= :window_start
       AND created_at < :window_end
       AND topic = ANY(:topics)
-      AND symbol = :symbol
+      -- Older RiskDecision rows predate event-store key-to-symbol indexing.
+      -- Their envelope key is still the authoritative target symbol, so the
+      -- fallback keeps historical deployment evidence auditable.
+      AND COALESCE(symbol, event_key) = :symbol
     ORDER BY sequence_id
     LIMIT :row_limit
     """
