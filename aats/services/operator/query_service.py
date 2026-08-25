@@ -1662,7 +1662,12 @@ class OperatorQueryService:
         ):
             return None
         side = str(getattr(position, "side", None) or getattr(position, "pos_side", None) or "net").lower()
-        if side == "short":
+        quantity = self._to_decimal(getattr(position, "quantity", None))
+        if side == "short" or (
+            side not in {"long", "short"}
+            and quantity is not None
+            and quantity < -self._DECIMAL_EPSILON
+        ):
             return (liquidation_price - mark_price) / mark_price
         return (mark_price - liquidation_price) / mark_price
 
@@ -1878,8 +1883,23 @@ class OperatorQueryService:
             "truth_source": "exchange_risk_snapshot_plus_latest_risk_decision",
         }
 
+    def _guard_signal_provider(self, *, service_attr: str, signal_name: str) -> Any | None:
+        """Resolve a local guard service or its cross-process read cache."""
+        service = getattr(self.runtime, service_attr, None)
+        if service is not None:
+            return service
+        caches = getattr(self.runtime, "guard_signal_caches", None)
+        if isinstance(caches, dict):
+            cache = caches.get(signal_name)
+            if cache is not None and callable(getattr(cache, "snapshot", None)):
+                return cache
+        return None
+
     def derivatives_live_guard(self) -> dict[str, Any]:
-        service = getattr(self.runtime, "derivatives_live_guard_service", None)
+        service = self._guard_signal_provider(
+            service_attr="derivatives_live_guard_service",
+            signal_name="derivatives_live",
+        )
         if service is None:
             return {
                 "enabled": False,
@@ -7583,7 +7603,10 @@ class OperatorQueryService:
         return self.runtime_queries.phase1_shadow_history(limit=limit, offset=offset)
 
     def trial_guard(self) -> dict[str, Any]:
-        service = getattr(self.runtime, "trial_guard_service", None)
+        service = self._guard_signal_provider(
+            service_attr="trial_guard_service",
+            signal_name="trial",
+        )
         if service is None:
             return {
                 "enabled": False,

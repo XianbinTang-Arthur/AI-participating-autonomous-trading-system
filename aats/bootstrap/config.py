@@ -6496,8 +6496,11 @@ async def build_runtime(
         )
         runtime._guard_signal_publish_task = _publish_task
 
-    elif effective_process_role == PROCESS_ROLE_DECISION and runtime.risk_engine is not None:
-        # Decision 侧：从 Redis 恢复 + 订阅 NATS，注入 risk_engine 作为 provider
+    elif effective_process_role in {PROCESS_ROLE_DECISION, PROCESS_ROLE_GATEWAY}:
+        # Decision / Gateway 侧：从 Redis 恢复并订阅 NATS。Decision 把信号
+        # 注入 risk_engine；Gateway 把相同缓存暴露给只读 operator API，避免
+        # 四进程拓扑把真实启用的 guard 错报为“未配置”。
+        _reader_process_role = effective_process_role
         #
         # 注意：三个 guard cache 共享同一个 NATS topic (GUARD_SIGNAL_UPDATES)，
         # NatsBus 为同 topic 只创建一个 durable consumer，因此不能让每个 cache
@@ -6510,10 +6513,11 @@ async def build_runtime(
         await _live_guard_cache.bootstrap(
             hot_state_store=hot_state_store,
             bus=bus,
-            process_role=PROCESS_ROLE_DECISION,
+            process_role=_reader_process_role,
             subscribe=False,
         )
-        runtime.risk_engine.live_runtime_guard_provider = _live_guard_cache
+        if runtime.risk_engine is not None:
+            runtime.risk_engine.live_runtime_guard_provider = _live_guard_cache
 
         _trial_guard_cache = GuardSignalHotStateCache(
             signal_name="trial",
@@ -6522,10 +6526,11 @@ async def build_runtime(
         await _trial_guard_cache.bootstrap(
             hot_state_store=hot_state_store,
             bus=bus,
-            process_role=PROCESS_ROLE_DECISION,
+            process_role=_reader_process_role,
             subscribe=False,
         )
-        runtime.risk_engine.trial_guard_provider = _trial_guard_cache
+        if runtime.risk_engine is not None:
+            runtime.risk_engine.trial_guard_provider = _trial_guard_cache
 
         _recovery_cache = GuardSignalHotStateCache(
             signal_name="recovery",
@@ -6534,10 +6539,11 @@ async def build_runtime(
         await _recovery_cache.bootstrap(
             hot_state_store=hot_state_store,
             bus=bus,
-            process_role=PROCESS_ROLE_DECISION,
+            process_role=_reader_process_role,
             subscribe=False,
         )
-        runtime.risk_engine.recovery_status_provider = _recovery_cache
+        if runtime.risk_engine is not None:
+            runtime.risk_engine.recovery_status_provider = _recovery_cache
 
         # 单次订阅 GUARD_SIGNAL_UPDATES，分发到所有 cache。
         # 每个 cache 的 _handle_remote_update 内部按 signal_name 过滤，

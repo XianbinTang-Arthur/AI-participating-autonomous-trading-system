@@ -587,6 +587,7 @@ def test_derivatives_live_managed_profile_is_pinned_for_directional_live() -> No
     assert values["strategy_hedge_independent_weak_edge_execution_mode"] == "block"
     assert values["strategy_hedge_independent_max_acceptable_cost_bps"] == 7.5
     assert values["strategy_hedge_independent_passive_first_enabled"] is True
+    assert values["trial_guard_enabled"] is True
 
 
 def test_managed_profiles_drop_legacy_cross_runtime_strategy_tuning() -> None:
