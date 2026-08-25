@@ -1534,7 +1534,9 @@ def build_silver_microstructure_15m(
     _validate_bar_alignment(bar_start_ts, bar_end_ts)
 
     start_time = time.monotonic()
-    flags: list[str] = []
+    flags_by_table: dict[str, list[str]] = {
+        table_key: [] for table_key in _TABLE_KEY_TO_NAME
+    }
     written: dict[str, int] = {}
     tables_failed: list[str] = []
     total_error: str | None = None
@@ -1565,7 +1567,7 @@ def build_silver_microstructure_15m(
                 f"microstructure_silver_etl_runs_total_{table_key}_success",
             )
         except Exception as exc:
-            flags.append(f"etl_failed:{table_key}")
+            flags_by_table[table_key].append(f"etl_failed:{table_key}")
             log.exception("%s build failed", table_key)
             written[table_name] = 0
             tables_failed.append(table_name)
@@ -1584,7 +1586,7 @@ def build_silver_microstructure_15m(
             session=session, symbol=symbol,
             bar_start=bar_start_ts, bar_end=bar_end_ts,
             ingest_run_id=ingest_run_id, dataset_version=dataset_version,
-            flags=flags,
+            flags=flags_by_table["orderbook"],
         ),
     )
     # 读刚写的 mid_price_last 供 trade_flow / oi_funding 用。
@@ -1612,7 +1614,7 @@ def build_silver_microstructure_15m(
             session=session, symbol=symbol,
             bar_start=bar_start_ts, bar_end=bar_end_ts,
             ingest_run_id=ingest_run_id, dataset_version=dataset_version,
-            flags=flags, mid_price_ref=mid_price_ref,
+            flags=flags_by_table["trade_flow"], mid_price_ref=mid_price_ref,
         ),
     )
 
@@ -1624,7 +1626,7 @@ def build_silver_microstructure_15m(
             session=session, symbol=symbol,
             bar_start=bar_start_ts, bar_end=bar_end_ts,
             ingest_run_id=ingest_run_id, dataset_version=dataset_version,
-            flags=flags, mid_price_ref=mid_price_ref,
+            flags=flags_by_table["oi_funding"], mid_price_ref=mid_price_ref,
         ),
     )
 
@@ -1637,7 +1639,7 @@ def build_silver_microstructure_15m(
             session=session, symbol=symbol,
             bar_start=bar_start_ts, bar_end=bar_end_ts,
             ingest_run_id=ingest_run_id, dataset_version=dataset_version,
-            flags=flags,
+            flags=flags_by_table["volume_profile"],
         ),
     )
 
@@ -1649,18 +1651,25 @@ def build_silver_microstructure_15m(
             session=session, symbol=symbol,
             bar_start=bar_start_ts, bar_end=bar_end_ts,
             ingest_run_id=ingest_run_id, dataset_version=dataset_version,
-            flags=flags,
+            flags=flags_by_table["liquidation"],
         ),
     )
 
     duration = time.monotonic() - start_time
+    aggregate_flags = sorted(
+        {
+            flag
+            for table_flags in flags_by_table.values()
+            for flag in table_flags
+        }
+    )
     result = SilverMicrostructureResult(
         symbol=symbol,
         bar_start_ts=bar_start_ts,
         bar_end_ts=bar_end_ts,
         tables_written=written,
         tables_failed=list(tables_failed),
-        quality_flags=sorted(set(flags)),
+        quality_flags=aggregate_flags,
         duration_seconds=duration,
         error=total_error,
     )
@@ -1684,7 +1693,7 @@ def build_silver_microstructure_15m(
     # 被 etl_errors_<table>_total 覆盖, 不重复计入 no-data。
     for tk, tname in _TABLE_KEY_TO_NAME.items():
         if written.get(tname, 0) > 0 and tname not in tables_failed:
-            if _table_had_no_data(tk, flags):
+            if _table_had_no_data(tk, flags_by_table[tk]):
                 _record_metric(
                     metrics_registry,
                     f"microstructure_silver_bars_with_no_data_{tk}_total",

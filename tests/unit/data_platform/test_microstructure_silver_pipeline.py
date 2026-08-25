@@ -121,6 +121,50 @@ class TestEmptyBarGapFill(unittest.TestCase):
                 ).scalar()
                 self.assertEqual(count, 1, f"expected 1 row in silver.{tbl}")
 
+            # 每张 Silver 行只能携带自身来源/计算产生的质量标记。旧实现共用
+            # 一个可变 flags 列表，导致 volume_profile 的 partial_baseline 和
+            # oi_funding 的 partial_data 污染后续 liquidation 行，审计归因失真。
+            per_table_flags = {}
+            for table_name in (
+                    "market_orderbook_metrics_15m",
+                    "market_trade_flow_15m",
+                    "market_oi_funding_metrics_15m",
+                    "market_volume_profile_15m",
+                    "market_liquidation_metrics_15m",
+            ):
+                raw_flags = sess.execute(
+                    text(f"SELECT quality_flags FROM silver.{table_name}")
+                ).scalar_one()
+                per_table_flags[table_name] = (
+                    [
+                        flag
+                        for flag in raw_flags.strip("{}").split(",")
+                        if flag
+                    ]
+                    if isinstance(raw_flags, str)
+                    else raw_flags
+                )
+            self.assertEqual(
+                set(per_table_flags["market_orderbook_metrics_15m"]),
+                {"orderbook_bbo_no_data", "orderbook_books5_no_data"},
+            )
+            self.assertEqual(
+                set(per_table_flags["market_trade_flow_15m"]),
+                {"trades_no_data"},
+            )
+            self.assertEqual(
+                set(per_table_flags["market_oi_funding_metrics_15m"]),
+                {"oi_no_data", "funding_no_data", "mark_no_data"},
+            )
+            self.assertEqual(
+                set(per_table_flags["market_volume_profile_15m"]),
+                {"trades_no_data", "partial_baseline"},
+            )
+            self.assertEqual(
+                set(per_table_flags["market_liquidation_metrics_15m"]),
+                {"liquidation_no_data"},
+            )
+
     def test_no_etl_failed_flag_on_empty_bar(self) -> None:
         """空 bar 应该是 "gap fill" (打 *_no_data), 不应该是 etl_failed。"""
         env = make_env(owner=self)
