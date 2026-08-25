@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict, deque
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -79,6 +80,9 @@ class FillEventHotCache:
         self._process_role: str = "monolith"
         self._bootstrapped: bool = False
         self._subscribed: bool = False
+        # Redis 只是热缓存，不足以证明历史 fill 覆盖完整。只有启动时已与
+        # Postgres source of truth 对齐，读路径才可以跳过数据库 fallback。
+        self._truth_verified: bool = False
         self._index_version: int = 0
         # R3-P1-E4：popitem 淘汰出的 fill_id，待 publish 路径异步 Redis DEL。
         # 2026-04-21 A3：换成 deque(maxlen=...)，防止 subscriber-only 进程
@@ -96,6 +100,7 @@ class FillEventHotCache:
         hot_state_store: HotStateStore,
         bus: EventBus,
         process_role: str,
+        truth_loader: Callable[[int], list[FillEvent]] | None = None,
         subscribe: bool = True,
     ) -> None:
         self._hot_state_store = hot_state_store
@@ -146,6 +151,9 @@ class FillEventHotCache:
         else:
             log_event(self._logger, "fill_event_cache_bootstrap_no_index",
                       process_role=self._process_role)
+
+        if callable(truth_loader):
+            await self._reconcile_bootstrap_truth(truth_loader=truth_loader)
 
         self._bootstrapped = True
         if subscribe:
@@ -244,8 +252,13 @@ class FillEventHotCache:
         *,
         since: datetime | None = None,
     ) -> list[FillEvent] | None:
-        """返回 scope 内的 fills（排序后）。未 bootstrap 返回 None（I5）。"""
-        if not self._bootstrapped:
+        """返回 scope 内的 fills（排序后）。
+
+        未 bootstrap 或启动时未能与 Postgres 真相对齐时返回 ``None``，让
+        caller 回退数据库。Redis index 可能因重启、TTL 或写入中断而只覆盖
+        部分生命周期，不能单独作为 strategy health 的完整历史依据。
+        """
+        if not self._bootstrapped or not self._truth_verified:
             return None
         all_fills = list(self._fills.values())
         scoped = filter_fills(all_fills, scope)
@@ -272,6 +285,39 @@ class FillEventHotCache:
     # ──────────────────────────────────────────────────────────────────
     # 内部 helpers
     # ──────────────────────────────────────────────────────────────────
+
+    async def _reconcile_bootstrap_truth(
+        self,
+        *,
+        truth_loader: Callable[[int], list[FillEvent]],
+    ) -> None:
+        """用 Postgres 最近 fills 替换可能不完整的 Redis 启动快照。"""
+        try:
+            truth_rows = await asyncio.to_thread(truth_loader, self._max_capacity)
+            normalized = [FillEvent.model_validate(row) for row in truth_rows]
+        except Exception as exc:
+            self._truth_verified = False
+            log_event(
+                self._logger,
+                "fill_event_cache_bootstrap_truth_failed",
+                level="warning",
+                process_role=self._process_role,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return
+
+        recent = sorted(normalized, key=fill_processing_sort_key)[-self._max_capacity :]
+        self._fills = OrderedDict((fill.fill_id, fill) for fill in recent)
+        self._pending_evictions.clear()
+        self._truth_verified = True
+        log_event(
+            self._logger,
+            "fill_event_cache_bootstrap_truth_reconciled",
+            process_role=self._process_role,
+            cached_count=len(self._fills),
+            max_capacity=self._max_capacity,
+        )
 
     def _apply_locally(self, fill: FillEvent) -> bool:
         """Append-only dedup by fill_id. 已存在的 fill_id 被跳过。
@@ -364,6 +410,7 @@ class FillEventHotCache:
             "process_role": self._process_role,
             "bootstrapped": self._bootstrapped,
             "subscribed": self._subscribed,
+            "truth_verified": self._truth_verified,
             "cached_count": len(self._fills),
             "max_capacity": self._max_capacity,
             "index_version": self._index_version,

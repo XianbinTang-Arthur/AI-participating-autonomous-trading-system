@@ -16,6 +16,7 @@ from aats.services.strategy_execution_health import (
     ClosedTradeOutcome,
     _walk_leg_fills,
     _strategy_health_snapshot_from_outcomes,
+    compute_strategy_execution_health,
 )
 
 
@@ -34,8 +35,10 @@ class TestStrategyExecutionHealth(TestCase):
         close_only: bool = False,
         decision_id: str = "dec-test",
         execution_chain_id: str | None = "independent:dec-test:long:de_risk",
+        pos_side: str = "long",
+        ingestion_timestamp=None,
     ) -> FillEvent:
-        ts = utc_now().astimezone(timezone.utc)
+        ts = ingestion_timestamp or utc_now().astimezone(timezone.utc)
         return FillEvent(
             fill_id=fill_id,
             decision_id=decision_id,
@@ -62,8 +65,42 @@ class TestStrategyExecutionHealth(TestCase):
             ingestion_timestamp=ts,
             product_type="derivatives",
             margin_mode="isolated",
-            pos_side="long",
+            pos_side=pos_side,
         )
+
+    def test_explicit_close_fill_preserves_cooldown_when_open_fill_is_outside_cache(self) -> None:
+        close_ts = utc_now().astimezone(timezone.utc)
+        close_fill = self._make_fill(
+            fill_id="close-short-after-cache-gap",
+            side="buy",
+            position_intent="close_short",
+            reduce_only=True,
+            close_only=True,
+            pos_side="net",
+            ingestion_timestamp=close_ts,
+        )
+        settings = AATSSettings.model_validate(
+            {"strategy_post_close_cooldown_seconds": 300}
+        )
+
+        snapshot = compute_strategy_execution_health(
+            settings=settings,
+            symbol="BTC-USDT-SWAP",
+            fills=[close_fill],
+            snapshots=[],
+            current_position_qty=Decimal("0"),
+            current_long_position_qty=Decimal("0"),
+            current_short_position_qty=Decimal("0"),
+            as_of=close_ts + timedelta(seconds=17),
+        )
+        guardrails = snapshot.active_guardrails(
+            settings=settings,
+            as_of=close_ts + timedelta(seconds=17),
+            current_position_qty=Decimal("0"),
+        )
+
+        self.assertEqual(snapshot.last_position_closed_at, close_ts)
+        self.assertIn("post_close_cooldown_active", guardrails["flags"])
 
     def test_residual_exits_do_not_raise_guard_eligible_churn_ratio(self) -> None:
         now = utc_now()

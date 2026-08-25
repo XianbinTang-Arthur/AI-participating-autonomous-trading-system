@@ -471,10 +471,13 @@ def _walk_symbol_fills(
     position_qty = Decimal("0")
     current_position_opened_at: datetime | None = None
     last_position_closed_at: datetime | None = None
+    latest_explicit_close_at: datetime | None = None
     outcomes: list[ClosedTradeOutcome] = []
     active_lifecycle: _LifecycleAccumulator | None = None
 
     for fill in fills:
+        if _is_explicit_close_fill(fill):
+            latest_explicit_close_at = fill.ingestion_timestamp
         fill_qty = to_decimal(fill.fill_qty)
         signed_qty = fill_qty if fill.side == "buy" else -fill_qty
         previous_qty = position_qty
@@ -536,6 +539,12 @@ def _walk_symbol_fills(
 
     if is_effectively_zero(current_position_qty):
         current_position_opened_at = None
+        if latest_explicit_close_at is not None:
+            last_position_closed_at = max(
+                item
+                for item in (last_position_closed_at, latest_explicit_close_at)
+                if item is not None
+            )
     elif is_effectively_zero(position_qty) or (position_qty > 0) != (current_position_qty > 0):
         current_position_opened_at = None
     elif active_lifecycle is not None:
@@ -555,12 +564,15 @@ def _walk_leg_fills(
     position_qty = Decimal("0")
     current_position_opened_at: datetime | None = None
     last_position_closed_at: datetime | None = None
+    latest_explicit_close_at: datetime | None = None
     outcomes: list[ClosedTradeOutcome] = []
     active_lifecycle: _LifecycleAccumulator | None = None
 
     for fill in fills:
         if _fill_leg(fill) != leg:
             continue
+        if _is_explicit_close_fill(fill):
+            latest_explicit_close_at = fill.ingestion_timestamp
         signed_qty = _leg_signed_fill_qty(fill=fill, leg=leg)
         previous_qty = position_qty
         position_qty = max(previous_qty + signed_qty, Decimal("0"))
@@ -608,6 +620,12 @@ def _walk_leg_fills(
 
     if is_effectively_zero(current_position_qty):
         current_position_opened_at = None
+        if latest_explicit_close_at is not None:
+            last_position_closed_at = max(
+                item
+                for item in (last_position_closed_at, latest_explicit_close_at)
+                if item is not None
+            )
     elif is_effectively_zero(position_qty) or abs(position_qty - current_position_qty) > EPSILON_DECIMAL_12:
         current_position_opened_at = None
     elif active_lifecycle is not None:
@@ -717,6 +735,16 @@ def _fill_leg(fill: FillEvent) -> str | None:
     if normalized_intent.endswith("_short"):
         return "short"
     return None
+
+
+def _is_explicit_close_fill(fill: FillEvent) -> bool:
+    normalized_intent = str(fill.position_intent or "").strip().lower()
+    return bool(
+        fill.close_only
+        or normalized_intent in {"close_long", "close_short"}
+        or fill.execution_action == "close"
+        or fill.leg_action == "close"
+    )
 
 
 def _leg_signed_fill_qty(*, fill: FillEvent, leg: str) -> Decimal:

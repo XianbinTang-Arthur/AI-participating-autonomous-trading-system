@@ -117,11 +117,19 @@ async def _boot(
     *,
     store: InMemoryHotStateStore | None = None,
     bus: InMemoryEventBus | None = None,
+    truth_loader=None,
     subscribe: bool = True,
 ) -> tuple[InMemoryHotStateStore, InMemoryEventBus]:
     s = store if store is not None else InMemoryHotStateStore()
     b = bus if bus is not None else InMemoryEventBus()
-    await cache.bootstrap(hot_state_store=s, bus=b, process_role="execution", subscribe=subscribe)
+    loader = truth_loader if truth_loader is not None else (lambda _limit: [])
+    await cache.bootstrap(
+        hot_state_store=s,
+        bus=b,
+        process_role="execution",
+        truth_loader=loader,
+        subscribe=subscribe,
+    )
     return s, b
 
 
@@ -172,6 +180,56 @@ class TestFillEventHotCacheBootstrap(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snap["cached_count"], 0)
         self.assertEqual(cache.fills_for_scope_sync(_SCOPE), [])
 
+    async def test_bootstrap_without_truth_loader_forces_database_fallback(self) -> None:
+        cache = FillEventHotCache(logger=_logger())
+        store = InMemoryHotStateStore()
+        bus = InMemoryEventBus()
+
+        await cache.bootstrap(
+            hot_state_store=store,
+            bus=bus,
+            process_role="execution",
+        )
+
+        self.assertFalse(cache.snapshot()["truth_verified"])
+        self.assertIsNone(cache.fills_for_scope_sync(_SCOPE))
+
+    async def test_bootstrap_truth_replaces_incomplete_redis_history(self) -> None:
+        cache = FillEventHotCache(logger=_logger())
+        store = InMemoryHotStateStore()
+        close_fill = _make_fill(
+            fill_id="fill-close",
+            ingestion_timestamp=_BASE_TS + timedelta(minutes=10),
+        )
+        open_fill = _make_fill(fill_id="fill-open")
+        await store.set(_fill_key(close_fill.fill_id), close_fill.model_dump(mode="json"))
+        await store.set(
+            FILL_INDEX_KEY,
+            {"all_fill_ids": [close_fill.fill_id], "version": 1},
+        )
+
+        await _boot(
+            cache,
+            store=store,
+            truth_loader=lambda limit: [open_fill, close_fill][-limit:],
+        )
+
+        fills = cache.fills_for_scope_sync(_SCOPE)
+        assert fills is not None
+        self.assertTrue(cache.snapshot()["truth_verified"])
+        self.assertEqual([fill.fill_id for fill in fills], ["fill-open", "fill-close"])
+
+    async def test_bootstrap_truth_failure_forces_database_fallback(self) -> None:
+        cache = FillEventHotCache(logger=_logger())
+
+        def _raise(_limit: int) -> list[FillEvent]:
+            raise RuntimeError("postgres_unavailable")
+
+        await _boot(cache, truth_loader=_raise)
+
+        self.assertFalse(cache.snapshot()["truth_verified"])
+        self.assertIsNone(cache.fills_for_scope_sync(_SCOPE))
+
     async def test_bootstrap_hydrates_from_index(self) -> None:
         cache = FillEventHotCache(logger=_logger())
         store = InMemoryHotStateStore()
@@ -183,7 +241,11 @@ class TestFillEventHotCacheBootstrap(unittest.IsolatedAsyncioTestCase):
             "all_fill_ids": ["fill-A", "fill-B"],
             "version": 1,
         })
-        await _boot(cache, store=store)
+        await _boot(
+            cache,
+            store=store,
+            truth_loader=lambda limit: [f1, f2][-limit:],
+        )
         self.assertEqual(cache.snapshot()["cached_count"], 2)
 
     async def test_bootstrap_redis_get_fails_best_effort(self) -> None:

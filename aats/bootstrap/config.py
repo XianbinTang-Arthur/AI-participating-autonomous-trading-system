@@ -5746,10 +5746,15 @@ async def build_runtime(
     slices.fill_event_hot_cache = FillEventHotCache(
         logger=get_logger("aats.execution.fill_event_cache"),
     )
+    fill_event_truth_repo = _storage_execution_truth_repo(storage)
     await slices.fill_event_hot_cache.bootstrap(
         hot_state_store=hot_state_store,
         bus=slices.bus,
         process_role=effective_process_role or "monolith",
+        truth_loader=lambda limit: fill_event_truth_repo.fills_for_scope(
+            scope=state_scope,
+            limit=limit,
+        ),
         subscribe=False,
     )
     log_event(
