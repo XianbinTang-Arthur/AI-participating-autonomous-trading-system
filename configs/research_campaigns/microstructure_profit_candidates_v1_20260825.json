@@ -1,0 +1,50 @@
+{
+  "campaign_id": "microstructure_profit_candidates_v1_20260825",
+  "dataset_version": "v1.0",
+  "end": "2026-05-28T00:00:00+00:00",
+  "fee_bps": 5.0,
+  "funding_bps": 0.5,
+  "hypotheses": [
+    {
+      "capacity_assumption": "Top-5 depth and public trades are 15-minute aggregates; no executable capacity is claimed until candidate-bound L2 replay passes.",
+      "factor_expression": "ZScore(top5_weighted_imbalance, 16) + ZScore(trade_flow_imbalance, 16)",
+      "falsification_condition": "Reject if either development segment has non-positive net annualized return, the explicit-cost edge is non-positive, or any campaign statistical gate fails.",
+      "holding_period_bars": 1,
+      "hypothesis": "When top-five displayed liquidity and aggressive trade flow point in the same direction relative to their prior four-hour distributions, that pressure continues for one additional 15-minute bar after explicit costs.",
+      "hypothesis_id": "book_flow_pressure_continuation",
+      "mechanism": "Displayed-liquidity and aggressive-flow pressure continuation",
+      "rationale": "A synchronized book imbalance and taker imbalance may identify information-driven demand before passive liquidity fully replenishes."
+    },
+    {
+      "capacity_assumption": "Open-interest change is a normalized 15-minute aggregate and trade flow is public taker flow; no leverage or size claim is made from this development result.",
+      "factor_expression": "trade_flow_imbalance * oi_delta",
+      "falsification_condition": "Reject if flow accompanied by position creation does not produce positive net next-bar returns in both train and valid, or if stability and multiple-testing gates fail.",
+      "holding_period_bars": 1,
+      "hypothesis": "Aggressive trade flow has more persistent 15-minute directional impact when it coincides with same-direction open-interest expansion, indicating new position formation rather than position transfer.",
+      "hypothesis_id": "flow_oi_position_creation",
+      "mechanism": "Aggressive flow confirmed by position creation",
+      "rationale": "Combining taker direction with open-interest change distinguishes new risk deployment from trades that merely exchange existing inventory."
+    },
+    {
+      "capacity_assumption": "Basis is mark price minus contemporaneous order-book mid in basis points; no spot hedge, funding carry, or cross-venue capacity is modeled in this directional development test.",
+      "factor_expression": "-ZScore(basis_bps, 96)",
+      "falsification_condition": "Reject if extreme mark-to-mid basis does not mean-revert enough over the next 15 minutes to overcome 7.5 bps modeled cost in both development segments.",
+      "holding_period_bars": 1,
+      "hypothesis": "An extreme mark-to-mid basis relative to the prior day reverses over the next 15-minute bar as temporary derivative pricing pressure dissipates.",
+      "hypothesis_id": "mark_mid_basis_reversion",
+      "mechanism": "Short-horizon derivative basis normalization",
+      "rationale": "The mark-to-mid deviation measures a positioning and pricing dislocation that is economically distinct from candle-only momentum or reversal."
+    }
+  ],
+  "max_factor_input_missing_ratio": 0.01,
+  "registered_at": "2026-08-25T20:27:00+00:00",
+  "research_profile": "real_factor_research",
+  "schema_version": "research_preregistered_campaign_v1",
+  "slippage_bps": 2.0,
+  "start": "2026-05-16T00:00:00+00:00",
+  "symbol": "BTC-USDT-SWAP",
+  "test_ratio": 0.2,
+  "timeframe": "15m",
+  "train_ratio": 0.6,
+  "valid_ratio": 0.2
+}

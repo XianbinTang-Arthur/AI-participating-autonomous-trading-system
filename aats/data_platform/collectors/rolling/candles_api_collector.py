@@ -275,17 +275,22 @@ def collect_candles_incremental(
                 )
                 page += 1
 
-        # Filter: only keep rows strictly newer than checkpoint
+        # Keep one-bar overlap so a checkpoint written by an older collector
+        # version from an unconfirmed candle can heal when OKX later marks that
+        # same timestamp confirmed.  Bronze/Silver are idempotent by (symbol, ts).
         if checkpoint_ts:
-            all_rows = [r for r in all_rows if r.ts > checkpoint_ts]
+            all_rows = [r for r in all_rows if r.ts >= checkpoint_ts]
 
         all_rows = _dedupe_candle_rows(all_rows)
 
         count = _write_staging(session, table, all_rows, run_id, dataset_version)
 
-        # Advance checkpoint
-        if all_rows:
-            newest_ts = max(r.ts for r in all_rows)
+        # Only a confirmed/closed candle may advance the checkpoint.  Advancing
+        # to the current open candle would make the strict incremental filter
+        # skip its final close forever, persisting confirm=false into Silver.
+        confirmed_rows = [row for row in all_rows if row.confirm]
+        if confirmed_rows:
+            newest_ts = max(r.ts for r in confirmed_rows)
             next_ts = newest_ts + delta
             upsert_checkpoint(
                 session,

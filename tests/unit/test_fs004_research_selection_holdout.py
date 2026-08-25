@@ -30,7 +30,7 @@ def gate(*, passed: bool, failures: tuple[str, ...] = ()) -> CandidateGateResult
 
 
 def test_real_data_selection_protocol_has_explicit_development_and_holdout_roles() -> None:
-    assert REAL_DATA_CODE_VERSION == "research_factory_real_data_runner_v2"
+    assert REAL_DATA_CODE_VERSION == "research_factory_real_data_runner_v3"
     assert SELECTION_PROTOCOL_VERSION == "train_valid_selection_test_holdout_v2"
     assert DEVELOPMENT_SEGMENTS == ("train", "valid")
     assert BENCHMARK_SEGMENT == "valid"

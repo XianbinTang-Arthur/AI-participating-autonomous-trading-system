@@ -8,7 +8,7 @@ from typing import Any
 
 from aats.data_platform.research_factory.numeric import require_finite_number
 
-ALLOWED_FACTOR_FIELDS = frozenset(
+BASE_FACTOR_FIELDS = frozenset(
     {
         "open",
         "high",
@@ -19,6 +19,16 @@ ALLOWED_FACTOR_FIELDS = frozenset(
         "funding_rate",
     }
 )
+MICROSTRUCTURE_FACTOR_FIELDS = frozenset(
+    {
+        "top5_weighted_imbalance",
+        "trade_flow_imbalance",
+        "oi_delta",
+        "funding_z_score_7d",
+        "basis_bps",
+    }
+)
+ALLOWED_FACTOR_FIELDS = BASE_FACTOR_FIELDS | MICROSTRUCTURE_FACTOR_FIELDS
 ALLOWED_FACTOR_FUNCTIONS = frozenset(
     {
         "Ref",

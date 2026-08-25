@@ -27,6 +27,32 @@ def test_parse_factor_expression_accepts_basic_arithmetic_composition() -> None:
     assert parsed.functions == ("Return", "ZScore")
 
 
+def test_parse_factor_expression_accepts_microstructure_fields() -> None:
+    parsed = parse_factor_expression(
+        "ZScore(top5_weighted_imbalance, 16) + trade_flow_imbalance * oi_delta"
+    )
+
+    assert parsed.fields == (
+        "top5_weighted_imbalance",
+        "trade_flow_imbalance",
+        "oi_delta",
+    )
+
+
+def test_evaluate_factor_expression_uses_microstructure_values() -> None:
+    rows = [
+        {"basis_bps": 2.0, "funding_z_score_7d": -1.0},
+        {"basis_bps": 4.0, "funding_z_score_7d": 0.5},
+    ]
+
+    result = evaluate_factor_expression(
+        "basis_bps - funding_z_score_7d",
+        rows,
+    )
+
+    assert result.values == pytest.approx((3.0, 3.5))
+
+
 def test_parse_factor_expression_rejects_import_call() -> None:
     with pytest.raises(ValueError, match="dunder"):
         parse_factor_expression('__import__("os")')

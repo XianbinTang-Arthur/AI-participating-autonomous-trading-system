@@ -70,6 +70,7 @@ def load_and_validate_plan(path: Path, *, artifact_root: Path) -> dict[str, Any]
     _parse_datetime(str(plan["start"]))
     _parse_datetime(str(plan["end"]))
     plan.setdefault("funding_bps", 0.5)
+    plan.setdefault("max_factor_input_missing_ratio", 0.01)
     return plan
 
 
@@ -288,6 +289,9 @@ def main(argv: list[str] | None = None) -> int:
                             fee_bps=float(plan["fee_bps"]),
                             slippage_bps=float(plan["slippage_bps"]),
                             funding_bps=float(plan["funding_bps"]),
+                            max_factor_input_missing_ratio=float(
+                                plan["max_factor_input_missing_ratio"]
+                            ),
                             execution_cost_summary_path=summary,
                             require_execution_realism=args.phase == "evidence-complete",
                             timestamp=timestamp,

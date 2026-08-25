@@ -13,6 +13,9 @@ from pathlib import PurePath, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from aats.data_platform.research_factory.datasets.segments import assert_no_leakage
+from aats.data_platform.research_factory.features.expressions import (
+    MICROSTRUCTURE_FACTOR_FIELDS,
+)
 from aats.data_platform.research_factory.numeric import require_finite_number
 from aats.data_platform.research_factory.specs import DatasetSpec, ProcessorSpec, SegmentSpec
 
@@ -37,6 +40,7 @@ class GoldBarRecord:
     volume: NumericValue
     vwap: NumericValue | None = None
     funding_rate: NumericValue | None = None
+    feature_values: Mapping[str, NumericValue | None] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -63,13 +67,27 @@ class GoldBarRecord:
                 raise ValueError("record.vwap must be positive")
         if self.funding_rate is not None:
             require_finite_number(self.funding_rate, "record.funding_rate")
+        if not isinstance(self.feature_values, Mapping):
+            raise ValueError("record.feature_values must be a mapping")
+        unexpected_fields = sorted(
+            set(self.feature_values) - MICROSTRUCTURE_FACTOR_FIELDS
+        )
+        if unexpected_fields:
+            raise ValueError(
+                f"record.feature_values contains unsupported fields: {unexpected_fields}"
+            )
+        feature_values = dict(self.feature_values)
+        for field_name, value in feature_values.items():
+            if value is not None:
+                require_finite_number(value, f"record.feature_values.{field_name}")
         if not isinstance(self.metadata, Mapping):
             raise ValueError("record.metadata must be a mapping")
+        object.__setattr__(self, "feature_values", feature_values)
         object.__setattr__(self, "metadata", dict(self.metadata))
 
     def to_row(self) -> dict[str, Any]:
         """Return a detached row dictionary suitable for feature processing."""
-        return {
+        row = {
             "symbol": self.symbol,
             "timeframe": self.timeframe,
             "ts": self.ts,
@@ -82,6 +100,8 @@ class GoldBarRecord:
             "funding_rate": self.funding_rate,
             "metadata": dict(self.metadata),
         }
+        row.update(self.feature_values)
+        return row
 
 
 @dataclass(frozen=True, slots=True)

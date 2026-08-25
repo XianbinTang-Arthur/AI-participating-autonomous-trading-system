@@ -212,6 +212,128 @@ def test_gold_replay_data_source_loads_records_with_watermark() -> None:
     assert result.source_watermark["timestamp_timezone_assumption"] == "timezone-aware database timestamp"
 
 
+def test_gold_replay_data_source_joins_and_fingerprints_microstructure_fields() -> None:
+    rows = [
+        SimpleNamespace(
+            symbol="BTC-USDT-SWAP",
+            ts=START,
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.5,
+            volume=10_000.0,
+            aligned_funding_rate=0.0001,
+            source_candle_dataset_version="v1.0",
+            source_funding_dataset_version="funding_v1",
+            build_run_id="gold-run-1",
+            top5_weighted_imbalance=0.25,
+            trade_flow_imbalance=0.4,
+            bbo_samples_n=900,
+            books5_samples_n=900,
+            ob_dataset_version="p1d_microstructure_v1.0",
+            ob_ingest_run_id="micro-run-1",
+            ob_quality_flags=(),
+            trade_count=100,
+            tf_dataset_version="p1d_microstructure_v1.0",
+            tf_ingest_run_id="micro-run-1",
+            tf_quality_flags=(),
+            oi_samples_n=10,
+            oi_dataset_version="p1d_microstructure_v1.0",
+            oi_ingest_run_id="micro-run-1",
+            oi_quality_flags=(),
+        )
+    ]
+    session = FakeSession(rows)
+
+    result = GoldReplayDataSource(session).load(
+        symbol="BTC-USDT-SWAP",
+        timeframe="15m",
+        start=START,
+        end=START + timedelta(minutes=15),
+        dataset_version="v1.0",
+        required_factor_fields=(
+            "top5_weighted_imbalance",
+            "trade_flow_imbalance",
+        ),
+    )
+
+    assert "silver.market_orderbook_metrics_15m" in session.sql
+    assert "silver.market_trade_flow_15m" in session.sql
+    assert result.records[0].feature_values == {
+        "top5_weighted_imbalance": pytest.approx(0.25),
+        "trade_flow_imbalance": pytest.approx(0.4),
+    }
+    assert result.source_tables == (
+        "gold.market_swap_replay_bars_15m",
+        "silver.market_orderbook_metrics_15m",
+        "silver.market_trade_flow_15m",
+    )
+    micro = result.source_watermark["microstructure"]
+    assert micro["eligible_non_null_counts"] == {
+        "top5_weighted_imbalance": 1,
+        "trade_flow_imbalance": 1,
+    }
+    assert micro["source_fingerprint"].startswith("sha256:")
+
+
+def test_gold_replay_data_source_rejects_microstructure_on_non_15m_timeframe() -> None:
+    with pytest.raises(ValueError, match="require_15m"):
+        GoldReplayDataSource(FakeSession([])).load(
+            symbol="BTC-USDT-SWAP",
+            timeframe="1h",
+            start=START,
+            end=START + timedelta(hours=1),
+            required_factor_fields=("trade_flow_imbalance",),
+        )
+
+
+def test_gold_replay_data_source_nulls_microstructure_when_lineage_mismatches() -> None:
+    row = SimpleNamespace(
+        symbol="BTC-USDT-SWAP",
+        ts=START,
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=10_000.0,
+        aligned_funding_rate=0.0001,
+        source_candle_dataset_version="v1.0",
+        source_funding_dataset_version="funding_v1",
+        build_run_id="gold-run-1",
+        top5_weighted_imbalance=0.25,
+        trade_flow_imbalance=0.4,
+        bbo_samples_n=900,
+        books5_samples_n=900,
+        ob_dataset_version="micro-v1",
+        ob_ingest_run_id="micro-run-1",
+        ob_quality_flags=(),
+        trade_count=100,
+        tf_dataset_version="micro-v2",
+        tf_ingest_run_id="micro-run-1",
+        tf_quality_flags=(),
+        oi_samples_n=10,
+        oi_dataset_version="micro-v1",
+        oi_ingest_run_id="micro-run-1",
+        oi_quality_flags=(),
+    )
+
+    result = GoldReplayDataSource(FakeSession([row])).load(
+        symbol="BTC-USDT-SWAP",
+        timeframe="15m",
+        start=START,
+        end=START + timedelta(minutes=15),
+        required_factor_fields=(
+            "top5_weighted_imbalance",
+            "trade_flow_imbalance",
+        ),
+    )
+
+    assert result.records[0].feature_values == {
+        "top5_weighted_imbalance": None,
+        "trade_flow_imbalance": None,
+    }
+
+
 def test_real_data_config_timestamp_defaults_to_current_utc(tmp_path: Path) -> None:
     before = datetime.now(UTC)
     config = ResearchFactoryExperimentConfig(
@@ -413,6 +535,7 @@ def test_real_data_runner_requires_train_and_valid_gates_to_pass(tmp_path: Path)
     assert development_returns["segments"]["train"]["net_returns"]
     assert development_returns["segments"]["valid"]["net_returns"]
     assert development_returns["holdout"]["values_exposed"] is False
+    assert (experiment_dir / "factor_input_quality_report.json").is_file()
     assert not (experiment_dir / "candidate_artifact.json").exists()
 
 

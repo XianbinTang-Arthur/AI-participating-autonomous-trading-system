@@ -42,6 +42,7 @@ _CAMPAIGN_KEYS = frozenset(
         "hypotheses",
     }
 )
+_CAMPAIGN_OPTIONAL_KEYS = frozenset({"max_factor_input_missing_ratio"})
 _HYPOTHESIS_KEYS = frozenset(
     {
         "hypothesis_id",
@@ -172,6 +173,7 @@ class PreregisteredCampaignSpec:
     fee_bps: float
     slippage_bps: float
     funding_bps: float
+    max_factor_input_missing_ratio: float | None
     hypotheses: tuple[PreregisteredHypothesisSpec, ...]
     source_sha256: str
 
@@ -182,7 +184,12 @@ class PreregisteredCampaignSpec:
         *,
         source_sha256: str,
     ) -> "PreregisteredCampaignSpec":
-        _require_exact_keys(payload, _CAMPAIGN_KEYS, "campaign")
+        _require_required_and_optional_keys(
+            payload,
+            _CAMPAIGN_KEYS,
+            _CAMPAIGN_OPTIONAL_KEYS,
+            "campaign",
+        )
         if payload["schema_version"] != PREREGISTERED_CAMPAIGN_SCHEMA:
             raise ValueError("preregistered_campaign_schema_mismatch")
         registered_at = _datetime(payload["registered_at"], "registered_at")
@@ -243,12 +250,20 @@ class PreregisteredCampaignSpec:
                 "slippage_bps",
             ),
             funding_bps=_finite_float(payload["funding_bps"], "funding_bps"),
+            max_factor_input_missing_ratio=(
+                _inclusive_ratio(
+                    payload["max_factor_input_missing_ratio"],
+                    "max_factor_input_missing_ratio",
+                )
+                if "max_factor_input_missing_ratio" in payload
+                else None
+            ),
             hypotheses=hypotheses,
             source_sha256=_sha256_text(source_sha256, "source_sha256"),
         )
 
     def manifest_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": PREREGISTERED_CAMPAIGN_SCHEMA,
             "campaign_id": self.campaign_id,
             "registered_at": self.registered_at.isoformat(),
@@ -271,6 +286,9 @@ class PreregisteredCampaignSpec:
             "capital_eligible": False,
             "authorization_boundary": _AUTHORIZATION_BOUNDARY,
         }
+        if self.max_factor_input_missing_ratio is not None:
+            payload["max_factor_input_missing_ratio"] = self.max_factor_input_missing_ratio
+        return payload
 
 
 def load_preregistered_campaign(path: str | Path) -> PreregisteredCampaignSpec:
@@ -353,6 +371,8 @@ def register_preregistered_campaign(
             "reason_codes": ["preregistered_new_hypothesis"],
             "authorization_boundary": _AUTHORIZATION_BOUNDARY,
         }
+        if spec.max_factor_input_missing_ratio is not None:
+            plan["max_factor_input_missing_ratio"] = spec.max_factor_input_missing_ratio
         writes.extend(((proposal_path, proposal), (card_path, card), (plan_path, plan)))
         plan_records.append(
             {
@@ -453,6 +473,23 @@ def _require_exact_keys(
         )
 
 
+def _require_required_and_optional_keys(
+    payload: Mapping[str, Any],
+    required: frozenset[str],
+    optional: frozenset[str],
+    label: str,
+) -> None:
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"{label}_must_be_object")
+    keys = set(payload)
+    missing = required - keys
+    extra = keys - required - optional
+    if missing or extra:
+        raise ValueError(
+            f"{label}_keys_mismatch:missing={sorted(missing)}:extra={sorted(extra)}"
+        )
+
+
 def _require_unique(values: Sequence[str], reason: str) -> None:
     if len(set(values)) != len(values):
         raise ValueError(reason)
@@ -505,6 +542,13 @@ def _ratio(value: Any, field_name: str) -> float:
     result = _finite_float(value, field_name)
     if not 0.0 < result < 1.0:
         raise ValueError(f"{field_name}_must_be_between_zero_and_one")
+    return result
+
+
+def _inclusive_ratio(value: Any, field_name: str) -> float:
+    result = _finite_float(value, field_name)
+    if not 0.0 <= result <= 1.0:
+        raise ValueError(f"{field_name}_must_be_between_zero_and_one_inclusive")
     return result
 
 

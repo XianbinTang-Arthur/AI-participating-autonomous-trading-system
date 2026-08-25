@@ -145,6 +145,43 @@ def test_gold_bar_record_rejects_invalid_ohlcv_invariants() -> None:
             volume=1.0,
         )
 
+
+def test_gold_bar_record_exposes_validated_microstructure_feature_values() -> None:
+    row = GoldBarRecord(
+        symbol="BTC-USDT-SWAP",
+        timeframe="15m",
+        ts=ts(0),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=1.0,
+        feature_values={"trade_flow_imbalance": 0.25, "oi_delta": None},
+    ).to_row()
+
+    assert row["trade_flow_imbalance"] == pytest.approx(0.25)
+    assert row["oi_delta"] is None
+
+
+def test_gold_bar_record_rejects_unknown_or_non_finite_feature_values() -> None:
+    common = {
+        "symbol": "BTC-USDT-SWAP",
+        "timeframe": "15m",
+        "ts": ts(0),
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.5,
+        "volume": 1.0,
+    }
+    with pytest.raises(ValueError, match="unsupported fields"):
+        GoldBarRecord(**common, feature_values={"future_alpha": 1.0})
+    with pytest.raises(ValueError, match="finite"):
+        GoldBarRecord(
+            **common,
+            feature_values={"trade_flow_imbalance": float("nan")},
+        )
+
     with pytest.raises(ValueError, match="record.volume"):
         GoldBarRecord(
             symbol="BTC-USDT-SWAP",

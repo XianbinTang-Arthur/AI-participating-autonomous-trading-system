@@ -227,6 +227,8 @@ def deep_backfill_one(
     dry_run: bool = False,
     build_gold: bool = False,
     merge_every_n_pages: int = 50,
+    refresh_existing: bool = False,
+    refresh_end: datetime | None = None,
 ) -> dict[str, Any]:
     """对单个 symbol+timeframe 执行深度回填.
 
@@ -248,6 +250,10 @@ def deep_backfill_one(
         完成后是否自动重建 Gold
     merge_every_n_pages : int
         每隔 N 页做一次 staging→silver 合并
+    refresh_existing : bool
+        覆盖刷新已存在的历史窗口，用于修复不完整或未确认的源行
+    refresh_end : datetime | None
+        覆盖刷新窗口的排他结束时间；refresh_existing=True 时必填
 
     Returns
     -------
@@ -259,6 +265,15 @@ def deep_backfill_one(
     from aats.data_platform.db import get_session
 
     settings = get_settings()
+    if target_start.tzinfo is None or target_start.utcoffset() is None:
+        raise ValueError("target_start must be timezone-aware")
+    if refresh_existing:
+        if refresh_end is None:
+            raise ValueError("refresh_end is required when refresh_existing is enabled")
+        if refresh_end.tzinfo is None or refresh_end.utcoffset() is None:
+            raise ValueError("refresh_end must be timezone-aware")
+        if refresh_end <= target_start:
+            raise ValueError("refresh_end must be after target_start")
     stats = {
         "symbol": symbol,
         "timeframe": timeframe,
@@ -274,6 +289,8 @@ def deep_backfill_one(
         "new_max_ts": None,
         "gold_built": False,
         "api_exhausted": False,
+        "mode": "refresh_existing" if refresh_existing else "backfill_missing_history",
+        "refresh_end": refresh_end.isoformat() if refresh_end is not None else None,
     }
 
     # 1. 查询已有数据范围
@@ -293,7 +310,7 @@ def deep_backfill_one(
         log.info("[%s %s] 数据库中无已有数据，将从当前时间开始向前回填", symbol, timeframe)
 
     # 如果已有数据的最早时间已经早于目标，无需回填
-    if existing_min and existing_min <= target_start:
+    if not refresh_existing and existing_min and existing_min <= target_start:
         log.info(
             "[%s %s] 已有数据起点 %s 已早于目标 %s，无需回填",
             symbol, timeframe,
@@ -305,7 +322,10 @@ def deep_backfill_one(
     # 2. 确定起始分页点
     # 从已有数据的最早时间开始向更早方向拉取
     # OKX after=X 返回 ts < X 的数据
-    if existing_min:
+    if refresh_existing:
+        assert refresh_end is not None
+        page_from_ms = _ts_ms(refresh_end)
+    elif existing_min:
         page_from_ms = _ts_ms(existing_min)
     else:
         page_from_ms = _ts_ms(datetime.now(timezone.utc))
@@ -360,10 +380,20 @@ def deep_backfill_one(
             page_rows = []
             for item in raw_data:
                 parsed = _parse_api_candle(item, symbol)
-                if parsed:
+                # Historical repair/backfill must never promote an open candle.
+                # The rolling collector owns provisional current-bar updates.
+                if parsed and parsed["confirm"] and (
+                    not refresh_existing
+                    or (
+                        target_start <= parsed["ts"]
+                        and refresh_end is not None
+                        and parsed["ts"] < refresh_end
+                    )
+                ):
                     page_rows.append(parsed)
 
             all_rows.extend(page_rows)
+            stats["rows_fetched"] += len(page_rows)
 
             # 获取本页最早时间戳
             oldest_ts_in_page = min(int(d[0]) for d in raw_data)
@@ -407,8 +437,6 @@ def deep_backfill_one(
                 all_rows = []
 
             time.sleep(rate_limit_sleep)
-
-    stats["rows_fetched"] = stats.get("rows_fetched", 0) + len(all_rows)
 
     if dry_run:
         # 仅报告统计
@@ -605,6 +633,17 @@ def main() -> None:
         help="目标回填起始日期 (YYYY-MM-DD)，与 --days 二选一",
     )
     parser.add_argument(
+        "--refresh-existing",
+        action="store_true",
+        help="覆盖刷新已存在窗口，而不是只向已有最早时间之前回填",
+    )
+    parser.add_argument(
+        "--refresh-end",
+        type=str,
+        default=None,
+        help="覆盖刷新排他结束日期 (YYYY-MM-DD)，仅与 --refresh-existing 同用",
+    )
+    parser.add_argument(
         "--rate-limit", type=float, default=0.15,
         help="API 请求间隔秒数 (默认: 0.15)",
     )
@@ -631,12 +670,24 @@ def main() -> None:
     else:
         parser.error("必须指定 --days 或 --target-start")
         return
+    refresh_end = (
+        datetime.strptime(args.refresh_end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        if args.refresh_end
+        else None
+    )
+    if args.refresh_existing and refresh_end is None:
+        parser.error("--refresh-existing 必须同时指定 --refresh-end")
+    if not args.refresh_existing and refresh_end is not None:
+        parser.error("--refresh-end 只能与 --refresh-existing 同用")
 
     log.info("=" * 60)
     log.info("OKX API 深度回填")
     log.info("  交易对  : %s", args.symbol)
     log.info("  时间框架: %s", ", ".join(args.timeframes))
     log.info("  目标起点: %s", target_start.strftime("%Y-%m-%d %H:%M UTC"))
+    log.info("  执行模式: %s", "覆盖刷新" if args.refresh_existing else "缺失历史回填")
+    if refresh_end is not None:
+        log.info("  刷新终点: %s (exclusive)", refresh_end.strftime("%Y-%m-%d %H:%M UTC"))
     log.info("  请求间隔: %.2fs", args.rate_limit)
     log.info("  试运行  : %s", "是" if args.dry_run else "否")
     log.info("  重建Gold: %s", "是" if args.build_gold else "否")
@@ -657,6 +708,8 @@ def main() -> None:
                 dry_run=args.dry_run,
                 build_gold=args.build_gold,
                 merge_every_n_pages=args.merge_every,
+                refresh_existing=args.refresh_existing,
+                refresh_end=refresh_end,
             )
             all_stats.append(result)
         except Exception:

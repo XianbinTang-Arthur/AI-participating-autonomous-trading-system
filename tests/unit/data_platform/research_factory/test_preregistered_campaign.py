@@ -150,3 +150,25 @@ def test_campaign_rejects_overlapping_holding_period_until_modeled(
 
     with pytest.raises(ValueError, match="holding_period_bars_must_be_one"):
         load_preregistered_campaign(_write_config(tmp_path, payload))
+
+
+def test_campaign_binds_factor_input_missing_ratio_into_manifest_and_plans(
+    tmp_path: Path,
+) -> None:
+    payload = _config()
+    payload["max_factor_input_missing_ratio"] = 0.01
+    spec = load_preregistered_campaign(_write_config(tmp_path, payload))
+    artifact_root = tmp_path / "artifacts" / "research" / "research_factory"
+
+    register_preregistered_campaign(spec, artifact_root=artifact_root)
+    campaign_root = artifact_root / "preregistered_campaigns" / spec.campaign_id
+    manifest = json.loads(
+        (campaign_root / "campaign_manifest.json").read_text(encoding="utf-8")
+    )
+    plans = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in (campaign_root / "plans").glob("*.json")
+    ]
+
+    assert manifest["max_factor_input_missing_ratio"] == pytest.approx(0.01)
+    assert all(plan["max_factor_input_missing_ratio"] == pytest.approx(0.01) for plan in plans)

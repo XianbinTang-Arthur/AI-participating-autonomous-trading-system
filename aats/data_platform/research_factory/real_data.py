@@ -36,7 +36,14 @@ from aats.data_platform.research_factory.evidence import (
     build_source_integrity_report,
 )
 from aats.data_platform.research_factory.experiments.recorder import ExperimentRecorder
+from aats.data_platform.research_factory.features.expressions import (
+    MICROSTRUCTURE_FACTOR_FIELDS,
+    parse_factor_expression,
+)
 from aats.data_platform.research_factory.features.functions import evaluate_factor_expression
+from aats.data_platform.research_factory.features.quality import (
+    build_factor_input_quality_report,
+)
 from aats.data_platform.research_factory.metrics.gates import (
     CandidateArtifact,
     CandidateGateResult,
@@ -72,7 +79,7 @@ from aats.data_platform.research_factory.specs import (
 )
 
 DEFAULT_EXPERIMENT_ARTIFACT_ROOT = Path("artifacts") / "research" / "research_factory" / "experiments"
-REAL_DATA_CODE_VERSION = "research_factory_real_data_runner_v2"
+REAL_DATA_CODE_VERSION = "research_factory_real_data_runner_v3"
 SELECTION_PROTOCOL_VERSION = "train_valid_selection_test_holdout_v2"
 DEVELOPMENT_EVIDENCE_REF = "development_evidence.json"
 DEVELOPMENT_RETURN_SERIES_REF = "development_return_series.json"
@@ -87,6 +94,20 @@ EXECUTION_EVIDENCE_REPORT_REF = "execution_evidence_report.json"
 EVIDENCE_BUNDLE_REF = "evidence_bundle.json"
 NOVELTY_GATE_RESULT_REF = "novelty_gate_result.json"
 FACTOR_PROPOSAL_REF = "factor_proposal.json"
+FACTOR_INPUT_QUALITY_REPORT_REF = "factor_input_quality_report.json"
+MICROSTRUCTURE_FACTOR_POLICY_VERSION = "research_factory_microstructure_15m_v1"
+_MICROSTRUCTURE_FIELD_SOURCE = {
+    "top5_weighted_imbalance": "ob",
+    "trade_flow_imbalance": "tf",
+    "oi_delta": "oi",
+    "funding_z_score_7d": "oi",
+    "basis_bps": "oi",
+}
+_MICROSTRUCTURE_SOURCE_TABLE = {
+    "ob": "silver.market_orderbook_metrics_15m",
+    "tf": "silver.market_trade_flow_15m",
+    "oi": "silver.market_oi_funding_metrics_15m",
+}
 TIMEFRAME_PERIODS_PER_YEAR = {
     "1m": 365.0 * 24.0 * 60.0,
     "5m": 365.0 * 24.0 * 12.0,
@@ -103,6 +124,7 @@ class GoldReplayLoadResult:
     source_watermark: Mapping[str, Any]
     gold_table: str
     dataset_version: str
+    source_tables: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.records:
@@ -115,6 +137,10 @@ class GoldReplayLoadResult:
         object.__setattr__(self, "source_watermark", dict(self.source_watermark))
         object.__setattr__(self, "gold_table", _require_non_empty(self.gold_table, "gold_table"))
         object.__setattr__(self, "dataset_version", _require_non_empty(self.dataset_version, "dataset_version"))
+        source_tables = self.source_tables or (self.gold_table,)
+        if not all(isinstance(value, str) and value.strip() for value in source_tables):
+            raise ValueError("gold replay source_tables must contain non-empty strings")
+        object.__setattr__(self, "source_tables", tuple(dict.fromkeys(source_tables)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +178,7 @@ class ResearchFactoryExperimentConfig:
     min_test_bars: int = 2
     max_bar_gap_ratio: float = 0.0
     max_funding_missing_ratio: float = 0.0
+    max_factor_input_missing_ratio: float = 0.01
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +236,7 @@ class GoldReplayDataSource:
         start: datetime,
         end: datetime,
         dataset_version: str | None = None,
+        required_factor_fields: Sequence[str] = (),
     ) -> GoldReplayLoadResult:
         symbol = _require_non_empty(symbol, "symbol").upper()
         _require_aware_datetime(start, "start")
@@ -216,29 +244,78 @@ class GoldReplayDataSource:
         if end <= start:
             raise ValueError("end must be after start")
         gold_table = replay_bar_table_name(symbol, timeframe)
+        microstructure_fields = tuple(
+            field
+            for field in dict.fromkeys(required_factor_fields)
+            if field in MICROSTRUCTURE_FACTOR_FIELDS
+        )
+        if microstructure_fields and timeframe.lower() != "15m":
+            raise ValueError("microstructure_factor_fields_require_15m_timeframe")
+
+        microstructure_select = ""
+        microstructure_joins = ""
+        if microstructure_fields:
+            microstructure_select = ",\n                " + ",\n                ".join(
+                [
+                    f"{_MICROSTRUCTURE_FIELD_SOURCE[field]}.{field} AS {field}"
+                    for field in microstructure_fields
+                ]
+                + [
+                    "ob.bbo_samples_n",
+                    "ob.books5_samples_n",
+                    "ob.dataset_version AS ob_dataset_version",
+                    "ob.ingest_run_id::text AS ob_ingest_run_id",
+                    "ob.quality_flags AS ob_quality_flags",
+                    "tf.trade_count",
+                    "tf.dataset_version AS tf_dataset_version",
+                    "tf.ingest_run_id::text AS tf_ingest_run_id",
+                    "tf.quality_flags AS tf_quality_flags",
+                    "oi.oi_samples_n",
+                    "oi.dataset_version AS oi_dataset_version",
+                    "oi.ingest_run_id::text AS oi_ingest_run_id",
+                    "oi.quality_flags AS oi_quality_flags",
+                ]
+            )
+            microstructure_joins = """
+            LEFT JOIN silver.market_orderbook_metrics_15m AS ob
+              ON ob.symbol = g.symbol AND ob.ts = g.ts
+            LEFT JOIN silver.market_trade_flow_15m AS tf
+              ON tf.symbol = g.symbol AND tf.ts = g.ts
+            LEFT JOIN silver.market_oi_funding_metrics_15m AS oi
+              ON oi.symbol = g.symbol AND oi.ts = g.ts
+            """
 
         sql = f"""
             SELECT
-                symbol, ts,
-                open, high, low, close,
-                volume, aligned_funding_rate,
-                source_candle_dataset_version,
-                source_funding_dataset_version,
-                build_run_id
-            FROM {gold_table}
-            WHERE symbol = :symbol
-              AND ts >= :start
-              AND ts < :end
-              AND is_closed = TRUE
+                g.symbol, g.ts,
+                g.open, g.high, g.low, g.close,
+                g.volume, g.aligned_funding_rate,
+                g.source_candle_dataset_version,
+                g.source_funding_dataset_version,
+                g.build_run_id
+                {microstructure_select}
+            FROM {gold_table} AS g
+            {microstructure_joins}
+            WHERE g.symbol = :symbol
+              AND g.ts >= :start
+              AND g.ts < :end
+              AND g.is_closed = TRUE
         """
         params: dict[str, Any] = {"symbol": symbol, "start": start, "end": end}
         if dataset_version:
-            sql += " AND source_candle_dataset_version = :dataset_version"
+            sql += " AND g.source_candle_dataset_version = :dataset_version"
             params["dataset_version"] = dataset_version
-        sql += " ORDER BY ts"
+        sql += " ORDER BY g.ts"
 
         rows = self.session.execute(text(sql), params).fetchall()
-        records = tuple(_row_to_gold_bar_record(row, timeframe) for row in rows)
+        records = tuple(
+            _row_to_gold_bar_record(
+                row,
+                timeframe,
+                feature_fields=microstructure_fields,
+            )
+            for row in rows
+        )
         if not records:
             raise ValueError("no Gold replay bars found for requested research window")
 
@@ -275,11 +352,30 @@ class GoldReplayDataSource:
             ),
             "timestamp_timezone_assumption": _timestamp_timezone_assumption(rows),
         }
+        source_tables = [gold_table]
+        if microstructure_fields:
+            microstructure_sources = tuple(
+                dict.fromkeys(
+                    _MICROSTRUCTURE_FIELD_SOURCE[field]
+                    for field in microstructure_fields
+                )
+            )
+            source_watermark["microstructure"] = _microstructure_source_watermark(
+                rows,
+                records=records,
+                fields=microstructure_fields,
+                sources=microstructure_sources,
+            )
+            source_tables.extend(
+                _MICROSTRUCTURE_SOURCE_TABLE[source]
+                for source in microstructure_sources
+            )
         return GoldReplayLoadResult(
             records=records,
             source_watermark=source_watermark,
             gold_table=gold_table,
             dataset_version=resolved_dataset_version,
+            source_tables=tuple(source_tables),
         )
 
 
@@ -310,6 +406,7 @@ def run_research_factory_experiment(
     if config.label_horizon_bars <= 0:
         raise ValueError("label_horizon_bars must be positive")
     factor_expression = _resolve_factor_expression(config)
+    parsed_factor = parse_factor_expression(factor_expression)
     research_profile = resolve_research_profile(config.research_profile)
     execution_evidence_required = _execution_evidence_required(config, research_profile)
     if execution_evidence_required and config.execution_cost_summary_path is None:
@@ -377,12 +474,17 @@ def run_research_factory_experiment(
         if preflight_execution_error is not None:
             raise ValueError(preflight_execution_error)
 
-        load_result = _load_gold_replay_records(config, data_source)
+        load_result = _load_gold_replay_records(
+            config,
+            data_source,
+            required_factor_fields=parsed_factor.fields,
+        )
         dataset_spec = _build_dataset_spec(
             config,
             segments,
             dataset_version=load_result.dataset_version,
             gold_table=load_result.gold_table,
+            source_tables=load_result.source_tables,
         )
         experiment_spec = _build_experiment_spec(
             experiment_id=experiment_id,
@@ -442,6 +544,18 @@ def run_research_factory_experiment(
             )
 
         prepared = GoldBarDatasetHandler().prepare(load_result.records, dataset_spec)
+        factor_input_quality = build_factor_input_quality_report(
+            prepared,
+            required_fields=parsed_factor.fields,
+            max_missing_ratio=config.max_factor_input_missing_ratio,
+            created_at=config.timestamp,
+        )
+        recorder.record_json_artifact(
+            experiment_id,
+            "factor_input_quality_report",
+            FACTOR_INPUT_QUALITY_REPORT_REF,
+            factor_input_quality.to_dict(),
+        )
         dataset_quality = build_dataset_quality_report(
             records=load_result.records,
             prepared=prepared,
@@ -504,6 +618,9 @@ def run_research_factory_experiment(
             EVIDENCE_BUNDLE_REF,
             evidence_bundle,
         )
+        if not factor_input_quality.passed:
+            failures = "; ".join(factor_input_quality.failures)
+            raise ValueError(f"factor input quality gate failed: {failures}")
         if not evidence_bundle.passed:
             failures = "; ".join(evidence_bundle.failures)
             raise ValueError(f"evidence quality gate failed: {failures}")
@@ -666,7 +783,9 @@ def _build_dataset_spec(
     *,
     dataset_version: str,
     gold_table: str,
+    source_tables: Sequence[str] = (),
 ) -> DatasetSpec:
+    resolved_source_tables = tuple(source_tables) or (gold_table,)
     return DatasetSpec(
         dataset_id=_dataset_id(config),
         symbol=config.symbol.upper(),
@@ -677,6 +796,7 @@ def _build_dataset_spec(
         segments=segments,
         source_refs={
             "gold_replay_bars": gold_table,
+            "research_source_tables": list(resolved_source_tables),
             "source_candle_dataset_version": config.dataset_version,
         },
     )
@@ -709,6 +829,8 @@ def _gold_table_ref(config: ResearchFactoryExperimentConfig) -> str:
 def _load_gold_replay_records(
     config: ResearchFactoryExperimentConfig,
     data_source: GoldReplayDataSource | None,
+    *,
+    required_factor_fields: Sequence[str],
 ) -> GoldReplayLoadResult:
     if data_source is None:
         raise ValueError("data_source is required; CLI should provide a GoldReplayDataSource")
@@ -718,6 +840,7 @@ def _load_gold_replay_records(
         start=config.start,
         end=config.end,
         dataset_version=config.dataset_version,
+        required_factor_fields=required_factor_fields,
     )
 
 
@@ -732,11 +855,28 @@ def _resolve_factor_expression(config: ResearchFactoryExperimentConfig) -> str:
     return config.proposal.factor_expression
 
 
-def _row_to_gold_bar_record(row: Any, timeframe: str) -> GoldBarRecord:
+def _row_to_gold_bar_record(
+    row: Any,
+    timeframe: str,
+    *,
+    feature_fields: Sequence[str] = (),
+) -> GoldBarRecord:
     ts = _coerce_aware_datetime(getattr(row, "ts"), "row.ts")
     volume = getattr(row, "volume")
     if volume is None:
         raise ValueError(f"Gold replay bar volume is missing at {ts.isoformat()}")
+    selected_sources = tuple(
+        dict.fromkeys(_MICROSTRUCTURE_FIELD_SOURCE[field] for field in feature_fields)
+    )
+    lineage_eligible = _microstructure_row_lineage_eligible(row, selected_sources)
+    feature_values = {
+        field: (
+            _eligible_microstructure_value(row, field)
+            if lineage_eligible
+            else None
+        )
+        for field in feature_fields
+    }
     return GoldBarRecord(
         symbol=str(getattr(row, "symbol")),
         timeframe=timeframe,
@@ -747,12 +887,139 @@ def _row_to_gold_bar_record(row: Any, timeframe: str) -> GoldBarRecord:
         close=getattr(row, "close"),
         volume=volume,
         funding_rate=getattr(row, "aligned_funding_rate", None),
+        feature_values=feature_values,
         metadata={
             "source_candle_dataset_version": getattr(row, "source_candle_dataset_version", None),
             "source_funding_dataset_version": getattr(row, "source_funding_dataset_version", None),
             "build_run_id": getattr(row, "build_run_id", None),
         },
     )
+
+
+def _microstructure_row_lineage_eligible(
+    row: Any,
+    sources: Sequence[str],
+) -> bool:
+    if not sources:
+        return True
+    versions = {getattr(row, f"{source}_dataset_version", None) for source in sources}
+    run_ids = {getattr(row, f"{source}_ingest_run_id", None) for source in sources}
+    return (
+        None not in versions
+        and len(versions) == 1
+        and None not in run_ids
+        and len(run_ids) == 1
+    )
+
+
+def _eligible_microstructure_value(row: Any, field: str) -> Any:
+    source = _MICROSTRUCTURE_FIELD_SOURCE[field]
+    flags = set(getattr(row, f"{source}_quality_flags", None) or ())
+    if "partial_data" in flags or "stale_source" in flags:
+        return None
+    if any(flag.startswith("etl_failed") for flag in flags):
+        return None
+    if field == "top5_weighted_imbalance":
+        if int(getattr(row, "books5_samples_n", 0) or 0) < 720:
+            return None
+        if "orderbook_books5_no_data" in flags:
+            return None
+    elif field == "trade_flow_imbalance":
+        if int(getattr(row, "trade_count", 0) or 0) < 1 or "trades_no_data" in flags:
+            return None
+    elif field == "oi_delta":
+        if int(getattr(row, "oi_samples_n", 0) or 0) < 1 or "oi_no_data" in flags:
+            return None
+    elif field == "funding_z_score_7d" and "funding_no_data" in flags:
+        return None
+    elif field == "basis_bps" and (
+        "mark_no_data" in flags or "orderbook_bbo_no_data" in flags
+    ):
+        return None
+    return getattr(row, field, None)
+
+
+def _microstructure_source_watermark(
+    rows: Sequence[Any],
+    *,
+    records: Sequence[GoldBarRecord],
+    fields: Sequence[str],
+    sources: Sequence[str],
+) -> dict[str, Any]:
+    lineage = {
+        source: {
+            "table": _MICROSTRUCTURE_SOURCE_TABLE[source],
+            "dataset_versions": sorted(
+                {
+                    str(value)
+                    for row in rows
+                    if (value := getattr(row, f"{source}_dataset_version", None))
+                }
+            ),
+            "ingest_run_id_count": len(
+                {
+                    str(value)
+                    for row in rows
+                    if (value := getattr(row, f"{source}_ingest_run_id", None))
+                }
+            ),
+        }
+        for source in sources
+    }
+    fingerprint_rows = [
+        {
+            "ts": _coerce_aware_datetime(getattr(row, "ts"), "row.ts").isoformat(),
+            "values": {field: str(getattr(row, field, None)) for field in fields},
+            "lineage": {
+                source: {
+                    "dataset_version": getattr(row, f"{source}_dataset_version", None),
+                    "ingest_run_id": getattr(row, f"{source}_ingest_run_id", None),
+                    "quality_flags": sorted(
+                        getattr(row, f"{source}_quality_flags", None) or ()
+                    ),
+                    "coverage": _microstructure_source_coverage(row, source),
+                }
+                for source in sources
+            },
+        }
+        for row in rows
+    ]
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            fingerprint_rows,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "policy_version": MICROSTRUCTURE_FACTOR_POLICY_VERSION,
+        "minimum_coverage": {
+            "bbo_samples_n": 720,
+            "books5_samples_n": 720,
+            "trade_count": 1,
+            "oi_samples_n": 1,
+        },
+        "required_fields": list(fields),
+        "source_tables": [_MICROSTRUCTURE_SOURCE_TABLE[source] for source in sources],
+        "eligible_non_null_counts": {
+            field: sum(record.feature_values.get(field) is not None for record in records)
+            for field in fields
+        },
+        "lineage": lineage,
+        "source_fingerprint": f"sha256:{fingerprint}",
+    }
+
+
+def _microstructure_source_coverage(row: Any, source: str) -> dict[str, int]:
+    if source == "ob":
+        return {
+            "bbo_samples_n": int(getattr(row, "bbo_samples_n", 0) or 0),
+            "books5_samples_n": int(getattr(row, "books5_samples_n", 0) or 0),
+        }
+    if source == "tf":
+        return {"trade_count": int(getattr(row, "trade_count", 0) or 0)}
+    return {"oi_samples_n": int(getattr(row, "oi_samples_n", 0) or 0)}
 
 
 def _timestamp_timezone_assumption(rows: Sequence[Any]) -> str:
