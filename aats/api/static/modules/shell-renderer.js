@@ -43,6 +43,7 @@ export function createDashboardShellRenderer({
   syncExitExecutionNavigationLinks,
   localizedRecoveryReasons,
   isPausedAwaitingResume,
+  ensureActiveViewLinkVisible = () => {},
 }) {
   // #20 修复说明：renderCache 用 WeakMap 而不是普通 Map，是有意为之但容易踩坑。
   //
@@ -68,11 +69,20 @@ export function createDashboardShellRenderer({
 
   function renderShell() {
     syncExitExecutionNavigationLinks();
-    viewLinks.forEach((link) => link.classList.toggle("is-active", link.dataset.view === state.activeView));
+    renderRuntimeModeBadge();
+    if (document.body?.dataset) document.body.dataset.view = state.activeView;
+    viewLinks.forEach((link) => {
+      const isActive = link.dataset.view === state.activeView;
+      link.classList.toggle("is-active", isActive);
+      if (isActive) {
+        link.setAttribute?.("aria-current", "page");
+      } else {
+        link.removeAttribute?.("aria-current");
+      }
+    });
     viewSections.forEach((section) => section.classList.toggle("is-active", section.dataset.view === state.activeView));
     renderPageChrome();
     renderSessionSummary();
-    renderRuntimeModeBadge();
     renderStatusRibbon();
     renderBanners();
     renderActiveView();
@@ -80,6 +90,9 @@ export function createDashboardShellRenderer({
     updateActionAccess();
     updateRefreshLabel();
     syncRefreshInteractivity();
+    ensureActiveViewLinkVisible(
+      viewLinks.find((link) => link.dataset.view === state.activeView) || null,
+    );
   }
 
   // P0-b Task 2.1: 全局顶栏 runtime mode badge.

@@ -9,6 +9,13 @@ function readableProfile(value, fallback = "待确认") {
   return readableState(String(value), fallback);
 }
 
+const KNOWN_PROFILE_ID_PATTERN = /\b(trend_aggressive|trend_normal|trend_strict|range_defensive|high_volatility_defensive|execution_degraded_safe)\b/giu;
+
+function localizeKnownProfilesInText(value, fallback) {
+  const text = textOrFallback(value, fallback);
+  return text.replace(KNOWN_PROFILE_ID_PATTERN, (profileId) => readableProfile(profileId, profileId));
+}
+
 function activeProfileSummary(activeRevision = {}, activation = {}) {
   const profileName = activeRevision.profile_label || activation.active_profile_id || "";
   return {
@@ -145,7 +152,7 @@ function profileEvidenceCallout(controlSummary = {}, evidence = {}, latestCandid
   if (selection.fast_track_applied) {
     return callout({
       title: "当前通过紧急安全快速通道切档",
-      copy: textOrFallback(
+      copy: localizeKnownProfilesInText(
         selection.operator_summary,
         "系统已经跳过慢速样本门槛，允许直接切向更保守的安全档位。",
       ),
@@ -234,7 +241,7 @@ function profileEvidenceCard(data) {
         {
           label: "切换分类",
           value: readableState(selection.transition_class || "unknown"),
-          meta: textOrFallback(selection.operator_summary, "当前没有额外切换摘要。"),
+          meta: localizeKnownProfilesInText(selection.operator_summary, "当前没有额外切换摘要。"),
           tone: "info",
           badge: actorTags("system"),
         },

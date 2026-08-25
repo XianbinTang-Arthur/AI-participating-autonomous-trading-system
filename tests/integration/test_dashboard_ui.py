@@ -560,7 +560,10 @@ class TestDashboardUI(unittest.TestCase):
 
         self.assertIn("export function createExecutionActionHandlers", execution_actions_text)
         self.assertIn("pageLoadStep = 12", execution_actions_text)
-        self.assertIn('"inspect-lifecycle-attribution": (value) => inspectLifecycleAttribution(value)', execution_actions_text)
+        self.assertIn(
+            '"inspect-lifecycle-attribution": (value, target) => inspectLifecycleAttribution(value, target)',
+            execution_actions_text,
+        )
         self.assertIn('"load-more-orders": () => adjustPageLimit("recentOrders", pageLoadStep)', execution_actions_text)
         self.assertIn('"load-more-fills": () => adjustPageLimit("recentFills", pageLoadStep)', execution_actions_text)
 
@@ -3642,7 +3645,10 @@ console.log(JSON.stringify({
   drawerExplainsFallback: drawer.body.includes('AI 已参与本轮评估'),
   drawerUsesHumanDecisionSource: drawer.body.includes('AI 未被采纳，沿用基础策略'),
   manualOnlyProfileDefaultsToManual: /<button class="primary-button" data-action="set-profile-control-mode" data-value="manual"[^>]*disabled/.test(manualOnlyConfigHtml),
-  manualOnlyProfileAutoEnabled: /<button class="secondary-button" data-action="set-profile-control-mode" data-value="auto"/.test(manualOnlyConfigHtml),
+  manualOnlyProfileAutoDisabled: /<button class="secondary-button" data-action="set-profile-control-mode" data-value="auto"[^>]*disabled/.test(manualOnlyConfigHtml),
+  manualOnlyProfileControlGateExplained: manualOnlyConfigHtml.includes('托管配置已关闭自动换档') && manualOnlyConfigHtml.includes('必须修改配置并按标准流程重启'),
+  manualOnlyProfileCurrentLabel: manualOnlyConfigHtml.includes('手动切档（当前）'),
+  manualOnlyCurrentProfileMetaIsManual: manualOnlyConfigHtml.includes('当前手动固定在这个档位') && !manualOnlyConfigHtml.includes('当前正在自动管理这个档位'),
   manualOnlyProfileButtonsUnlocked: /data-action="manual-activate-strategy-profile" data-value="trend_strict"/.test(manualOnlyConfigHtml) && !/data-action="manual-activate-strategy-profile" data-value="trend_strict"[^>]*disabled/.test(manualOnlyConfigHtml),
   manualOnlyRuntimeCurrentModeLocked: /<button class="primary-button" data-action="select-ai-operating-mode" data-value="baseline_only"[^>]*disabled/.test(manualOnlyConfigHtml),
   manualOnlyRuntimePolicyLocksAlternativeModes:
@@ -3696,7 +3702,10 @@ console.log(JSON.stringify({
         self.assertIn('"drawerExplainsFallback":true', result.stdout)
         self.assertIn('"drawerUsesHumanDecisionSource":true', result.stdout)
         self.assertIn('"manualOnlyProfileDefaultsToManual":true', result.stdout)
-        self.assertIn('"manualOnlyProfileAutoEnabled":true', result.stdout)
+        self.assertIn('"manualOnlyProfileAutoDisabled":true', result.stdout)
+        self.assertIn('"manualOnlyProfileControlGateExplained":true', result.stdout)
+        self.assertIn('"manualOnlyProfileCurrentLabel":true', result.stdout)
+        self.assertIn('"manualOnlyCurrentProfileMetaIsManual":true', result.stdout)
         self.assertIn('"manualOnlyProfileButtonsUnlocked":true', result.stdout)
         self.assertIn('"manualOnlyRuntimeCurrentModeLocked":true', result.stdout)
         self.assertIn('"manualOnlyRuntimePolicyLocksAlternativeModes":true', result.stdout)

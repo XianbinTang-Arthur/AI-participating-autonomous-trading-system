@@ -628,6 +628,10 @@ def _render_reference() -> str:
         "  - `strategy_profile_auto_control_enabled`",
         "  - `strategy_profile_emergency_safety_fast_track_enabled`",
         "",
+        "`strategy_profile_auto_control_enabled` 在全部托管 profile 中默认是 `false`，即手动切档。",
+        "它是自动换档硬门禁，不是可由页面覆盖的普通默认值：配置关闭时，页面和 API 均不得恢复",
+        "自动控制；改为 `true` 后需要按标准部署流程重启，之后操作员才能在允许范围内暂停或恢复。",
+        "",
         "### 想改 directional 去哪",
         "",
         "- 改 `configs/strategy_profiles/<profile>.yaml`。",
@@ -722,6 +726,14 @@ def _render_reference() -> str:
         for field in fields:
             lines.append(f"- `{field}`")
         lines.append("")
+        if group_name == "AI/自动换档":
+            lines.extend(
+                [
+                    "上述自动换档主开关默认关闭。页面上的手动/自动选择只管理配置允许范围内的运行态，不能",
+                    "绕过 `strategy_profile_auto_control_enabled: false`。",
+                    "",
+                ]
+            )
     lines.extend(
         [
             "## managed `.env` 中会被忽略的派生字段",

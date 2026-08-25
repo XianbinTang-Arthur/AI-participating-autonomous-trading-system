@@ -49,8 +49,10 @@ export function createAdminActions({
   async function toggleOperatorUser(username) {
     const user = findOperatorUser(username);
     if (!user) return;
+    const nextStateLabel = user.enabled ? "停用" : "启用";
+    if (!windowRef.confirm(`确认${nextStateLabel}账号 ${username} 吗？这会立即改变该账号的登录与访问权限。`)) return;
     if (!ensureNotBusy()) return;
-    const finishAction = beginAction(null, `正在${user.enabled ? "停用" : "启用"} ${username}…`);
+    const finishAction = beginAction(null, `正在${nextStateLabel} ${username}…`);
     try {
       await requestJson(`/auth/users/${encodeURIComponent(username)}`, {
         method: "PATCH",
@@ -107,6 +109,7 @@ export function createAdminActions({
       renderBanners();
       return;
     }
+    if (!windowRef.confirm(`确认把账号 ${username} 的角色从 ${user.role} 修改为 ${nextRole} 吗？权限变更将立即生效。`)) return;
     if (!ensureNotBusy()) return;
     const finishAction = beginAction(null, `正在更新 ${username} 的角色…`);
     try {
@@ -159,6 +162,7 @@ export function createAdminActions({
       renderBanners();
       return;
     }
+    if (!windowRef.confirm(`确认重置账号 ${username} 的密码吗？该账号原密码将立即失效。`)) return;
     if (!ensureNotBusy()) return;
     const finishAction = beginAction(null, `正在重置 ${username} 的密码…`);
     try {

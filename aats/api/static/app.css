@@ -616,12 +616,55 @@ h3 {
 .workspace-nav {
   margin-top: 18px;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 10px;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
 }
 
 .workspace-nav--top {
   margin-top: 0;
+}
+
+.workspace-nav .workspace-link {
+  flex: 0 0 auto;
+  padding-inline: 14px;
+}
+
+.workspace-nav::-webkit-scrollbar,
+.section-nav::-webkit-scrollbar {
+  display: none;
+}
+
+.skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 1000;
+  padding: 10px 14px;
+  border-radius: 8px;
+  color: #04101d;
+  background: #f8fafc;
+  font-weight: 800;
+  transform: translateY(-160%);
+  transition: transform 140ms ease;
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
 }
 
 .workspace-tab,
@@ -2406,14 +2449,6 @@ input::placeholder {
     grid-column: span 1;
   }
 
-  .span-8,
-  .span-7,
-  .span-6,
-  .span-5,
-  .span-4,
-  .span-3 {
-    grid-column: span 12;
-  }
 }
 
 @media (max-width: 980px) {
@@ -2478,16 +2513,13 @@ input::placeholder {
     gap: 12px;
   }
 
-  .workspace-nav {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
-  }
-
   .section-nav {
-    display: grid;
-    grid-template-columns: 1fr;
+    display: flex;
+    flex-wrap: nowrap;
     gap: 8px;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: none;
   }
 
   .strategy-section-nav {
@@ -2501,6 +2533,7 @@ input::placeholder {
   }
 
   .section-nav__link {
+    flex: 0 0 auto;
     min-height: 36px;
     padding: 0 12px;
   }
@@ -2673,6 +2706,15 @@ input::placeholder {
 }
 
 @media (max-width: 1100px) {
+  .span-8,
+  .span-7,
+  .span-6,
+  .span-5,
+  .span-4,
+  .span-3 {
+    grid-column: span 12;
+  }
+
   .policy-summary-grid {
     grid-template-columns: 1fr;
   }

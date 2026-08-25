@@ -362,8 +362,8 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
     }),
     riskExposure: surfaceCard({
       title: "合约敞口",
-      kicker: "long / short / gross / net",
-      copy: "对冲模式下不能只看净敞口，这里同时展开 long、short、gross、net 四口径。",
+      kicker: "多头 / 空头 / 毛敞口 / 净敞口",
+      copy: "对冲模式下不能只看净敞口，这里同时展开多头、空头、毛敞口、净敞口四个口径。",
       content: summaryStrip([
         {
           label: "多头名义价值",
@@ -1256,7 +1256,7 @@ function legMismatchTone(summary = {}) {
 function legMismatchSummaryMeta(summary = {}) {
   const items = Array.isArray(summary.items) ? summary.items : [];
   if (!items.length) {
-    return "当前没有 long / short 两条腿之间的额外异常。";
+    return "当前没有多头腿与空头腿之间的额外异常。";
   }
   const prefix = Number(summary.missing_execution_chain_count || 0) > 0
     ? `其中有 ${formatNumber(summary.missing_execution_chain_count || 0, 0)} 条腿在交易所存在，但本地没有对应执行链。`
@@ -1293,7 +1293,7 @@ function requiredExchangeModeMeta(positionModeContract = {}) {
 function localInstrumentLegMeta(rows = []) {
   if (!rows.length) return "当前没有持仓。";
   const dualLegged = rows.filter((item) => item.dual_legged);
-  if (!dualLegged.length) return "当前持仓都是单腿净仓，没有 long / short 并存。";
+  if (!dualLegged.length) return "当前持仓都是单腿净仓，没有多头腿与空头腿并存。";
   return dualLegged
     .slice(0, 2)
     .map((item) => `${textOrFallback(item.symbol, "未知合约")}：多头 ${formatNumber(item.long_position_qty)} / 空头 ${formatNumber(item.short_position_qty)}`)

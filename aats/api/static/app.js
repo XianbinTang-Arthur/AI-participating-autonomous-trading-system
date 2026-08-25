@@ -153,6 +153,7 @@ const shellRenderer = createDashboardShellRenderer({
   syncExitExecutionNavigationLinks,
   localizedRecoveryReasons,
   isPausedAwaitingResume,
+  ensureActiveViewLinkVisible: keepActiveViewLinkVisible,
 });
 const {
   currentRefreshInteractivityRoots,
@@ -241,7 +242,9 @@ const rdpActionHandlers = createRdpActionHandlers({
 
 function init() {
   bindEvents();
-  renderShell();
+  // 直达深层路由时也要完成 aria-current 与横向导航可视区同步；仅调用
+  // renderShell 会渲染正确页面，但不会执行 setActiveView 的导航契约。
+  setActiveView(state.activeView, { refresh: false });
   void refreshDashboard();
   // Tick the "最近刷新" relative-age label once a second so users see "5 秒
   // 前" roll forward without waiting for the next renderShell() call (which
@@ -594,6 +597,18 @@ function renderProtectedAuthBlockedCurrentView() {
   );
 }
 
+function keepActiveViewLinkVisible(activeLink) {
+  const nav = activeLink?.closest?.(".workspace-nav");
+  if (!nav || nav.scrollWidth <= nav.clientWidth) return;
+  const navRect = nav.getBoundingClientRect();
+  const activeRect = activeLink.getBoundingClientRect();
+  if (activeRect.left < navRect.left) {
+    nav.scrollTo({ left: Math.max(0, nav.scrollLeft - (navRect.left - activeRect.left) - 8), behavior: "auto" });
+  } else if (activeRect.right > navRect.right) {
+    nav.scrollTo({ left: nav.scrollLeft + (activeRect.right - navRect.right) + 8, behavior: "auto" });
+  }
+}
+
 
 function setActiveView(view, { pushHistory = false, refresh = true } = {}) {
   const nextView = resolveKnownView(view);
@@ -614,7 +629,18 @@ function setActiveView(view, { pushHistory = false, refresh = true } = {}) {
   } else if (nextView === "exitExecution") {
     syncActiveViewLocationState({ pushHistory: false });
   }
-  viewLinks.forEach((link) => link.classList.toggle("is-active", link.dataset.view === nextView));
+  let activeLink = null;
+  viewLinks.forEach((link) => {
+    const isActive = link.dataset.view === nextView;
+    link.classList.toggle("is-active", isActive);
+    if (isActive) {
+      link.setAttribute("aria-current", "page");
+    } else {
+      link.removeAttribute("aria-current");
+    }
+    if (isActive) activeLink = link;
+  });
+  keepActiveViewLinkVisible(activeLink);
   viewSections.forEach((section) => section.classList.toggle("is-active", section.dataset.view === nextView));
   renderShell();
   if (!refresh) return;
@@ -1111,11 +1137,12 @@ async function restoreStrategyProfileAutomaticControl(target = null) {
     const activation = result?.activation || {};
     setFlash(
       state,
-      "info",
+      "positive",
       activation?.active_profile_id
         ? `策略档位已恢复自动切档逻辑，当前仍保持 ${readableProfileName(result?.active_revision?.profile_label || activation.active_profile_id)}。`
         : "策略档位已恢复自动切档逻辑。",
     );
+    renderBanners();
     await refreshDashboard({ manual: true });
   } catch (error) {
     setFlash(state, "danger", error instanceof Error ? error.message : String(error));
@@ -1138,11 +1165,12 @@ async function pauseStrategyProfileAutomaticControl(target = null) {
     const activation = result?.activation || {};
     setFlash(
       state,
-      "info",
+      "positive",
       activation?.active_profile_id
         ? `当前已切到手动切档，系统会保持 ${readableProfileName(result?.active_revision?.profile_label || activation.active_profile_id)}。`
         : "当前已切到手动切档。",
     );
+    renderBanners();
     await refreshDashboard({ manual: true });
   } catch (error) {
     setFlash(state, "danger", error instanceof Error ? error.message : String(error));

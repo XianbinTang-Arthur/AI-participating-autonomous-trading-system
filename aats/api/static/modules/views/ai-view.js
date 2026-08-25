@@ -664,7 +664,7 @@ function economicGateRows(latestAssessment, latestOutcome, latestProfileControl)
       "模型与 prompt",
       modelValue,
       [
-        latestAssessment.provider_name ? `provider ${latestAssessment.provider_name}` : null,
+        latestAssessment.provider_name ? `服务来源 ${humanState(latestAssessment.provider_name)}` : null,
         latestAssessment.prompt_version ? `prompt ${latestAssessment.prompt_version}` : null,
       ].filter(Boolean).join(" / ") || "当前没有模型元数据。",
     ],

@@ -152,5 +152,50 @@ class TestFs018ReducedMotionContract(unittest.TestCase):
         self.assertNotIn('behavior: "smooth"', self.app_js)
 
 
+class TestDashboardNavigationAndLandmarkContract(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.html = (STATIC_DIR / "dashboard-shell.html").read_text(encoding="utf-8")
+        cls.css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+        cls.app_js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        cls.shell_renderer_js = (STATIC_DIR / "modules" / "shell-renderer.js").read_text(encoding="utf-8")
+
+    def test_shell_has_skip_link_named_main_and_single_global_heading(self) -> None:
+        self.assertIn('<a class="skip-link" href="#mainContent">跳到主要内容</a>', self.html)
+        self.assertIn('<main id="mainContent" class="workspace" tabindex="-1">', self.html)
+        self.assertIn('<h1 class="visually-hidden">AATS 自动交易监控台</h1>', self.html)
+        self.assertEqual(len(re.findall(r"<h1\b", self.html)), 1)
+        self.assertLess(self.html.index('class="skip-link"'), self.html.index('aria-label="主导航"'))
+
+    def test_primary_navigation_is_single_row_scrollable_and_tracks_current_page(self) -> None:
+        nav_block = _css_block(self.css, ".workspace-nav {")
+        self.assertIn("flex-wrap: nowrap", nav_block)
+        self.assertIn("overflow-x: auto", nav_block)
+        self.assertIn("overscroll-behavior-inline: contain", nav_block)
+        self.assertIn("scrollbar-width: none", nav_block)
+        self.assertIn(".workspace-nav::-webkit-scrollbar", self.css)
+        self.assertIn("keepActiveViewLinkVisible(activeLink)", self.app_js)
+        self.assertIn("setActiveView(state.activeView, { refresh: false })", self.app_js)
+        self.assertIn("ensureActiveViewLinkVisible: keepActiveViewLinkVisible", self.app_js)
+        self.assertIn('link.setAttribute("aria-current", "page")', self.app_js)
+        self.assertIn('link.removeAttribute("aria-current")', self.app_js)
+        self.assertIn("document.body?.dataset", self.shell_renderer_js)
+        self.assertIn('link.setAttribute?.("aria-current", "page")', self.shell_renderer_js)
+        self.assertIn("ensureActiveViewLinkVisible(", self.shell_renderer_js)
+
+    def test_layout_only_stacks_common_spans_below_1100_pixels(self) -> None:
+        medium_block = _css_block(self.css, "@media (max-width: 1280px)")
+        compact_block = _css_block(self.css, "@media (max-width: 1100px)")
+        self.assertNotIn(".span-8", medium_block)
+        self.assertIn(".span-8", compact_block)
+        self.assertIn("grid-column: span 12", compact_block)
+
+    def test_mobile_section_navigation_remains_horizontally_scannable(self) -> None:
+        mobile_block = _css_block(self.css, "@media (max-width: 720px)")
+        self.assertRegex(mobile_block, r"\.section-nav\s*\{[^}]*display:\s*flex")
+        self.assertRegex(mobile_block, r"\.section-nav\s*\{[^}]*overflow-x:\s*auto")
+        self.assertNotRegex(mobile_block, r"\.section-nav\s*\{[^}]*grid-template-columns")
+
+
 if __name__ == "__main__":
     unittest.main()

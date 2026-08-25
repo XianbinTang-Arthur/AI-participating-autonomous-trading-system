@@ -48,6 +48,7 @@
   <link rel="modulepreload" href="/ui/modules/views/strategy-view.js">
 </head>
 <body data-view="home">
+  <a class="skip-link" href="#mainContent">跳到主要内容</a>
   <div class="console-shell console-shell--compact">
     <nav class="workspace-nav workspace-nav--top" aria-label="主导航">
       <a class="workspace-link" data-view="home" href="/ui">主页</a>
@@ -137,7 +138,8 @@
 
     <section id="bannerContainer" class="banner-stack" aria-live="polite"></section>
 
-    <main class="workspace">
+    <main id="mainContent" class="workspace" tabindex="-1">
+      <h1 class="visually-hidden">AATS 自动交易监控台</h1>
       <div id="pageHead" class="page-head">
         <div>
           <p id="pageEyebrow" class="panel-kicker">主页</p>

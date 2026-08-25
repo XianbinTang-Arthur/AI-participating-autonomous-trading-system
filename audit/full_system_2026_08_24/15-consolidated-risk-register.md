@@ -28,6 +28,14 @@
 
 `FS-013` 保留为撤回项：首轮曾怀疑 `CLAIMED` submit 会在恢复时被自动重复提交；复核 command recovery、启动 blocker 和相关测试后，确认当前实现会 halt 并要求交易所对账，因此不登记为 finding，也不复用该编号。
 
+## 2026-08-25 前端审计影响说明
+
+- **FS-002 不变**：Operator UI 的“恢复自动运行”已增加明确二次确认，并保留后端恢复/风控重验；这只降低误触风险，不能证明 Redis/NATS 分区、TTL、多实例或独立复核，因此不关闭 FS-002 的运行门禁。
+- **FS-017 / FS-018 部分增加浏览器证据**：11 个受保护路由在 1920、1440、1280、1024、768、390px 共 66 个组合完成真实浏览器渲染，新增 skip link、全局 H1、命名 main、`aria-current` 和活动导航可视性，且无页面级横向溢出。真实读屏器、axe、高对比度、缩放和目标浏览器 reduced-motion 开关仍未验证，原状态不得改为完全关闭。
+- **FS-021 增加本地证据但远端门禁不变**：Ruff 通过；完整 unit 为 4,442 passed、30 skipped、94 subtests passed；Windows dashboard integration 为 99 passed。规定的 WSL `~/aats-venv` 缺失，WSL integration 未完成，远端 required check/不可绕过性仍未知。
+
+完整前端证据见 `../frontend_ui_2026_08_25/22-frontend-ui-audit.md`、`23-frontend-backend-contract-audit.md` 和 `25-ui-remediation-report.md`。
+
 ## 优先级解释
 
 - P1 必须在任何真实资金上线前关闭，并由独立复核人验证。

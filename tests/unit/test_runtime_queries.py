@@ -808,6 +808,34 @@ class TestAiRuntimeLocalServiceRead(unittest.TestCase):
         self.assertTrue(result["strategy_profile_auto_control_effective"])
         self.assertEqual(result["strategy_profile_auto_control_reason"], "configured_auto")
 
+    def test_ai_runtime_config_gate_overrides_stale_auto_activation_state(self) -> None:
+        class _StrategyProfiles:
+            def activation_status(self) -> dict[str, object]:
+                return {"auto_switch_enabled": True}
+
+        ai_service = SimpleNamespace(
+            status=lambda: {
+                "configured_operating_mode": "baseline",
+                "effective_operating_mode": "baseline",
+                "canonical_configured_operating_mode": "baseline",
+                "canonical_effective_operating_mode": "baseline",
+                "manual_override_active": False,
+            }
+        )
+        owner = _AIRuntimeFakeOwner(ai_service=ai_service, process_role="decision")
+        owner.runtime.settings.strategy_profile_auto_control_configured = False
+        owner.strategy_profiles = _StrategyProfiles()
+
+        result = RuntimeQueryFacade(owner).ai_runtime()
+
+        self.assertFalse(result["strategy_profile_auto_control_configured"])
+        self.assertFalse(result["strategy_profile_auto_control_effective"])
+        self.assertEqual(result["strategy_profile_control_effective_mode"], "manual")
+        self.assertEqual(
+            result["strategy_profile_auto_control_reason"],
+            "explicit_setting_disabled",
+        )
+
 
 class TestAiRuntimeAuthoritativeRead(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:

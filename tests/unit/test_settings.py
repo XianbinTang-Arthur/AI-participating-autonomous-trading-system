@@ -182,6 +182,7 @@ class TestAATSSettings(unittest.TestCase):
         self.assertEqual(settings.derivatives_position_mode, "hedge")
         self.assertEqual(settings.derivatives_hedge_transition_mode, "close_then_open")
         self.assertTrue(settings.derivatives_require_exchange_pos_mode_match)
+        self.assertFalse(settings.strategy_profile_auto_control_enabled)
 
     def test_independent_execution_policy_settings_default_to_adaptive_modes(self) -> None:
         settings = AATSSettings.model_validate({})

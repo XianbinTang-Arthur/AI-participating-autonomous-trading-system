@@ -192,7 +192,7 @@ function renderProfileControlPanel({
     title: "自动换档控制",
     kicker: "策略档位切换",
     copy: "这里用唯一的自动换档主开关决定 6 个策略档位是由系统自动评估并自动激活，还是由你手动固定。开启自动换档后，系统会默认启用自动激活规则，并锁定下面 6 个档位按钮；切回手动后才能再次点击。",
-    actions: renderProfileControlModeActions({ canAdmin, autoEnabled }),
+    actions: renderProfileControlModeActions({ canAdmin, configured, autoEnabled }),
     content: `
       ${callout({
         title: summary.title,
@@ -242,17 +242,24 @@ function renderProfileControlPanel({
 
 function renderProfileControlModeActions({
   canAdmin = false,
+  configured = false,
   autoEnabled = false,
 }) {
   return `
     <div class="table-actions table-actions--compact">
-      ${actionButton("手动切档", "set-profile-control-mode", "manual", !autoEnabled ? "primary" : "secondary", {
+      ${actionButton(!autoEnabled ? "手动切档（当前）" : "手动切档", "set-profile-control-mode", "manual", !autoEnabled ? "primary" : "secondary", {
         disabled: !canAdmin || !autoEnabled,
         title: !canAdmin ? "当前账号只有查看权限" : !autoEnabled ? "当前已经是手动切档" : "关闭自动切档，改为手动选择档位",
       })}
-      ${actionButton("自动切档", "set-profile-control-mode", "auto", autoEnabled ? "primary" : "secondary", {
-        disabled: !canAdmin || autoEnabled,
-        title: !canAdmin ? "当前账号只有查看权限" : autoEnabled ? "当前已经是自动切档" : "开启自动切档，下面的档位按钮会锁定",
+      ${actionButton(autoEnabled ? "自动切档（当前）" : "自动切档", "set-profile-control-mode", "auto", autoEnabled ? "primary" : "secondary", {
+        disabled: !canAdmin || autoEnabled || !configured,
+        title: !canAdmin
+          ? "当前账号只有查看权限"
+          : !configured
+            ? "托管配置已关闭自动换档；如需启用，必须修改配置并按标准流程重启"
+            : autoEnabled
+              ? "当前已经是自动切档"
+              : "开启自动切档，下面的档位按钮会锁定",
       })}
     </div>
   `;
@@ -262,6 +269,7 @@ function renderProfileControlModeActions({
 
 function renderCurrentConfigurationCard({ runtimeProfiles = {}, runtime = {}, aiState = {}, activeRevision = {}, activation = {} }) {
   const runtimePayload = runtimeProfiles.current_runtime_payload || {};
+  const autoEnabled = Boolean(runtime.strategy_profile_auto_control_effective);
   const strategyShadowEnabled = Boolean(aiState.shadow_mode_enabled ?? runtime.shadow_mode_enabled);
   const executionShadow = executionShadowState(
     runtime.execution_suggestion_mode
@@ -287,7 +295,7 @@ function renderCurrentConfigurationCard({ runtimeProfiles = {}, runtime = {}, ai
           label: "策略档位",
           value: readableProfile(activeRevision.profile_id || activation.active_profile_id, "待确认"),
           meta: activation.active_profile_id
-            ? activeProfileMeta(activeRevision.profile_id || activation.active_profile_id, true, [])
+            ? activeProfileMeta(activeRevision.profile_id || activation.active_profile_id, autoEnabled, [])
             : "当前没有活动档位",
           tone: activation.active_profile_id ? activeProfileTone(activeRevision.profile_id || activation.active_profile_id) : "outline",
           badge: actorTags((activeRevision.profile_id || activation.active_profile_id) === "execution_degraded_safe" ? "risk_control" : "system"),
@@ -402,7 +410,7 @@ function autoControlSummary(
   if (!configured && !enabled) {
     return {
       title: "当前按配置手动切档",
-      copy: "配置文件默认关闭自动换档，所以现在由你手动选择下面 6 个档位。系统不会自动评估或自动激活档位，直到你重新开启自动换档。",
+      copy: "配置文件默认关闭自动换档，所以现在由你手动选择下面 6 个档位。系统不会自动评估或自动激活档位；如需启用自动控制，必须显式修改托管配置并按标准流程重启。",
       tone: "outline",
       actors: ["config", "admin"],
     };

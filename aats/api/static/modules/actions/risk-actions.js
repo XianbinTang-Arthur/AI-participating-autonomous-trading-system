@@ -106,7 +106,11 @@ export function createRiskActionHandlers({
   }
 
   async function triggerResume(target = null) {
-    await runAction("/system/resume", { reason: "ui_manual_resume" }, "已提交恢复自动运行请求。", {
+    await runDangerousAction({
+      path: "/system/resume",
+      body: { reason: "ui_manual_resume" },
+      successMessage: "已提交恢复自动运行请求。",
+      confirmMessage: "确认尝试恢复自动运行吗？系统仍会重新检查暂停开关、对账、恢复资格和所有风控门禁，不满足条件时不会恢复交易。",
       target,
       pendingLabel: "正在恢复自动运行…",
       requestOptions: { timeout: RESUME_REQUEST_TIMEOUT_MS },

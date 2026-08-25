@@ -287,6 +287,9 @@ class StrategyProfileActivationFacade:
         auth_source: "AuthSource",
         reason: str,
     ) -> dict[str, Any]:
+        if not self.owner.settings.strategy_profile_auto_control_enabled:
+            raise ValueError("strategy_profile_auto_control_disabled_by_configuration")
+
         state = self.owner._activation_state()
         if state.auto_switch_enabled and (state.frozen_until is None or state.frozen_until <= utc_now()):
             cleared_state = state.model_copy(update={"frozen_until": None})

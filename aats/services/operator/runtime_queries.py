@@ -191,19 +191,22 @@ class RuntimeQueryFacade:
         else:
             strategy_profile_state = activation_status()
         auto_control_configured = settings.strategy_profile_auto_control_configured
-        auto_control_enabled = bool(strategy_profile_state.get("auto_switch_enabled", auto_control_configured))
-        status["strategy_profile_auto_control_configured"] = settings.strategy_profile_auto_control_configured
+        stored_auto_control_enabled = bool(
+            strategy_profile_state.get("auto_switch_enabled", auto_control_configured)
+        )
+        # 配置项是自动换档的硬门禁。数据库中可能残留旧的 operator override，
+        # 但在配置关闭时不能把它误报为当前真正生效的自动控制。
+        auto_control_enabled = auto_control_configured and stored_auto_control_enabled
+        status["strategy_profile_auto_control_configured"] = auto_control_configured
         status["strategy_profile_auto_control_effective"] = auto_control_enabled
         status["strategy_profile_control_configured_mode"] = "auto" if auto_control_configured else "manual"
         status["strategy_profile_control_effective_mode"] = "auto" if auto_control_enabled else "manual"
-        if auto_control_enabled and auto_control_configured:
+        if not auto_control_configured:
+            reason = "explicit_setting_disabled"
+        elif auto_control_enabled:
             reason = "configured_auto"
-        elif auto_control_enabled and not auto_control_configured:
-            reason = "operator_enabled_auto"
-        elif not auto_control_enabled and auto_control_configured:
-            reason = "operator_enabled_manual"
         else:
-            reason = "configured_manual"
+            reason = "operator_enabled_manual"
         status["strategy_profile_auto_control_reason"] = reason
         status["operating_mode_source"] = (
             "manual_selection"

@@ -25,6 +25,23 @@ def _run_node_module_script(script: str) -> subprocess.CompletedProcess[str]:
 
 
 class TestDashboardRefreshInteractivity(unittest.TestCase):
+    def test_profile_control_success_feedback_renders_before_dashboard_refresh(self) -> None:
+        app_source = (REPO_ROOT / "aats" / "api" / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        for function_name in (
+            "restoreStrategyProfileAutomaticControl",
+            "pauseStrategyProfileAutomaticControl",
+        ):
+            start = app_source.index(f"async function {function_name}")
+            end = app_source.index("\nasync function ", start + 1)
+            function_source = app_source[start:end]
+            self.assertIn('setFlash(\n      state,\n      "positive",', function_source)
+            self.assertLess(
+                function_source.index("renderBanners();"),
+                function_source.index("await refreshDashboard({ manual: true });"),
+            )
+
     def test_request_json_timeout_uses_localized_abort_error(self) -> None:
         script = r"""
 import { requestJson } from './aats/api/static/modules/api-client.js';
@@ -135,12 +152,13 @@ console.log(JSON.stringify({
   directTimeout: dangerousCalls[0]?.requestOptions?.timeout,
   blockerPath: actionCalls[0]?.[0],
   blockerTimeout: actionCalls[0]?.[3]?.requestOptions?.timeout,
-  directResumePath: actionCalls[1]?.[0],
-  directResumeTimeout: actionCalls[1]?.[3]?.requestOptions?.timeout,
-  blockerResumePath: actionCalls[2]?.[0],
-  blockerResumeTimeout: actionCalls[2]?.[3]?.requestOptions?.timeout,
-  exchangeRefreshPath: actionCalls[3]?.[0],
-  exchangeRefreshTimeout: actionCalls[3]?.[3]?.requestOptions?.timeout,
+  directResumePath: dangerousCalls[1]?.path,
+  directResumeTimeout: dangerousCalls[1]?.requestOptions?.timeout,
+  directResumeConfirm: dangerousCalls[1]?.confirmMessage,
+  blockerResumePath: actionCalls[1]?.[0],
+  blockerResumeTimeout: actionCalls[1]?.[3]?.requestOptions?.timeout,
+  exchangeRefreshPath: actionCalls[2]?.[0],
+  exchangeRefreshTimeout: actionCalls[2]?.[3]?.requestOptions?.timeout,
 }));
 """
         result = _run_node_module_script(script)
@@ -154,6 +172,8 @@ console.log(JSON.stringify({
         self.assertEqual(payload["blockerTimeout"], 120_000)
         self.assertEqual(payload["directResumePath"], "/system/resume")
         self.assertEqual(payload["directResumeTimeout"], 120_000)
+        self.assertIn("确认尝试恢复自动运行", payload["directResumeConfirm"])
+        self.assertIn("所有风控门禁", payload["directResumeConfirm"])
         self.assertEqual(payload["blockerResumePath"], "/system/blocker-actions/resume-system")
         self.assertEqual(payload["blockerResumeTimeout"], 120_000)
         self.assertEqual(payload["exchangeRefreshPath"], "/system/blocker-actions/refresh-exchange-state")

@@ -8736,7 +8736,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restore_action["details"]["active_profile_id"], "trend_strict")
         self.assertFalse(restore_action["details"]["frozen_by_admin_override"])
 
-    async def test_restore_strategy_profile_auto_can_enable_auto_even_when_config_default_is_manual(self) -> None:
+    async def test_restore_strategy_profile_auto_is_blocked_when_config_is_manual(self) -> None:
         runtime = await self._runtime(
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
@@ -8754,10 +8754,41 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             )
             snapshot = client.get("/strategy-profiles")
 
-        self.assertEqual(restored.status_code, 200)
-        self.assertEqual(restored.json()["status"], "auto_restored")
+        self.assertEqual(restored.status_code, 409)
+        self.assertEqual(
+            restored.json()["detail"],
+            "strategy_profile_auto_control_disabled_by_configuration",
+        )
         self.assertEqual(snapshot.status_code, 200)
-        self.assertTrue(snapshot.json()["activation"]["auto_switch_enabled"])
+        self.assertFalse(snapshot.json()["activation"]["auto_switch_enabled"])
+
+    async def test_admin_can_pause_strategy_profile_auto_switch_idempotently(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_users=[("admin", "admin-pass")],
+            strategy_profile_auto_control_enabled=True,
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            paused = client.post(
+                "/strategy-profiles/pause-auto",
+                json={"reason": "ui_pause_auto_strategy_profile_control"},
+            )
+            paused_again = client.post(
+                "/strategy-profiles/pause-auto",
+                json={"reason": "ui_pause_auto_strategy_profile_control"},
+            )
+            snapshot = client.get("/strategy-profiles")
+
+        self.assertEqual(paused.status_code, 200)
+        self.assertEqual(paused.json()["status"], "manual_paused")
+        self.assertEqual(paused_again.status_code, 200)
+        self.assertEqual(paused_again.json()["status"], "already_manual")
+        self.assertEqual(snapshot.status_code, 200)
+        self.assertFalse(snapshot.json()["activation"]["auto_switch_enabled"])
 
     async def test_strategy_profile_activation_is_blocked_when_open_orders_exist(self) -> None:
         runtime = await self._runtime(

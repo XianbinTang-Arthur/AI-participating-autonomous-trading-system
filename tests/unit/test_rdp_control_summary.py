@@ -39,6 +39,41 @@ def _fake_snapshot_request(runtime: object | None = None) -> SimpleNamespace:
 
 
 class TestRdpControlSummary(TestCase):
+    def test_workbench_items_humanize_governance_blocking_flags(self) -> None:
+        summary = {
+            "governance_state": {
+                "combo_states": [
+                    {
+                        "combo_key": "independent_15m",
+                        "family": "independent",
+                        "timeframe": "15m",
+                        "inconsistencies": ["治理目标参数与当前实盘 active 参数不一致"],
+                    }
+                ],
+            },
+            "pending_recommendations": [
+                {
+                    "combo_key": "independent_15m",
+                    "family": "independent",
+                    "timeframe": "15m",
+                    "recommendation_id": "rec_localization",
+                    "recommendation_type": "keep_active",
+                    "status": "draft",
+                    "created_at": "2026-08-25T12:00:00Z",
+                }
+            ],
+        }
+
+        with (
+            patch("aats.api.rdp_control_summary.query_latest_attribution", return_value={"available": False}),
+            patch("aats.api.rdp_control_summary.query_latest_execution_realism", return_value={"available": False}),
+            patch("aats.api.rdp_control_summary._build_combo_evidence_digest", return_value={}),
+        ):
+            payload = rdp_control_summary._build_workbench_items_payload(Path.cwd(), summary, {})
+
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["items"][0]["blocking_flags"], ["治理目标参数与当前实盘参数不一致。"])
+
     def test_control_summary_splits_running_and_pending_tasks_by_workflow(self) -> None:
         request = _fake_request()
 

@@ -1845,7 +1845,10 @@ def _build_workbench_items_payload(
             "approval_effect_summary": _approval_effect_summary_v2(recommendation_type),
             "reason_summary": reason_summary,
             "missing_evidence": missing_evidence,
-            "blocking_flags": [str(item) for item in (combo_state.get("inconsistencies") or [])],
+            "blocking_flags": [
+                _humanize_reason_entry(str(item)) or str(item)
+                for item in (combo_state.get("inconsistencies") or [])
+            ],
             "integrity_status": integrity_status,
             "integrity_alerts": item_alerts,
             "approval_enabled": not item_alerts,

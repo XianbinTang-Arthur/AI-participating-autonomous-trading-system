@@ -17,6 +17,20 @@ from aats.services.operator.runtime_queries import RuntimeQueryFacade
 from aats.services.operator.strategy_queries import StrategyQueryFacade
 
 
+def test_risk_reason_messages_cover_derivatives_exposure_limit_codes() -> None:
+    expected_fragments = {
+        "risk_max_long_notional_exceeded": "多头名义敞口超过上限",
+        "risk_max_short_notional_exceeded": "空头名义敞口超过上限",
+        "risk_max_gross_notional_exceeded": "多空合计名义敞口超过上限",
+        "risk_max_net_notional_exceeded": "净名义敞口超过上限",
+    }
+
+    for code, expected_fragment in expected_fragments.items():
+        message = OperatorQueryService._risk_reason_message(code)
+        assert expected_fragment in message
+        assert code not in message
+
+
 class _StrategyDashboardOwner:
     _DECIMAL_EPSILON = Decimal("0.000000000001")
 

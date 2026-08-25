@@ -71,6 +71,11 @@
 | sleeve 预算 | `strategy_sleeve_auto_*` |
 | 自动换档 | `strategy_profile_auto_control_enabled`；自动回滚没有统一 runtime Settings 开关 |
 
+四个托管 profile 的自动换档默认值均为 `false`（手动切档）。该字段是硬门禁：配置为
+`false` 时，页面和 API 都不能临时恢复自动切档；确需自动控制时，必须先显式改为 `true`，
+再通过标准提交、同步和重启流程使配置生效。配置允许自动控制后，操作员仍可在页面中临时
+暂停或恢复自动切档，运行态以 API 返回的 effective 状态为准。
+
 `strategy_profile_auto_rollback_enabled` 曾出现在四个 profile 中，但没有 Settings 字段或
 行为消费者，实际始终被静默忽略。Phase 3P 已删除该伪配置；不要重新加入，除非先完成
 真实自动回滚的状态机、权限、审计、失败恢复和端到端测试设计。

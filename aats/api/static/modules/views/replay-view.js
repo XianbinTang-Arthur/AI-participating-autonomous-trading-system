@@ -322,7 +322,7 @@ function replayReconciliationNarrative(replaySummary = null, legMismatchSummary 
 function replayLegMismatchMeta(summary = {}) {
   const items = Array.isArray(summary.items) ? summary.items : [];
   if (!items.length) {
-    return "当前没有额外 long / short 腿级差异。";
+    return "当前没有额外的多头腿与空头腿差异。";
   }
   const firstItem = items[0] || {};
   const firstSide = firstItem.leg_side === "long" ? "多头腿" : firstItem.leg_side === "short" ? "空头腿" : "净仓腿";
