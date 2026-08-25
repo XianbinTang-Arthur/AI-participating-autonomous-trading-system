@@ -1,8 +1,8 @@
 # RDP 2.0 运行可观测性纵向切片实施任务书
 
-> 文档状态：实现完成，待本地 derivatives 模拟栈部署验收  
-> 最后核对：2026-08-25（代码基线 `0b58dbad49735a89c1f02d6f69f74e8341ec8680`）  
-> 核对范围：当前 RDP 队列、daemon、workflow dispatcher、Operator API、Dashboard 快照与 RDP 前端  
+> 文档状态：实现完成，待本地 derivatives 模拟栈部署验收
+> 最后核对：2026-08-25（代码基线 `0b58dbad49735a89c1f02d6f69f74e8341ec8680`）
+> 核对范围：当前 RDP 队列、daemon、workflow dispatcher、Operator API、Dashboard 快照与 RDP 前端
 > 运行时边界：本文不证明当前研究结果有效、参数可发布或系统具备实盘交易资格
 
 ## 1. 业务目标与边界
