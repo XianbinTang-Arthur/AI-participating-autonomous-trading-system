@@ -96,6 +96,10 @@ wsl_run() {
     wsl -d "$DISTRO" bash -c "$1"
 }
 
+wsl_root_run() {
+    wsl -d "$DISTRO" -u root bash -c "$1"
+}
+
 repo_has_uncommitted_changes() {
     ! git diff --quiet || ! git diff --cached --quiet || [[ -n "$(git ls-files --others --exclude-standard)" ]]
 }
@@ -461,13 +465,32 @@ step_prune() {
     fi
 }
 
+ensure_wsl_runtime_prerequisites() {
+    log_info "检查 WSL2 宿主运行前置条件..."
+
+    local overcommit
+    overcommit="$(wsl_run "sysctl -n vm.overcommit_memory 2>/dev/null" | tr -d '\r')"
+    if [[ "$overcommit" != "1" ]]; then
+        # Redis fork/BGSAVE 在 vm.overcommit_memory=0 时可能即使内存充足也失败。
+        # WSL 重启会重置该运行时值，所以标准部署每次幂等校正，不修改发行版文件。
+        wsl_root_run "sysctl -q -w vm.overcommit_memory=1"
+        overcommit="$(wsl_run "sysctl -n vm.overcommit_memory 2>/dev/null" | tr -d '\r')"
+    fi
+    if [[ "$overcommit" != "1" ]]; then
+        log_error "无法设置 vm.overcommit_memory=1；Redis 持久化安全前置条件不满足"
+        exit 7
+    fi
+
+    log_ok "WSL2 运行前置条件满足（vm.overcommit_memory=1）"
+}
+
 step_infra_up() {
     log_info "Step 6/8: 启动基础设施（Postgres/Redis/NATS/...）..."
     wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && docker compose -f docker-compose.yml --env-file $WSL2_ENV_FILE up -d --wait --wait-timeout 90"
 
     local elapsed=0
     while [[ $elapsed -lt 30 ]]; do
-        if wsl_run "docker exec aats-postgres pg_isready -q 2>/dev/null"; then
+        if wsl_run "docker exec aats-postgres sh -lc 'pg_isready -q -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\"' 2>/dev/null"; then
             break
         fi
         sleep 2
@@ -627,6 +650,7 @@ main() {
     step_build
     step_down
     step_prune
+    ensure_wsl_runtime_prerequisites
     step_infra_up
     step_schema_migrate
     step_app_up

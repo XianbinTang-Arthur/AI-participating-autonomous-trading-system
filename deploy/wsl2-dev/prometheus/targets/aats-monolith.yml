@@ -1,0 +1,4 @@
+- targets:
+    - aats-gateway:9464
+  labels:
+    env: dev

@@ -2,8 +2,8 @@
 
 > 文档性质：当前实现说明、代码导航、运行与安全边界、维护手册
 > 原始全景审阅基线：Git `be9179ead5be6aba22fbe94e3baf72b9f46eedc3`（`main`，2026-05-19）
-> 整改覆盖层最后复核：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；Phase 3A–3W 整改提交候选）
-> 适用边界：正文原始全景数量仍是带基线的静态快照；2026-08-24/25 明确标注的 FS 整改段描述当前未提交工作区，不证明任何 live runtime 状态
+> 整改覆盖层最后复核：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；Phase 3A–3W 整改分支，以本文档所在 HEAD 为准）
+> 适用边界：正文原始全景数量仍是带基线的静态快照；2026-08-24/25 明确标注的 FS 整改段描述当前分支代码，不证明任何 live runtime 状态
 > 适用对象：重新接手项目的维护者、代码审阅者、交易与风控负责人、Operator
 > 事实优先级：固定行为以当前可执行代码为准；有效运行值以现场 runtime/数据库为准；自动化测试用于交叉验证；历史设计文档仅作背景
 
@@ -1270,7 +1270,7 @@ bash scripts/deploy.sh --profile derivatives --skip-commit
 3. 在停止旧应用前构建新镜像；
 4. 停止旧应用；
 5. 清理 dangling image；
-6. 启动基础设施并同步 Postgres 密码；
+6. 幂等校正 WSL2 `vm.overcommit_memory=1`，再启动基础设施并同步 Postgres 密码；
 7. 用新镜像运行一次性 root + RDP schema migration/validation job；非零时不启动应用；
 8. 启动应用并做健康检查。
 
@@ -1308,7 +1308,7 @@ bash scripts/deploy.sh --profile derivatives --skip-commit
 | Grafana | 12.4.3 | 3000 | 512 MiB |
 | Promtail | 3.0.0 | 无 host port | 256 MiB |
 
-Postgres 设 max connections 200、shared buffers 768 MiB，并记录 500ms 以上 SQL。Redis AOF everysec、maxmemory 384 MiB、allkeys-lru；因此 Redis 是热状态，不是不可替代的永久账本。
+Postgres 设 max connections 200、shared buffers 768 MiB，并记录 500ms 以上 SQL；健康探针同时指定 `POSTGRES_USER` 与 `POSTGRES_DB`，避免把“用户名同名但不存在的库”误写成周期性 FATAL。Redis AOF everysec、maxmemory 384 MiB、allkeys-lru；标准部署会以 WSL root 幂等设置 `vm.overcommit_memory=1`，否则失败关闭，防止 fork/BGSAVE 因宿主 overcommit 配置失败。Redis 仍是热状态，不是不可替代的永久账本。
 
 ### 21.5 镜像
 
@@ -1323,7 +1323,9 @@ Dockerfile 使用 Python 3.12 slim 两阶段构建，安装项目的 nats、redi
 
 ### 21.6 可观测性
 
-Prometheus 抓取四个主进程 9464、microstructure collector 9465、Redis exporter 9121。Grafana 当前 provision 的主要告警包括：
+Prometheus 通过 profile-aware file discovery 抓取主进程 9464、可选 microstructure collector 9465、Redis exporter 9121：`spot`/`derivatives` 模拟盘只配置四个实际启动的 sliced 主进程，不配置 collector；future derivatives live 另加入 collector；future monolith 只配置 gateway 主进程并另加入 collector。这样未部署的服务不会被伪装成 DOWN target，metrics dead-man 仍覆盖当前 profile 的全部实际目标。
+
+Grafana 当前 provision 的主要告警包括：
 
 - Kill Switch Triggered；
 - Reconciliation Mismatch；
@@ -1341,6 +1343,8 @@ Prometheus 抓取四个主进程 9464、microstructure collector 9465、Redis ex
 - Candles 15m rolling stale。
 
 OTel trace context 随 EventEnvelope 跨进程传播；Jaeger 接收 OTLP。Promtail 收集容器/应用日志到 Loki。telemetry 配置失败会退化 no-op，但 metrics dead-man 应提示这种“业务可能活着、可观测性已死”的情况。
+
+当前 Stage 9 通知策略是 **UI-only**：告警状态继续在 Grafana UI 中计算和保留，默认 policy 通过全天 mute timing 抑制 notifier，不配置外部 SMTP/Slack/Telegram。不能再用“不可投递 email 地址 + 未配置 SMTP”冒充 log-only，否则每次告警都会生成通知失败 ERROR。Microstructure WS Stale 还会先验证当前 Prometheus profile 是否配置 collector；模拟盘未部署 collector 时不告警。Decision Cycle Stall 在 Kill Switch/recovery 失败关闭期间仍可处于 active，它表示决策周期确实停止，不等同于进程 crash，也不能作为绕过恢复门禁的理由。
 
 ### 21.7 备份与恢复
 

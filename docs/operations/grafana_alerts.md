@@ -151,6 +151,8 @@ Grafana UI 路径：
 - 规则：`deploy/wsl2-dev/grafana/provisioning/alerting/rules.yml`
 - Contact points：`deploy/wsl2-dev/grafana/provisioning/alerting/contactpoints.yml`
 - Policies：`deploy/wsl2-dev/grafana/provisioning/alerting/policies.yml`
+- 当前 Stage 9 为 UI-only：全天 mute timing 阻止 notifier 外发；告警状态仍在 UI 内保留。启用真实通知前必须同时移除该 mute timing，并配置、测试经批准的真实 contact point。
+- Prometheus 主进程/collector 目标由 Compose profile 挂载的 `deploy/wsl2-dev/prometheus/targets/*.yml` 决定；未部署 collector 的模拟盘不会生成 Microstructure/telemetry 伪告警。
 - 修改后通过标准 `scripts/deploy.sh` 重建/验证，不手工重启单个 Compose 服务
 
 ---

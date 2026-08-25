@@ -20,6 +20,13 @@ x-aats-derivatives-live-env: &aats-derivatives-live-env
   AATS_PROCESS_ROLE: monolith
 
 services:
+  # monolith 只在 gateway 容器暴露主进程 metrics；未来 live 门禁解除后，
+  # 同时采集其要求的 microstructure collector。
+  prometheus:
+    volumes:
+      - ./prometheus/targets/aats-monolith.yml:/etc/prometheus/targets/aats.yml:ro
+      - ./prometheus/targets/microstructure.yml:/etc/prometheus/targets/microstructure.yml:ro
+
   # monolith 模式：只需要一个容器，替代 4 个独立进程。
   # 使用 api_gateway 入口 + PROCESS_ROLE=monolith，让 build_runtime
   # 装配全部 slice（shared + market + decision + execution + portfolio

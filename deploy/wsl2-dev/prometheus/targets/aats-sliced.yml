@@ -1,0 +1,7 @@
+- targets:
+    - aats-gateway:9464
+    - aats-market:9464
+    - aats-decision:9464
+    - aats-execution:9464
+  labels:
+    env: dev

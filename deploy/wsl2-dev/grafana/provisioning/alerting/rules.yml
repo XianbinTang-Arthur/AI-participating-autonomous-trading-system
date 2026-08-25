@@ -211,8 +211,9 @@ groups:
       # 最近 2 min 未见 microstructure_ws_message 日志 = collector 断链或 daemon 挂
       - uid: sev2-micro-ws-stale
         title: "SEV2: Microstructure WS Stale"
-        # A 末尾 `or vector(0)` + C 用 math: 同 sev2-decision-stall 反 threshold
-        # 陷阱; Loki 无匹配→0, 健康时 math 返回 0(不 fire),stall 时返回 1(fire).
+        # A 末尾 `or vector(0)`；D/E 再检查 Prometheus 中是否配置了 collector。
+        # 只有 live profile 的 file_sd 存在该 target 时，C 才把日志缺失判为 stale；
+        # spot/derivatives 模拟盘未部署 collector，不应产生虚假告警。
         condition: C
         data:
           - refId: A
@@ -234,7 +235,22 @@ groups:
             datasourceUid: __expr__
             model:
               type: math
-              expression: "$B < 1"
+              expression: "($B < 1) && ($E > 0)"
+            relativeTimeRange: { from: 0, to: 0 }
+          - refId: D
+            datasourceUid: prometheus
+            model:
+              expr: 'count(up{job="aats-microstructure"}) or vector(0)'
+              queryType: range
+            relativeTimeRange:
+              from: 120
+              to: 0
+          - refId: E
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: D
+              reducer: last
             relativeTimeRange: { from: 0, to: 0 }
         noDataState: Alerting
         execErrState: Error
@@ -464,8 +480,8 @@ groups:
         annotations:
           summary: "aats-* /metrics endpoint 连续 10min DOWN 或 Prometheus target 缺失"
           description: |
-            告警触发: 4 个主进程 (gateway/market/decision/execution) 或
-            microstructure-collector 的 /metrics endpoint 对 Prometheus 不可达.
+            告警触发: 当前部署 profile 配置的主进程或 microstructure-collector
+            的 /metrics endpoint 对 Prometheus 不可达.
             影响: P0-b runtime mode badge / Grafana panel / sev2/sev3 alert 全部失效.
             根因候选:
               - telemetry_metrics_http_bind_failed (见 Loki 日志 event_name 同名 critical)

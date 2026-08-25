@@ -97,7 +97,7 @@ $EDITOR .env.wsl2     # 把 *_change_me 改成你自己的值
 bash scripts/deploy.sh --profile derivatives --skip-commit
 ```
 
-profile 必填；当前只允许 `spot`/`derivatives`，所有 live profile 在副作用前失败且无 override。部署顺序由该入口固定为：预检与同步 → 生成本次 runtime readiness generation → 构建新镜像 → 停止旧栈 → 启动并检查基础设施 → 执行一次性 root + RDP schema migration job → 启动应用 → 应用健康检查 → 写入模拟证据包。四主进程只有在同 generation peer 就绪后启动 NATS/hybrid publisher；该代次同时写入 evidence。应用进程只做 schema exact validation，不得在 lifespan 或 daemon 启动路径隐式建表、补列或迁移。任一关键步骤失败必须中止；模拟证据明确不是 trading-ready，也不证明生产库已迁移或 NATS 目标故障矩阵已通过。
+profile 必填；当前只允许 `spot`/`derivatives`，所有 live profile 在副作用前失败且无 override。部署顺序由该入口固定为：预检与同步 → 生成本次 runtime readiness generation → 构建新镜像 → 停止旧栈 → 校正 WSL2 `vm.overcommit_memory=1` → 启动并检查基础设施 → 执行一次性 root + RDP schema migration job → 启动应用 → 应用健康检查 → 写入模拟证据包。Redis 前置条件无法校正时部署失败关闭；Postgres 探针同时指定容器内的用户和基础数据库，不会向不存在的用户名同名库探测。四主进程只有在同 generation peer 就绪后启动 NATS/hybrid publisher；该代次同时写入 evidence。应用进程只做 schema exact validation，不得在 lifespan 或 daemon 启动路径隐式建表、补列或迁移。任一关键步骤失败必须中止；模拟证据明确不是 trading-ready，也不证明生产库已迁移或 NATS 目标故障矩阵已通过。
 
 部署报告完成后可做只读验证：
 

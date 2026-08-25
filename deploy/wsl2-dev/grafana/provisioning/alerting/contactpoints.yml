@@ -1,8 +1,12 @@
 # =============================================================================
 # Grafana Alert Contact Points
 #
-# Stage 9 策略：只写 Grafana 内部日志 + UI 面板，不接外部通道。
+# Stage 9 策略：只在 Grafana UI 中保留状态，不接外部通道。
 # Stage 10 再接 Slack / email / Telegram webhook。
+#
+# Grafana provisioning 要求 policy 引用一个合法 receiver，因此保留 email
+# receiver，但 policies.yml 通过全天 mute timing 阻止 notifier 执行。仅使用
+# 不可投递的占位地址而不 mute，会持续产生 `SMTP not configured` ERROR。
 # =============================================================================
 
 apiVersion: 1
@@ -14,8 +18,7 @@ contactPoints:
       - uid: aats-log-receiver
         type: email
         settings:
-          # 占位地址——未配置 SMTP 所以不会真正发送。
-          # Grafana 10.4+ 要求 addresses 非空才能通过 provisioning 校验。
-          # 告警状态仍然在 UI 面板中追踪。Stage 10 再配置真实 SMTP + 真实收件人。
+          # Grafana 10.4+ 要求 addresses 非空才能通过 provisioning 校验；
+          # policies.yml 的全天 mute timing 保证此 receiver 不会被调用。
           addresses: "noreply@aats.local"
         disableResolveMessage: true

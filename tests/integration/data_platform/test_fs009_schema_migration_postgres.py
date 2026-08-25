@@ -86,7 +86,10 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
             stages=(last_stage,),
         )
         self.assertTrue(rollback.ok, rollback.error_message)
-        with self.assertRaisesRegex(RuntimeError, "migration_contract_failed"):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"rdp_schema_(?:orm|migration)_contract_failed",
+        ):
             validate_rdp_schema(settings)
 
         repaired = apply_rdp_migrations(settings)

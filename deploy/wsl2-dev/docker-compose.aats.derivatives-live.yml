@@ -16,6 +16,12 @@ x-aats-derivatives-live-env: &aats-derivatives-live-env
   AATS_EXECUTION_COMMAND_FLOW_ENABLED: "true"
 
 services:
+  # 仅 derivatives-live 启动 microstructure collector，因此只在该 profile
+  # 把 collector 加入 Prometheus；模拟盘不会再产生不存在目标的 DOWN 告警。
+  prometheus:
+    volumes:
+      - ./prometheus/targets/microstructure.yml:/etc/prometheus/targets/microstructure.yml:ro
+
   aats-gateway:
     env_file:
       - ../../.env.derivatives.live

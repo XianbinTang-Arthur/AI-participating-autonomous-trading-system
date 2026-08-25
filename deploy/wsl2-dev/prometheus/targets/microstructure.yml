@@ -1,0 +1,4 @@
+- targets:
+    - aats-microstructure-collector:9465
+  labels:
+    env: dev

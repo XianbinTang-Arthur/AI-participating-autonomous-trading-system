@@ -138,5 +138,69 @@ class TestGrafanaRuntimeModeAlerts(unittest.TestCase):
             )
 
 
+class TestProfileAwareObservabilityProvisioning(unittest.TestCase):
+    """Runtime profiles must not alert on components they do not deploy."""
+
+    def test_prometheus_targets_follow_compose_profile(self) -> None:
+        deploy_dir = REPO_ROOT / "deploy" / "wsl2-dev"
+        base_compose = (deploy_dir / "docker-compose.yml").read_text(encoding="utf-8")
+        live_overlay = (deploy_dir / "docker-compose.aats.derivatives-live.yml").read_text(
+            encoding="utf-8"
+        )
+        monolith_overlay = (
+            deploy_dir / "docker-compose.aats.derivatives-live-monolith.yml"
+        ).read_text(encoding="utf-8")
+        sliced_targets = yaml.safe_load(
+            (deploy_dir / "prometheus" / "targets" / "aats-sliced.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        empty_targets = yaml.safe_load(
+            (deploy_dir / "prometheus" / "targets" / "empty.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(len(sliced_targets[0]["targets"]), 4)
+        self.assertEqual(empty_targets, [])
+        self.assertIn("targets/empty.yml:/etc/prometheus/targets/microstructure.yml", base_compose)
+        self.assertIn(
+            "targets/microstructure.yml:/etc/prometheus/targets/microstructure.yml",
+            live_overlay,
+        )
+        self.assertIn("targets/aats-monolith.yml:/etc/prometheus/targets/aats.yml", monolith_overlay)
+
+    def test_ui_only_policy_is_muted_for_the_full_day(self) -> None:
+        policies = yaml.safe_load(
+            (ALERTING_DIR / "policies.yml").read_text(encoding="utf-8")
+        )
+
+        root_policy = policies["policies"][0]
+        self.assertNotIn("mute_time_intervals", root_policy)
+        catch_all_route = root_policy["routes"][0]
+        self.assertEqual(catch_all_route["object_matchers"], [["alertname", "=~", ".+"]])
+        self.assertEqual(catch_all_route["mute_time_intervals"], ["aats-ui-only"])
+        mute_timing = policies["muteTimes"][0]
+        self.assertEqual(mute_timing["name"], "aats-ui-only")
+        full_day = mute_timing["time_intervals"][0]["times"][0]
+        self.assertEqual(full_day, {"start_time": "00:00", "end_time": "24:00"})
+
+    def test_microstructure_stale_rule_is_gated_by_deployed_target(self) -> None:
+        rules = yaml.safe_load(
+            (ALERTING_DIR / "rules.yml").read_text(encoding="utf-8")
+        )
+        micro_rule = next(
+            rule
+            for group in rules["groups"]
+            for rule in group["rules"]
+            if rule.get("uid") == "sev2-micro-ws-stale"
+        )
+        by_ref = {item["refId"]: item for item in micro_rule["data"]}
+
+        self.assertEqual(by_ref["C"]["model"]["expression"], "($B < 1) && ($E > 0)")
+        self.assertIn('up{job="aats-microstructure"}', by_ref["D"]["model"]["expr"])
+        self.assertEqual(by_ref["E"]["model"]["expression"], "D")
+
+
 if __name__ == "__main__":
     unittest.main()

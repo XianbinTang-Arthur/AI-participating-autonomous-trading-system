@@ -13,29 +13,22 @@ global:
   evaluation_interval: 30s
 
 scrape_configs:
-  # 4 个 AATS 进程各自运行 PrometheusMetricReader 在 :9464。
-  # Docker 容器名 = docker-compose service name（aats-gateway 等）。
-  # monolith 单进程模式下只有 aats-monolith 一个目标。
+  # AATS 主进程各自运行 PrometheusMetricReader 在 :9464。目标由 Compose
+  # profile 挂载的 file_sd 文件决定：默认是 4 个 sliced 进程，monolith
+  # profile 只采集 gateway 容器，防止监控不存在的服务。
   - job_name: aats
-    static_configs:
-      - targets:
-          - aats-gateway:9464
-          - aats-market:9464
-          - aats-decision:9464
-          - aats-execution:9464
-        labels:
-          env: dev
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/aats.yml
 
   # P1-D Phase 1A Stage 4: microstructure WS collector 暴露自己的
   # PrometheusMetricReader 在 :9465（与 9464 错开，避免同主机端口冲突）。
   # Metrics 包括 microstructure_ws_messages_total / bronze_rows_written 等，
   # 对应 Grafana dashboard p1d_microstructure.json Panel 1-2。
   - job_name: aats-microstructure
-    static_configs:
-      - targets:
-          - aats-microstructure-collector:9465
-        labels:
-          env: dev
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/microstructure.yml
 
   # Redis Exporter — redis_commands_duration_seconds_total 等指标
   - job_name: redis

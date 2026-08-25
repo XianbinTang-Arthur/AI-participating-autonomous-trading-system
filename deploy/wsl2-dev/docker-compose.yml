@@ -75,7 +75,10 @@ services:
       # 首次初始化时自动创建 4 个环境隔离数据库 + 1 个 RDP 研究库
       - ./initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aats}"]
+      # 同时指定用户和实际存在的基础库。只传 -U 时 pg_isready 会默认连接
+      # 与用户名同名的数据库；例如 POSTGRES_USER=admin 会每 10 秒向日志写入
+      # `FATAL: database \"admin\" does not exist`，即使容器最终仍被判 healthy。
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -298,6 +301,11 @@ services:
       - "127.0.0.1:9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # 默认 spot/derivatives 模拟 profile 采用四切片主进程且不启动
+      # microstructure collector。live/monolith overlay 按容器目标路径替换
+      # 这两个 file_sd 文件，避免 Prometheus 对未部署服务持续报 DOWN。
+      - ./prometheus/targets/aats-sliced.yml:/etc/prometheus/targets/aats.yml:ro
+      - ./prometheus/targets/empty.yml:/etc/prometheus/targets/microstructure.yml:ro
       - prometheus_data:/prometheus
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]

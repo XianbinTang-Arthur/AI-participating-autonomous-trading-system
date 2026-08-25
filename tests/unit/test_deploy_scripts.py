@@ -100,6 +100,20 @@ def test_deploy_script_syncs_postgres_password_with_psql_variables() -> None:
     assert 'ALTER USER :"pg_user" PASSWORD :\'pg_password\';' in text
 
 
+def test_postgres_probes_use_an_existing_database_and_redis_host_is_prepared() -> None:
+    deploy_text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+    compose_text = (
+        REPO_ROOT / "deploy" / "wsl2-dev" / "docker-compose.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "pg_isready -q -U" in deploy_text
+    assert '-d \\"\\$POSTGRES_DB\\"' in deploy_text
+    assert 'pg_isready -U \\"$$POSTGRES_USER\\" -d \\"$$POSTGRES_DB\\"' in compose_text
+    assert "ensure_wsl_runtime_prerequisites" in deploy_text
+    assert "vm.overcommit_memory=1" in deploy_text
+    assert 'wsl -d "$DISTRO" -u root bash -c' in deploy_text
+
+
 def test_deploy_script_provisions_tls_for_live_profiles_and_uses_https_health_checks() -> None:
     text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
     compose_text = (REPO_ROOT / "deploy" / "wsl2-dev" / "docker-compose.aats.yml").read_text(encoding="utf-8")

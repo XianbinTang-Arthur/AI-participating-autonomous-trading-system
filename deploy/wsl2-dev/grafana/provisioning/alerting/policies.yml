@@ -1,8 +1,8 @@
 # =============================================================================
 # Grafana Notification Policies
 #
-# 默认路由：所有告警走 aats-log-only contact point。
-# Stage 9 只在 Grafana UI 内追踪告警状态，不做外部推送。
+# 默认路由：所有告警关联 aats-log-only contact point，但由全天 mute timing
+# 抑制实际通知。Stage 9 只在 Grafana UI 内追踪告警状态，不做外部推送。
 # =============================================================================
 
 apiVersion: 1
@@ -16,3 +16,20 @@ policies:
     group_wait: 30s
     group_interval: 5m
     repeat_interval: 4h
+    # Grafana/Alertmanager 禁止在 root route 直接配置 mute timing，因此用
+    # alertname 必然存在的全匹配子路由承接全部告警；continue 默认 false，
+    # 命中后不会再由 root receiver 重复通知。
+    routes:
+      - receiver: aats-log-only
+        object_matchers:
+          - [alertname, "=~", ".+"]
+        mute_time_intervals:
+          - aats-ui-only
+
+muteTimes:
+  - orgId: 1
+    name: aats-ui-only
+    time_intervals:
+      - times:
+          - start_time: "00:00"
+            end_time: "24:00"
