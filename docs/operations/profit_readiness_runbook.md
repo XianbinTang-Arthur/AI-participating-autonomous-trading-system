@@ -1,7 +1,7 @@
 # 收益证据与模拟交易就绪运行手册
 
 > 文档状态：现行操作说明
-> 最后核对：2026-08-25（实现基线 `52cd026a98b073ff2d25693c38f8fe5f643688f9`）
+> 最后核对：2026-08-25（实现与模拟部署基线 `66be4f5c4fbb180e2a286ff7b6d3844b3064ea9f`）
 > 适用范围：`derivatives` 本地模拟栈、RDP 研究库、Research Factory 研究产物
 > 禁止范围：真实资金、live profile、真实订单、手工绕过部署入口
 
@@ -17,7 +17,7 @@
 | 微观结构资格 | 已实现 15 分钟窗口门禁 | 连续频道满足样本、完整性和 lineage 后才可用于研究 |
 | 历史候选资金资格 | 已完成确定性审计 | 旧 `benchmark_segment=test` 等产物全部不可作为资金证据 |
 | v2 复跑 | 已生成计划并提供两阶段批处理 | development 不读 holdout；完整阶段强制要求 L2 成本摘要 |
-| Campaign 统计门禁 | 已自动串联实验 return series、全试验计数、重复假设、walk-forward、bootstrap、Holm、deflated Sharpe | 本次 3 个可评估代表候选全部失败，不具备资本资格 |
+| Campaign 统计门禁 | 已自动串联预注册、实验 return series、全试验计数、重复假设、walk-forward、bootstrap、Holm、deflated Sharpe | 历史重放 3 个和新预注册 4 个代表候选均失败，不具备资本资格 |
 | 模拟执行预算 | 已修复方向 intent 只缩审计预算、不缩 qty 的错误，并按最严格现有 cap 限制单步目标 | 确定性测试通过；部署后尚未出现自然非零信号，运行验收仍是 `UNKNOWN` |
 | 一次性 holdout | 已实现 DB 唯一账本和先占用后读取协议 | 失败也消耗访问；不允许事后补登记已看过的 test 指标 |
 | L2/event 回放 | 已实现 top-5、共享深度、partial/no-fill、post-only 队列近似 | 盘口研究证据，不等于交易所撮合真值 |
@@ -63,6 +63,28 @@ python scripts/rdp_validate_microstructure_window.py \
 指定历史窗口才关闭当前时效限制。输出不可覆盖并包含确定性 fingerprint。
 
 ## 4. 历史候选与 v2 复跑
+
+全新经济假设必须先预注册，不能先运行再补写 hypothesis：
+
+```bash
+python scripts/rdp_preregister_candidate_campaign.py \
+  --config configs/research_campaigns/<campaign>.json \
+  --artifact-root artifacts/research/research_factory
+
+python scripts/rdp_run_candidate_v2_batch.py \
+  --plan-root artifacts/research/research_factory/preregistered_campaigns/<campaign>/plans \
+  --artifact-root artifacts/research/research_factory \
+  --experiment-root artifacts/research/research_factory/<campaign>_experiments \
+  --phase development
+```
+
+配置严格固定机制、可证伪条件、容量假设、Factor DSL、Gold 窗口、分段和 fee/slippage/funding
+成本。每个 plan 绑定 manifest、proposal 与 hypothesis card 的 SHA-256；新计划中的
+`funding_bps` 同时进入真实 experiment 与 hypothesis fingerprint。当前 baseline 为避免重叠
+标签虚增年化只接受 `holding_period_bars=1`；更长持有期必须先实现非重叠收益口径。
+
+若任一 development gate 失败，仍须对完整 plan root 运行 campaign 计数；不得删除失败计划、
+改阈值后复用同一 campaign ID，或读取 holdout 寻找“翻盘”。
 
 ```powershell
 .venv\Scripts\python.exe scripts\rdp_audit_and_plan_candidate_v2.py

@@ -1672,8 +1672,15 @@ PASS，自然非零信号运行验收仍为 UNKNOWN，真实收益仍为 NO-GO�
 提交 `6749ea8a515fc84f8ab8b38de5790c8f5c0fc17c` 进一步把上述人工 SQL 观察收口为不可覆盖的
 只读漏斗证据：绑定健康 deployment 的 SHA/commit/generation，以 settle delay 后的唯一
 decision 为样本，自动识别超 cap、尺度型风险拒绝、阶段断链、拒绝后订单和孤儿成交。当前现场
-artifact 覆盖 8 个自然 flat/0 决策周期，因成熟自然非零目标为 0 正确输出 `UNKNOWN`，并固定
+上一代 artifact 覆盖 8 个自然 flat/0 决策周期，因成熟自然非零目标为 0 正确输出 `UNKNOWN`，并固定
 `production_ready=false`、`trading_ready=false`。
+
+提交 `410e3a40c910f07f0722704a25cf14e1fb376c91` 又补齐新经济假设的预注册缺口，并把
+funding 成本纳入 plan、experiment 和 hypothesis fingerprint。实际 v3 campaign 在结果前固定
+4 个唯一机制，四者 train/valid 净收益和成本后 edge 均未通过，2,000 次 bootstrap 后代表通过
+数仍为 0；holdout 保持封存，因此 P2 L2 request 未启动。提交
+`66be4f5c4fbb180e2a286ff7b6d3844b3064ea9f` 同时修复运行证据目录导致标准 WSL 同步自阻断的问题。
+该部署的最新漏斗 artifact 覆盖后续 5 个自然 flat/0 决策周期，仍正确输出 `UNKNOWN`。
 
 ## 27. 尚未通过本次静态审阅确认的运行事实
 

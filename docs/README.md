@@ -252,6 +252,10 @@
   或盈利成功。命令与退出码见
   [`operations/profit_readiness_runbook.md`](operations/profit_readiness_runbook.md)，实现与证据边界见
   [`code_review/profitability_gap_assessment_2026_08_25.md`](code_review/profitability_gap_assessment_2026_08_25.md)。
+- 2026-08-25 新候选预注册已把经济机制、失效条件、容量假设、Factor DSL、Gold 窗口及
+  fee/slippage/funding 成本固定在结果之前，并完成 4 个唯一假设的真实 development campaign。
+  四者 train/valid 成本后收益全部失败，统计通过数仍为 0，holdout 继续封存；实施任务书见
+  [`task/preregistered_candidate_campaign_sow_2026_08_25.md`](task/preregistered_candidate_campaign_sow_2026_08_25.md)。
 
 ## 8. 易漂移事实与代码真源
 

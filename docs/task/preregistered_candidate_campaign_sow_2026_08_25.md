@@ -1,7 +1,8 @@
 # 新经济假设预注册与 Development Campaign SOW
 
-> 文档状态：实施中任务书
-> 最后核对：2026-08-25（起始 HEAD `175d4afa90db24cbe208dbff5adaa2dad311a85b`）
+> 文档状态：已实施任务书
+> 最后核对：2026-08-25（起始 HEAD `175d4afa90db24cbe208dbff5adaa2dad311a85b`；
+> 研究实现 `410e3a40c910f07f0722704a25cf14e1fb376c91`；部署修复 `66be4f5c4fbb180e2a286ff7b6d3844b3064ea9f`）
 > 核对范围：Research Factory 新候选预注册、v2 development batch、完整 campaign 统计
 > 运行边界：只读取 Gold development 数据；不读取 test/holdout，不写运行参数，不提交订单，
 > 不启动 live profile，不产生资金资格或盈利承诺。
@@ -121,3 +122,19 @@ holdout 状态和下一门。文档必须区分代码能力、一次性运行事
 - 实际结果不因失败而删除，不降低门槛，不打开 test；
 - Ruff、相关单测、完整 unit 与标准 derivatives 模拟部署通过；
 - 只有统计门全部通过的候选才可进入 P2 L2 request，其他候选必须淘汰。
+
+### 实施结果
+
+配置 `profit_candidates_v3_20260825` 在查看 development 结果前固定四个不同 Factor DSL 签名：
+短周期反转、成交量确认动量、funding 拥挤反转和前一日区间突破。生成阶段写出 1 个 manifest、
+4 个 proposal、4 个 hypothesis card、4 个 plan 和 registration evidence；数据库、holdout、
+运行参数和订单均未访问。
+
+WSL2 `derivatives` 模拟环境随后对同一 Gold development 窗口运行全部四个计划，并执行 2,000
+次 block bootstrap（seed 7）及完整 campaign。结果为 4/4 experiment gate 失败、4 个唯一假设、
+0 个代表候选通过、`capital_eligible=false`、holdout=`sealed_not_evaluated`。Campaign evidence：
+
+`/root/aats/artifacts/research/research_factory/campaigns/profit_candidates_v3_20260825/campaign_evidence.json`
+
+SHA-256=`a67403ace4b6197005f161ce1b88aaf42f4231341afa00ab0f2d2966f84d968a`。
+因此本轮按预注册门停止，不生成 P2 L2 request，也不调整阈值重试。
