@@ -321,14 +321,20 @@ export function renderAIAnalysisView(data) {
   );
 
   return `
-    <div class="panel-grid">
-      <div class="span-4">${workspace.aiHero}</div>
-      <div class="span-8">${workspace.aiLatest}</div>
-      ${workspace.aiReview ? `<div class="span-12">${workspace.aiReview}</div>` : ""}
-      <div class="span-12">${profileEvidenceCard(data)}</div>
-      ${showExecutionSuggestion ? `<div class="span-12">${analysis.aiExecutionSuggestion}</div>` : ""}
-      <div class="span-12">${analysis.aiPerformanceReports}</div>
-      <div class="span-12">${analysis.aiHistory}</div>
+    <div class="workspace-stack ai-analysis-workspace">
+      <div class="layout-flow layout-flow--5-7 ai-analysis-flow">
+        <div class="layout-flow__column">
+          <div class="ai-analysis-flow__hero">${workspace.aiHero}</div>
+          <div class="ai-analysis-flow__profile">${profileEvidenceCard(data)}</div>
+        </div>
+        <div class="layout-flow__column">
+          <div class="ai-analysis-flow__latest">${workspace.aiLatest}</div>
+          <div class="ai-analysis-flow__performance">${analysis.aiPerformanceReports}</div>
+        </div>
+      </div>
+      ${workspace.aiReview ? `<div>${workspace.aiReview}</div>` : ""}
+      ${showExecutionSuggestion ? `<div>${analysis.aiExecutionSuggestion}</div>` : ""}
+      <div>${analysis.aiHistory}</div>
     </div>
   `;
 }

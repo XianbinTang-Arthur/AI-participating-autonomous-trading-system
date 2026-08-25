@@ -861,7 +861,7 @@ export function renderRdpControlPanelV2({
         canAdmin,
       })}
       <div class="panel-grid ai-config-layout">
-        <section class="span-8 workspace-stack" role="region" aria-label="RDP 当前待处理与发布">
+        <section class="span-8 workspace-stack" role="region" aria-label="RDP 当前待处理、发布与后台状态">
           ${renderWorkbenchItemsCard({
             items: rdpWorkbenchItems.items || [],
             canAdmin,
@@ -878,13 +878,13 @@ export function renderRdpControlPanelV2({
             tuningProposals: tuningProposalsPending ? { loading: true } : rdpTuningProposals,
             canAdmin,
           })}
-        </section>
-        <aside class="span-4 workspace-stack" role="region" aria-label="RDP 侧栏：告警、运行态与观察窗口">
-          ${renderIntegrityAlertsCard(workbenchAlertsPending ? { loading: true } : rdpWorkbenchAlerts)}
           ${renderRuntimeRailCard({
             overview: rdpWorkbenchOverview,
             rdpControl,
           })}
+        </section>
+        <aside class="span-4 workspace-stack" role="region" aria-label="RDP 侧栏：告警与观察窗口">
+          ${renderIntegrityAlertsCard(workbenchAlertsPending ? { loading: true } : rdpWorkbenchAlerts)}
           ${renderObservationRailCard({
             rdpControl,
             canAdmin,

@@ -601,12 +601,18 @@ export function renderRiskView(data, uiState = data.uiState || {}) {
       </div>
     `
     : `
-      <div class="panel-grid strategy-page-grid">
+      <div class="workspace-stack">
         ${sections.riskExitExecutionReview ? `<div class="span-12">${sections.riskExitExecutionReview}</div>` : ""}
         ${sections.riskExitExecutionTimeline ? `<div class="span-12">${sections.riskExitExecutionTimeline}</div>` : ""}
-        <div class="span-7">${sections.riskBlockers}</div>
-        <div class="span-5">${sections.riskMetrics}</div>
-        <div class="span-12">${sections.riskBills}</div>
+        <div class="layout-flow layout-flow--7-5 risk-review-flow">
+          <div class="layout-flow__column">
+            <div class="risk-review-flow__blockers">${sections.riskBlockers}</div>
+            <div class="risk-review-flow__bills">${sections.riskBills}</div>
+          </div>
+          <div class="layout-flow__column">
+            <div class="risk-review-flow__metrics">${sections.riskMetrics}</div>
+          </div>
+        </div>
       </div>
     `;
   return `
@@ -637,13 +643,19 @@ export function renderRiskView(data, uiState = data.uiState || {}) {
         "恢复前必须确认的条件",
         "把恢复资格、对账、保证金、账户状态和持仓模式放到同一层，避免在多个小卡片里来回跳读。",
         `
-          <div class="panel-grid strategy-page-grid">
-            <div class="span-4">${sections.riskRecovery}</div>
-            <div class="span-4">${sections.riskReconciliation}</div>
-            <div class="span-4">${sections.riskMarginBuffer}</div>
-            <div class="span-4">${sections.riskAccount}</div>
-            <div class="span-4">${sections.riskExposure}</div>
-            <div class="span-4">${sections.riskPositionMode}</div>
+          <div class="layout-flow layout-flow--three risk-recovery-flow">
+            <div class="layout-flow__column">
+              <div class="risk-recovery-flow__recovery">${sections.riskRecovery}</div>
+              <div class="risk-recovery-flow__account">${sections.riskAccount}</div>
+            </div>
+            <div class="layout-flow__column">
+              <div class="risk-recovery-flow__reconciliation">${sections.riskReconciliation}</div>
+              <div class="risk-recovery-flow__exposure">${sections.riskExposure}</div>
+            </div>
+            <div class="layout-flow__column">
+              <div class="risk-recovery-flow__margin">${sections.riskMarginBuffer}</div>
+              <div class="risk-recovery-flow__position-mode">${sections.riskPositionMode}</div>
+            </div>
           </div>
         `
       )}

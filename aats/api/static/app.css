@@ -26,6 +26,14 @@
   --radius-lg: 22px;
   --radius-md: 16px;
   --radius-sm: 12px;
+  --space-page-inline: clamp(18px, 1.8vw, 24px);
+  --space-page-top: 18px;
+  --space-page-bottom: 32px;
+  --space-section: 14px;
+  --space-grid: 12px;
+  --space-card: 16px;
+  --space-card-gap: 12px;
+  --space-item: 10px;
   --font-display: "Aptos Display", "Segoe UI Variable Display", "PingFang SC", "Noto Sans SC", sans-serif;
   --font-sans: "Aptos", "Segoe UI Variable", "PingFang SC", "Noto Sans SC", sans-serif;
   --font-mono: "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", monospace;
@@ -102,7 +110,7 @@ h3 {
 .console-shell {
   max-width: 1680px;
   margin: 0 auto;
-  padding: 24px 28px 48px;
+  padding: var(--space-page-top) var(--space-page-inline) var(--space-page-bottom);
 }
 
 .console-shell--compact {
@@ -136,8 +144,8 @@ h3 {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 18px;
-  padding: 16px 20px;
+  gap: var(--space-card-gap);
+  padding: 13px 16px;
   border-radius: var(--radius-lg);
 }
 
@@ -171,7 +179,7 @@ h3 {
 .command-panel,
 .session-panel {
   display: grid;
-  gap: 16px;
+  gap: var(--space-card-gap);
 }
 
 .masthead-copy h1,
@@ -206,7 +214,7 @@ h3 {
 .lead {
   max-width: 62ch;
   font-size: 15px;
-  line-height: 1.7;
+  line-height: 1.6;
 }
 
 .meta-copy,
@@ -222,14 +230,14 @@ h3 {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  gap: 16px;
+  gap: var(--space-card-gap);
 }
 
 .session-panel,
 .command-panel,
 .surface-card,
 .status-card {
-  padding: 18px;
+  padding: var(--space-card);
   border-radius: var(--radius-lg);
 }
 
@@ -287,10 +295,10 @@ h3 {
 }
 
 .status-ribbon {
-  margin-top: 18px;
+  margin-top: var(--space-section);
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 14px;
+  gap: var(--space-item);
 }
 
 .status-ribbon--home {
@@ -317,8 +325,8 @@ h3 {
 }
 
 .status-ribbon--home .status-card {
-  min-height: 124px;
-  padding: 16px;
+  min-height: 112px;
+  padding: 14px;
   gap: 8px;
 }
 
@@ -341,8 +349,8 @@ h3 {
 
 .status-card {
   display: grid;
-  gap: 10px;
-  min-height: 140px;
+  gap: 8px;
+  min-height: 124px;
 }
 
 .status-card h3 {
@@ -486,7 +494,7 @@ h3 {
   max-width: 100%;
   gap: 8px;
   padding: 8px 14px;
-  margin: 10px 0 0 0;
+  margin: 7px 0 0 0;
   border-radius: 999px;
   font-weight: 800;
   font-size: 12px;
@@ -614,10 +622,10 @@ h3 {
 }
 
 .workspace-nav {
-  margin-top: 18px;
+  margin-top: var(--space-section);
   display: flex;
   flex-wrap: nowrap;
-  gap: 10px;
+  gap: 8px;
   overflow-x: auto;
   overscroll-behavior-inline: contain;
   scrollbar-width: none;
@@ -888,7 +896,7 @@ h3 {
 }
 
 .banner-stack {
-  margin-top: 18px;
+  margin-top: var(--space-section);
   display: grid;
   gap: 10px;
 }
@@ -898,10 +906,10 @@ h3 {
 }
 
 .notice-card {
-  padding: 14px 16px;
+  padding: 12px 14px;
   border-radius: var(--radius-md);
   border: 1px solid transparent;
-  line-height: 1.6;
+  line-height: 1.55;
 }
 
 .notice-card.tone-info {
@@ -917,7 +925,7 @@ h3 {
 }
 
 .workspace {
-  margin-top: 18px;
+  margin-top: var(--space-section);
 }
 
 .home-top-grid {
@@ -1072,7 +1080,7 @@ h3 {
 
 .view-layout {
   display: grid;
-  gap: 16px;
+  gap: var(--space-grid);
 }
 
 .view-layout.is-refreshing .surface-card,
@@ -1104,7 +1112,7 @@ h3 {
 }
 
 .page-head {
-  margin-bottom: 20px;
+  margin-bottom: var(--space-section);
   padding: 0 4px;
 }
 
@@ -1115,12 +1123,12 @@ h3 {
 .panel-grid {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
-  gap: 18px;
+  gap: var(--space-grid);
 }
 
 .surface-card {
   display: grid;
-  gap: 16px;
+  gap: var(--space-card-gap);
 }
 
 .strategy-page-grid {
@@ -1145,8 +1153,8 @@ h3 {
 
 .primary-status-panel {
   display: grid;
-  gap: 14px;
-  padding: 20px;
+  gap: var(--space-card-gap);
+  padding: var(--space-card);
   border-radius: var(--radius-xl);
   border: 1px solid var(--line-strong);
   background:
@@ -1196,7 +1204,7 @@ h3 {
 
 .subsection-block {
   display: grid;
-  gap: 12px;
+  gap: var(--space-item);
 }
 
 .span-12 { grid-column: span 12; }
@@ -1217,16 +1225,16 @@ h3 {
 .summary-strip {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 10px;
+  gap: 8px;
 }
 
 .summary-tile {
-  padding: 12px 13px;
+  padding: 10px 11px;
   border-radius: var(--radius-md);
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.03);
   display: grid;
-  gap: 5px;
+  gap: 4px;
   align-content: start;
   min-width: 0;
 }
@@ -1301,22 +1309,22 @@ h3 {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  gap: 16px;
+  gap: var(--space-card-gap);
 }
 
 .hero-copy {
   color: var(--text-soft);
-  line-height: 1.7;
+  line-height: 1.6;
 }
 
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: var(--space-item);
 }
 
 .stat-item {
-  padding: 14px;
+  padding: 11px;
   border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.02);
   border: 1px solid var(--line);
@@ -1351,7 +1359,7 @@ h3 {
 .alert-list,
 .alert-queue {
   display: grid;
-  gap: 12px;
+  gap: 9px;
 }
 
 .kv-row,
@@ -1359,8 +1367,8 @@ h3 {
 .timeline-item,
 .alert-queue__item {
   display: grid;
-  gap: 6px;
-  padding: 14px;
+  gap: 5px;
+  padding: 11px;
   border-radius: var(--radius-md);
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.02);
@@ -1397,7 +1405,7 @@ h3 {
 }
 
 .callout {
-  padding: 16px;
+  padding: 13px;
   border-radius: var(--radius-md);
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.03);
@@ -1408,9 +1416,9 @@ h3 {
 }
 
 .callout p {
-  margin-top: 8px;
+  margin-top: 6px;
   color: var(--text-soft);
-  line-height: 1.7;
+  line-height: 1.6;
 }
 
 /* tone 变体：让审批阻断等 danger-级 callout 在视觉上和普通信息卡 clearly 区分。
@@ -1468,7 +1476,7 @@ h3 {
 
 .data-table th,
 .data-table td {
-  padding: 14px 16px;
+  padding: 10px 12px;
   text-align: left;
   border-bottom: 1px solid var(--line);
   vertical-align: top;
@@ -1512,31 +1520,31 @@ h3 {
 
 .rdp-ops-shell {
   display: grid;
-  gap: 16px;
+  gap: var(--space-grid);
 }
 
 .rdp-command-actions {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 10px;
+  gap: 8px;
 }
 
 .rdp-section {
-  margin: 1.25rem 0 0.75rem;
+  margin: 1rem 0 0.6rem;
 }
 
 .rdp-worklist,
 .rdp-checklist {
   display: grid;
-  gap: 12px;
+  gap: var(--space-item);
 }
 
 .rdp-workitem,
 .rdp-checkitem {
   display: grid;
-  gap: 10px;
-  padding: 14px;
+  gap: 8px;
+  padding: 11px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.02);
@@ -1591,8 +1599,8 @@ h3 {
 
 .rdp-inline-block {
   display: grid;
-  gap: 10px;
-  margin-top: 14px;
+  gap: 8px;
+  margin-top: 10px;
 }
 
 .rdp-subtle-heading {
@@ -1607,7 +1615,7 @@ h3 {
 
 .mini-table th,
 .mini-table td {
-  padding: 10px 12px;
+  padding: 8px 10px;
   text-align: left;
   border-bottom: 1px solid var(--line);
   vertical-align: middle;
@@ -1799,7 +1807,7 @@ h3 {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-  padding: 12px 14px;
+  padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.02);
@@ -1821,8 +1829,8 @@ h3 {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
+  gap: 10px;
+  padding: 10px 13px;
   color: var(--text);
   font-size: 13px;
   font-weight: 800;
@@ -1837,16 +1845,16 @@ h3 {
 }
 
 .strategy-subsection__body {
-  padding: 14px 16px 16px;
+  padding: 11px 13px 13px;
   display: grid;
-  gap: 12px;
+  gap: var(--space-item);
   background: rgba(6, 14, 22, 0.38);
 }
 
 .section-nav {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
 }
 
 .section-nav__link {
@@ -1863,7 +1871,34 @@ h3 {
 
 .workspace-stack {
   display: grid;
-  gap: 16px;
+  gap: var(--space-grid);
+}
+
+/* 独立列流用于内容高度差异显著的工作区。每列自行向下排布，避免普通
+   CSS Grid 同一行被最长卡片撑高后，在短卡片下方留下大面积空洞。 */
+.layout-flow {
+  display: grid;
+  gap: var(--space-grid);
+  align-items: start;
+}
+
+.layout-flow--7-5 {
+  grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+}
+
+.layout-flow--5-7 {
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+}
+
+.layout-flow--three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.layout-flow__column {
+  display: grid;
+  gap: var(--space-grid);
+  min-width: 0;
+  align-content: start;
 }
 
 .workspace-section {
@@ -1871,27 +1906,27 @@ h3 {
 }
 
 .strategy-workspace {
-  gap: 22px;
+  gap: 16px;
 }
 
 .strategy-section-nav {
   position: sticky;
   top: 12px;
   z-index: 2;
-  padding: 10px 0 2px;
+  padding: 7px 0 2px;
   background: linear-gradient(180deg, rgba(5, 12, 19, 0.96), rgba(5, 12, 19, 0.72), transparent);
 }
 
 .strategy-workspace-section {
   display: grid;
-  gap: 14px;
+  gap: 10px;
 }
 
 .strategy-workspace-section__head {
   display: flex;
   justify-content: space-between;
   align-items: flex-end;
-  gap: 16px;
+  gap: var(--space-card-gap);
 }
 
 .strategy-workspace-section__copy {
@@ -1929,7 +1964,7 @@ h3 {
 
 .manual-profile-switch-grid {
   display: grid;
-  gap: 14px;
+  gap: var(--space-card-gap);
 }
 
 .manual-profile-switch-actions {
@@ -2057,7 +2092,7 @@ h3 {
 
 .field-grid {
   display: grid;
-  gap: 12px;
+  gap: var(--space-item);
 }
 .home-context-card {
   min-height: 100%;
@@ -2066,7 +2101,7 @@ h3 {
 
 .home-context-card .panel-head {
   align-items: flex-start;
-  min-height: 72px;
+  min-height: 60px;
 }
 
 .summary-strip--quad {
@@ -2083,13 +2118,13 @@ h3 {
 }
 
 .policy-card {
-  gap: 18px;
+  gap: var(--space-card-gap);
 }
 
 .policy-summary-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
+  gap: var(--space-card-gap);
 }
 
 .policy-summary-grid .kv-list {
@@ -2097,12 +2132,12 @@ h3 {
 }
 
 .policy-form-grid {
-  gap: 18px;
+  gap: var(--space-card-gap);
 }
 
 .policy-form-panel {
   align-items: start;
-  gap: 14px;
+  gap: var(--space-card-gap);
 }
 
 .policy-form-panel input,
@@ -2148,12 +2183,12 @@ input::placeholder {
 }
 
 .empty-state {
-  padding: 24px;
+  padding: var(--space-card);
   border-radius: var(--radius-md);
   border: 1px dashed var(--line-strong);
   background: rgba(255, 255, 255, 0.02);
   color: var(--text-soft);
-  line-height: 1.7;
+  line-height: 1.6;
 }
 
 .skeleton-grid {
@@ -2194,15 +2229,15 @@ input::placeholder {
 
 .skeleton-panel {
   display: grid;
-  gap: 16px;
-  padding: 20px;
+  gap: var(--space-card-gap);
+  padding: var(--space-card);
   border-radius: var(--radius-xl);
 }
 
 .skeleton-card {
   display: grid;
-  gap: 14px;
-  padding: 18px;
+  gap: var(--space-card-gap);
+  padding: var(--space-card);
   border-radius: var(--radius-lg);
 }
 
@@ -2287,13 +2322,13 @@ input::placeholder {
 
 .skeleton-list {
   display: grid;
-  gap: 12px;
+  gap: var(--space-item);
 }
 
 .skeleton-row {
   display: grid;
   gap: 7px;
-  padding: 14px;
+  padding: 11px;
   border-radius: var(--radius-md);
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.02);
@@ -2342,10 +2377,10 @@ input::placeholder {
   width: 100%;
   max-width: 560px;
   min-width: 0;
-  padding: 28px;
+  padding: 24px;
   border-radius: var(--radius-xl);
   display: grid;
-  gap: 24px;
+  gap: 20px;
 }
 
 .login-copy,
@@ -2362,7 +2397,7 @@ input::placeholder {
 
 .login-form {
   display: grid;
-  gap: 14px;
+  gap: var(--space-card-gap);
 }
 
 .login-button {
@@ -2706,6 +2741,53 @@ input::placeholder {
 }
 
 @media (max-width: 1100px) {
+  .layout-flow--7-5,
+  .layout-flow--5-7,
+  .layout-flow--three {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .strategy-overview-flow > .layout-flow__column,
+  .risk-recovery-flow > .layout-flow__column,
+  .risk-review-flow > .layout-flow__column,
+  .ai-analysis-flow > .layout-flow__column {
+    display: contents;
+  }
+
+  .strategy-overview-flow__hero,
+  .risk-recovery-flow__recovery,
+  .risk-review-flow__blockers,
+  .ai-analysis-flow__hero {
+    order: 1;
+  }
+
+  .strategy-overview-flow__workbench,
+  .risk-recovery-flow__reconciliation,
+  .risk-review-flow__metrics,
+  .ai-analysis-flow__latest {
+    order: 2;
+  }
+
+  .strategy-overview-flow__history,
+  .risk-recovery-flow__margin,
+  .risk-review-flow__bills,
+  .ai-analysis-flow__profile {
+    order: 3;
+  }
+
+  .risk-recovery-flow__account,
+  .ai-analysis-flow__performance {
+    order: 4;
+  }
+
+  .risk-recovery-flow__exposure {
+    order: 5;
+  }
+
+  .risk-recovery-flow__position-mode {
+    order: 6;
+  }
+
   .span-8,
   .span-7,
   .span-6,

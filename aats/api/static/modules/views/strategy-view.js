@@ -669,10 +669,14 @@ export function renderStrategyView(data) {
         "本轮策略到底想做什么",
         "先看当前决策、门禁和目标变化。这里回答的是”这轮会不会动手”，不是配置细节。 ",
         `
-          <div class="panel-grid strategy-page-grid">
-            <div class="span-7">${sections.strategyHero}</div>
-            <div class="span-5">${sections.strategyDecisionWorkbench}</div>
-            <div class="span-12">${sections.strategyHistory}</div>
+          <div class="layout-flow layout-flow--7-5 strategy-overview-flow">
+            <div class="layout-flow__column">
+              <div class="strategy-overview-flow__hero">${sections.strategyHero}</div>
+              <div class="strategy-overview-flow__history">${sections.strategyHistory}</div>
+            </div>
+            <div class="layout-flow__column">
+              <div class="strategy-overview-flow__workbench">${sections.strategyDecisionWorkbench}</div>
+            </div>
           </div>
         `
       )}
