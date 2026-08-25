@@ -18,6 +18,10 @@ def test_parse_factor_expression_accepts_whitelisted_field_and_function() -> Non
     assert parsed.fields == ("close",)
     assert parsed.functions == ("Mean",)
     assert parsed.to_dict()["fields"] == ["close"]
+    assert parsed.normalized_ast == (
+        "Call(func=Name(id='Mean', ctx=Load()), "
+        "args=[Name(id='close', ctx=Load()), Constant(value=20)])"
+    )
 
 
 def test_parse_factor_expression_accepts_basic_arithmetic_composition() -> None:

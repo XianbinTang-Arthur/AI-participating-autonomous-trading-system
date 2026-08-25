@@ -77,10 +77,21 @@ def parse_factor_expression(expr: str) -> FactorExpression:
     visitor.visit(tree)
     return FactorExpression(
         expression=expr.strip(),
-        normalized_ast=ast.dump(tree.body, include_attributes=False),
+        normalized_ast=_normalized_ast_dump(tree.body),
         fields=tuple(visitor.fields),
         functions=tuple(visitor.functions),
     )
+
+
+def _normalized_ast_dump(node: ast.AST) -> str:
+    """Return a stable AST representation across supported Python versions.
+
+    Python 3.12 serializes an empty ``Call.keywords`` field while Python 3.14
+    omits it from ``ast.dump``. Factor expressions reject keyword arguments,
+    so removing that empty implementation detail preserves semantics and keeps
+    preregistration signatures identical across Windows and WSL2 runtimes.
+    """
+    return ast.dump(node, include_attributes=False).replace(", keywords=[]", "")
 
 
 class _SafeFactorExpressionVisitor(ast.NodeVisitor):
