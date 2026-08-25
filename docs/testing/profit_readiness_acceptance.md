@@ -1,7 +1,7 @@
 # 收益可信度整改验收矩阵
 
 > 文档状态：现行测试说明
-> 最后核对：2026-08-25（实现基线 `0762a4aeed87075b9001717383b9565416c7271b`，另含本文档所在 HEAD 的日志降噪改动）
+> 最后核对：2026-08-25（实现与模拟部署基线 `52cd026a98b073ff2d25693c38f8fe5f643688f9`）
 > 边界：本文定义可执行验收，不把未运行的项目标记为通过。
 
 | 层级 | 验收项 | 通过条件 | 失败/未知处理 |
@@ -24,13 +24,15 @@
 
 ## 现场验收快照（非持续状态证明）
 
-下列结论只对应 2026-08-25 18:07--18:17 UTC、实现基线 `0762a4ae` 的本地
+下列结论只对应 2026-08-25 18:00--18:29 UTC、实现基线 `52cd026a` 的本地
 `derivatives` 模拟栈；容器、账户、交易所和数据新鲜度会随时间变化，后续测试必须重新生成
 证据，不得引用本节代替现场核验。
 
 - 全量单元回归：`4551 passed, 30 skipped, 94 subtests passed`；Ruff 通过；
+- 已部署 decision 容器在显式执行 managed-profile 注入后读取到 `derivatives`，现场最严格
+  单步 cap 为 1,250；无 legs intent 的 10 × 0.25 缩放结果为 2.5，断言通过；
 - 标准部署证据：
-  `/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260825T180738016567Z-derivatives-0762a4aeed87.json`；
+  `/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260825T182745833825Z-derivatives-52cd026a98b0.json`；
 - 七个必需应用容器均为 `running/healthy`、重启计数为 0，最近 15 分钟无
   `ERROR`/`CRITICAL`/未解析 traceback；
 - 2026-08-25 18:00--18:15 UTC 微观结构窗口现场重算成功：BBO 779、books5 1382、
@@ -42,13 +44,15 @@
 - development campaign 计入全部 10 个计划，预先识别 4 个唯一假设与 6 个重复计划；3 个
   有 return series 的代表候选全部为负收益且统计失败，`representative_pass_count=0`、
   `capital_eligible=false`、holdout=`sealed_not_evaluated`；
-- 部署后的首批 25 个 position target 均为 flat/0，25 个 risk decision 均批准，未产生
-  execution plan、order intent、order 或 fill；这证明当前窗口没有风险阻断，但自然非零信号下
-  的预算修复仍为 `UNKNOWN`；
+- 预算修复第一代部署后的 25 个 position target 均为 flat/0，25 个 risk decision 均批准；
+  最新部署后的首个 target/risk 也正常产生，但仍为 flat/0，未产生 execution plan、order
+  intent、order 或 fill；这证明所观测窗口没有风险阻断，但自然非零信号下的预算修复仍为
+  `UNKNOWN`；
 - 签名 Operator 页面显示模拟栈对账一致、当前阻断 0、活动委托 0、敞口 0、恢复资格为是；
   同页仍明确暴露真实资金报单路径未知、试盘守护未配置，因此不构成实盘或盈利证明；
-- 当前 WARNING 主要是 dev HTTP/insecure-cookie 的模拟环境声明，以及 flat/0 target 的
-  `normalize_delta` 跳过；后者已在本文档所在 HEAD 降为 DEBUG，避免正常观望污染告警面。
+- 上一代 WARNING 主要是 dev HTTP/insecure-cookie 的模拟环境声明，以及 flat/0 target 的
+  `normalize_delta` 跳过；后者已降为 DEBUG。最新部署日志复核中七个应用 error 匹配数为 0，
+  flat/0 的 `normalize_delta` WARNING 匹配数也为 0。
 
 本快照证明数据窗口可研究、模拟服务可运行，并明确证明本轮候选没有正期望证据。它不证明
 模拟成交可信，不证明参数 runtime ACK 已接入，也不解除任何 live profile 的 NO-GO。完整差距

@@ -1,11 +1,11 @@
 # AATS 从当前状态到真实收益的差距评估与落地路线
 
 > 文档状态：现行代码审查与收益就绪判断
-> 最后核对：2026-08-25 18:20 UTC
-> 静态实现基线：Git `0762a4aeed87075b9001717383b9565416c7271b`
+> 最后核对：2026-08-25 18:29 UTC
+> 静态实现基线：Git `52cd026a98b073ff2d25693c38f8fe5f643688f9`
 > 模拟运行基线：`derivatives`，deployment generation
-> `0762a4aeed87-20260825T180612Z-39-8550`
-> 运行证据：`/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260825T180738016567Z-derivatives-0762a4aeed87.json`
+> `52cd026a98b0-20260825T182622Z-180-19894`
+> 运行证据：`/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260825T182745833825Z-derivatives-52cd026a98b0.json`
 > 禁止外推：本文不构成投资建议，不证明未来收益，不授权 live profile、真实资金或真实订单。
 
 ## 1. 结论
@@ -119,13 +119,16 @@ Campaign 的完整口径为：
 
 ### 6.3 当前部署观察
 
-标准部署后，七个应用容器均 healthy，最近 10 分钟七个应用日志未匹配到 error-level、fatal、
-critical、exception 或 traceback。签名 Operator 页面显示 runtime normal、reconciliation
-一致、blocker 0、敞口 0、活动委托 0。
+最新标准部署后，七个应用容器均 healthy，`/healthz` 为 200；匿名访问认证端点
+`/system/health`、`/system/recovery` 均为预期 401。七个应用日志未匹配到 error-level、fatal、
+critical、exception 或 traceback，正常 flat/0 决策也不再产生 WARNING。上一代签名 Operator
+快照显示 runtime normal、reconciliation 一致、blocker 0、敞口 0、活动委托 0；这些动态字段
+在任何实际操作前仍须重新登录读取。
 
-部署后事件库产生了 25 个 position target 和 25 个 risk decision；risk 均批准，但目标均为
-flat/0，因此没有形成 plan/order/fill。结论是：**修复已通过确定性测试并成功部署，但自然非零
-信号下的运行验收仍为 UNKNOWN，而不是 PASS。**
+预算修复的第一代部署观察产生了 25 个 position target 和 25 个 risk decision；最新部署后的
+首个 target/risk 也已正常产生。两代观察中 risk 均批准，但目标均为 flat/0，因此没有形成
+plan/order/fill。结论是：**修复已通过确定性测试并成功部署，但自然非零信号下的运行验收仍为
+UNKNOWN，而不是 PASS。**
 
 ## 7. 后续可落地工作包与硬验收门
 
