@@ -1,11 +1,11 @@
 """RDP (Research Data Platform) SQLAlchemy ORM 模型。
 
 替代 migrations/research/*.sql，通过 RdpBase.metadata.create_all() 自动建表。
-48 张表分布在 7 个 PostgreSQL schema：meta / staging / bronze / silver /
+81 张表分布在 7 个 PostgreSQL schema：meta / staging / bronze / silver /
 gold / research / governance。
 
 设计决策：
-- 静态 ORM class 用于结构独特的表（meta / research / governance，12 张）
+- 静态 ORM class 用于结构独特的 meta / research / governance 表
 - 工厂函数用于重复模式的数据层表（staging/bronze/silver candles + funding + gold replay bars，35 张）
 - 所有模型仅用于 schema 定义（create_all），业务代码仍用原始 SQL 访问
 - 省略 updated_at 触发器——开发阶段不需要，应用代码直接设值
@@ -1460,6 +1460,187 @@ class RecommendationModel(RdpBase):
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 
+class ResearchHoldoutAccessLedgerModel(RdpBase):
+    """One-time, fail-closed access ledger for sealed Research Factory holdouts."""
+
+    __tablename__ = "research_holdout_access_ledger"
+    __table_args__ = (
+        UniqueConstraint(
+            "candidate_id",
+            "holdout_content_fingerprint",
+            name="uq_holdout_candidate_fingerprint",
+        ),
+        Index("ix_holdout_access_status_time", "status", "accessed_at"),
+        CheckConstraint(
+            "status IN ('access_started', 'evaluated_pass', "
+            "'evaluated_fail', 'access_failed')",
+            name="ck_holdout_access_status",
+        ),
+        CheckConstraint(
+            "length(btrim(reason)) > 0",
+            name="ck_holdout_reason_nonempty",
+        ),
+        CheckConstraint(
+            "length(btrim(candidate_id)) > 0 AND length(btrim(actor)) > 0 "
+            "AND holdout_content_fingerprint ~ '^rfseg_[0-9a-f]{64}$' "
+            "AND git_commit ~ '^[0-9a-f]{40,64}$' "
+            "AND (artifact_sha256 IS NULL OR "
+            "artifact_sha256 ~ '^[0-9a-f]{64}$')",
+            name="ck_holdout_identity_shape",
+        ),
+        CheckConstraint(
+            "(status = 'access_started' AND completed_at IS NULL "
+            "AND artifact_path IS NULL AND artifact_sha256 IS NULL "
+            "AND result_payload IS NULL AND error_message IS NULL) OR "
+            "(status IN ('evaluated_pass', 'evaluated_fail') "
+            "AND completed_at IS NOT NULL AND artifact_path IS NOT NULL "
+            "AND artifact_sha256 IS NOT NULL AND result_payload IS NOT NULL "
+            "AND error_message IS NULL) OR "
+            "(status = 'access_failed' AND completed_at IS NOT NULL "
+            "AND artifact_path IS NULL AND artifact_sha256 IS NULL "
+            "AND result_payload IS NULL AND length(btrim(error_message)) > 0)",
+            name="ck_holdout_terminal_shape",
+        ),
+        {"schema": "governance"},
+    )
+
+    access_id = Column(
+        UUID(as_uuid=False), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    candidate_id = Column(String(160), nullable=False)
+    holdout_content_fingerprint = Column(String(80), nullable=False)
+    actor = Column(String(128), nullable=False)
+    reason = Column(Text, nullable=False)
+    git_commit = Column(String(64), nullable=False)
+    status = Column(String(32), nullable=False, server_default=text("'access_started'"))
+    artifact_path = Column(Text)
+    artifact_sha256 = Column(String(64))
+    result_payload = Column(JSONB)
+    error_message = Column(Text)
+    accessed_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    completed_at = Column(DateTime(timezone=True))
+
+
+class ParameterActivationOperationModel(RdpBase):
+    """Execution-owned generation lifecycle; this row alone never activates runtime."""
+
+    __tablename__ = "parameter_activation_operations"
+    __table_args__ = (
+        UniqueConstraint(
+            "scope", "scope_ref", "generation", name="uq_parameter_activation_generation"
+        ),
+        Index("ix_parameter_activation_state_time", "state", "created_at"),
+        Index(
+            "uq_parameter_activation_nonterminal_scope",
+            "scope",
+            "scope_ref",
+            unique=True,
+            postgresql_where=text(
+                "state IN ('pending', 'preparing', 'prepared', 'committing', "
+                "'rollback_required', 'rolling_back')"
+            ),
+        ),
+        CheckConstraint(
+            "operation_type IN ('apply', 'rollback')",
+            name="ck_parameter_activation_operation_type",
+        ),
+        CheckConstraint(
+            "state IN ('pending', 'preparing', 'prepared', 'committing', "
+            "'succeeded', 'failed', 'rollback_required', 'rolling_back', "
+            "'rolled_back')",
+            name="ck_parameter_activation_state",
+        ),
+        CheckConstraint(
+            "cardinality(expected_process_roles) > 0",
+            name="ck_parameter_activation_roles_nonempty",
+        ),
+        CheckConstraint(
+            "length(btrim(reason)) > 0",
+            name="ck_parameter_activation_reason_nonempty",
+        ),
+        CheckConstraint(
+            "length(btrim(scope)) > 0 AND length(btrim(scope_ref)) > 0 "
+            "AND length(btrim(generation)) > 0 AND length(btrim(actor)) > 0 "
+            "AND payload_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND to_parameter_set_id IS NOT NULL AND deadline_at > created_at",
+            name="ck_parameter_activation_identity_shape",
+        ),
+        CheckConstraint(
+            "(state IN ('succeeded', 'failed', 'rolled_back') "
+            "AND terminal_at IS NOT NULL) OR "
+            "(state NOT IN ('succeeded', 'failed', 'rolled_back') "
+            "AND terminal_at IS NULL)",
+            name="ck_parameter_activation_terminal_shape",
+        ),
+        {"schema": "governance"},
+    )
+
+    operation_id = Column(String(128), primary_key=True)
+    operation_type = Column(String(16), nullable=False)
+    scope = Column(String(32), nullable=False)
+    scope_ref = Column(String(160), nullable=False)
+    generation = Column(String(128), nullable=False)
+    from_parameter_set_id = Column(String(128))
+    to_parameter_set_id = Column(String(128))
+    payload_sha256 = Column(String(64), nullable=False)
+    state = Column(String(32), nullable=False, server_default=text("'pending'"))
+    expected_process_roles = Column(ARRAY(Text), nullable=False)
+    actor = Column(String(128), nullable=False)
+    reason = Column(Text, nullable=False)
+    error_message = Column(Text)
+    deadline_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    terminal_at = Column(DateTime(timezone=True))
+
+
+class ParameterRuntimeAckModel(RdpBase):
+    """Per-process prepare/commit/readback/rollback acknowledgement."""
+
+    __tablename__ = "parameter_runtime_acks"
+    __table_args__ = (
+        UniqueConstraint(
+            "operation_id", "process_role", "phase", name="uq_parameter_runtime_ack"
+        ),
+        Index("ix_parameter_runtime_ack_operation", "operation_id", "ack_at"),
+        CheckConstraint(
+            "phase IN ('prepare', 'commit', 'readback', 'rollback')",
+            name="ck_parameter_runtime_ack_phase",
+        ),
+        CheckConstraint(
+            "ack_status IN ('accepted', 'rejected', 'mismatch', 'timeout')",
+            name="ck_parameter_runtime_ack_status",
+        ),
+        CheckConstraint(
+            "length(btrim(process_role)) > 0 "
+            "AND length(btrim(generation)) > 0 "
+            "AND payload_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_parameter_runtime_ack_identity_shape",
+        ),
+        {"schema": "governance"},
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    operation_id = Column(
+        String(128),
+        ForeignKey(
+            "governance.parameter_activation_operations.operation_id",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        nullable=False,
+    )
+    process_role = Column(String(64), nullable=False)
+    phase = Column(String(16), nullable=False)
+    generation = Column(String(128), nullable=False)
+    payload_sha256 = Column(String(64), nullable=False)
+    ack_status = Column(String(16), nullable=False)
+    observed_parameter_set_id = Column(String(128))
+    details = Column(JSONB)
+    error_message = Column(Text)
+    ack_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
 class ActiveDecisionModel(RdpBase):
     """governance.active_decisions — 每个 family/timeframe 的当前决策状态.
 
@@ -1880,7 +2061,7 @@ class DecisionEvidenceBundleModel(RdpBase):
 # =====================================================================
 
 def create_rdp_schema(engine: object) -> None:
-    """创建 RDP 的全部 7 个 PostgreSQL schema + 48 张表。
+    """创建 RDP 的全部 7 个 PostgreSQL schema + 81 张表。
 
     替代 migrations/research/*.sql 迁移文件。幂等——已存在的 schema/表不会
     被破坏（CREATE SCHEMA IF NOT EXISTS + create_all 的 checkfirst=True）。

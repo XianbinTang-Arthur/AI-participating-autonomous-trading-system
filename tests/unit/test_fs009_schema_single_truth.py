@@ -155,7 +155,7 @@ def test_batch_b_migration_script_bypasses_sqlalchemy_bind_parsing() -> None:
 def test_batch_b_recommendation_source_round_migration_is_registered() -> None:
     stage = "batch_b_15_recommendation_source_round"
 
-    assert _batch_b.BATCH_B_STAGES[-1] == stage
+    assert stage in _batch_b.BATCH_B_STAGES
     sql = _batch_b._load_sql(stage)
     assert "ADD COLUMN IF NOT EXISTS source_round_id VARCHAR(128)" in sql
     assert "CREATE UNIQUE INDEX IF NOT EXISTS uq_rec_round_family_tf_active" in sql

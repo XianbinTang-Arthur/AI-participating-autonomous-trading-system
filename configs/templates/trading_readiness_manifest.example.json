@@ -1,0 +1,10 @@
+{
+  "format_version": 1,
+  "target": "simulation",
+  "profile": "derivatives",
+  "git_commit": "replace-with-deployed-commit",
+  "image_identity": "replace-with-image-digest",
+  "schema_revision": "batch_b_16_profit_readiness_governance",
+  "facts": [],
+  "template_note": "Missing facts are UNKNOWN and must keep simulation_ready=false. production_ready and trading_ready remain false in format v1."
+}

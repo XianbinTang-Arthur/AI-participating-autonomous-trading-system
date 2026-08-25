@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import stat
 import tempfile
+import uuid
 from typing import Any
 
 
@@ -47,3 +49,45 @@ def atomic_json_write(
         except OSError:
             pass
         raise
+
+
+def immutable_json_write(
+    data: Any,
+    path: pathlib.Path,
+    *,
+    indent: int = 2,
+    ensure_ascii: bool = False,
+) -> str:
+    """Write JSON exactly once and return its SHA-256 digest.
+
+    The temporary file is fully flushed before a hard link atomically claims
+    the final name.  An existing target raises ``FileExistsError`` and is never
+    replaced.  This is intended for audit evidence, not mutable registries.
+    """
+
+    import hashlib
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (
+        json.dumps(
+            data,
+            indent=indent,
+            ensure_ascii=ensure_ascii,
+            sort_keys=True,
+            default=str,
+        )
+        + "\n"
+    ).encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    path.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    return digest

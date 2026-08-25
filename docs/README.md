@@ -46,6 +46,8 @@
 | [上线前本地测试指南](testing/README.md) | 现行操作说明 | 本地静态、单元、场景、WSL2 集成、模拟运行与现场门 |
 | [文档治理规范](DOCUMENTATION_GOVERNANCE.md) | 现行约束 | 放置、命名、状态、复核、迁移和验收规则 |
 | [文档纠错审计报告](code_review/DOCUMENTATION_AUDIT.md) | 现行审计记录 | 本轮纠错范围、代码事实、验证方法与未改代码风险 |
+| [收益证据与模拟交易就绪运行手册](operations/profit_readiness_runbook.md) | 现行操作说明 | 公共微观结构、v2 候选、L2、holdout、参数代次、故障矩阵和 readiness |
+| [收益可信度整改验收矩阵](testing/profit_readiness_acceptance.md) | 现行测试说明 | 静态、单元、WSL2、模拟运行及明确 NO-GO 边界 |
 
 ## 4. 现行专题文档
 
@@ -119,7 +121,7 @@
 - 本地 `start_api.py` 是 HTTP，只接受模拟 profile 与 loopback host；live TLS 配置仍保留，但当前 deploy/prewarm/wrapper/local launcher 都禁止 live。
 - `scripts/run_local.py` 现为明确迁移失败入口：不加载 profile/runtime，输出指引并 exit `2`；不是可用 paper loop，仓库外旧调用方仍需迁移。
 - JetStream 是 3 条 stream，全部 1 天上限/兜底；总声明容量 6.5 GiB，server 8 GiB。
-- RDP ORM 是 78 张表，不是 48 张。
+- RDP ORM 是 81 张表，不是历史材料中的 48/78 张。
 - RDP workflow 是 10 个定义、8 个 enabled；decision/release disabled，release 还禁止入队。
 - runtime active parameter 是 Postgres DB-only；JSON 文件不是 fallback。
 - `apply_active_parameter_set.py`、`approve_recommendation_and_apply.py`、`rdp_rollback_active_parameter_set.py`、`rdp_freeze_parameter_set.py`、`rdp_run_release_cycle.py` 已禁用。
@@ -225,13 +227,13 @@
   [`task/fs_008_database_connection_budget_sow_2026_08_25.md`](task/fs_008_database_connection_budget_sow_2026_08_25.md)
   和 [`../audit/full_system_2026_08_24/41-fs-008-database-connection-budget.md`](../audit/full_system_2026_08_24/41-fs-008-database-connection-budget.md)。
 - 2026-08-25 Phase 3V 已把 Research Factory real-data v2 的 candidate selection 与 test
-  隔离：train/valid 分段计算并要求双门通过，valid 是 development benchmark；外部
-  execution summary 也必须精确绑定 valid 窗口；test 只参与输入质量/来源一致性检查与精确
-  内容 seal，不能直接或经全窗口执行指标进入绩效 selection gate。新 recommendation 明示 holdout 尚未
-  评估。最终 OOS、一次性访问账本、walk-forward、多重检验、历史 v1 artifact 审计和独立
-  复核仍 OPEN。详见
+  隔离；本次收益可信度整改又增加历史候选不可用审计、确定性 v2 计划、purged
+  walk-forward、block bootstrap、Holm、deflated Sharpe、一次性 holdout 账本、L2 event
+  replay 和 paper calibration。代码与单元契约不等于候选已完成最终 OOS；当前尚无候选专用
+  holdout 运行结果、worker 参数读回或完整故障矩阵，因此生产仍 NO-GO。详见
   [`task/fs_004_research_selection_holdout_sow_2026_08_25.md`](task/fs_004_research_selection_holdout_sow_2026_08_25.md)
-  和 [`../audit/full_system_2026_08_24/42-fs-004-research-selection-holdout.md`](../audit/full_system_2026_08_24/42-fs-004-research-selection-holdout.md)。
+  、[`task/profit_readiness_full_delivery_sow_2026_08_25.md`](task/profit_readiness_full_delivery_sow_2026_08_25.md)
+  和 [`operations/profit_readiness_runbook.md`](operations/profit_readiness_runbook.md)。
 - 2026-08-25 Phase 3W 完成起始基线以来全量候选变更复审，补齐登录/Kill Switch/
   回测成交的非有限值边界、本地 monolith 入口、CI warning filter 和 SQLite 测试资源释放，
   并删除当前 Compose 注释中的手工运维误导。Windows 严格全量单测为

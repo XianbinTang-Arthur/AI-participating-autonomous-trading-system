@@ -144,10 +144,10 @@ bash scripts/deploy.sh --profile derivatives --skip-commit
 | --- | --- | --- |
 | gateway liveness / 进程内关键任务监督 | `GET /healthz` | 200 表示 FastAPI 存活且当前 supervisor 未发现关键 task 结束或纳管固定周期 task stalled；不表示 trading-ready |
 | system health | `GET /system/health` 或 UI | 无 critical blocker |
-| process roles | deployment report / container health | 当前模拟 profile 的 gateway/market/decision/execution/rdp-daemon 都启动 |
+| process roles | deployment report / container health | 当前 derivatives 模拟 profile 的 gateway/market/decision/execution/rdp-daemon/liquidations-daemon/microstructure-collector 都启动 |
 | peer readiness generation | deployment evidence + 四主进程日志 | 同一非空 generation；all-ready 只包含同代次 role；目标启动/重启故障矩阵未跑前不标 PASS |
 | schema contract | deploy schema job + root/RDP ledgers | 当前 revision 无 missing/unknown/checksum mismatch；未完成克隆库 manifest 前不外推为生产 PASS |
-| live overlay collectors | future live packet | required list 已包含 liquidations-daemon 与 microstructure-collector；当前 live 禁用，未运行验证 |
+| public collectors | deployment evidence + Silver 最新行 | derivatives 模拟 required list 包含 liquidations-daemon 与 microstructure-collector；heartbeat 通过后仍须核对频道数据 freshness/eligibility |
 | DB runtime lock | Postgres `pg_locks` | 每个 role 一把独立 advisory lock |
 | NATS | `curl :8222/healthz` | healthy |
 | Redis | `redis-cli ping` | PONG |
@@ -158,7 +158,7 @@ bash scripts/deploy.sh --profile derivatives --skip-commit
 
 注意：`/healthz` 不是 trading ready gate。它仍不覆盖全部事件驱动任务、整体 event-loop stall 或跨进程业务一致性；live 前必须看 `/system/health`、reconciliation、account freshness、kill switch 和 recovery status。
 
-当前模拟部署成功只表示五个模拟应用容器通过健康门。`derivatives-live` future required list 已纳入两个 collector，但 live gate 位于所有副作用前，因此当前没有 collector 运行结论。`/healthz`、容器 healthy 和模拟证据包都不是 trading-ready。
+当前 derivatives 模拟部署成功只表示七个应用容器通过健康门。collector heartbeat 不等于四类 Silver 数据新鲜或研究窗口 eligible；必须继续生成微观结构资格、L2、paper calibration、故障矩阵和 readiness 证据。`derivatives-live` 仍在副作用前失败。`/healthz`、容器 healthy 和模拟证据包都不是 trading-ready，完整步骤见 [`docs/operations/profit_readiness_runbook.md`](docs/operations/profit_readiness_runbook.md)。
 
 ## 7. 安全启动顺序
 

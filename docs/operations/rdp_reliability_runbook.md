@@ -91,7 +91,7 @@
 ```
 1. 停止新的参数发布，查看 /rdp/health 和数据库容器健康/日志。
 2. 不输出连接串或环境文件内容；使用项目健康检查确认 research/governance DB。
-3. 核对 governance migrations 和 78 表 schema，不用临时 Python 建表替代迁移。
+3. 核对 governance migrations 和 81 表 schema，不用临时 Python 建表替代迁移。
 4. 恢复数据库真源；不得从 active JSON 人工 seed runtime 状态。
 5. 核对 active parameter sets、apply history、release、scheduler state 和 runtime provenance。
 ```

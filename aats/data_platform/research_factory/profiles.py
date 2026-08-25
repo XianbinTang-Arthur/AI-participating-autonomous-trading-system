@@ -14,7 +14,14 @@ from aats.data_platform.research_factory.observations import (
 
 RESEARCH_PROFILE_SCHEMA_VERSION = "research_profile_policy_v1"
 ALLOWED_RESEARCH_PROFILES = frozenset(
-    {"smoke", "real_factor_research", "shadow_review", "paper_review", "preapply_review"}
+    {
+        "smoke",
+        "real_factor_development",
+        "real_factor_research",
+        "shadow_review",
+        "paper_review",
+        "preapply_review",
+    }
 )
 
 
@@ -88,7 +95,7 @@ def research_profile_for_name(name: str) -> ResearchProfile:
                 allow_dataset_fingerprint_compatibility=True,
             ),
         )
-    if profile_name == "real_factor_research":
+    if profile_name in {"real_factor_development", "real_factor_research"}:
         return ResearchProfile(
             name=profile_name,
             dataset_quality_thresholds=DatasetQualityThresholds(
@@ -100,7 +107,7 @@ def research_profile_for_name(name: str) -> ResearchProfile:
             candidate_gate_thresholds=_candidate_thresholds(),
             observation_thresholds=observation_thresholds_for_profile("shadow_review"),
             execution_evidence_policy=ExecutionEvidencePolicy(
-                required=True,
+                required=profile_name == "real_factor_research",
                 allow_dataset_fingerprint_compatibility=True,
             ),
         )

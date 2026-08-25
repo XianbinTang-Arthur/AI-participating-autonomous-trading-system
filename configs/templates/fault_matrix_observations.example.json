@@ -1,0 +1,41 @@
+{
+  "format_version": 1,
+  "cases": [
+    {
+      "case_name": "redis_disconnect",
+      "isolated_profile": "derivatives",
+      "started_at": "2026-08-25T00:00:00+00:00",
+      "completed_at": "2026-08-25T00:00:01+00:00",
+      "checks": []
+    },
+    {
+      "case_name": "nats_disconnect",
+      "isolated_profile": "derivatives",
+      "started_at": "2026-08-25T00:00:00+00:00",
+      "completed_at": "2026-08-25T00:00:01+00:00",
+      "checks": []
+    },
+    {
+      "case_name": "execution_restart",
+      "isolated_profile": "derivatives",
+      "started_at": "2026-08-25T00:00:00+00:00",
+      "completed_at": "2026-08-25T00:00:01+00:00",
+      "checks": []
+    },
+    {
+      "case_name": "stale_generation",
+      "isolated_profile": "derivatives",
+      "started_at": "2026-08-25T00:00:00+00:00",
+      "completed_at": "2026-08-25T00:00:01+00:00",
+      "checks": []
+    },
+    {
+      "case_name": "activation_ttl_expiry",
+      "isolated_profile": "derivatives",
+      "started_at": "2026-08-25T00:00:00+00:00",
+      "completed_at": "2026-08-25T00:00:01+00:00",
+      "checks": []
+    }
+  ],
+  "template_note": "Fill every required check with PASS/FAIL/UNKNOWN and a real evidence_ref; an empty template must fail closed."
+}

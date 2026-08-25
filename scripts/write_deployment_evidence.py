@@ -20,6 +20,12 @@ _CONTAINER_PORT_RE = re.compile(r"^[1-9][0-9]{0,4}/(?:tcp|udp)$")
 _READINESS_GENERATION_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _SIMULATION_PROFILES = frozenset({"spot", "derivatives"})
 _LOOPBACK_HOST_IPS = frozenset({"127.0.0.1", "::1"})
+_COLLECTOR_HEARTBEATS = {
+    "aats-liquidations-daemon": "/tmp/aats_liquidations_heartbeat",
+    "aats-microstructure-collector": "/tmp/aats_microstructure_heartbeat",
+}
+_COLLECTOR_MAX_HEARTBEAT_AGE_SECONDS = 60.0
+_COLLECTOR_MAX_FUTURE_SKEW_SECONDS = 5.0
 
 
 CommandRunner = Callable[[Sequence[str], Path | None], str]
@@ -58,6 +64,35 @@ def _container_fact(name: str, run: CommandRunner) -> dict[str, str]:
     if not _IMAGE_RE.fullmatch(image_id):
         raise RuntimeError(f"invalid_container_image_id:{name}")
     return {"name": name, "status": status, "health": health, "image_id": image_id}
+
+
+def _collector_heartbeat_fact(
+    name: str,
+    *,
+    run: CommandRunner,
+    now: datetime,
+) -> dict[str, object]:
+    heartbeat_path = _COLLECTOR_HEARTBEATS[name]
+    raw_epoch = run(("docker", "exec", name, "stat", "-c", "%Y", heartbeat_path), None)
+    if not raw_epoch.isdigit():
+        raise RuntimeError(f"invalid_collector_heartbeat_epoch:{name}")
+    try:
+        heartbeat_at = datetime.fromtimestamp(int(raw_epoch), tz=timezone.utc)
+    except (OverflowError, OSError, ValueError) as exc:
+        raise RuntimeError(f"invalid_collector_heartbeat_epoch:{name}") from exc
+    raw_age_seconds = (now - heartbeat_at).total_seconds()
+    if raw_age_seconds < -_COLLECTOR_MAX_FUTURE_SKEW_SECONDS:
+        raise RuntimeError(f"collector_heartbeat_in_future:{name}:{raw_age_seconds:.3f}")
+    age_seconds = max(0.0, raw_age_seconds)
+    if age_seconds >= _COLLECTOR_MAX_HEARTBEAT_AGE_SECONDS:
+        raise RuntimeError(f"collector_heartbeat_stale:{name}:{age_seconds:.3f}")
+    return {
+        "name": name,
+        "heartbeat_path": heartbeat_path,
+        "heartbeat_at": heartbeat_at.isoformat(),
+        "heartbeat_age_seconds": round(age_seconds, 3),
+        "fresh": True,
+    }
 
 
 def _gateway_published_bindings(run: CommandRunner) -> list[dict[str, str]]:
@@ -143,9 +178,14 @@ def build_evidence(
     if not _IMAGE_RE.fullmatch(base_image_id):
         raise RuntimeError("invalid_base_image_id")
 
-    container_facts = [_container_fact(name, run) for name in required_containers]
-    gateway_bindings = _gateway_published_bindings(run)
     now = generated_at or datetime.now(timezone.utc)
+    container_facts = [_container_fact(name, run) for name in required_containers]
+    collector_freshness = [
+        _collector_heartbeat_fact(name, run=run, now=now)
+        for name in required_containers
+        if name in _COLLECTOR_HEARTBEATS
+    ]
+    gateway_bindings = _gateway_published_bindings(run)
     return {
         "format_version": 1,
         "generated_at": now.isoformat(),
@@ -163,6 +203,7 @@ def build_evidence(
             "consistent_rollback_verified": False,
         },
         "required_containers": container_facts,
+        "collector_freshness": collector_freshness,
         "gateway_published_bindings": gateway_bindings,
         "runtime_unknowns": [
             "production_account_and_exchange_not_verified",

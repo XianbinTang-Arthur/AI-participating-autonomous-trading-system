@@ -54,7 +54,7 @@
 
 | 主题 | 过期/错误表述 | 当前代码事实 |
 | --- | --- | --- |
-| 运行拓扑 | 单体 API 或仅 4 个容器代表整个 derivatives-live | 4 个交易 slice；另有 `rdp-daemon`、`liquidations-daemon`、`microstructure-collector`，标准 derivatives-live 共 7 个应用进程 |
+| 运行拓扑 | 单体 API 或仅 4 个容器代表整个 derivatives | 4 个交易 slice；`derivatives` 模拟另有 `rdp-daemon`、`liquidations-daemon`、`microstructure-collector`，共 7 个应用进程；live 仍禁用 |
 | profile 端口 | spot/derivatives/live 端口混用 | spot 8000、derivatives 8001、spot-live 8010、derivatives-live 8011 |
 | profile 语义 | derivatives 使用 hedge，或 live 使用 net | derivatives 是 simulated/cross/net；derivatives-live 是 real/cross/hedge |
 | 本地 API | `start_api.py` 使用 HTTPS | 本地入口是 HTTP；标准 live 部署由部署脚本准备 TLS 并使用 HTTPS |
@@ -63,7 +63,7 @@
 | 参数映射 | independent 只有 18 项；signal/stability 未映射；directional trend weight 占位映射到 alpha 门槛 | independent 21 个 required 映射；directional 3 个实际映射且仅 min-hold required；trend weight 无生产映射；short-bias 是 replay 上下文快照 |
 | JetStream | 2 条 stream、7 天保留 | 3 条 stream，1 天上限/兜底；声明容量 2 GiB + 4 GiB + 512 MiB = 6.5 GiB，server 为 8 GiB |
 | 审计事件 | `audit.records` 是 JetStream topic | 它是 persist-only 路径，落 Postgres，不属于 3 条 stream |
-| RDP 表 | 48 张表 | 当前 ORM metadata 为 78 张表 |
+| RDP 表 | 48/78 张表 | 当前 ORM metadata 为 81 张表 |
 | 工作流 | 少于 10 个，decision/release 按计划运行 | 10 个定义、8 个 enabled；decision/release disabled，release 禁止入队 |
 | 参数变更 | 旧脚本可 freeze/apply/rollback/release | 多个旧脚本已硬禁用；当前生产变更必须走受控 API/UI、权限、完整性检查、安全门和审计 |
 | apply token | 所有 release/apply 组合路由都强制 token | 直接 apply/rollback 路由强制 `X-Rdp-Apply-Token`；当前 create-release 与 approve-and-release 组合路由依赖写权限和 Step 2 gate，但未绑定该 token dependency |
@@ -129,7 +129,7 @@
 | 全仓 Markdown 本地链接与图片 | 699 个跟踪文档 + 4 个本次新增文档，共 703 个文件；失效目标 0 |
 | 现行文档元数据 | 30 个现行入口、约束、操作和模块文档均带 2026-08-22 核对日期及 `be9179e` 基线 |
 | 现行文档 RDP method/path 引用 | 166 个带 HTTP method 的引用；与 50 个当前 RDP 路由比较，未匹配 0 |
-| 静态事实断言 | profile/端口、3 stream/6.5 GiB、78 表、10/8 workflow、release enqueue block、193/169/50 route 全部通过 |
+| 静态事实断言 | profile/端口、3 stream/6.5 GiB、81 表、10/8 workflow、release enqueue block、193/169/50 route 全部通过 |
 | Python lint | 仅检查本轮改到注释/docstring 的 7 个 Python 文件；Ruff 通过 |
 | 针对性单元测试 | NATS、managed/runtime profile、DB-only active parameter、scheduler/task queue、API、apply token、approve/release；215 passed，6 subtests passed |
 | Diff hygiene | `git diff --check` 通过；仅有仓库既有 Windows line-ending 提示，无 whitespace error |

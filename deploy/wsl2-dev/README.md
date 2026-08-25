@@ -101,6 +101,12 @@ profile 必填；当前只允许 `spot`/`derivatives`，所有 live profile 在�
 
 部署报告完成后可做只读验证：
 
+`derivatives` 模拟 profile 还会启动 `aats-liquidations-daemon` 和
+`aats-microstructure-collector` 两个公共数据采集器，应用必需集合因此为七个容器。采集器只写
+研究库、不加载 live env、不接 execution command；其 60 秒 heartbeat 是部署证据的一部分，
+但不能代替 Silver 表数据新鲜度和 eligibility。完整流程见
+[收益证据与模拟交易就绪运行手册](../../docs/operations/profit_readiness_runbook.md)。
+
 ```bash
 # 必要时确认 Windows 与 WSL2 checkout 对齐
 bash scripts/sync_to_wsl2.sh check

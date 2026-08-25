@@ -91,7 +91,7 @@
 .\.venv\Scripts\python.exe scripts\rdp_detect_gaps.py
 ```
 
-`rdp_init_db.py` 是受控显式迁移入口，执行 ORM baseline、完整 Batch B ledger/checksum chain 和最终只读校验；不要按旧的 48 表清单或仅按 78 张 ORM 表存在验收。`--ensure-schema` 为旧 CLI 名，在 daily ingest/replay 等业务 runner 中已收紧为只读 validate-only，不再执行 DDL。Live 部署不手工运行本节命令，只通过根 `scripts/deploy.sh` 的一次性综合 schema job。
+`rdp_init_db.py` 是受控显式迁移入口，执行 ORM baseline、完整 Batch B ledger/checksum chain 和最终只读校验；不要按旧的 48/78 表清单或仅按 81 张 ORM 表存在验收。`--ensure-schema` 为旧 CLI 名，在 daily ingest/replay 等业务 runner 中已收紧为只读 validate-only，不再执行 DDL。Live 部署不手工运行本节命令，只通过根 `scripts/deploy.sh` 的一次性综合 schema job。
 
 ### 5.2 Replay 与研究
 

@@ -137,7 +137,10 @@ required_app_containers_for_profile() {
         derivatives-live)
             echo "aats-gateway aats-market aats-decision aats-execution aats-rdp-daemon aats-liquidations-daemon aats-microstructure-collector"
             ;;
-        spot|spot-live|derivatives)
+        derivatives)
+            echo "aats-gateway aats-market aats-decision aats-execution aats-rdp-daemon aats-liquidations-daemon aats-microstructure-collector"
+            ;;
+        spot|spot-live)
             echo "aats-gateway aats-market aats-decision aats-execution aats-rdp-daemon"
             ;;
         *)

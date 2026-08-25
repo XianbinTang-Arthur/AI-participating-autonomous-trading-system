@@ -17,6 +17,7 @@ Batch B 按顺序执行版本化 schema 演进:
   - batch_b_13_rdp_collection_modeling_hygiene.sql: collection/modeling hygiene
   - batch_b_14_ls_ratio_1h_schedule.sql: official 1H long-short ratio bronze table
   - batch_b_15_recommendation_source_round.sql: recommendation source round column + active uniqueness
+  - batch_b_16_profit_readiness_governance.sql: holdout + parameter activation audit ledgers
 
 每个 stage 对应一个 rollback SQL,逆序回滚。
 
@@ -59,6 +60,7 @@ BATCH_B_STAGES: tuple[str, ...] = (
     "batch_b_13_rdp_collection_modeling_hygiene",
     "batch_b_14_ls_ratio_1h_schedule",
     "batch_b_15_recommendation_source_round",
+    "batch_b_16_profit_readiness_governance",
 )
 
 

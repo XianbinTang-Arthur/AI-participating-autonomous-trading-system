@@ -23,12 +23,12 @@ AATS 的首要意义是通过自动化交易持续追求长期稳定盈利，为
 | decision | aats-decision | 决策引擎 |
 | execution | aats-execution | 执行引擎 + OKX 适配器 |
 | rdp-daemon | aats-rdp-daemon | Research Data Platform |
-| liquidations-daemon | aats-liquidations-daemon | derivatives-live liquidation 数据采集（仅该 overlay） |
-| microstructure-collector | aats-microstructure-collector | derivatives-live 微观结构数据采集（仅该 overlay） |
+| liquidations-daemon | aats-liquidations-daemon | derivatives 模拟公共强平数据采集；future live 拓扑也声明该角色 |
+| microstructure-collector | aats-microstructure-collector | derivatives 模拟公共 BBO/books5/trades/OI 采集；future live 拓扑也声明该角色 |
 
 基础设施容器：aats-postgres, aats-redis, aats-redis-exporter, aats-nats, aats-jaeger, aats-grafana, aats-prometheus, aats-loki, aats-promtail
 
-“四进程”只表示主交易 role 数量。`derivatives-live` Compose 拓扑共有 7 个应用容器；Phase 3F 已把两个 collector 加入该 profile 的 future required list，但标准部署入口当前硬禁用所有 live profile，不能据此推断它们已运行或健康。
+“四进程”只表示主交易 role 数量。`derivatives` 模拟 Compose 当前共有 7 个应用容器，并把两个公共 collector 纳入部署健康与 heartbeat 证据；静态声明不证明现场数据新鲜。future `derivatives-live` 也声明 7 个角色，但标准入口硬禁用全部 live profile。
 
 ## 关键路径和文件
 
@@ -48,6 +48,7 @@ AATS 的首要意义是通过自动化交易持续追求长期稳定盈利，为
 - **Managed 配置真实性**: Phase 3P 后 strategy YAML 必须是 mapping，runtime defaults 与 YAML 的每个 key 都必须属于 `AATSSettings.model_fields`，未知 key 在 runtime 构建前失败；`strategy_profile_auto_rollback_enabled` 从未有消费者且已删除，不能写成已实现能力
 - **Profile recommendation 边界**: `approve/release` 只推进研究治理状态；Phase 3M 后 `profile-recommendations/{id}/apply` 与 `/rollback` 均在授权检查后无写入 `501`。在 execution-owned generation/worker readback 完成前，不得把它们用于运行参数变更
 - **回测成交证据边界**: Phase 3N 后只接受带 `next_bar_event_v2` 与 `ohlcv_participation_cap_v2` 的新回测作为当前 bar-proxy 证据；三类订单均受 volume/cap 约束，artifact 必须声明无 L2 depth、spread/queue、impact/latency 校准，不能外推 live 容量或收益
+- **收益证据 v1 边界**: 公共微观结构 eligibility、v2 候选审计/复跑、统计门、L2 event replay、paper calibration、一次性 holdout 账本、参数 generation、故障/readiness schema 的现行入口见 `docs/operations/profit_readiness_runbook.md`。格式 v1 只能产生模拟就绪，`production_ready`/`trading_ready` 固定 false；runtime worker 尚未接 ACK，profile apply/rollback 继续 501
 - **Dashboard 无障碍边界**: Phase 3O 后详情抽屉必须保持原生 modal dialog、初始/返回焦点、Escape/backdrop 统一关闭和 reduced-motion CSS/JS 契约；静态/单元通过不能替代目标浏览器、键盘、NVDA/VoiceOver 与 axe 实测
 
 ### 数据库

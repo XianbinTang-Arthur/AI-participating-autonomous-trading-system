@@ -74,13 +74,21 @@ def test_deploy_order_and_failure_posture_are_fail_closed() -> None:
     assert "模拟栈基础检查通过（不是 trading-ready 或生产放行）" in source
 
 
-def test_future_derivatives_live_topology_includes_live_only_collectors() -> None:
+def test_derivatives_simulation_and_future_live_topologies_require_public_collectors() -> None:
     source = DEPLOY_SCRIPT.read_text(encoding="utf-8")
 
-    assert (
+    required_line = (
         'echo "aats-gateway aats-market aats-decision aats-execution aats-rdp-daemon '
         'aats-liquidations-daemon aats-microstructure-collector"'
-    ) in source
+    )
+    assert source.count(required_line) == 2
+
+    simulation_overlay = (
+        REPO_ROOT / "deploy" / "wsl2-dev" / "docker-compose.aats.derivatives.yml"
+    ).read_text(encoding="utf-8")
+    for service in ("aats-liquidations-daemon:", "aats-microstructure-collector:"):
+        assert service in simulation_overlay
+    assert ".env.derivatives.live" not in simulation_overlay
 
 
 def test_entrypoint_wrappers_default_to_simulation_and_reject_live() -> None:
@@ -153,9 +161,80 @@ def test_evidence_packet_contains_only_simulation_identity_and_explicit_unknowns
     assert payload["gateway_published_bindings"] == [
         {"container_port": "8001/tcp", "host_ip": "127.0.0.1", "host_port": "8001"}
     ]
+    assert payload["collector_freshness"] == []
     encoded = json.dumps(payload).lower()
     for forbidden in ("password", "api_key", "token", "database_url", "dsn"):
         assert forbidden not in encoded
+
+
+def test_evidence_packet_requires_fresh_public_collector_heartbeats() -> None:
+    module = _load_evidence_module()
+    commit = "a" * 40
+    image_id = "sha256:" + "b" * 64
+    generated_at = datetime(2026, 8, 24, tzinfo=UTC)
+
+    def fake_run(args: tuple[str, ...], _cwd: Path | None = None) -> str:
+        if args[:3] == ("git", "rev-parse", "HEAD"):
+            return commit
+        if args[:4] == ("docker", "image", "inspect", "aats-base:dev"):
+            return image_id
+        if "{{.State.Status}}" in args:
+            return "running"
+        if "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}" in args:
+            return "healthy"
+        if "{{.Image}}" in args:
+            return image_id
+        if args[:3] == ("docker", "exec", "aats-microstructure-collector"):
+            return str(int(generated_at.timestamp()) - 10)
+        if "{{json .NetworkSettings.Ports}}" in args:
+            return json.dumps({"8001/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8001"}]})
+        raise AssertionError(args)
+
+    payload = module.build_evidence(
+        repo_root=REPO_ROOT,
+        profile="derivatives",
+        overlay="docker-compose.aats.derivatives.yml",
+        schema_job_status="passed",
+        runtime_readiness_generation=READINESS_GENERATION,
+        required_containers=("aats-gateway", "aats-microstructure-collector"),
+        run=fake_run,
+        generated_at=generated_at,
+    )
+
+    assert payload["collector_freshness"] == [
+        {
+            "name": "aats-microstructure-collector",
+            "heartbeat_path": "/tmp/aats_microstructure_heartbeat",
+            "heartbeat_at": "2026-08-23T23:59:50+00:00",
+            "heartbeat_age_seconds": 10.0,
+            "fresh": True,
+        }
+    ]
+
+
+def test_evidence_rejects_stale_or_future_collector_heartbeat() -> None:
+    module = _load_evidence_module()
+    now = datetime(2026, 8, 24, tzinfo=UTC)
+
+    def runner_for(epoch: int):
+        def _run(args: tuple[str, ...], _cwd: Path | None = None) -> str:
+            assert args[:3] == ("docker", "exec", "aats-microstructure-collector")
+            return str(epoch)
+
+        return _run
+
+    with pytest.raises(RuntimeError, match="collector_heartbeat_stale"):
+        module._collector_heartbeat_fact(
+            "aats-microstructure-collector",
+            run=runner_for(int(now.timestamp()) - 60),
+            now=now,
+        )
+    with pytest.raises(RuntimeError, match="collector_heartbeat_in_future"):
+        module._collector_heartbeat_fact(
+            "aats-microstructure-collector",
+            run=runner_for(int(now.timestamp()) + 6),
+            now=now,
+        )
 
 
 def test_evidence_writer_refuses_overwrite(tmp_path: Path) -> None:

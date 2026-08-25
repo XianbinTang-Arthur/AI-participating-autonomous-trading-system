@@ -25,7 +25,7 @@ RDP 是研究和治理子系统，不是实时交易执行器。
 
 ## 2. 数据架构
 
-`aats/data_platform/rdp_models.py::RdpBase` 当前声明 78 张表：
+`aats/data_platform/rdp_models.py::RdpBase` 当前声明 81 张表：
 
 | Schema | 表数 | 主要职责 |
 | --- | ---: | --- |
@@ -35,10 +35,10 @@ RDP 是研究和治理子系统，不是实时交易执行器。
 | `gold` | 8 | replay、对齐和研究消费数据集 |
 | `meta` | 6 | ingest run、checkpoint、quality、dataset 元数据 |
 | `research` | 3 | experiment 与研究结果 |
-| `governance` | 19 | 参数、推荐、发布、观察、任务队列、调度和运行状态 |
-| **合计** | **78** | — |
+| `governance` | 22 | 参数、推荐、发布、观察、任务队列、holdout、参数代次和运行状态 |
+| **合计** | **81** | — |
 
-迁移定义位于 `aats/data_platform/migrations/`。显式前向入口是 `scripts/apply_schema_migrations.py`（部署综合作业）或兼容初始化入口 `scripts/rdp_init_db.py`；它们均执行 ORM baseline + 全部 13 个有序 Batch B stage，并在 `governance.rdp_schema_migrations` 保存 version/checksum。应用、daemon 和研究 job 不在启动期执行 DDL，只读校验 ORM table/column surface 与迁移账本。不能用旧文档中的“48 张表”或单纯“表存在”判断 schema 完整。
+迁移定义位于 `aats/data_platform/migrations/`。显式前向入口是 `scripts/apply_schema_migrations.py`（部署综合作业）或兼容初始化入口 `scripts/rdp_init_db.py`；它们均执行 ORM baseline + 全部 16 个有序 Batch B stage，并在 `governance.rdp_schema_migrations` 保存 version/checksum。应用、daemon 和研究 job 不在启动期执行 DDL，只读校验 ORM table/column surface 与迁移账本。不能用旧文档中的“48/78 张表”或单纯“表存在”判断 schema 完整。
 
 ### 数据流
 

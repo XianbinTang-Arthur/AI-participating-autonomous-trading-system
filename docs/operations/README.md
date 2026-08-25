@@ -24,6 +24,7 @@
 | [`rdp_ui_quickstart.md`](rdp_ui_quickstart.md) | RDP UI 使用入口 | local HTTP 与 live TLS 必须区分 |
 | [`wsl2_sync_workflow.md`](wsl2_sync_workflow.md) | Windows/WSL2 Git 同步 | 只同步 committed state；部署仍走 `scripts/deploy.sh` |
 | [`wsl2_startup_prewarm.md`](wsl2_startup_prewarm.md) | 登录后 WSL2 预热/repair | repair 复用标准部署包装器，不形成第二套部署方式 |
+| [`profit_readiness_runbook.md`](profit_readiness_runbook.md) | 收益证据、v2 研究、L2、holdout、参数代次、故障矩阵与 readiness | 格式 v1 只能证明模拟就绪，不能放行 live |
 
 部署、TLS、profile、端口和安全停机的最高层操作入口是根目录 [`../../DEPLOYMENT.md`](../../DEPLOYMENT.md)。
 

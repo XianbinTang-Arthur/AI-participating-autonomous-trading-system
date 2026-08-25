@@ -1,0 +1,57 @@
+{
+  "format_version": 1,
+  "contract_id": "future-derivatives-canary-v1",
+  "status": "design_only_no_go",
+  "deployment": {
+    "deployable": false,
+    "registered_deploy_profile": false,
+    "live_profile_unlock": false,
+    "override_supported": false,
+    "requires_separate_go_decision": true
+  },
+  "venue": {
+    "exchange": "okx",
+    "product_type": "swap",
+    "margin_mode": "isolated",
+    "symbols": [
+      "BTC-USDT-SWAP"
+    ]
+  },
+  "credential_policy": {
+    "required_permissions": [
+      "read",
+      "trade"
+    ],
+    "forbidden_permissions": [
+      "withdraw",
+      "transfer"
+    ],
+    "dedicated_subaccount_required": true,
+    "ip_allowlist_required": true
+  },
+  "risk_limits": {
+    "leverage": 1,
+    "max_order_notional_usdt": 25,
+    "max_gross_notional_usdt": 50,
+    "max_daily_loss_usdt": 5,
+    "max_open_positions": 1,
+    "max_orders_per_hour": 4,
+    "reduce_only_exit_required": true,
+    "manual_resume_required": true
+  },
+  "governance": {
+    "minimum_distinct_operators": 2,
+    "approver_must_differ_from_executor": true,
+    "automatic_cap_increase_allowed": false,
+    "automatic_resume_allowed": false,
+    "required_evidence": [
+      "trading_readiness_v2_or_later",
+      "complete_fault_matrix",
+      "fresh_exchange_reconciliation",
+      "parameter_runtime_readback",
+      "kill_switch_execution_ack",
+      "credential_permission_attestation"
+    ]
+  },
+  "authorization_boundary": "This file is a non-deployable future contract and grants no live-trading permission."
+}

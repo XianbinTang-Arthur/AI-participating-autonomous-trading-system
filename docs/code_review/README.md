@@ -11,11 +11,11 @@
 
 AATS（AI Participating Autonomous Trading System）不是一个简单的“策略产生信号、适配器发送订单”的程序，而是一个围绕真实资金交易构建的、事件驱动的受治理交易系统。它把行情、特征、规则基线、AI、五类策略、组合分配、政策与风险门、订单状态机、资金占用、账本、对账、恢复、研究治理和 Operator 控制面放在同一条可审计链路中。
 
-当前默认的衍生品实盘部署由以下部分组成：
+当前 derivatives 模拟拓扑，以及 future 衍生品 live 设计拓扑，由以下部分组成；live 当前不可部署：
 
 - 交易主路径：`gateway`、`market`、`decision`、`execution` 四个切片进程；
 - 研究治理：`rdp-daemon`；
-- 衍生品实盘旁路采集：`liquidations-daemon`、`microstructure-collector`；
+- 公共旁路采集：`liquidations-daemon`、`microstructure-collector`；当前 derivatives 模拟栈已纳入二者，future live 也声明二者；
 - 基础设施：Postgres、Redis、Redis exporter、NATS JetStream、Prometheus、Grafana、Loki、Promtail、Jaeger；
 - 外部交易与数据源：OKX 公共行情、私有账户、模拟盘或真实交易接口；
 - 人工控制面：FastAPI REST API 与内置中文 Operator UI。
@@ -29,7 +29,7 @@ AATS（AI Participating Autonomous Trading System）不是一个简单的“策�
 5. **成交是财务投影的核心事实输入。** `FillEvent` 驱动组合、余额、费用、已实现盈亏、lot、ledger、settlement 与 reconciliation；费用在系统内按正成本记录，并从余额/盈亏扣除。
 6. **四进程运行依赖 NATS 与 Redis。** exchange-coupled 的四进程模式若仍使用纯内存事件总线或纯内存热状态，启动会失败，而不是带着错误拓扑继续运行。
 7. **RDP 的研究结论默认不能直接改实盘。** Research Factory 明确禁止 runtime mutation、active parameter write、runtime config write 和 OKX write；研究产物先形成证据、verdict、recommendation，再进入审批、gate、发布和观察链路。
-8. **当前代码与若干旧文档存在漂移。** Phase 3Q 已把失效的 `scripts/run_local.py` 收口为明确迁移失败入口；Phase 3R 又修复 replay short-bias gate，并重写已漂移的参数映射参考；Phase 3S 增加基础 CI/warning gate，Phase 3T 再加入 Python hashed lock 与外部镜像 digest，但远端 required check、integration 和完整供应链扫描仍未启用；RDP 当前 ORM 元数据是 78 张表；JetStream 主事件流当前代码默认 1 天而部分旧注释仍写 7 天。具体见第 26 章。
+8. **当前代码与若干旧文档存在漂移。** Phase 3Q 已把失效的 `scripts/run_local.py` 收口为明确迁移失败入口；Phase 3R 又修复 replay short-bias gate，并重写已漂移的参数映射参考；Phase 3S 增加基础 CI/warning gate，Phase 3T 再加入 Python hashed lock 与外部镜像 digest，但远端 required check、integration 和完整供应链扫描仍未启用；本次新增三张收益治理表后，RDP ORM 元数据是 81 张表；JetStream 主事件流当前代码默认 1 天而部分旧注释仍写 7 天。具体见第 26 章。
 
 ## 1. 文档范围、方法与可信边界
 
@@ -46,7 +46,7 @@ AATS（AI Participating Autonomous Trading System）不是一个简单的“策�
 | JavaScript | 43 个文件，约 19,545 行 |
 | 测试文件 `test_*.py` | 406 个，其中 unit 348、integration 46、scenario 5、smoke 1，另有根级验收测试 |
 | 主交易 ORM 表 | 49 张，均在当前 schema（通常是 `public`） |
-| RDP ORM 表 | 78 张，分布于 7 个 schema |
+| RDP ORM 表 | 81 张，分布于 7 个 schema |
 | FastAPI 路由 | 193 条（包括 API、UI 静态路由、OpenAPI/Swagger） |
 
 审阅方式不是把历史文档重新拼接，而是从以下实际入口反向建立调用图：
@@ -1102,7 +1102,7 @@ RDP 与主交易库分离，负责：
 
 它不是主交易订单执行器。RDP 生成的研究候选不能直接调用 OKX。
 
-### 20.2 七个 schema、78 张表
+### 20.2 七个 schema、81 张表
 
 | Schema | 数量 | 作用 |
 | --- | ---: | --- |
@@ -1112,7 +1112,7 @@ RDP 与主交易库分离，负责：
 | `gold` | 8 | replay-ready bar |
 | `meta` | 6 | ingest、manifest、quality、raw source metadata |
 | `research` | 3 | experiments、summary、scan run |
-| `governance` | 19 | parameter、recommendation、release、observation、task、scheduler、runtime status |
+| `governance` | 22 | parameter、recommendation、release、observation、task、holdout、activation、runtime status |
 
 完整表名见附录 C。
 
@@ -1292,7 +1292,7 @@ bash scripts/deploy.sh --profile derivatives --skip-commit
 | `aats-liquidations-daemon` | liquidation WS collector | 512 MiB | `/tmp` heartbeat |
 | `aats-microstructure-collector` | microstructure WS collector | 512 MiB | `/tmp` heartbeat |
 
-当前 `spot`/`derivatives` 模拟 profile 要求 gateway、market、decision、execution、RDP daemon。future `derivatives-live` required list 另含两个 collector；future monolith list 也要求 collector，确保没有完整 overlay 时不能误通过。因为 live 当前硬禁用，这只是失败关闭契约，不是运行健康证据。
+当前 `spot` 模拟 profile 要求 gateway、market、decision、execution、RDP daemon；`derivatives` 模拟 profile 另要求两个公共 collector，共 7 个应用容器。future `derivatives-live` 与 monolith list 也要求 collector。静态清单和 heartbeat 均不能替代频道/Silver freshness 与 eligibility。
 
 ### 21.4 基础设施容器
 
@@ -1323,7 +1323,7 @@ Dockerfile 使用 Python 3.12 slim 两阶段构建，安装项目的 nats、redi
 
 ### 21.6 可观测性
 
-Prometheus 通过 profile-aware file discovery 抓取主进程 9464、可选 microstructure collector 9465、Redis exporter 9121，并自采集 9090：`spot`/`derivatives` 模拟盘只配置四个实际启动的 sliced 主进程，不配置 collector；future derivatives live 另加入 collector；future monolith 只配置 gateway 主进程并另加入 collector。自采集把 `prometheus_sd_discovered_targets` 写入 TSDB，可选服务告警据此判断当前 profile 是否实际发现目标；这既不会把未部署服务伪装成 DOWN target，也不会因已移除 target 的 `up` 时序在 lookback 窗口内残留而误报。metrics dead-man 仍覆盖当前 profile 的全部实际 AATS 目标。
+Prometheus 通过 profile-aware file discovery 抓取主进程 9464、可选 microstructure collector 9465、Redis exporter 9121，并自采集 9090：`spot` 模拟盘只配置四个 sliced 主进程；`derivatives` 模拟盘还挂载 microstructure target；future derivatives live 同样包含 collector。自采集把 `prometheus_sd_discovered_targets` 写入 TSDB，可选服务告警据此判断当前 profile 是否实际发现目标；这既不会把未部署服务伪装成 DOWN target，也不会因已移除 target 的 `up` 时序在 lookback 窗口内残留而误报。
 
 Grafana 当前 provision 的主要告警包括：
 
@@ -1344,7 +1344,7 @@ Grafana 当前 provision 的主要告警包括：
 
 OTel trace context 随 EventEnvelope 跨进程传播；Jaeger 接收 OTLP。Promtail 收集容器/应用日志到 Loki。telemetry 配置失败会退化 no-op，但 metrics dead-man 应提示这种“业务可能活着、可观测性已死”的情况。
 
-当前 Stage 9 通知策略是 **UI-only**：告警状态继续在 Grafana UI 中计算和保留，默认 policy 通过全天 mute timing 抑制 notifier，不配置外部 SMTP/Slack/Telegram。不能再用“不可投递 email 地址 + 未配置 SMTP”冒充 log-only，否则每次告警都会生成通知失败 ERROR。Microstructure WS Stale 还会先验证当前 Prometheus profile 是否配置 collector；模拟盘未部署 collector 时不告警。Decision Cycle Stall 在 Kill Switch/recovery 失败关闭期间仍可处于 active，它表示决策周期确实停止，不等同于进程 crash，也不能作为绕过恢复门禁的理由。
+当前 Stage 9 通知策略是 **UI-only**：告警状态继续在 Grafana UI 中计算和保留，默认 policy 通过全天 mute timing 抑制 notifier，不配置外部 SMTP/Slack/Telegram。不能再用“不可投递 email 地址 + 未配置 SMTP”冒充 log-only，否则每次告警都会生成通知失败 ERROR。Microstructure WS Stale 会先验证当前 Prometheus profile 是否配置 collector；derivatives 模拟已配置，spot 未配置。Decision Cycle Stall 在 Kill Switch/recovery 失败关闭期间仍可处于 active，它表示决策周期确实停止，不等同于进程 crash。
 
 ### 21.7 备份与恢复
 
@@ -1529,13 +1529,14 @@ paper loop；仓库外期待 JSON summary/exit 0 的调用方仍需迁移。
 
 ### 26.2 “四进程”不等于部署只有四个应用容器
 
-四进程只描述主交易 slice。derivatives-live overlay 还定义 RDP daemon、liquidation collector 与 microstructure collector；future 监控、资源规划和故障域必须按 7 个应用容器理解。该 profile 当前被部署入口禁用，不能从静态拓扑推断运行状态。
+四进程只描述主交易 slice。derivatives 模拟 overlay 当前还定义 RDP daemon、liquidation collector 与 microstructure collector，监控、资源规划和故障域应按 7 个应用容器理解。future live 也声明同样角色但当前不可部署。
 
-### 26.3 Future live collector 已进入 required list，但目标验证仍缺失
+### 26.3 公共 collector 已进入 derivatives 模拟 required list，现场 freshness 仍须验证
 
-Phase 3F 后，future `derivatives-live` required list 已包含 liquidation 与 microstructure
-collector，不再是旧的“五个主容器”清单。当前 live profile 在任何部署副作用前硬禁用，
-因此代码清单尚未经过目标 Compose health/freshness 验证；静态包含不能证明旁路数据健康。
+本次收益可信度整改把 liquidation 与 microstructure collector 加入 `derivatives` 模拟 required
+list、部署证据和 Prometheus target，不再是旧的“五个模拟应用容器”清单。代码清单与单元
+测试仍不能证明目标 Compose 已重建、heartbeat 新鲜或四类 Silver 数据 eligible；必须按现行
+运行手册现场验证。future live 继续在任何副作用前硬禁用。
 
 ### 26.4 RDP 迁移不再属于应用启动
 
@@ -1543,7 +1544,7 @@ Phase 3E 工作区已把 root/RDP schema 所有权收口到部署期显式 job�
 
 ### 26.5 RDP 表数量旧说明已过时
 
-当前 `RdpBase.metadata` 是 78 张表、7 个 schema；旧 README/设计中出现的 48 等数量只能代表历史阶段。
+当前 `RdpBase.metadata` 是 81 张表、7 个 schema；旧 README/设计中出现的 48/78 等数量只能代表历史阶段。
 
 ### 26.6 JetStream 旧注释漂移（已在 2026-08-22 文档修复中更正）
 
@@ -1620,7 +1621,7 @@ admin、仓库外进程、慢查询/泄漏/重连和 topology 实例漂移仍可
 联合内存没有现场证据，因此 FS-008 保持部分整改。详见
 [`../../audit/full_system_2026_08_24/41-fs-008-database-connection-budget.md`](../../audit/full_system_2026_08_24/41-fs-008-database-connection-budget.md)。
 
-### 26.16 Research Factory 已隔离 test 选择路径，但最终 OOS 仍开放
+### 26.16 Research Factory 已补齐资金资格基础设施，但最终 OOS 运行仍开放
 
 Phase 3V 将 real-data runner 固定为 `train_valid_selection_test_holdout_v2`：train 与 valid
 分别计算 segment-local label、metrics 和 gate，二者必须同时通过；valid 是 candidate
@@ -1631,11 +1632,11 @@ rows 与 dataset fingerprint 的 `rfseg_` SHA-256 seal，并标记
 `sealed_not_evaluated`/`metrics_exposed=false`。
 
 新 candidate/recommendation 必须闭合 development evidence ref、segment roles、protocol
-和 holdout seal，并披露当前 metrics 只是 development evidence。该代码消除了当前 v2
-runner 的 test 直接选候选路径，但 seal 不能证明历史 test 从未被查看，也没有完成一次性
-最终 OOS、walk-forward、多重检验、历史 artifact/registry 审计或独立复核。FS-004 因此是
-`PARTIALLY REMEDIATED / TEST SEALED FROM CANDIDATE SELECTION / FINAL OOS & HISTORY AUDIT OPEN`。
-详见
+和 holdout seal。本次又实现历史 artifact 资金资格审计、确定性 v2 计划/批处理、purged
+walk-forward、block bootstrap、Holm、deflated Sharpe、先占唯一键再读取的一次性 holdout
+ledger、L2 event replay 与 paper lifecycle calibration。当前历史候选已全部登记为不可作为
+资金证据，但尚未得到候选专用的最终 OOS 结果，也没有 worker 参数 readback 或真实故障矩阵，
+因此仍不能放行生产。详见
 [`../../audit/full_system_2026_08_24/42-fs-004-research-selection-holdout.md`](../../audit/full_system_2026_08_24/42-fs-004-research-selection-holdout.md)。
 
 ### 26.17 全量候选复审已收口新增缺陷，目标运行验证仍开放
@@ -1969,7 +1970,7 @@ strategy_sleeve_intents
 strategy_sleeves
 ```
 
-## 附录 C：RDP 78 张表
+## 附录 C：RDP 81 张表
 
 ### C.1 `staging`（11）
 
@@ -2060,7 +2061,7 @@ experiments
 parameter_scan_runs
 ```
 
-### C.7 `governance`（19）
+### C.7 `governance`（22）
 
 ```text
 active_decisions
@@ -2077,8 +2078,11 @@ rdp_task_queue
 recommendations
 release_effectiveness
 research_round_snapshots
+research_holdout_access_ledger
 rollback_recommendations
 snapshots
+parameter_activation_operations
+parameter_runtime_acks
 strategy_tuning_proposals
 workflow_run_reports
 workflow_scheduler_state

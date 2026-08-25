@@ -356,8 +356,21 @@ Phase 3V 将 Research Factory real-data candidate 的开发选择固定为 train
 但不进入 factor、label、绩效 metrics 或 candidate selection gate；它以 `rfseg_` 内容 seal
 和 `sealed_not_evaluated` 状态进入 evidence
 lineage；外部 execution summary 必须精确绑定 valid segment，不能以全窗口间接消费 test。
-该架构边界防止当前 v2 runner 用 test 选候选，但没有实现最终一次性 OOS、
-holdout access ledger、purged walk-forward 或历史污染审计，不能据此放行生产参数。
+该架构边界防止当前 v2 runner 用 test 选候选。收益可信度整改又增加了历史 candidate
+资金资格审计和确定性 v2 计划、purged walk-forward、moving-block bootstrap、Holm 多重检验、
+deflated Sharpe，以及先提交唯一访问 claim 再调用 evaluator 的一次性 holdout ledger。旧候选
+全部保留但显式不可作为资金证据；没有候选专用 evaluator 的真实一次性 test 运行时，仍不得
+宣称最终 OOS 已通过。
+
+盘口成交真实性由 `l2_event_replay_v1` 单独承载：它只使用已落库的 top-5 快照与公共 trade，
+共享可见深度，建模 partial/no-fill、IOC limit、post-only marketability 与保守 queue-ahead，
+不外推五档之外的流动性。其结果还必须与 `paper_local` order/command/state/fill 生命周期校准。
+这比 OHLCV proxy 更接近可执行研究，但仍不是交易所撮合引擎或未来实盘滑点真值。
+
+参数 generation 的审计表和纯状态机已经存在，要求所有预期 role 对同一 payload SHA 完成
+prepare/commit/readback，错代次、错指纹、部分 ACK 或读回错 parameter set 都会失败/回滚。
+当前 runtime worker 未接 ACK，因此 profile apply/rollback 保持 501，不能把 DB active row 当作
+内存已生效。readiness 格式 v1 也固定 `production_ready=false`、`trading_ready=false`。
 
 仍未完成的架构门禁：空库、历史克隆和部分失败库尚未导出并比较完整 table/column/type/default/index/constraint/view/function manifest，也没有经验证的 app+schema 一致回滚。因此不得把 ledger 与单元测试通过等同于生产 schema 已一致。
 
@@ -385,4 +398,5 @@ holdout access ledger、purged walk-forward 或历史污染审计，不能据此
 | RDP 模块 | `aats/data_platform/README.md`、`docs/rdp/README.md` |
 | Operator 运维 | `docs/operations/README.md`、`docs/operations/operator_checklist.md` |
 | 测试与上线前验证 | `docs/testing/README.md` |
+| 收益证据与模拟交易就绪 | `docs/operations/profit_readiness_runbook.md`、`docs/testing/profit_readiness_acceptance.md` |
 | WSL2 基础设施 | `deploy/wsl2-dev/README.md`；`deploy/wsl2-dev/RUNBOOK.md` 仅为历史实跑记录 |

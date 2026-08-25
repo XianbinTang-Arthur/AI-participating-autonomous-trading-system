@@ -7,6 +7,8 @@
 
 本文给出“本地静态验证 → 单元/场景测试 → WSL2 集成 → 模拟运行 → 上线审批”的分层入口。每一层的通过只证明该层范围，不能替代下一层，更不能等价为实盘放行。
 
+收益证据专项的可执行验收与 NO-GO 传播规则见 [`profit_readiness_acceptance.md`](profit_readiness_acceptance.md)。
+
 ## 1. 强制安全边界
 
 - 本地测试默认使用 `derivatives` 模拟 profile；禁止为了“更真实”改用 `derivatives_live`。

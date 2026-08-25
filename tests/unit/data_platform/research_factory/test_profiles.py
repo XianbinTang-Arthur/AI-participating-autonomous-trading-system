@@ -14,6 +14,20 @@ def test_research_profile_smoke_keeps_low_sample_thresholds() -> None:
     assert profile.execution_evidence_policy.required is False
 
 
+def test_real_factor_development_keeps_thresholds_without_claiming_l2() -> None:
+    development = research_profile_for_name("real_factor_development")
+    evidence_complete = research_profile_for_name("real_factor_research")
+
+    assert development.dataset_quality_thresholds == (
+        evidence_complete.dataset_quality_thresholds
+    )
+    assert development.candidate_gate_thresholds == (
+        evidence_complete.candidate_gate_thresholds
+    )
+    assert development.execution_evidence_policy.required is False
+    assert evidence_complete.execution_evidence_policy.required is True
+
+
 def test_research_profile_preapply_requires_strict_execution_identity() -> None:
     profile = research_profile_for_name("preapply_review")
 

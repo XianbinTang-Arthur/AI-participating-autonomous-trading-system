@@ -14,3 +14,44 @@ execution 近似层。后续版本可接入 orderbook depth 和 trades 数据提
   aggregation          — 跨 family/timeframe 比较聚合
   report_builder       — Markdown 报告生成
 """
+from aats.data_platform.execution_realism.l2_event_replay import (
+    L2_EVENT_REPLAY_MODEL_VERSION,
+    L2ExecutionEvidence,
+    L2OrderBookSnapshot,
+    L2OrderRequest,
+    L2ReplayPolicy,
+    L2TradeEvent,
+    OrderBookLevel,
+    replay_l2_orders,
+)
+from aats.data_platform.execution_realism.simulation_calibration import (
+    CALIBRATION_MODEL_VERSION,
+    ExecutionCalibrationPolicy,
+    ExecutionCalibrationReport,
+    ObservedCommand,
+    ObservedFill,
+    ObservedPaperOrder,
+    ObservedStateTransition,
+    PredictedExecution,
+    calibrate_l2_against_paper_lifecycle,
+)
+
+__all__ = [
+    "L2_EVENT_REPLAY_MODEL_VERSION",
+    "L2ExecutionEvidence",
+    "L2OrderBookSnapshot",
+    "L2OrderRequest",
+    "L2ReplayPolicy",
+    "L2TradeEvent",
+    "OrderBookLevel",
+    "CALIBRATION_MODEL_VERSION",
+    "ExecutionCalibrationPolicy",
+    "ExecutionCalibrationReport",
+    "ObservedCommand",
+    "ObservedFill",
+    "ObservedPaperOrder",
+    "ObservedStateTransition",
+    "PredictedExecution",
+    "calibrate_l2_against_paper_lifecycle",
+    "replay_l2_orders",
+]
