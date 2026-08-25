@@ -24,7 +24,7 @@
 
 ## 现场验收快照（非持续状态证明）
 
-下列结论只对应 2026-08-25 18:00--18:29 UTC、实现基线 `52cd026a` 的本地
+下列结论只对应 2026-08-25 18:15--18:31 UTC、实现基线 `52cd026a` 的本地
 `derivatives` 模拟栈；容器、账户、交易所和数据新鲜度会随时间变化，后续测试必须重新生成
 证据，不得引用本节代替现场核验。
 
@@ -35,11 +35,11 @@
   `/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260825T182745833825Z-derivatives-52cd026a98b0.json`；
 - 七个必需应用容器均为 `running/healthy`、重启计数为 0，最近 15 分钟无
   `ERROR`/`CRITICAL`/未解析 traceback；
-- 2026-08-25 18:00--18:15 UTC 微观结构窗口现场重算成功：BBO 779、books5 1382、
-  trades 12082、OI 72、liquidations 7，四类数据 lineage 使用同一 `ingest_run_id`；
+- 2026-08-25 18:15--18:30 UTC 微观结构窗口现场重算成功：BBO 762、books5 1359、
+  trades 7196、OI 72、liquidations 2，四类数据 lineage 使用同一 `ingest_run_id`；
 - collector heartbeat SHA-256 为
-  `6fb70a9d706a67d6843b96e004fa365d6f09f7e9c87e3805f3b970fc749a35a3`；窗口资格证据
-  fingerprint 为 `e0edd0b985bd82eb432b7f3e7f4587234ab2fbeababe122a8240419db8cdc3fa`，
+  `097104361c9ea7705d0f32540cd13ad6ca499ed1eeb009daed8202f1ef4d306c`；窗口资格证据
+  fingerprint 为 `fdd268122c1125bd5b29ea2133aa79c741a0acc1d29a010605b2c9507a659e32`，
   现场结果为 `eligible_for_research=true`、`reason_codes=[]`；
 - development campaign 计入全部 10 个计划，预先识别 4 个唯一假设与 6 个重复计划；3 个
   有 return series 的代表候选全部为负收益且统计失败，`representative_pass_count=0`、
