@@ -143,6 +143,9 @@ class TestProfileAwareObservabilityProvisioning(unittest.TestCase):
 
     def test_prometheus_targets_follow_compose_profile(self) -> None:
         deploy_dir = REPO_ROOT / "deploy" / "wsl2-dev"
+        prometheus_config = yaml.safe_load(
+            (deploy_dir / "prometheus" / "prometheus.yml").read_text(encoding="utf-8")
+        )
         base_compose = (deploy_dir / "docker-compose.yml").read_text(encoding="utf-8")
         live_overlay = (deploy_dir / "docker-compose.aats.derivatives-live.yml").read_text(
             encoding="utf-8"
@@ -163,6 +166,10 @@ class TestProfileAwareObservabilityProvisioning(unittest.TestCase):
 
         self.assertEqual(len(sliced_targets[0]["targets"]), 4)
         self.assertEqual(empty_targets, [])
+        self.assertIn(
+            "prometheus",
+            {config["job_name"] for config in prometheus_config["scrape_configs"]},
+        )
         self.assertIn("targets/empty.yml:/etc/prometheus/targets/microstructure.yml", base_compose)
         self.assertIn(
             "targets/microstructure.yml:/etc/prometheus/targets/microstructure.yml",
@@ -198,7 +205,11 @@ class TestProfileAwareObservabilityProvisioning(unittest.TestCase):
         by_ref = {item["refId"]: item for item in micro_rule["data"]}
 
         self.assertEqual(by_ref["C"]["model"]["expression"], "($B < 1) && ($E > 0)")
-        self.assertIn('up{job="aats-microstructure"}', by_ref["D"]["model"]["expr"])
+        self.assertEqual(
+            by_ref["D"]["model"]["expr"],
+            'prometheus_sd_discovered_targets{config="aats-microstructure",name="scrape"} '
+            "or vector(0)",
+        )
         self.assertEqual(by_ref["E"]["model"]["expression"], "D")
 
 

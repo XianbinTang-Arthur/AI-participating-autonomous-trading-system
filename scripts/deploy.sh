@@ -488,15 +488,6 @@ step_infra_up() {
     log_info "Step 6/8: 启动基础设施（Postgres/Redis/NATS/...）..."
     wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && docker compose -f docker-compose.yml --env-file $WSL2_ENV_FILE up -d --wait --wait-timeout 90"
 
-    local elapsed=0
-    while [[ $elapsed -lt 30 ]]; do
-        if wsl_run "docker exec aats-postgres sh -lc 'pg_isready -q -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\"' 2>/dev/null"; then
-            break
-        fi
-        sleep 2
-        elapsed=$((elapsed + 2))
-    done
-
     wsl -d "$DISTRO" bash <<PWEOF
 set -euo pipefail
 cd $WSL_PROJECT

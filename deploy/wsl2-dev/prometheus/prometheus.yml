@@ -37,3 +37,13 @@ scrape_configs:
           - redis-exporter:9121
         labels:
           env: dev
+
+  # Prometheus 自采集使服务发现计数进入 TSDB。可选服务告警据此判断当前
+  # profile 是否实际配置了对应 target，避免已移除 target 的 up 时序在
+  # lookback 窗口内残留并触发误报。
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090
+        labels:
+          env: dev

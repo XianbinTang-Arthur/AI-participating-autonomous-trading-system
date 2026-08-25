@@ -240,7 +240,9 @@ groups:
           - refId: D
             datasourceUid: prometheus
             model:
-              expr: 'count(up{job="aats-microstructure"}) or vector(0)'
+              # 使用实时服务发现计数，而非 up 序列。后者在 profile 切换后会按
+              # Prometheus lookback 窗口残留，导致未部署 collector 的模拟盘误报。
+              expr: 'prometheus_sd_discovered_targets{config="aats-microstructure",name="scrape"} or vector(0)'
               queryType: range
             relativeTimeRange:
               from: 120

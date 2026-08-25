@@ -1323,7 +1323,7 @@ Dockerfile 使用 Python 3.12 slim 两阶段构建，安装项目的 nats、redi
 
 ### 21.6 可观测性
 
-Prometheus 通过 profile-aware file discovery 抓取主进程 9464、可选 microstructure collector 9465、Redis exporter 9121：`spot`/`derivatives` 模拟盘只配置四个实际启动的 sliced 主进程，不配置 collector；future derivatives live 另加入 collector；future monolith 只配置 gateway 主进程并另加入 collector。这样未部署的服务不会被伪装成 DOWN target，metrics dead-man 仍覆盖当前 profile 的全部实际目标。
+Prometheus 通过 profile-aware file discovery 抓取主进程 9464、可选 microstructure collector 9465、Redis exporter 9121，并自采集 9090：`spot`/`derivatives` 模拟盘只配置四个实际启动的 sliced 主进程，不配置 collector；future derivatives live 另加入 collector；future monolith 只配置 gateway 主进程并另加入 collector。自采集把 `prometheus_sd_discovered_targets` 写入 TSDB，可选服务告警据此判断当前 profile 是否实际发现目标；这既不会把未部署服务伪装成 DOWN target，也不会因已移除 target 的 `up` 时序在 lookback 窗口内残留而误报。metrics dead-man 仍覆盖当前 profile 的全部实际 AATS 目标。
 
 Grafana 当前 provision 的主要告警包括：
 

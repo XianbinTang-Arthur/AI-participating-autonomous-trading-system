@@ -106,8 +106,8 @@ def test_postgres_probes_use_an_existing_database_and_redis_host_is_prepared() -
         REPO_ROOT / "deploy" / "wsl2-dev" / "docker-compose.yml"
     ).read_text(encoding="utf-8")
 
-    assert "pg_isready -q -U" in deploy_text
-    assert '-d \\"\\$POSTGRES_DB\\"' in deploy_text
+    assert "docker exec aats-postgres sh -lc 'pg_isready" not in deploy_text
+    assert "up -d --wait --wait-timeout 90" in deploy_text
     assert 'pg_isready -U \\"$$POSTGRES_USER\\" -d \\"$$POSTGRES_DB\\"' in compose_text
     assert "ensure_wsl_runtime_prerequisites" in deploy_text
     assert "vm.overcommit_memory=1" in deploy_text
