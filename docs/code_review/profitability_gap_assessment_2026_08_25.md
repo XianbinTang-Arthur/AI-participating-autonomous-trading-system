@@ -1,11 +1,11 @@
 # AATS 从当前状态到真实收益的差距评估与落地路线
 
 > 文档状态：现行代码审查与收益就绪判断
-> 最后核对：2026-08-25（本文所在 HEAD；平仓冷静期修复 `ad1c68b24d8865e06ad6f57b71ffe22c24ea7e2e`）
-> 静态实现基线：本文所在 HEAD
+> 最后核对：2026-08-25（当前实现提交 `2c798eab13dedd6c65287d64ae46499d98492ce2`）
+> 静态实现基线：`2c798eab13dedd6c65287d64ae46499d98492ce2`
 > 模拟运行基线：`derivatives`，deployment generation
-> `1beba655f321-20260825T195714Z-1631-8136`
-> 运行证据：`/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260825T195837932361Z-derivatives-1beba655f321.json`
+> `2c798eab13de-20260825T205326Z-1584-9530`
+> 运行证据：`/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260825T205451196702Z-derivatives-2c798eab13de.json`
 > 禁止外推：本文不构成投资建议，不证明未来收益，不授权 live profile、真实资金或真实订单。
 
 ## 1. 结论
@@ -15,10 +15,11 @@
 
 基于本轮代码、研究 artifact、数据库事件、模拟部署和 Operator 状态的交叉核验，我给出的判断是：
 
-- **系统工程与风控基础完成度约为 75%--85%**：多进程、持久化、风控、恢复、对账、审计、
-  研究治理和 Operator 控制面已经形成体系；当前模拟栈可健康运行。
-- **可信模拟盈利证据成熟度约为 10%--20%**：评估、预注册和数据门禁进一步完善，但累计两轮
-  7 个可评估唯一候选全部为负收益；模拟盘虽已出现 3 个自然新风险订单、3 个平仓订单和
+- **系统工程与风控基础完成度约为 80%--88%**：多进程、持久化、风控、恢复、对账、审计、
+  研究治理和 Operator 控制面已经形成体系；跨进程 guard 可观测和净仓强平方向错误已修复，
+  当前模拟栈可健康运行。剩余差距主要是参数 ACK/readback、故障矩阵和目标平台长稳验证。
+- **可信模拟盈利证据成熟度约为 10%--20%**：评估、预注册和数据门禁进一步完善，但三轮共
+  10 个可评估唯一候选全部为负收益；模拟盘虽已出现 3 个自然新风险订单、3 个平仓订单和
   28 个 fill 事件，仍远低于校准门，且这些成交没有绑定合格候选。
 - **小额真实资金 canary 就绪度低于 10%**：除收益证据为空外，runtime parameter ACK/readback、
   隔离故障矩阵、forward paper 观察和 live 部署入口均未完成；当前 live profile 仍应硬性 NO-GO。
@@ -46,18 +47,18 @@
 | --- | --- | --- | --- |
 | 市场数据接入 | BBO、books5、trades、OI、liquidations 已进入 derivatives 模拟拓扑；曾有单个 15 分钟窗口通过完整性与 lineage 门 | 局部可用，不代表长区间连续可用 | 为每个研究/回放区间生成无缺口 eligibility manifest，并持续验证 collector freshness |
 | 研究数据与协议 | development/valid/封存 holdout 分段、artifact fingerprint、真实试验族计数已实现 | 研究纪律基本成形 | 候选必须升级到 `paper_review`/`preapply_review` 的更高样本与成本证据门 |
-| 候选经济性 | 历史 replay 的 3 个代表候选与新预注册的 4 个唯一候选均为负收益；累计通过数 0 | **明确失败** | 淘汰已评估七类表达式；下一轮必须来自新增数据域或更强经济机制，不能继续围绕同一 OHLCV/funding DSL 做参数寻优 |
+| 候选经济性 | 历史 replay 3 个、OHLCV/funding 预注册 4 个、微观结构预注册 3 个候选均为负收益；累计 10/10 失败 | **明确失败** | 淘汰已评估十类表达式；先扩展连续历史和低换手/多持有期研究口径，再注册新机制，不能改阈值追逐同窗结果 |
 | 多重检验 | campaign 自动计入 10 次计划、识别 6 个预先重复计划，并执行 bootstrap、Holm、DSR、purged walk-forward | 工具已具备，结果未通过 | 新 campaign 必须继续计入全部尝试和失败项，禁止只汇报赢家 |
 | 下单前资金尺度 | 历史 517 个非零目标中 516 个同时触发多个名义额度拒绝；本轮定位为 allocator 只缩审计金额、未缩 qty | 根因已修复并部署；不可覆盖漏斗证据已自动化 | 等待 100 个已成熟自然非零信号，证明同一 decision 的 target notional 不超过现场 cap，且 policy/risk 不因同一尺度问题拒绝 |
 | 模拟执行 | 已产生 3 个自然新风险订单和 3 个平仓订单；一次 17 秒重入暴露的重启缓存缺陷已修复，最终部署四个主进程均以 Postgres truth 恢复 15 条历史 fill | **链路已走通；冷静期重启一致性已验证，样本仍不足** | 在同一受控 observation 中累计 ≥100 个成熟非零 target；不得放宽风控凑成交 |
-| 成交真实性 | L2 partial/no-fill/队列近似和 paper lifecycle 校准器已有实现；自然订单样本累计 2，仍未绑定合格候选/L2 prediction | 工具可用，证据不足 | 至少 20 个匹配 paper order，并满足生命周期 100%、fill ratio MAE ≤ 0.20、均价误差 ≤ 10 bps、费用误差 ≤ 1 bps、终态 p95 ≤ 5 秒 |
+| 成交真实性 | L2 partial/no-fill/队列近似和 paper lifecycle 校准器已有实现；自然订单累计 6 个，仍未绑定合格候选/L2 prediction | 工具可用，证据不足 | 至少 20 个匹配 paper order，并满足生命周期 100%、fill ratio MAE ≤ 0.20、均价误差 ≤ 10 bps、费用误差 ≤ 1 bps、终态 p95 ≤ 5 秒 |
 | 已实现净收益 | 已观察到 3 次完整模拟开平仓，但快速重入场曾产生额外 taker fee；这些交易未绑定合格候选，极小样本没有统计意义 | **仍没有可信盈利证据** | 先通过候选门，再形成扣除 fee、funding、slippage 后的冻结 forward paper 净收益序列 |
 | 参数生效 | generation schema 与治理状态机已实现；worker ACK/readback 未接入，apply/rollback 返回 501 | 失败关闭是正确行为 | 所有预期 role 完成 prepare/commit/readback，一致读取同一 parameter set ID；失败可确定回滚 |
 | 韧性 | 关键任务监督、恢复、对账、kill switch 已较完整；固定故障矩阵 schema 已实现 | 缺现场隔离故障证据 | 在独立 stack/volume 中完成 Redis、NATS、execution restart、stale generation、TTL 五场景，证明无意外新增风险 |
 | 前向验证 | 没有合格候选，也没有 paper observation | **0 个有效窗口** | 先通过 paper review，再通过 preapply review；任何 abort、负成本后 edge 或超回撤均淘汰 |
 | 真实资金入口 | spot-live、derivatives-live、derivatives-live-monolith 在副作用前失败；future canary `deployable=false` | **明确 NO-GO** | 只有前述证据完整后，另行审计并由人工批准最小权限 canary；本轮不得打开 |
 
-## 4. 两轮候选族的实际结果
+## 4. 三轮候选族的实际结果
 
 本轮不是根据旧文档推断，而是在 WSL2 的真实 Gold development 数据上执行 development batch，
 再运行 2,000 次 deterministic block bootstrap（seed 7）。holdout 保持
@@ -105,7 +106,36 @@ SHA-256=`a67403ace4b6197005f161ce1b88aaf42f4231341afa00ab0f2d2966f84d968a`。
 
 这次结果进一步缩小了不确定性：**问题不只是旧候选实现过时；在同一 OHLCV/funding 研究域内，
 四个预先固定的新机制同样无法覆盖显式成本。** 下一轮高价值工作应优先扩充可审计的 L2/订单流、
-基差/期限结构和状态标签，而不是继续对现有七个表达式做窗口、阈值或符号网格搜索。
+基差/期限结构和状态标签，而不是继续对这七个表达式做窗口、阈值或符号网格搜索。
+
+### 4.2 微观结构桥接 campaign
+
+提交 `fe6efd65fb283b0d52ec340971de290afed3b490` 将订单簿、主动成交、持仓量和基差接入
+Research Factory，并增加按 train/valid/test 分段的输入缺失门。历史 K 线采集器曾把
+`confirm=false` 的滚动 bar 推进 checkpoint，导致该时间戳永远不再被重新确认；修复后通过
+OKX history-candles 权威刷新，2026-05-16 至 2026-05-28 窗口的 Silver 与 Gold 均为
+1,152/1,152 条已收盘，零 K 线缺口、零 funding 缺失。
+
+配置 `microstructure_profit_candidates_v1_20260825` 在结果前固定三种机制和 7.5 bps 成本，
+登记证据 SHA-256 为
+`a38afb4618b372d88b9c5cea8e9a9ef58cfe875ecbb3e3d125a3637039586019`。提交
+`012b91c454b88b0d573a2cfcd0de981c77388f73` 又修复 Python 3.12/3.14 的 `ast.dump`
+差异，保证同一 Factor DSL 跨 Windows/WSL2 产生相同签名。
+
+实际 development 结果如下；最大回撤使用绝对值。输入质量全部通过：每个所需微观结构字段
+1,150/1,152 非空，缺失率 0.1736%，低于预注册的 1% 上限。
+
+| 预注册假设 | Train 年化净收益 | Train 最大回撤 | Valid 年化净收益 | Valid 成本后 edge | 原始 p 值 | 结论 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 订单簿与成交压力延续 | -9.155649 | 0.165816 | -10.571249 | -3.016909 bps | 1.0 | 淘汰 |
+| 成交流与 OI 新仓形成 | -13.985244 | 0.241415 | -12.743515 | -3.636848 bps | 1.0 | 淘汰 |
+| mark-mid 基差回归 | -10.880812 | 0.193485 | -8.172298 | -2.332277 bps | 1.0 | 淘汰 |
+
+Campaign 统计证据 SHA-256 为
+`ca311e020b3843905b1c6b289bc6d42daafc6825f0e16aac436c4e4e2537bab5`，三次计划全部计入，
+`representative_pass_count=0`、`capital_eligible=false`、holdout=`sealed_not_evaluated`。
+这证明先前的主要问题确实不是“Factor DSL 没接微观结构数据”；接入后仍无法覆盖成本，当前更
+直接的约束是 12 天样本过短、单 bar 持有导致换手成本高，以及尚无冻结候选的 L2 成交校准。
 
 ## 5. 为什么 expected edge 和系统健康仍不能推导收益
 
@@ -215,6 +245,23 @@ fingerprint=`funnel_8632e0e041c0aa4950508bd0a51268b9e5a58daa75d85055cab6d2078f55
 任何失败仍保留 return series 并进入完整 campaign。实际 v3 的四个候选全部失败，因此没有
 生成 L2 request、没有进入 paper observation，也没有打开 holdout。
 
+### 6.7 微观结构研究桥接与历史修复
+
+提交 `fe6efd65fb283b0d52ec340971de290afed3b490` 完成五个微观结构字段、条件连接、lineage、
+字段缺失门和预注册 campaign 的端到端接入，并修复未确认滚动 K 线错误推进 checkpoint。
+2026-05-16 至 2026-05-28 的 15m Silver/Gold 已恢复为 1,152/1,152 条已收盘记录；三种新机制
+在 7.5 bps 显式成本下仍全部失败，holdout 未打开。提交
+`012b91c454b88b0d573a2cfcd0de981c77388f73` 保证 Factor DSL 签名跨 Python 3.12/3.14 稳定。
+
+### 6.8 跨进程 guard 可观测与净空仓风险方向
+
+部署后的签名 Operator 页面曾把净空仓强平距离显示成负值并标为高风险，同时 Gateway 进程读取
+不到由 Execution 维护的 trial/derivatives guard，显示“未配置”。提交
+`2c798eab13dedd6c65287d64ae46499d98492ce2` 修复两条事实链：净数量为负时按 short 方向计算强平
+距离；Gateway 订阅 guard signal 并在 Operator 查询中从 Redis/NATS 缓存回退读取。最终只读 UI
+复核显示 trial guard 为“监控中”，最近强平距离为正的 3,081.29%，没有硬阻断。该页面同时显示的
+7 个已关闭模拟样本及 24 小时模拟 PnL 不是候选绑定的收益证据，不能用于放行资金。
+
 ## 7. 后续可落地工作包与硬验收门
 
 以下顺序是依赖关系，不应并行跳过前置门。
@@ -232,22 +279,25 @@ risk、plan、intent、order、fill，并按部署 generation 输出数量、not
 - plan/order/fill 必须来自系统自然信号，历史 BLOCKED 不算样本；
 - 风控拒绝必须保留且可解释，绝不为了提高通过率放宽上限。
 
-### P1：建立下一轮真正不同的候选族（本轮已完成并全数失败）
+### P1：先扩展研究时域并降低不必要换手（基础桥接已完成，时间样本未完成）
 
-工作：先写经济假设卡，再写参数。候选应覆盖至少三种不同机制，例如资金费/基差回归、流动性与
-订单流失衡、波动状态切换；每种机制明确持有周期、失败条件、成本来源和可交易容量。每个计划在
-运行前固定，并继续把失败、无数据和重复项计入 trial count。
+工作：持续采集或权威回填至少 90 天连续 15m 数据（目标 8,640 bars），并为大于 1 bar 的持有期
+实现非重叠标签、purge/embargo 和按实际换手扣费，避免当前“每根 bar 翻仓”的成本结构主导结果。
+只有数据与口径冻结后，才先写经济假设卡、再写参数，注册新的机制族；继续把失败、无数据和重复
+项计入 trial count。
 
 通过条件：
 
+- 连续 15m 历史至少 8,640 bars，时间缺口为 0，所需字段在每段不超过预注册缺失阈值；
+- 多持有期收益没有重叠标签泄漏，成本由实际持仓变化而非每 bar 固定扣减；
 - development 至少满足 `real_factor_development`：总 500、train 300、valid 100、sealed test 100；
 - 候选净年化收益 > 0、成本后 edge > 0、最大回撤 ≤ 20%；
 - purged walk-forward、bootstrap lower bound、Holm 和 DSR 全部通过；
 - 不通过的候选淘汰，不读取 holdout，不修改阈值追逐结果。
 
-本轮四个预注册机制已经满足“先写卡再运行”，但通过数为 0。下一轮不得把这四个表达式改窗口
-后重新包装为新机制；应先建设当前 Gold bars 缺失的 L2/订单流、基差/期限结构或可审计状态标签，
-再注册新的 trial family。
+本轮 OHLCV/funding 四个和微观结构三个预注册机制都满足“先写卡再运行”，但通过数为 0。下一轮
+不得把这些表达式改窗口后重新包装为新机制，也不能把 12 天结果当成 90 天门已完成；应先完成
+连续时域和低换手口径，再注册新的 trial family。
 
 ### P2：L2 成本证据与 paper 生命周期校准
 
@@ -320,7 +370,7 @@ holdout 失败即淘汰，不得第二次读取，不得更换 actor 重试，�
 
 ```text
 simulation_runtime_operational = PASS (snapshot only)
-candidate_statistical_edge = FAIL
+candidate_statistical_edge = FAIL / 10 of 10 unique candidates rejected
 paper_execution_calibration = UNKNOWN / 6 natural orders, below 20 and no L2 binding
 forward_paper_profitability = UNKNOWN / no eligible candidate
 parameter_runtime_readback = UNKNOWN

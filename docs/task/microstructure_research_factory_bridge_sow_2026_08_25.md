@@ -1,8 +1,8 @@
 # 微观结构研究数据桥接与预注册候选验证 SOW
 
-> 文档状态：实施中任务书  
-> 最后核对：2026-08-25（起始 HEAD `64a6c13e2146d5b996111dc0f2760e8021112a81`）  
-> 核对范围：Research Factory Gold 数据源、Factor DSL、微观结构 Silver、Gold replay 构建、预注册 development campaign  
+> 文档状态：已完成任务书
+> 最后核对：2026-08-25（起始 HEAD `64a6c13e2146d5b996111dc0f2760e8021112a81`；实现提交 `fe6efd65fb283b0d52ec340971de290afed3b490`、`012b91c454b88b0d573a2cfcd0de981c77388f73`）
+> 核对范围：Research Factory Gold 数据源、Factor DSL、微观结构 Silver、Gold replay 构建、预注册 development campaign
 > 安全边界：只读研究数据与 research artifact；允许重建 `gold.market_swap_replay_bars_15m`；不读取 holdout 收益、不写运行参数、不提交订单、不启动 live profile。
 
 ## 1. 业务目标与边界
@@ -149,3 +149,33 @@ Silver 的派生事实，可由后续 ingest run 再次幂等生成。
 - 所有失败候选进入完整 trial count，禁止因结果不好而改阈值重跑；
 - Ruff、相关单测、完整 unit 和 WSL2 数据链路验证通过；
 - 只有 campaign 统计门通过者才可申请 L2 execution evidence，本任务绝不自动进入实盘。
+
+## 17. 实施结果与验收结论
+
+本 SOW 的代码、数据修复、预注册和 development campaign 均已执行完成，但收益结论为失败：
+
+- Factor DSL 已加入 `top5_weighted_imbalance`、`trade_flow_imbalance`、`oi_delta`、
+  `funding_z_score_7d`、`basis_bps`；只有表达式实际引用这些字段时，15m Gold 查询才连接
+  对应 Silver 表。
+- `GoldBarRecord.feature_values`、字段级/分段级质量报告、Silver lineage、source watermark、
+  dataset fingerprint 和预注册缺失率上限已接入现有不可变 artifact 链路。
+- 修复 K 线采集器用未确认滚动 bar 推进 checkpoint 的缺陷；权威刷新后，2026-05-16 至
+  2026-05-28 半开区间内 Silver/Gold 均为 1,152 条已收盘记录，零 K 线缺口、零 funding 缺失。
+- 每个所需微观结构字段有 1,150/1,152 个非空值，全窗缺失率 0.173611%；train/valid 为 0，
+  test 为 0.869565%，均低于预注册 1% 上限。该质量通过只证明数据可评估，不证明信号有效。
+- 预注册证据 SHA-256 为
+  `a38afb4618b372d88b9c5cea8e9a9ef58cfe875ecbb3e3d125a3637039586019`；登记阶段没有数据库、
+  holdout 或 runtime parameter 访问。Python 3.12/3.14 的空 `keywords` AST 表示差异已归一化，
+  同一表达式在 Windows/WSL2 产生相同签名。
+- 三个机制的 train/valid 净收益及成本后 edge 全为负，原始 p 值均为 1.0；campaign evidence
+  SHA-256 为 `ca311e020b3843905b1c6b289bc6d42daafc6825f0e16aac436c4e4e2537bab5`，
+  `representative_pass_count=0`、`capital_eligible=false`、holdout 保持封存。
+
+验证结果：相关研究单测累计 355 项通过；最终完整单元回归为 4,596 passed、30 skipped、
+94 subtests passed；Ruff 通过。WSL2 内尝试按仓库规定运行集成 pytest 时发现
+`~/aats-venv/bin/python` 不存在，因此该项是环境缺口，不记为通过；实际数据重建和 campaign
+通过标准 `derivatives` 模拟部署中的 RDP 容器完成。
+
+任务结论为“研究能力验收通过、三个候选经济性验收失败”。不得因工程实现完成而进入 L2、
+holdout、参数应用或真实资金流程；下一轮必须先扩大连续历史并实现低换手/多持有期的非重叠
+收益口径，再预注册新的经济机制。

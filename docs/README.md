@@ -265,6 +265,13 @@
   fee/slippage/funding 成本固定在结果之前，并完成 4 个唯一假设的真实 development campaign。
   四者 train/valid 成本后收益全部失败，统计通过数仍为 0，holdout 继续封存；实施任务书见
   [`task/preregistered_candidate_campaign_sow_2026_08_25.md`](task/preregistered_candidate_campaign_sow_2026_08_25.md)。
+- 2026-08-25 微观结构桥接已把订单簿、主动成交、OI、funding z-score 和 basis 接入 Research
+  Factory，并修复未确认滚动 K 线错误推进 checkpoint。权威刷新后的 12 天窗口有 1,152 条
+  closed Silver/Gold，字段缺失率 0.173611% ≤ 1%；三个预注册微观结构候选仍全部失败，累计
+  10/10 唯一候选未通过，holdout 继续封存。最终模拟部署还修复了净空仓强平距离方向和 Gateway
+  跨进程 guard signal 读取；Operator 当前显示 guard“监控中”只证明观测链恢复，不是盈利证明。
+  任务事实见
+  [`task/microstructure_research_factory_bridge_sow_2026_08_25.md`](task/microstructure_research_factory_bridge_sow_2026_08_25.md)。
 
 ## 8. 易漂移事实与代码真源
 

@@ -1,7 +1,7 @@
 # 收益证据与模拟交易就绪运行手册
 
 > 文档状态：现行操作说明
-> 最后核对：2026-08-25（当前静态实现见本文所在 HEAD；现场部署基线 `1beba655f32183cc1edc99619150f5737303c00e`）
+> 最后核对：2026-08-25（静态实现 `2c798eab13dedd6c65287d64ae46499d98492ce2`；模拟部署 generation `2c798eab13de-20260825T205326Z-1584-9530`）
 > 适用范围：`derivatives` 本地模拟栈、RDP 研究库、Research Factory 研究产物
 > 禁止范围：真实资金、live profile、真实订单、手工绕过部署入口
 
@@ -17,7 +17,8 @@
 | 微观结构资格 | 已实现 15 分钟窗口门禁 | 连续频道满足样本、完整性和 lineage 后才可用于研究 |
 | 历史候选资金资格 | 已完成确定性审计 | 旧 `benchmark_segment=test` 等产物全部不可作为资金证据 |
 | v2 复跑 | 已生成计划并提供两阶段批处理 | development 不读 holdout；完整阶段强制要求 L2 成本摘要 |
-| Campaign 统计门禁 | 已自动串联预注册、实验 return series、全试验计数、重复假设、walk-forward、bootstrap、Holm、deflated Sharpe | 历史重放 3 个和新预注册 4 个代表候选均失败，不具备资本资格 |
+| Campaign 统计门禁 | 已自动串联预注册、实验 return series、全试验计数、重复假设、walk-forward、bootstrap、Holm、deflated Sharpe | 历史重放 3 个、OHLCV/funding 预注册 4 个、微观结构预注册 3 个候选共 10/10 失败，不具备资本资格 |
+| Research Factory 微观结构 | 五个白名单字段、Silver 条件连接、lineage/fingerprint 和分段输入缺失门已接入 | 2026-05-16 至 2026-05-28 的 1,152 条 15m 数据可评估；三候选仍失败，不证明收益 |
 | 模拟执行预算 | 已修复方向 intent 只缩审计预算、不缩 qty 的错误，并按最严格现有 cap 限制单步目标 | 已观察 3 个开仓和 3 个平仓订单；最终部署窗有 2/100 个成熟可执行 target，运行验收仍是 `UNKNOWN` |
 | 平仓冷静期 | Fill 热缓存启动时以 Postgres truth 重建；失败回退数据库；明确平仓 fill 可恢复 close anchor | 标准重部署已验证 truth reconcile、close anchor 与 298 秒 active guard；强竞争入场信号阻断样本仍待积累 |
 | 一次性 holdout | 已实现 DB 唯一账本和先占用后读取协议 | 失败也消耗访问；不允许事后补登记已看过的 test 指标 |
@@ -63,6 +64,23 @@ python scripts/rdp_validate_microstructure_window.py \
 `fresh=true`。省略 `--window-start` 时，“最新”Silver 窗口结束时间还必须在 30 分钟内；显式
 指定历史窗口才关闭当前时效限制。输出不可覆盖并包含确定性 fingerprint。
 
+若历史 K 线曾被未确认滚动 bar 污染 checkpoint，只允许用显式时间边界刷新，不得无界重写：
+
+```bash
+python scripts/rdp_deep_backfill_api.py \
+  --symbol BTC-USDT-SWAP \
+  --timeframes 15m \
+  --target-start 2026-05-16 \
+  --refresh-existing \
+  --refresh-end 2026-05-28 \
+  --rate-limit 0.15 \
+  --merge-every 50
+```
+
+刷新后必须分别核对半开区间内 confirmed Silver、closed Gold、时间缺口和 funding 缺失。采集器只
+允许已确认 bar 推进持久 checkpoint；滚动 bar 可更新当前值，但必须在后续轮次重取，不能封死该
+时间戳。本次命令参数只是已执行证据，不是通用窗口；后续必须替换为待修复的显式范围。
+
 ## 4. 历史候选与 v2 复跑
 
 全新经济假设必须先预注册，不能先运行再补写 hypothesis：
@@ -80,9 +98,15 @@ python scripts/rdp_run_candidate_v2_batch.py \
 ```
 
 配置严格固定机制、可证伪条件、容量假设、Factor DSL、Gold 窗口、分段和 fee/slippage/funding
-成本。每个 plan 绑定 manifest、proposal 与 hypothesis card 的 SHA-256；新计划中的
+成本。微观结构表达式还必须显式固定 `max_factor_input_missing_ratio`，并在全窗及
+train/valid/test 每段都通过；缺失值不会被静默填零。每个 plan 绑定 manifest、proposal 与
+hypothesis card 的 SHA-256；新计划中的
 `funding_bps` 同时进入真实 experiment 与 hypothesis fingerprint。当前 baseline 为避免重叠
 标签虚增年化只接受 `holding_period_bars=1`；更长持有期必须先实现非重叠收益口径。
+
+Factor DSL 签名必须跨支持的 Python 运行时一致。仓库已归一化 `ast.dump` 中空 `keywords` 的
+3.12/3.14 表示差异；任何新增 AST 节点都要在 Windows 和部署容器用同一表达式复算 signature，
+不同则停止登记，不能把同一假设误计为两个 trial。
 
 若任一 development gate 失败，仍须对完整 plan root 运行 campaign 计数；不得删除失败计划、
 改阈值后复用同一 campaign ID，或读取 holdout 寻找“翻盘”。
@@ -247,6 +271,14 @@ python scripts/write_trading_readiness_evidence.py \
 契约固定单一 BTC 永续、逐仓、1x、单笔 25 USDT、总敞口 50 USDT、日损失 5 USDT、无提现/
 划转权限、双人签和手工恢复，且 `deployable=false`。这些数字只是未来最大上限，不是当前建议
 入金金额，也不代表可部署。
+
+签名 Operator 页面只可作为当前只读观测面，不能替代底层证据。部署后还必须确认：
+
+- trial guard 能通过跨进程 signal cache 显示 `MONITORING`/实际状态，而不是因 Gateway 本地没有
+  Execution monitor 而误报“未配置”；
+- 净空仓的 liquidation gap 按 short 方向计算并为正；负百分比高风险不能在未核对方向前接受；
+- 页面中的模拟 PnL、已关闭样本数和 `safe_to_trade` 只描述当前模拟运行，不是研究候选统计收益；
+- guarded-live preflight、参数 readback 或任一 live 前置项为 unknown 时继续 NO-GO。
 
 ## 10. 停止条件
 

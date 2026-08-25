@@ -29,7 +29,7 @@ AATS（AI Participating Autonomous Trading System）不是一个简单的“策�
 5. **成交是财务投影的核心事实输入。** `FillEvent` 驱动组合、余额、费用、已实现盈亏、lot、ledger、settlement 与 reconciliation；费用在系统内按正成本记录，并从余额/盈亏扣除。
 6. **四进程运行依赖 NATS 与 Redis。** exchange-coupled 的四进程模式若仍使用纯内存事件总线或纯内存热状态，启动会失败，而不是带着错误拓扑继续运行。
 7. **RDP 的研究结论默认不能直接改实盘。** Research Factory 明确禁止 runtime mutation、active parameter write、runtime config write 和 OKX write；研究产物先形成证据、verdict、recommendation，再进入审批、gate、发布和观察链路。
-8. **当前代码与若干旧文档存在漂移。** Phase 3Q 已把失效的 `scripts/run_local.py` 收口为明确迁移失败入口；Phase 3R 又修复 replay short-bias gate，并重写已漂移的参数映射参考；Phase 3S 增加基础 CI/warning gate，Phase 3T 再加入 Python hashed lock 与外部镜像 digest，但远端 required check、integration 和完整供应链扫描仍未启用；本次新增三张收益治理表后，RDP ORM 元数据是 81 张表；JetStream 主事件流当前代码默认 1 天而部分旧注释仍写 7 天。最新收益复核还证明本轮 3 个可评估代表候选全部负收益，当前项目不能因模拟部署健康而被描述为“接近盈利上线”。具体见第 26 章与[真实收益差距评估](profitability_gap_assessment_2026_08_25.md)。
+8. **当前代码与若干旧文档存在漂移。** Phase 3Q 已把失效的 `scripts/run_local.py` 收口为明确迁移失败入口；Phase 3R 又修复 replay short-bias gate，并重写已漂移的参数映射参考；Phase 3S 增加基础 CI/warning gate，Phase 3T 再加入 Python hashed lock 与外部镜像 digest，但远端 required check、integration 和完整供应链扫描仍未启用；本次新增三张收益治理表后，RDP ORM 元数据是 81 张表；JetStream 主事件流当前代码默认 1 天而部分旧注释仍写 7 天。最新收益复核证明历史、OHLCV/funding 和微观结构三阶段累计 10/10 个唯一候选全部失败，当前项目不能因模拟部署健康而被描述为“接近盈利上线”。具体见第 26 章与[真实收益差距评估](profitability_gap_assessment_2026_08_25.md)。
 
 ## 1. 文档范围、方法与可信边界
 
@@ -1698,6 +1698,28 @@ Redis index，Decision Context 无法把平仓 fill 与此前开仓生命周期�
 随后一次自然平仓约 2 秒后的决策上下文明确报告 298.12 秒剩余冷静期、active guard 和零 target。
 累计现场样本现为 3 个新风险订单、3 个平仓订单和 28 个 fill；最终 deployment 漏斗窗仍只有
 2/100 个成熟可执行 target，状态为 `UNKNOWN`，不构成收益证明。
+
+### 26.19 微观结构研究桥接与跨进程风险观测已完成，经济性继续失败
+
+提交 `fe6efd65fb283b0d52ec340971de290afed3b490` 将订单簿 top-5、主动成交、OI、funding z-score
+和 mark-mid basis 作为受白名单约束的 Factor DSL 输入接入 Gold/Silver 查询，并加入字段级、
+分段级缺失门、lineage 和 dataset fingerprint。K 线采集器只允许 confirmed bar 推进 checkpoint；
+显式权威刷新后，2026-05-16 至 2026-05-28 半开区间的 Silver/Gold 均为 1,152 条 closed bar，
+每个所需微观结构字段缺失率为 0.173611%，低于预注册 1% 上限。提交
+`012b91c454b88b0d573a2cfcd0de981c77388f73` 进一步归一化 Python 3.12/3.14 的 AST 表示，避免
+同一 Factor DSL 因运行时差异被误计为不同 trial。
+
+三种预注册机制在 fee=5bps、slippage=2bps、funding=0.5bps 下，train/valid 净收益和成本后
+edge 全部为负，原始 p 值均为 1.0；campaign 的 `representative_pass_count=0`、
+`capital_eligible=false`、holdout=`sealed_not_evaluated`。累计三个阶段 10 个唯一候选通过数为 0。
+当前主约束已经从“研究工厂读不到微观结构”转为“12 天样本过短、单 bar 换手成本高且没有正的
+开发段机制”，不能通过打开 holdout 或改阈值解决。
+
+签名 Operator 现场还暴露两项真实性缺陷：净空仓强平距离曾用 long 方向计算成负值；Gateway 与
+Execution 分进程时曾把实际存在的 trial guard 显示成未配置。提交
+`2c798eab13dedd6c65287d64ae46499d98492ce2` 已修复方向推断并让 Gateway 订阅 Redis/NATS guard
+signal cache。最终模拟 UI 显示 trial guard“监控中”、净空仓强平距离为正；这些修复只提高风险
+观测可信度，不改变候选全部失败、参数 readback 未接入和 live NO-GO 的结论。
 
 ## 27. 尚未通过本次静态审阅确认的运行事实
 
