@@ -160,6 +160,68 @@ class OkxBulkLinkClient:
             raise ValueError("okx_bulk_link_dates_must_be_aware")
         if end_date_inclusive < start_date:
             raise ValueError("okx_bulk_link_range_invalid")
+        # The public UI endpoint currently rejects ranges whose endpoint
+        # inclusive selection exceeds seven calendar dates (OKX code 50076).
+        # Split into non-overlapping seven-date chunks and verify the merged
+        # calendar below.
+        bodies: list[Mapping[str, Any]] = []
+        cursor = start_date
+        while cursor <= end_date_inclusive:
+            chunk_end = min(cursor + timedelta(days=6), end_date_inclusive)
+            bodies.append(
+                self._request_range(
+                    module=module,
+                    instrument_family=instrument_family,
+                    start_date=cursor,
+                    end_date_inclusive=chunk_end,
+                )
+            )
+            cursor = chunk_end + timedelta(days=1)
+            if cursor <= end_date_inclusive and self.request_interval_seconds:
+                time.sleep(self.request_interval_seconds)
+
+        links: list[dict[str, Any]] = []
+        for body in bodies:
+            details = body.get("data", {}).get("details", [])
+            if not isinstance(details, list):
+                raise RuntimeError("okx_bulk_link_details_invalid")
+            for detail in details:
+                groups = detail.get("groupDetails", []) if isinstance(detail, dict) else []
+                if not isinstance(groups, list):
+                    raise RuntimeError("okx_bulk_link_group_invalid")
+                for group in groups:
+                    if not isinstance(group, dict):
+                        raise RuntimeError("okx_bulk_link_item_invalid")
+                    filename = str(group.get("filename", ""))
+                    url = str(group.get("url", ""))
+                    _validate_download_identity(filename, url)
+                    match = _DATE_IN_FILE.search(filename)
+                    if match is None:
+                        raise RuntimeError("okx_bulk_link_filename_date_missing")
+                    links.append(
+                        {
+                            "filename": filename,
+                            "date": match.group(1),
+                            "size_mb": str(group.get("sizeMB", "")),
+                            "url": url,
+                        }
+                    )
+        expected_days = (end_date_inclusive.date() - start_date.date()).days + 1
+        by_date = {item["date"]: item for item in links}
+        if len(by_date) != len(links):
+            raise RuntimeError("okx_bulk_link_duplicate_date")
+        if len(by_date) != expected_days:
+            raise RuntimeError("okx_bulk_link_date_coverage_incomplete")
+        return [by_date[key] for key in sorted(by_date)]
+
+    def _request_range(
+        self,
+        *,
+        module: str,
+        instrument_family: str,
+        start_date: datetime,
+        end_date_inclusive: datetime,
+    ) -> Mapping[str, Any]:
         payload = {
             "module": module,
             "instType": "SWAP",
@@ -193,38 +255,7 @@ class OkxBulkLinkClient:
             raise RuntimeError("okx_bulk_link_request_rejected")
         if body is None:
             raise RuntimeError("okx_bulk_link_response_missing")
-        details = body.get("data", {}).get("details", [])
-        if not isinstance(details, list):
-            raise RuntimeError("okx_bulk_link_details_invalid")
-        links: list[dict[str, Any]] = []
-        for detail in details:
-            groups = detail.get("groupDetails", []) if isinstance(detail, dict) else []
-            if not isinstance(groups, list):
-                raise RuntimeError("okx_bulk_link_group_invalid")
-            for group in groups:
-                if not isinstance(group, dict):
-                    raise RuntimeError("okx_bulk_link_item_invalid")
-                filename = str(group.get("filename", ""))
-                url = str(group.get("url", ""))
-                _validate_download_identity(filename, url)
-                match = _DATE_IN_FILE.search(filename)
-                if match is None:
-                    raise RuntimeError("okx_bulk_link_filename_date_missing")
-                links.append(
-                    {
-                        "filename": filename,
-                        "date": match.group(1),
-                        "size_mb": str(group.get("sizeMB", "")),
-                        "url": url,
-                    }
-                )
-        expected_days = (end_date_inclusive.date() - start_date.date()).days + 1
-        by_date = {item["date"]: item for item in links}
-        if len(by_date) != len(links):
-            raise RuntimeError("okx_bulk_link_duplicate_date")
-        if len(by_date) != expected_days:
-            raise RuntimeError("okx_bulk_link_date_coverage_incomplete")
-        return [by_date[key] for key in sorted(by_date)]
+        return body
 
 
 def build_campaign_manifest(

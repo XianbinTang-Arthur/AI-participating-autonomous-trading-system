@@ -219,6 +219,48 @@ def test_bulk_link_resolution_rejects_duplicate_calendar_date() -> None:
             )
 
 
+def test_bulk_link_resolution_chunks_ranges_at_official_seven_day_limit() -> None:
+    start = datetime(2026, 8, 1, tzinfo=UTC)
+    observed_ranges: list[tuple[datetime, datetime]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        begin = datetime.fromtimestamp(payload["dateQuery"]["begin"] / 1000, tz=UTC)
+        end = datetime.fromtimestamp(payload["dateQuery"]["end"] / 1000, tz=UTC)
+        observed_ranges.append((begin, end))
+        groups = []
+        cursor = begin
+        while cursor <= end:
+            day = cursor.date().isoformat()
+            filename = f"BTC-USDT-SWAP-trades-{day}.zip"
+            groups.append(
+                {
+                    "filename": filename,
+                    "url": f"https://static.okx.com/cdn/{filename}",
+                }
+            )
+            cursor += timedelta(days=1)
+        return httpx.Response(
+            200,
+            json={"code": "0", "data": {"details": [{"groupDetails": groups}]}},
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        links = OkxBulkLinkClient(client, request_interval_seconds=0).resolve(
+            module="1",
+            instrument_family="BTC-USDT",
+            start_date=start,
+            end_date_inclusive=start + timedelta(days=9),
+        )
+
+    assert observed_ranges == [
+        (start, start + timedelta(days=6)),
+        (start + timedelta(days=7), start + timedelta(days=9)),
+    ]
+    assert len(links) == 10
+    assert len({item["date"] for item in links}) == 10
+
+
 def test_manifest_validation_detects_material_tampering() -> None:
     manifest = _one_day_manifest()
     manifest["symbol"] = "ETH-USDT-SWAP"
