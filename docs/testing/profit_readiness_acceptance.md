@@ -1,7 +1,7 @@
 # 收益可信度整改验收矩阵
 
 > 文档状态：现行测试说明
-> 最后核对：2026-08-26（实现基线 `fe5596fd5ee4`；derivatives generation `fe5596fd5ee4-20260826T151737Z-392-3966`；旧 generation 仅作历史证据）
+> 最后核对：2026-08-26（实现基线 `314adc6e8f17`；derivatives generation `314adc6e8f17-20260826T193656Z-763-10457`；旧 generation 仅作历史证据）
 > 边界：本文定义可执行验收，不把未运行的项目标记为通过。
 
 | 层级 | 验收项 | 通过条件 | 失败/未知处理 |
@@ -34,37 +34,39 @@
 
 ## 当前现场验收快照（非持续状态证明）
 
-下列结论只对应 2026-08-26 实现基线 `fe5596fd5ee4` 和 deployment generation
-`fe5596fd5ee4-20260826T151737Z-392-3966`；它们不是持续状态证明：
+下列结论只对应 2026-08-26 实现基线 `314adc6e8f17` 和 deployment generation
+`314adc6e8f17-20260826T193656Z-763-10457`；它们不是持续状态证明：
 
-- WSL2 规定路径 `~/aats-venv` 已恢复为 Python 3.12.14，uv 0.12.5 发布资产 SHA-256 与 Linux
-  hash lock 均已验证；`aats`、`psycopg`、`pyarrow`、`pytest` 和 `SQLAlchemy` 可导入。Stage 18
-  在隔离 PostgreSQL 16 上前向、幂等、回滚、修复和约束验证 `3 passed`；
-- Ruff 全量通过；最终完整单元回归为 `4794 passed, 30 skipped, 94 subtests passed`；runtime
-  47、CI 41、外部镜像 9 项 lock contract 通过；
+- WSL2 规定路径 `~/aats-venv` 为 Python 3.12.14；依赖锁验证通过。Stage 18 隔离迁移与归档恢复
+  集成共 `4 passed in 19.91s`；目标库真实 BBO 分区另恢复 1,064 行，SHA、行数与时间边界一致；
+- 实现 `314adc6e` 与本轮文档工作区的完整单元回归为
+  `4814 passed, 30 skipped, 94 subtests passed in 122.00s`；首次运行只因系统 `%TEMP%` 权限失败，
+  改用项目内隔离 `--basetemp` 后完整通过；
 - 标准部署 evidence 为
-  `/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260826T151904172220Z-derivatives-fe5596fd5ee4.json`。
-  Gateway、Market、Decision、Execution、RDP daemon 和两个 collector 均为 `healthy`，重启计数为
-  0；`/healthz` 为 `status=ok`，最近 10 分钟应用日志未匹配异常堆栈、数据库异常或非零进程退出；
+  `/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260826T193838939451Z-derivatives-314adc6e8f17.json`。
+  七个核心应用/采集容器最终均为 `healthy`；受控 DB outage 后 PostgreSQL 重启 1 次，其余核心容器
+  重启计数为 0，Gateway 的 phase1 shadow loop 在约 7 秒内记录 recovered，`/healthz` 为 HTTP 200；
 - v5 覆盖 artifact 为
-  `/app/artifacts/data_governance/coverage/coverage_20260826T151922950145Z.json`，SHA-256
-  `53672eb8f548cc41472d1082d5e793b4d721b0238bedc6a2f7bdee55d96b3607`。98 个 dataset 中
-  `missing=47`、`observed=26`、`observed_with_quality_issues=23`、`unbounded_not_scanned=2`、
-  `audit_failed=0`；恢复分类为 `cannot_recover=1`、`deterministic_rebuild=22`、
-  `official_backfill=26`、`prospective_only=21`；
-- 完整 RDP `task_235c5e4eb2a7` / `run_ff3e022b420444f7` 在约 7 秒内开始并完成 10 个步骤。
-  当前 Phase 3 `20260826_150925_f175fd1b`、Phase 4 `20260826_150933_12ddbb91` 与 decision round
-  `20260826_150943_630c50bf` 严格绑定，不再读取旧 JSON 快照；
-- 运行结论仍是 `blocked_by_attribution` / `not_ready_attribution_issue`。四个策略/周期组合均为
-  `aligned=0`、`live_only=0`，总计 `unattributable=5398`；系统对四个组合均给出 `pause`，8 条
-  recommendation 均未 approve、release 或 apply；
-- kill switch 保持 `HALTED`，`resume_authorized=false`。本轮没有启动 live profile、提交真实订单、
-  打开 holdout 或应用参数。服务重启使既有浏览器会话失效，签名页面视觉复核需重新登录后补做。
+  `/app/artifacts/data_governance/coverage/coverage_20260826T194622424432Z.json`，SHA-256
+  `77ed0bcec772b2f5c73c8e396fad3f6ae85286fbe0f31297520f21e01c160ea8`。98 个 dataset 中
+  `missing=35`、`observed=37`、`observed_with_quality_issues=24`、
+  `present_unbounded_not_scanned=2`、`audit_failed=0`；
+- 一日 OHLCV、funding、mark proxy、4,092,576 笔官方 trade 与 6,684,186 条官方 L2 事件已导入并形成
+  `ELIGIBLE` bundle；L2/trade-flow Silver 重建指纹确定且重复执行幂等；Gold 15m/1H 为 96/24 行。
+  这不证明历史 OI/强平或当时 AATS live capture；
+- 完整 RDP `task_274d8e5f2470` / `run_7dd43c671b064959` 约 6 秒开始并完成 10/10 步骤。Phase 3
+  `20260826_194312_bf9a4924`、Phase 4 `20260826_194320_fa86acfa` 与 decision round
+  `20260826_194329_bf4d89f6` 绑定；
+- 运行结论仍是 `blocked_by_attribution` / `not_ready_attribution_issue`。四个组合均为 `aligned=0`、
+  `live_only=0`，5,398 条旧 live 事实缺 lineage；4 条参数升级建议和 4 条 pause 建议均为 draft，
+  未 approve、release 或 apply；
+- 本轮没有启动 live profile、提交真实订单、打开 holdout、读取账户凭证或应用参数。浏览器因服务重启
+  被重定向到登录页，签名页面视觉复核需操作员重新登录。
 
-因此，当前工程链路可以运行并能对不合格数据/归因正确失败关闭，但距离收益可信仍有实质缺口：
-官方 1 日样本及 30/90 日窗未验收、历史 L2 来源未提供、47 个 dataset 缺失、23 个 dataset 有质量
-问题、精确归因为 0、归档恢复/DB outage/重连等故障矩阵未完成。production/trading readiness 固定为
-NO-GO；流程退出码 0 不能解释为策略通过。
+因此，当前工程链路、一日官方数据、归档恢复和主要故障矩阵已经可以真实运行并失败关闭，但收益可信
+仍是 NO-GO：30 日 source-aware 派生与签名 UI 门未通过，90 日容量不安全，精确归因为 0，账户执行事实
+未获只读授权，campaign、L2/paper calibration、一次性 holdout 和前瞻模拟未完成。流程退出码 0 不能解释
+为策略通过。
 
 ### 2026-08-25 上一代快照（历史证据）
 

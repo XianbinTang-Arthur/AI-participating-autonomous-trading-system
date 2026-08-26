@@ -1,7 +1,7 @@
 # RDP 历史数据恢复与持续采集运行手册
 
 > 文档状态：现行操作说明
-> 最后核对：2026-08-26（实现基线 `fe5596fd5ee4`；derivatives generation `fe5596fd5ee4-20260826T151737Z-392-3966`）
+> 最后核对：2026-08-26（实现基线 `314adc6e8f17`；derivatives generation `314adc6e8f17-20260826T193656Z-763-10457`）
 > 核对范围：当前代码、迁移、CLI、单元契约及本次受控 derivatives 模拟部署；数据库覆盖、磁盘容量、网络和 collector 连续性会漂移，执行时必须重新验证
 > 安全边界：只允许 RDP research/governance 数据库与 `derivatives` 模拟栈；禁止 live profile、真实订单和参数 apply
 
@@ -71,7 +71,7 @@ cd ~/aats
 
 任何 `audit_failed` 必须先修复审计本身，不能直接进入导入或重建。
 
-2026-08-26 的最后一次 v5 现场基线为 `coverage_20260826T151922950145Z.json`（SHA-256 `53672eb8f548cc41472d1082d5e793b4d721b0238bedc6a2f7bdee55d96b3607`）：`audit_failed=0`，但仍有 47 个 dataset 缺失、23 个 dataset 存在质量问题。该快照用于审计追溯，不得代替下一次操作前的新审计。
+2026-08-26 的最后一次 v5 现场基线为 `coverage_20260826T194622424432Z.json`（SHA-256 `77ed0bcec772b2f5c73c8e396fad3f6ae85286fbe0f31297520f21e01c160ea8`）：`audit_failed=0`，但仍有 35 个 dataset 缺失、24 个 dataset 存在质量问题。恢复矩阵的 59 条分类是来源路线，不是“已补齐”。该快照用于审计追溯，不得代替下一次操作前的新审计。
 
 ## 5. 第二步：先归档到期 live 原始事实
 
@@ -104,6 +104,21 @@ retention 默认 dry-run：
 
 验证对任一分区失败时，整个 retention 事务删除 0 行。
 
+### 5.1 隔离恢复演练
+
+任一已归档 Parquet 都必须先在临时表中证明可恢复，不能直接覆盖热表：
+
+```bash
+~/aats-venv/bin/python scripts/rdp_verify_archive_restore.py \
+  --parquet /absolute/path/part-00000.parquet
+~/aats-venv/bin/python scripts/rdp_verify_archive_restore.py \
+  --parquet /absolute/path/part-00000.parquet --confirm
+```
+
+恢复器校验 manifest、SHA-256、scope、schema、行数和最早/最晚事件时间，只写事务内 `TEMP TABLE`，跳过数据库 generated column，永久表写入数固定为 0。2026-08-26 的现场演练对 `bronze.market_orderbook_bbo` UTC 2026-08-24 分区恢复 1,064 行，Parquet SHA-256 为 `cb3f1ce8e3f53e76aa08badbcd6132b62535b85e34809d125f7bc2009565cfc2`，行数与边界一致。
+
+用高于当前可用空间的 `minimum_free_bytes` 做安全门演练时，必须返回 `archive_disk_free_below_safety_floor` 且不发布 artifact。不要通过降低门槛或先删热数据解决容量告警。
+
 ## 6. 第三步：官方历史数据分级导入
 
 统一命令默认只输出计划；实际写入必须同时使用 `--apply --confirm`。时间必须携带 offset，窗口统一为 `[start, end)` UTC，raw 目录必须是绝对路径。
@@ -123,10 +138,14 @@ retention 默认 dry-run：
 ### 6.2 官方文件：trade 或 L2
 
 ```bash
-~/aats-venv/bin/python scripts/rdp_import_official_history.py l2-file --symbol BTC-USDT-SWAP --start 2026-08-01T00:00:00Z --end 2026-08-02T00:00:00Z --input /absolute/path/official-l2-file.zip --raw-archive-dir /root/aats-data/rdp-raw
+~/aats-venv/bin/python scripts/rdp_import_official_history.py l2-file --symbol BTC-USDT-SWAP --start 2026-08-01T00:00:00Z --end 2026-08-02T00:00:00Z --input /absolute/path/official-l2-file.tar.gz --raw-archive-dir /root/aats/artifacts/data_governance/raw/official_history
 ```
 
 L2 每次最多一个 UTC 日。文件先流式复制到不可变 raw archive，再解析 sequence/action/bids/asks；因果重采样只使用 `source_state_ts <= sample_ts` 的状态，连续缺口压缩成 range，不能跨 gap forward-fill。
+
+官方批量文件的文件名不是时间语义证据。2026-08-26 现场样本表明：官方 trade 文件的“2026-08-24”覆盖 UTC+8 的该自然日，即 `[2026-08-23T16:00Z, 2026-08-24T16:00Z)`；同轮官方 L2 文件内事件则覆盖 `[2026-08-20T00:00Z, 2026-08-21T00:00Z)`。导入前必须读取首尾事件时间，确认半开窗口后再传 `--start/--end`；边界外仍有记录时导入器失败关闭，禁止只按文件名推算。
+
+大体积 L2 必须使用流式 tar member 读取、分批提交和 durable checkpoint。现场 567,605,859-byte L2 首次整块处理发生 OOM，失败 run 已保留；流式/checkpoint 修复后导入 6,684,186 条事件，并因果生成 86,400 条 BBO 1 Hz 与 172,800 条 books5 2 Hz。重复同一来源/窗口会复用持久断点，不得重新包装为另一份来源。
 
 L2 完整性证据必须按来源 schema 与数据日期解释：当前 OKX 订单簿协议以 `seqId`/`prevSeqId` 连续性为主；官方在 2026-06-23 起将 WebSocket 增量频道的 `checksum` 标为废弃并固定返回 `0`。因此，固定 `0` 既不能证明完整，也不能单独判失败；只有历史文件明确采用旧版非零 checksum 语义时才校验该字段。无论哪种版本，raw 文件/响应本身的 SHA-256 始终强制保留，且它与订单簿 payload checksum 不是同一概念。
 
@@ -138,7 +157,19 @@ L2 完整性证据必须按来源 schema 与数据日期解释：当前 OKX 订�
 
 只有 confirmed bar 会写入；缺失 bar 形成 gap。输出明确标记 proxy，不得满足 tick 级门。
 
-### 6.4 confirmed OHLCV 与 funding 深度回填
+### 6.4 2026-08-26 一日现场基线
+
+| 数据 | 合格 bundle | 关键证据 |
+| --- | --- | --- |
+| OHLCV 15m / 1H | `8e9ba5e5-1565-4d1b-9c5f-5f710508923e` / `ee44c1e0-9414-4912-849f-08c453f58982` | 96 / 24 confirmed bars |
+| Funding | `dd334050-a823-4485-9279-757d84ac246e` | 3 个实际 settlement，不假定固定 8 小时 |
+| Mark proxy 15m / 1H | `8bbe0e07-279f-45a4-aecd-0382e7e1dd0d` / `204a139d-c5fc-493a-82fe-932d39be7a15` | 96 / 24 confirmed proxy bars |
+| Official trades | `496ddbf4-b8a1-4d0d-9096-df4bb74ad4f9` | 4,092,576 行；raw SHA-256 `4669b6802033795fcccc98ba5d42b0ac7c0cad2f789892ae14485abef9b264fc` |
+| Official L2 | `26ba52a7-a411-467d-9475-fa1bf82fd7e7` | 6,684,186 事件；raw SHA-256 `58a4de062068067fc7a3ee227f4bc658fd95e0b08dd0364ada5d60c196952c8b` |
+
+这些 ID 只证明表中所列一日窗口。新窗口必须产生自己的 source、raw hash、gap、bundle 和 eligibility 证据。
+
+### 6.5 confirmed OHLCV 与 funding 深度回填
 
 旧入口保留兼容，但已接入 raw archive、重试、数据库检查点、gap 和 bundle：
 
@@ -177,6 +208,10 @@ funding 覆盖依据实际 `fundingTime`；脚本报告实际观察到的结算�
 
 operation key 绑定 bundle fingerprint、Git 和 transform version。同一输入重复运行返回既有成功证据；输入或来源发生变化必须形成新证据，不能改写旧 bundle。
 
+一日现场重建结果：trade bundle 读取 4,092,576 行、写入 96 条 15m Silver，输出 fingerprint `39e848f0ab70f8bbe9ee9bc98596ad68846de785a94afbc78850ea6295788607`；L2 bundle 读取 259,200 个因果采样、写入 96 条 15m Silver，输出 fingerprint `b015c65b3506445d101d330c8456b8bba1ffa62a5588668f2bdb1f3c5fee7c60`。二次执行均返回 `already_succeeded`。
+
+现有 candle→Gold builder 为一日 15m/1H 分别生成 96/24 行，并保留 candle/funding dataset version 与 build run；但旧 Gold 表没有历史 `bundle_id`，不能把它描述为“完整 source-aware bundle 重建”。历史 OI 与公共强平缺失也不能从 candle、trade 或 L2 推导。进入 30 日前，必须把所需 Gold、quality report 和 artifact index 与输入 bundle/source fingerprint 建立确定性关联，或明确把对应研究限制在现有可证明的输入域。
+
 ## 8. 第五步：持续采集和有效零
 
 `derivatives` 模拟部署会启动公共采集 daemon。微观结构频道是实际 `trades`、BBO/books5 及 OI/funding/mark；不是历史文档中的 `trades-all`。公共强平使用 `liquidation-orders` WebSocket，没有被当前实现信任的强平历史 REST 回填。
@@ -206,6 +241,8 @@ hourly reliability cycle 会把治理快照不可用、collector 陈旧/drop、�
 
 任何阶段都不得降低 raw SHA-256、适用版本的序列/完整性证据、gap、因果或来源门来换取更快完成。L2 文件或账户历史需要额外来源/只读授权时，保持 `awaiting_source`/`UNKNOWN`，不要改用第三方数据冒充生产真相。
 
+2026-08-26 一日实测约增加 8.10 GB 数据库与 0.592 GB raw；当前数据库为 37,456,927,767 bytes，文件系统可用 801,632,419,840 bytes。线性 30 日约 243 GB DB + 17.75 GB raw，容量上可容纳，但一日 L2 处理约 29 分钟，必须安排受监控的长变更窗口，并先通过签名 UI 与完整 source-aware 派生门。线性 90 日约 729 GB DB + 53 GB raw；叠加当前 224.48 GB 已用、备份、索引、WAL 和运行余量后不满足安全空间，当前结论为 NO-GO。该计算会漂移，不能作为未来永久批准。
+
 ## 11. 部署与验收
 
 代码必须先提交。Windows 到 WSL2 的唯一部署入口：
@@ -218,7 +255,7 @@ bash scripts/deploy.sh --profile derivatives --skip-commit
 
 完整 RDP 只可在模拟环境触发。recommendation 可以生成和审阅，但本手册不授权 apply；live attribution 或 execution reconciliation 缺只读事实时保持 NO-GO/UNKNOWN。
 
-最后一次完整模拟 RDP（`task_235c5e4eb2a7` / `run_ff3e022b420444f7`）在约 7 秒内开始、10 个步骤全部完成，但结果为 `blocked_by_attribution`：四个策略/周期组合的精确 replay/live 对齐均为 0，系统动作均为 `pause`。这证明立即调度与失败关闭生效，不构成研究通过或参数应用授权。
+最后一次完整模拟 RDP（`task_274d8e5f2470` / `run_7dd43c671b064959`）在约 6 秒内开始、10/10 步骤进入终态，但结果为 `blocked_by_attribution`：四个策略/周期组合的精确 replay/live 对齐均为 0，5,398 条旧 live 事实缺九个 lineage 字段；系统只生成 4 条 draft 参数升级建议与 4 条 draft pause 建议。没有 approve/release/apply/rollback。这证明立即调度与失败关闭生效，不构成研究通过或参数应用授权。
 
 ## 12. 故障恢复
 
@@ -234,9 +271,12 @@ bash scripts/deploy.sh --profile derivatives --skip-commit
 
 所有运行结论都必须记录时间、commit/profile、数据库脱敏指纹、operation/run/bundle id、输入窗口和实际验证范围。
 
+关键后台循环的错误审计通常与业务循环共用 PostgreSQL。实现 `314adc6e` 起，错误审计 sink 不可达不会终止受监督业务循环：成功进度仍停止推进并保持失败关闭；数据库恢复后的成功业务周期写入 recovery、刷新 progress deadline。现场 DB outage 中，Gateway 于 19:39:05Z 记录 `phase1_shadow_monitor` 的 `OperationalError`，19:39:12Z 自动记录 recovered，进程重启计数保持 0。若仍看到 `/healthz` 的 `critical_background_task_failed` 且对应 task 已结束，必须标准重新部署并排查新的未捕获异常，不能手工篡改健康状态。
+
 ## 13. 官方事实来源
 
-- [OKX API v5 文档](https://app.okx.com/docs-v5/en)：端点、分页参数、字段和 WebSocket 频道语义；
-- [OKX API v5 更新日志](https://app.okx.com/docs-v5/log_en/)：协议变更日期与 `checksum` 废弃状态。
+- [OKX Historical market data](https://www.okx.com/en-us/historical-data)：当前官方批量 trade 与 order book 下载入口；
+- [OKX API v5 文档](https://www.okx.com/docs-v5/en/)：端点、分页参数、字段和 WebSocket 频道语义；
+- [OKX API v5 更新日志](https://www.okx.com/docs-v5/log_en/)：协议变更日期与 `checksum` 废弃状态。
 
 外部接口会变化。每次新增来源、扩大历史窗口或升级 schema 前必须重新核对官方文档；本页的核对日期不是未来运行的永久证明。
