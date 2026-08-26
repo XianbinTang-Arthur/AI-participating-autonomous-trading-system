@@ -483,87 +483,95 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
             register_local_capture_source,
             verify_archive_restore_drill,
         )
-        from aats.data_platform.db import apply_rdp_migrations, get_engine
+        from aats.data_platform.db import apply_rdp_migrations, get_engine, reset_engine
         from aats.data_platform.jobs.run_registry import create_ingest_run
 
-        settings = ResearchPlatformSettings(
-            database_url=self.container.get_connection_url(driver="psycopg2"),
-            _env_file=None,
-        )
-        report = apply_rdp_migrations(settings)
-        self.assertTrue(report.ok, report.error_message)
-        engine = get_engine(settings)
-        factory = sessionmaker(bind=engine, expire_on_commit=False)
-        day = datetime(2026, 8, 20, tzinfo=timezone.utc)
-        symbol = "RESTORE-DRILL-SWAP"
-        with Session(engine) as session, session.begin():
-            source_id = register_local_capture_source(
-                session,
-                source_key=f"integration-archive-{uuid.uuid4()}",
-                table="bronze.market_trades",
-                schema_version="integration-v1",
-                timestamp_semantics="integration UTC trade timestamp",
+        assert PostgresContainer is not None
+        archive_container = PostgresContainer("postgres:16-alpine")
+        archive_container.start()
+        reset_engine()
+        try:
+            settings = ResearchPlatformSettings(
+                database_url=archive_container.get_connection_url(driver="psycopg2"),
+                _env_file=None,
             )
-            ingest_run_id = create_ingest_run(
-                session,
-                run_type="backfill",
-                dataset_domain="microstructure",
-                instrument_type="SWAP",
-                symbol=symbol,
-                trigger_mode="manual",
-            )
-            for index in range(2):
-                session.execute(
-                    text(
-                        "INSERT INTO bronze.market_trades "
-                        "(symbol, ts, trade_id, px, sz, side, raw_payload, ingest_run_id) "
-                        "VALUES (:symbol, :ts, :trade_id, 100, 1, 'buy', "
-                        "CAST(:payload AS jsonb), CAST(:ingest_run_id AS UUID))"
-                    ),
-                    {
-                        "symbol": symbol,
-                        "ts": day + timedelta(seconds=index),
-                        "trade_id": str(index),
-                        "payload": '{"source":"integration"}',
-                        "ingest_run_id": ingest_run_id,
-                    },
+            report = apply_rdp_migrations(settings)
+            self.assertTrue(report.ok, report.error_message)
+            engine = get_engine(settings)
+            factory = sessionmaker(bind=engine, expire_on_commit=False)
+            day = datetime(2026, 8, 20, tzinfo=timezone.utc)
+            symbol = "RESTORE-DRILL-SWAP"
+            with Session(engine) as session, session.begin():
+                source_id = register_local_capture_source(
+                    session,
+                    source_key=f"integration-archive-{uuid.uuid4()}",
+                    table="bronze.market_trades",
+                    schema_version="integration-v1",
+                    timestamp_semantics="integration UTC trade timestamp",
                 )
-        scope = ArchiveScope(
-            source_id=source_id,
-            dataset_name="bronze.market_trades",
-            table="bronze.market_trades",
-            symbol=symbol,
-            coverage_start=day,
-            coverage_end=day + timedelta(days=1),
-        )
-        with tempfile.TemporaryDirectory() as temporary:
-            artifact = archive_partition(
-                factory,
-                scope,
-                Path(temporary),
-                minimum_free_bytes=0,
-                batch_size=1,
+                ingest_run_id = create_ingest_run(
+                    session,
+                    run_type="backfill",
+                    dataset_domain="microstructure",
+                    instrument_type="SWAP",
+                    symbol=symbol,
+                    trigger_mode="manual",
+                )
+                for index in range(2):
+                    session.execute(
+                        text(
+                            "INSERT INTO bronze.market_trades "
+                            "(symbol, ts, trade_id, px, sz, side, raw_payload, ingest_run_id) "
+                            "VALUES (:symbol, :ts, :trade_id, 100, 1, 'buy', "
+                            "CAST(:payload AS jsonb), CAST(:ingest_run_id AS UUID))"
+                        ),
+                        {
+                            "symbol": symbol,
+                            "ts": day + timedelta(seconds=index),
+                            "trade_id": str(index),
+                            "payload": '{"source":"integration"}',
+                            "ingest_run_id": ingest_run_id,
+                        },
+                    )
+            scope = ArchiveScope(
+                source_id=source_id,
+                dataset_name="bronze.market_trades",
+                table="bronze.market_trades",
+                symbol=symbol,
+                coverage_start=day,
+                coverage_end=day + timedelta(days=1),
             )
-            restored = verify_archive_restore_drill(
-                factory,
-                scope,
-                Path(artifact.parquet_path),
-                expected_sha256=artifact.sha256,
-                expected_rows=artifact.row_count,
-                batch_size=1,
-            )
-        self.assertEqual(restored.row_count, 2)
-        self.assertEqual(restored.parquet_sha256, artifact.sha256)
-        self.assertEqual(restored.dataset_name, "bronze.market_trades")
-        with Session(engine) as session:
-            source_rows = session.execute(
-                text(
-                    "SELECT COUNT(*) FROM bronze.market_trades "
-                    "WHERE symbol = :symbol"
-                ),
-                {"symbol": symbol},
-            ).scalar_one()
-        self.assertEqual(source_rows, 2)
+            with tempfile.TemporaryDirectory() as temporary:
+                artifact = archive_partition(
+                    factory,
+                    scope,
+                    Path(temporary),
+                    minimum_free_bytes=0,
+                    batch_size=1,
+                )
+                restored = verify_archive_restore_drill(
+                    factory,
+                    scope,
+                    Path(artifact.parquet_path),
+                    expected_sha256=artifact.sha256,
+                    expected_rows=artifact.row_count,
+                    batch_size=1,
+                )
+            self.assertEqual(restored.row_count, 2)
+            self.assertEqual(restored.parquet_sha256, artifact.sha256)
+            self.assertEqual(restored.dataset_name, "bronze.market_trades")
+            with Session(engine) as session:
+                source_rows = session.execute(
+                    text(
+                        "SELECT COUNT(*) FROM bronze.market_trades "
+                        "WHERE symbol = :symbol"
+                    ),
+                    {"symbol": symbol},
+                ).scalar_one()
+            self.assertEqual(source_rows, 2)
+        finally:
+            reset_engine()
+            archive_container.stop()
 
 
 if __name__ == "__main__":
