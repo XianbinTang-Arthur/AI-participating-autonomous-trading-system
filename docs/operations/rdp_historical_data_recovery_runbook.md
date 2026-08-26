@@ -1,7 +1,7 @@
 # RDP 历史数据恢复与持续采集运行手册
 
 > 文档状态：现行操作说明
-> 最后核对：2026-08-26（实现基线 `314adc6e8f17`；derivatives generation `314adc6e8f17-20260826T193656Z-763-10457`）
+> 最后核对：2026-08-26（实现基线 `2b0eef957bde`；本基线尚待下文标准部署复验，上一已核验 derivatives generation 为 `314adc6e8f17-20260826T193656Z-763-10457`）
 > 核对范围：当前代码、迁移、CLI、单元契约及本次受控 derivatives 模拟部署；数据库覆盖、磁盘容量、网络和 collector 连续性会漂移，执行时必须重新验证
 > 安全边界：只允许 RDP research/governance 数据库与 `derivatives` 模拟栈；禁止 live profile、真实订单和参数 apply
 
@@ -55,7 +55,7 @@ Windows 静态检查仍使用：
 
 ## 4. 第一步：只读覆盖审计
 
-覆盖审计在 PostgreSQL `REPEATABLE READ, READ ONLY` 快照中读取全部 98 张当前 ORM 表；有时间列的表只扫描给定窗口，无时间列的表只读 planner estimate。数据库已用完全一致的主键/唯一约束禁止重复时，审计直接报告重复为 0，不再重复执行高成本分组扫描。它不会建表、补数或修改状态。
+Stage 19 后，覆盖审计在 PostgreSQL `REPEATABLE READ, READ ONLY` 快照中读取全部 101 张当前 ORM 表；有时间列的表只扫描给定窗口，无时间列的表只读 planner estimate。数据库已用完全一致的主键/唯一约束禁止重复时，审计直接报告重复为 0，不再重复执行高成本分组扫描。它不会建表、补数或修改状态。若目标库仍只显示 98 张，说明 Stage 19 尚未标准部署，不能运行多日 campaign。
 
 ```bash
 cd ~/aats
@@ -210,7 +210,21 @@ operation key 绑定 bundle fingerprint、Git 和 transform version。同一输�
 
 一日现场重建结果：trade bundle 读取 4,092,576 行、写入 96 条 15m Silver，输出 fingerprint `39e848f0ab70f8bbe9ee9bc98596ad68846de785a94afbc78850ea6295788607`；L2 bundle 读取 259,200 个因果采样、写入 96 条 15m Silver，输出 fingerprint `b015c65b3506445d101d330c8456b8bba1ffa62a5588668f2bdb1f3c5fee7c60`。二次执行均返回 `already_succeeded`。
 
-现有 candle→Gold builder 为一日 15m/1H 分别生成 96/24 行，并保留 candle/funding dataset version 与 build run；但旧 Gold 表没有历史 `bundle_id`，不能把它描述为“完整 source-aware bundle 重建”。历史 OI 与公共强平缺失也不能从 candle、trade 或 L2 推导。进入 30 日前，必须把所需 Gold、quality report 和 artifact index 与输入 bundle/source fingerprint 建立确定性关联，或明确把对应研究限制在现有可证明的输入域。
+Stage 19 新增 `meta.historical_research_artifacts` 与 `gold.historical_replay_bars`，不改写旧 Gold。新 builder 将 candle、funding、mark proxy、逐日 trade-flow Silver 和逐日 L2 Silver 的 bundle/source/output fingerprint 固化到同一版本化 artifact，并生成 quality report 与 artifact index。行指纹不含随机数据库 ID，因此同一输入、transform 与 Git 在干净数据库中可复现；恢复既有 `SUCCEEDED` artifact 时会重新聚合行指纹，内容被篡改或缺失即失败关闭。
+
+单独构建命令默认只输出计划；实际写入必须显式确认：
+
+```bash
+~/aats-venv/bin/python scripts/rdp_build_source_aware_gold.py \
+  --symbol BTC-USDT-SWAP --timeframe 15m \
+  --candle-bundle-id <uuid> --funding-bundle-id <uuid> \
+  --auxiliary-bundle-id <mark-uuid> \
+  --auxiliary-bundle-id <trade-uuid> \
+  --auxiliary-bundle-id <l2-uuid> \
+  --start 2026-08-20T00:00:00Z --end 2026-08-21T00:00:00Z
+```
+
+历史 OI 与公共强平缺失仍不能从 candle、trade、L2 或 mark proxy 推导；source-aware Gold 只证明 artifact 所列输入域，不扩大事实边界。
 
 ## 8. 第五步：持续采集和有效零
 
@@ -242,6 +256,44 @@ hourly reliability cycle 会把治理快照不可用、collector 陈旧/drop、�
 任何阶段都不得降低 raw SHA-256、适用版本的序列/完整性证据、gap、因果或来源门来换取更快完成。L2 文件或账户历史需要额外来源/只读授权时，保持 `awaiting_source`/`UNKNOWN`，不要改用第三方数据冒充生产真相。
 
 2026-08-26 一日实测约增加 8.10 GB 数据库与 0.592 GB raw；当前数据库为 37,456,927,767 bytes，文件系统可用 801,632,419,840 bytes。线性 30 日约 243 GB DB + 17.75 GB raw，容量上可容纳，但一日 L2 处理约 29 分钟，必须安排受监控的长变更窗口，并先通过签名 UI 与完整 source-aware 派生门。线性 90 日约 729 GB DB + 53 GB raw；叠加当前 224.48 GB 已用、备份、索引、WAL 和运行余量后不满足安全空间，当前结论为 NO-GO。该计算会漂移，不能作为未来永久批准。
+
+### 10.1 多日 campaign 的唯一执行顺序
+
+campaign 只调用公开市场数据，不访问账户私有接口、不启动 live profile，也不应用研究参数。计划时和执行前各做一次容量检查；计划、下载、每日导入、Silver 重建和 15m/1H Gold 均写 checkpoint。trade 的官方自然日按 UTC+8 分区，因此每个 UTC 日必须联合相邻两个官方文件，不能只按文件名猜测边界。
+
+以下示例覆盖 `[2026-07-22, 2026-08-21)` 30 个完整 UTC 日；执行时必须按官方可用日期重新确认：
+
+```bash
+cd ~/aats
+CAMPAIGN_ROOT=/root/aats-data/rdp-campaigns/btc-swap-20260722-30d
+~/aats-venv/bin/python scripts/rdp_plan_historical_campaign.py \
+  --symbol BTC-USDT-SWAP --start 2026-07-22 --days 30 \
+  --storage-root "$CAMPAIGN_ROOT" \
+  --manifest-output "$CAMPAIGN_ROOT/manifest.json"
+```
+
+确认容量报告、日期和目标目录后，再以相同参数加 `--apply --confirm` 登记 campaign。可先独立预下载，也可由 runner 按日下载：
+
+```bash
+~/aats-venv/bin/python scripts/rdp_download_historical_campaign.py \
+  --manifest "$CAMPAIGN_ROOT/manifest.json" \
+  --target-dir "$CAMPAIGN_ROOT/downloads" --apply --confirm
+
+~/aats-venv/bin/python scripts/rdp_run_historical_campaign.py \
+  --campaign-id <campaign-uuid> --storage-root "$CAMPAIGN_ROOT" \
+  --apply --confirm
+```
+
+中断后使用同一 campaign ID、同一存储目录并增加 `--resume-running`。已下载文件只有在文件和 `.sha256.json` 侧车同时存在且哈希/长度一致时才复用；孤立文件或侧车不会被覆盖，必须先由操作员隔离。已成功 Silver/Gold 的恢复路径会重算输出指纹，不只相信状态字段。
+
+90 日必须先做容量 dry-run；当前校准下应返回 `capacity_projection_exceeds_safe_free_bytes`，不得增加 `--apply --confirm`：
+
+```bash
+~/aats-venv/bin/python scripts/rdp_plan_historical_campaign.py \
+  --symbol BTC-USDT-SWAP --start 2026-05-23 --days 90 \
+  --storage-root /root/aats-data/rdp-campaigns/btc-swap-90d-blocked \
+  --manifest-output /root/aats-data/rdp-campaigns/btc-swap-90d-blocked/manifest.json
+```
 
 ## 11. 部署与验收
 
