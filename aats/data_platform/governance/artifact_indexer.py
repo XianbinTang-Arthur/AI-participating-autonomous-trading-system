@@ -22,7 +22,7 @@ log = logging.getLogger("governance.artifact_indexer")
 _PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent.parent
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Artifact Index: 构建并验证 artifact 索引",
     )
@@ -30,7 +30,7 @@ def main() -> int:
         "--validate", action="store_true",
         help="扫描 artifacts/ 目录，构建 artifact_index.json",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if not args.validate:
         parser.print_help()
@@ -38,6 +38,7 @@ def main() -> int:
 
     from .artifact_index import build_artifact_index
     from ._atomic_io import atomic_json_write
+    from .snapshot_db import SNAPSHOT_ARTIFACT_INDEX, save_governance_snapshot
 
     log.info("构建 artifact index...")
     index = build_artifact_index(_PROJECT_ROOT)
@@ -46,6 +47,12 @@ def main() -> int:
     gov_dir.mkdir(parents=True, exist_ok=True)
     out_path = gov_dir / "artifact_index.json"
     atomic_json_write(index, out_path)
+    if not save_governance_snapshot(
+        snapshot_type=SNAPSHOT_ARTIFACT_INDEX,
+        payload=index,
+    ):
+        log.error("Artifact index DB snapshot 写入失败；拒绝把文件副本标记为已发布")
+        return 1
 
     summary = index["summary"]
     log.info(

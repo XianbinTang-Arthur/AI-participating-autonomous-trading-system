@@ -14,6 +14,7 @@ from typing import Any
 from .parameter_registry import load_registry
 
 log = logging.getLogger(__name__)
+_PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent.parent
 
 
 # ── 检查项定义 ───────────────────────────────────────────────────────
@@ -377,9 +378,8 @@ def run_quality_monitor(project_root: pathlib.Path) -> dict[str, Any]:
 # ── CLI 入口 ───────────────────────────────────────────────────────
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> int:
     import argparse
-    import sys
 
     logging.basicConfig(
         level=logging.INFO,
@@ -388,21 +388,27 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Quality Monitor: 治理层质量巡检")
     parser.add_argument("--run", action="store_true", help="运行全部巡检")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if not args.run:
         parser.print_help()
-        sys.exit(2)
+        return 2
 
-    _project_root = pathlib.Path(__file__).resolve().parent.parent.parent.parent
-    result = run_quality_monitor(_project_root)
+    result = run_quality_monitor(_PROJECT_ROOT)
 
     from ._atomic_io import atomic_json_write
+    from .snapshot_db import SNAPSHOT_QUALITY_MONITOR, save_governance_snapshot
 
-    gov_dir = _project_root / "artifacts" / "governance"
+    gov_dir = _PROJECT_ROOT / "artifacts" / "governance"
     gov_dir.mkdir(parents=True, exist_ok=True)
     out_path = gov_dir / "quality_monitor_summary.json"
     atomic_json_write(result, out_path)
+    if not save_governance_snapshot(
+        snapshot_type=SNAPSHOT_QUALITY_MONITOR,
+        payload=result,
+    ):
+        log.error("Quality monitor DB snapshot 写入失败；拒绝使用陈旧数据库真源")
+        return 1
 
     health = result["summary"]["health"]
     log.info(
@@ -410,4 +416,8 @@ if __name__ == "__main__":
         health, result["summary"]["passed"], result["summary"]["total_checks"],
     )
     log.info("写入 -> %s", out_path)
-    sys.exit(0)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
