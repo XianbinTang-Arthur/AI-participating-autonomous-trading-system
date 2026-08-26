@@ -29,6 +29,11 @@ _COLLECTOR_MAX_FUTURE_SKEW_SECONDS = 5.0
 
 
 CommandRunner = Callable[[Sequence[str], Path | None], str]
+Clock = Callable[[], datetime]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _run_command(args: Sequence[str], cwd: Path | None = None) -> str:
@@ -70,7 +75,8 @@ def _collector_heartbeat_fact(
     name: str,
     *,
     run: CommandRunner,
-    now: datetime,
+    now: datetime | None = None,
+    clock: Clock = _utc_now,
 ) -> dict[str, object]:
     heartbeat_path = _COLLECTOR_HEARTBEATS[name]
     raw_epoch = run(("docker", "exec", name, "stat", "-c", "%Y", heartbeat_path), None)
@@ -80,7 +86,8 @@ def _collector_heartbeat_fact(
         heartbeat_at = datetime.fromtimestamp(int(raw_epoch), tz=timezone.utc)
     except (OverflowError, OSError, ValueError) as exc:
         raise RuntimeError(f"invalid_collector_heartbeat_epoch:{name}") from exc
-    raw_age_seconds = (now - heartbeat_at).total_seconds()
+    observed_at = now or clock()
+    raw_age_seconds = (observed_at - heartbeat_at).total_seconds()
     if raw_age_seconds < -_COLLECTOR_MAX_FUTURE_SKEW_SECONDS:
         raise RuntimeError(f"collector_heartbeat_in_future:{name}:{raw_age_seconds:.3f}")
     age_seconds = max(0.0, raw_age_seconds)
@@ -156,6 +163,7 @@ def build_evidence(
     required_containers: Sequence[str],
     run: CommandRunner = _run_command,
     generated_at: datetime | None = None,
+    clock: Clock = _utc_now,
 ) -> dict[str, object]:
     if profile not in _SIMULATION_PROFILES:
         raise ValueError("deployment_evidence_requires_simulation_profile")
@@ -178,10 +186,15 @@ def build_evidence(
     if not _IMAGE_RE.fullmatch(base_image_id):
         raise RuntimeError("invalid_base_image_id")
 
-    now = generated_at or datetime.now(timezone.utc)
+    now = generated_at or clock()
     container_facts = [_container_fact(name, run) for name in required_containers]
     collector_freshness = [
-        _collector_heartbeat_fact(name, run=run, now=now)
+        _collector_heartbeat_fact(
+            name,
+            run=run,
+            now=generated_at,
+            clock=clock,
+        )
         for name in required_containers
         if name in _COLLECTOR_HEARTBEATS
     ]

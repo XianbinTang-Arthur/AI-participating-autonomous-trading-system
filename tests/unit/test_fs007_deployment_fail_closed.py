@@ -237,6 +237,50 @@ def test_evidence_rejects_stale_or_future_collector_heartbeat() -> None:
         )
 
 
+def test_evidence_observes_heartbeat_after_reading_it() -> None:
+    module = _load_evidence_module()
+    started_at = datetime(2026, 8, 24, tzinfo=UTC)
+    heartbeat_at = started_at.replace(second=5)
+    observed_at = started_at.replace(second=6)
+    clock_values = iter((started_at, observed_at))
+    commit = "a" * 40
+    image_id = "sha256:" + "b" * 64
+
+    def clock() -> datetime:
+        return next(clock_values)
+
+    def fake_run(args: tuple[str, ...], _cwd: Path | None = None) -> str:
+        if args[:3] == ("git", "rev-parse", "HEAD"):
+            return commit
+        if args[:4] == ("docker", "image", "inspect", "aats-base:dev"):
+            return image_id
+        if "{{.State.Status}}" in args:
+            return "running"
+        if "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}" in args:
+            return "healthy"
+        if "{{.Image}}" in args:
+            return image_id
+        if args[:3] == ("docker", "exec", "aats-microstructure-collector"):
+            return str(int(heartbeat_at.timestamp()))
+        if "{{json .NetworkSettings.Ports}}" in args:
+            return json.dumps({"8001/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8001"}]})
+        raise AssertionError(args)
+
+    payload = module.build_evidence(
+        repo_root=REPO_ROOT,
+        profile="derivatives",
+        overlay="docker-compose.aats.derivatives.yml",
+        schema_job_status="passed",
+        runtime_readiness_generation=READINESS_GENERATION,
+        required_containers=("aats-gateway", "aats-microstructure-collector"),
+        run=fake_run,
+        clock=clock,
+    )
+
+    assert payload["generated_at"] == started_at.isoformat()
+    assert payload["collector_freshness"][0]["heartbeat_age_seconds"] == 1.0
+
+
 def test_evidence_writer_refuses_overwrite(tmp_path: Path) -> None:
     module = _load_evidence_module()
     payload = {

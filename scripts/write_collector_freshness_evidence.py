@@ -32,7 +32,7 @@ def main() -> int:
     now = datetime.now(timezone.utc)
     containers = [_container_fact(name, _run_command) for name in _COLLECTORS]
     freshness = [
-        _collector_heartbeat_fact(name, run=_run_command, now=now)
+        _collector_heartbeat_fact(name, run=_run_command)
         for name in _COLLECTORS
     ]
     payload = {
