@@ -1,8 +1,8 @@
 # RDP 2.0 运行可观测性纵向切片实施任务书
 
-> 文档状态：实现完成，待本地 derivatives 模拟栈部署验收
-> 最后核对：2026-08-25（代码基线 `0b58dbad49735a89c1f02d6f69f74e8341ec8680`）
-> 核对范围：当前 RDP 队列、daemon、workflow dispatcher、Operator API、Dashboard 快照与 RDP 前端
+> 文档状态：实现完成，已完成本地 derivatives 模拟栈部署验收
+> 最后核对：2026-08-25（首次部署提交 `f87df95cf43c88977bb5d95fa9f2024ae1808b7c`；后续验收热修以本文档所在 HEAD 为准）
+> 核对范围：当前 RDP 队列、daemon、workflow dispatcher、Operator API、Dashboard 快照、RDP 前端与登录后浏览器验收
 > 运行时边界：本文不证明当前研究结果有效、参数可发布或系统具备实盘交易资格
 
 ## 1. 业务目标与边界
@@ -176,8 +176,15 @@ Step 状态：
   `2 passed`；
 - JavaScript 语法检查：`app.js`、`rdp-actions.js`、`rdp-view.js`、
   `rdp-control-panel.js` 全部通过；
-- 尚未把未提交工作区部署到本地 derivatives 模拟栈，因此本文不声称浏览器页面
-  或当前运行容器已经加载本次代码，也不声称任何研究/收益结论。
+- 标准 `derivatives` 模拟部署已加载提交 `f87df95c`，部署证据状态为
+  `simulation_stack_healthy`；7 个必需应用容器均为 `running/healthy`，该证据明确
+  保持 `production_ready=false`、`trading_ready=false`；
+- 登录后浏览器已验证 RDP 运行中心、Run 详情展开和定向刷新；未点击“运行完整
+  RDP”、审批、发布、重新观察或回滚等写动作；
+- 浏览器验收发现并修正两处展示真实性问题：完成态 Run 不再被描述为“无执行
+  步骤”，`enabled_live` 也不再脱离当前环境误写为真实资金实盘状态；
+- 当前模拟运行能够证明页面和 Run 可观测链已加载，不证明研究结果有效、候选可
+  发布、真实资金链可用或系统具备盈利能力。
 
 ## 17. 后续阶段
 

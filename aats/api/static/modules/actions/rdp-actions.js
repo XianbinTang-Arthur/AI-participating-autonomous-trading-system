@@ -52,6 +52,12 @@ export function createRdpActionHandlers({
     const attempts = detail?.attempts || [];
     const steps = detail?.steps || [];
     const events = detail?.events || [];
+    const currentStepSummary = run.current_step_key
+      || (run.status === "queued"
+        ? "尚未开始执行"
+        : run.status === "running" || run.status === "cancellation_requested"
+          ? "等待执行步骤上报"
+          : "当前没有正在执行的步骤");
     const attemptRows = attempts.length
       ? attempts.map((attempt) => `
           <article class="rdp-workitem tone-${attempt.status === "done" ? "positive" : (attempt.status === "failed" ? "danger" : "warning")}">
@@ -84,7 +90,7 @@ export function createRdpActionHandlers({
       body: `
         <div class="kv-list">
           <div class="kv-row"><span class="kv-row__label">触发来源</span><strong class="kv-row__value">${escapeHtml(run.trigger_kind || "unknown")}</strong></div>
-          <div class="kv-row"><span class="kv-row__label">进度</span><strong class="kv-row__value">${escapeHtml(`${run.completed_steps || 0}/${run.total_steps || 0}`)}</strong><span class="meta-copy">${escapeHtml(run.current_step_key || "当前无执行步骤")}</span></div>
+          <div class="kv-row"><span class="kv-row__label">进度</span><strong class="kv-row__value">${escapeHtml(`${run.completed_steps || 0}/${run.total_steps || 0}`)}</strong><span class="meta-copy">${escapeHtml(currentStepSummary)}</span></div>
           <div class="kv-row"><span class="kv-row__label">开始 / 完成</span><strong class="kv-row__value">${escapeHtml(formatRunTime(run.started_at))}</strong><span class="meta-copy">${escapeHtml(formatRunTime(run.finished_at))}</span></div>
         </div>
         ${run.error_summary ? `<div class="notice tone-danger">${escapeHtml(run.error_summary)}</div>` : ""}

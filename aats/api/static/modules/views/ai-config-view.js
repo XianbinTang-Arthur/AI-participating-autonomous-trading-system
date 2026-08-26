@@ -518,8 +518,8 @@ function executionShadowState(mode) {
   const normalized = String(mode || "disabled").trim().toLowerCase();
   if (normalized === "enabled_live") {
     return {
-      value: "已进入受限实盘",
-      meta: "AI 执行建议会在保护边界内参与真实执行",
+      value: "已接入当前执行链",
+      meta: "AI 执行建议会在当前环境的保护边界内影响执行参数；模拟盘或实盘由运行模式和执行后端另行决定",
       tone: "warning",
     };
   }

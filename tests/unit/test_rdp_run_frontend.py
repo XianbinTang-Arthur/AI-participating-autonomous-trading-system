@@ -141,9 +141,15 @@ const handlers = createRdpActionHandlers({
   requestJson: async (path, options = {}) => {
     requests.push({ path, method: options.method || 'GET' });
     return {
-      run: { run_id: 'run_123', workflow: 'research_cycle', status: 'failed' },
+      run: {
+        run_id: 'run_123',
+        workflow: 'research_cycle',
+        status: 'succeeded',
+        completed_steps: 1,
+        total_steps: 1,
+      },
       attempts: [],
-      steps: [],
+      steps: [{ step_key: 'research_cycle', status: 'succeeded', attempt_no: 1 }],
       events: [],
     };
   },
@@ -157,6 +163,9 @@ await handlers['rdp-retry-run']('run_123');
 console.log(JSON.stringify({
   paths: requests.map((item) => `${item.method} ${item.path}`),
   drawerOpened: drawers[0]?.title === 'run_123',
+  terminalStepCopyIsTruthful: drawers[0]?.body.includes('当前没有正在执行的步骤')
+    && !drawers[0]?.body.includes('当前无执行步骤')
+    && drawers[0]?.body.includes('research_cycle'),
   targetedRefreshes: refreshed.every((panels) => panels.length === 1 && panels[0] === 'rdpRuns'),
 }));
 """
@@ -165,4 +174,5 @@ console.log(JSON.stringify({
     assert '"POST /rdp/v2/runs/run_123/cancel"' in output
     assert '"POST /rdp/v2/runs/run_123/retry"' in output
     assert '"drawerOpened":true' in output
+    assert '"terminalStepCopyIsTruthful":true' in output
     assert '"targetedRefreshes":true' in output

@@ -735,13 +735,13 @@ function executionSuggestionRows(summary = {}) {
     [
       "翻译器状态",
       humanState(summary.status || "absent"),
-      latest.applied_to_live_execution ? "已进入受限实盘" : "当前不会改写真实下单",
+      latest.applied_to_live_execution ? "已应用到当前执行链" : "当前不会改写下单参数",
     ],
     [
-      "实盘应用",
-      latest.applied_to_live_execution ? "已受限进入实盘" : "当前没有进入实盘",
+      "执行应用",
+      latest.applied_to_live_execution ? "已受限应用" : "当前没有应用",
       latest.applied_to_live_execution
-        ? localizeList(latest.applied_live_fields, "当前没有额外实盘落地字段说明。")
+        ? localizeList(latest.applied_live_fields, "当前没有额外执行字段说明。")
         : humanError(latest.live_translation_fallback_reason),
     ],
     [
@@ -765,7 +765,7 @@ function executionSuggestionRows(summary = {}) {
         ? `${humanState(preview.execution_style || "not_requested")} / ${humanState(preview.order_type || "not_requested")}`
         : "当前没有新的翻译预览",
       previewActive
-        ? `${textOrFallback(preview.time_in_force, "时效待确认")} / 价格偏移 ${basisPoints(preview.limit_offset_bps, 2)} / 实盘限价 ${formatNumber(summary.live_limit_price ?? 0, 2)}`
+        ? `${textOrFallback(preview.time_in_force, "时效待确认")} / 价格偏移 ${basisPoints(preview.limit_offset_bps, 2)} / 下单限价 ${formatNumber(summary.live_limit_price ?? 0, 2)}`
         : "当前没有新的执行层 shadow 预演结果。",
     ],
     [
