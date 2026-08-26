@@ -119,6 +119,8 @@ RUN mkdir -p \
         /app/artifacts/decision_rounds \
         /app/artifacts/decision_system \
         /app/artifacts/operations \
+        /app/artifacts/operations/workflow_runs \
+        /app/artifacts/operations/alerts \
     && chown -R aats:aats /app
 
 USER aats

@@ -107,3 +107,54 @@ def test_scheduled_workflow_marker_propagates_pipeline_business_result(
     )
     assert payload["research_outcome"] == "blocked_by_attribution"
     assert payload["decision_round_id"] == "round_1"
+
+
+def test_scheduled_workflow_marker_propagates_direct_decision_result(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        rdp_run_scheduled_workflow,
+        "parse_args",
+        lambda: SimpleNamespace(
+            workflow="decision_cycle",
+            list=False,
+            dry_run=False,
+            no_stop_on_failure=False,
+        ),
+    )
+    monkeypatch.setattr(
+        workflow_dispatcher,
+        "run_workflow",
+        lambda *_args, **_kwargs: {
+            "run_id": "workflow_2",
+            "workflow": "decision_cycle",
+            "overall_status": "success",
+            "succeeded": 1,
+            "failed": 0,
+            "skipped": 0,
+            "tasks": [
+                {
+                    "name": "decision_round",
+                    "status": "success",
+                    "decision_result": {
+                        "research_outcome": "blocked_by_attribution",
+                        "round_id": "round_2",
+                        "readiness": "not_ready_attribution_issue",
+                    },
+                }
+            ],
+        },
+    )
+
+    assert rdp_run_scheduled_workflow.main() == 0
+    marker = next(
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith(rdp_run_scheduled_workflow._WORKFLOW_RESULT_PREFIX)
+    )
+    payload = json.loads(
+        marker.removeprefix(rdp_run_scheduled_workflow._WORKFLOW_RESULT_PREFIX),
+    )
+    assert payload["research_outcome"] == "blocked_by_attribution"
+    assert payload["decision_round_id"] == "round_2"

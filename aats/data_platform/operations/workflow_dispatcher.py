@@ -33,6 +33,7 @@ log = logging.getLogger(__name__)
 
 _WORKFLOW_CONFIG_DIR = "configs/rdp_workflows"
 _PIPELINE_RESULT_PREFIX = "RDP_PIPELINE_RESULT_JSON="
+_DECISION_RESULT_PREFIX = "RDP_DECISION_RESULT_JSON="
 _EXCEPTION_LINE_RE = re.compile(
     r"(?P<summary>[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception):\s+.+)$",
 )
@@ -330,6 +331,9 @@ def _run_task(
         pipeline_result = _extract_json_marker(combined_output, _PIPELINE_RESULT_PREFIX)
         if pipeline_result is not None:
             result["pipeline_result"] = pipeline_result
+        decision_result = _extract_json_marker(combined_output, _DECISION_RESULT_PREFIX)
+        if decision_result is not None:
+            result["decision_result"] = decision_result
         if proc.returncode != 0:
             first_failure = (pipeline_result or {}).get("first_failure")
             if isinstance(first_failure, dict):

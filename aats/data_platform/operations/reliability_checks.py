@@ -68,25 +68,31 @@ def check_quality_monitor_exists(root: Path) -> ReliabilityCheckResult:
 
 
 def check_active_decisions_exists(root: Path) -> ReliabilityCheckResult:
-    """检查 active_decisions.json 是否存在."""
-    fp = root / "artifacts" / "decision_system" / "active_decisions.json"
-    if not fp.exists():
-        return ReliabilityCheckResult(
-            name="active_decisions_exists",
-            category="decision",
-            passed=False,
-            severity="warning",
-            detail="active_decisions.json not found",
-        )
+    """检查 DB-first active decision registry 是否可读取."""
+    from aats.data_platform.decision_system.recommendation_registry import (
+        load_active_decision_registry,
+    )
+
+    fp = root / "artifacts" / "decision_system" / "active_decision_registry.json"
     try:
-        data = json.loads(fp.read_text(encoding="utf-8"))
+        data = load_active_decision_registry(fp)
         decisions = data.get("decisions", [])
+        if not isinstance(decisions, list):
+            raise ValueError("decisions must be a list")
+        if not decisions:
+            return ReliabilityCheckResult(
+                name="active_decisions_exists",
+                category="decision",
+                passed=False,
+                severity="warning",
+                detail="active decision registry contains no decisions",
+            )
         return ReliabilityCheckResult(
             name="active_decisions_exists",
             category="decision",
             passed=True,
             severity="info",
-            detail=f"active_decisions.json has {len(decisions)} decisions",
+            detail=f"active decision registry has {len(decisions)} decisions",
         )
     except Exception as e:
         return ReliabilityCheckResult(
@@ -94,7 +100,7 @@ def check_active_decisions_exists(root: Path) -> ReliabilityCheckResult:
             category="decision",
             passed=False,
             severity="warning",
-            detail=f"active_decisions.json parse error: {e}",
+            detail=f"active decision registry unavailable: {e}",
         )
 
 

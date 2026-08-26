@@ -144,19 +144,26 @@ def main() -> int:
         "failure_class": report.get("failure_class"),
         "first_failure": report.get("first_failure"),
     }
-    pipeline_result = next(
+    business_result = next(
         (
-            task.get("pipeline_result")
+            task.get("pipeline_result") or task.get("decision_result")
             for task in report.get("tasks", [])
-            if isinstance(task, dict) and isinstance(task.get("pipeline_result"), dict)
+            if isinstance(task, dict)
+            and isinstance(
+                task.get("pipeline_result") or task.get("decision_result"),
+                dict,
+            )
         ),
         {},
     )
-    if pipeline_result:
+    if business_result:
         marker_payload.update({
-            "research_outcome": pipeline_result.get("research_outcome", "unknown"),
-            "decision_round_id": pipeline_result.get("decision_round_id"),
-            "readiness": pipeline_result.get("readiness"),
+            "research_outcome": business_result.get("research_outcome", "unknown"),
+            "decision_round_id": (
+                business_result.get("decision_round_id")
+                or business_result.get("round_id")
+            ),
+            "readiness": business_result.get("readiness"),
         })
     print(
         _WORKFLOW_RESULT_PREFIX

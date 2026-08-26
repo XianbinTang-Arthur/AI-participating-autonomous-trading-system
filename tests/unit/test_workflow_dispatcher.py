@@ -156,6 +156,39 @@ def test_workflow_dispatcher_propagates_pipeline_warning(tmp_path: Path) -> None
     assert "部分阶段" in report["error_summary"]
 
 
+def test_workflow_dispatcher_extracts_direct_decision_result(tmp_path: Path) -> None:
+    script = tmp_path / "decision.py"
+    script.write_text(
+        "print('Phase 6 Decision Round completed')\n"
+        "print('RDP_DECISION_RESULT_JSON={\"round_id\":\"round_1\","
+        "\"research_outcome\":\"blocked_by_attribution\"}')\n",
+        encoding="utf-8",
+    )
+    _write_json(
+        tmp_path / "configs" / "rdp_workflows" / "demo.json",
+        {
+            "workflow": "demo",
+            "tasks": [
+                {
+                    "name": "decision_round",
+                    "command": f"python {script}",
+                    "enabled": True,
+                    "allow_failure": False,
+                    "success_markers": ["Phase 6 Decision Round completed"],
+                },
+            ],
+        },
+    )
+
+    report = run_workflow(tmp_path, "demo")
+
+    assert report["overall_status"] == "success"
+    assert report["tasks"][0]["decision_result"] == {
+        "round_id": "round_1",
+        "research_outcome": "blocked_by_attribution",
+    }
+
+
 def test_workflow_dispatcher_extracts_first_pipeline_traceback_summary(
     tmp_path: Path,
 ) -> None:
