@@ -165,15 +165,23 @@ check_log "backup_postgres"  "${LOG_DIR}/backup.log"            2400    # 40min 
 echo ""
 log "[磁盘]"
 
-backup_dir="${AATS_ROOT}/backups/wsl2-postgres"
+backup_dir="${AATS_BACKUP_DIR:-${AATS_ROOT}/backups/wsl2-postgres}"
+backup_database="${POSTGRES_DB:-aats}"
 if [ -d "$backup_dir" ]; then
-    backup_count=$(find "$backup_dir" -name 'aats_*.dump' -type f 2>/dev/null | wc -l)
-    latest_backup=$(ls -t "$backup_dir"/aats_*.dump 2>/dev/null | head -1)
+    backup_count=$(find "$backup_dir" -name "${backup_database}_*.dump" -type f 2>/dev/null | wc -l)
+    latest_backup=$(find "$backup_dir" -name "${backup_database}_*.dump" -type f -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
     if [ -n "$latest_backup" ]; then
         bk_size=$(du -h "$latest_backup" | cut -f1)
         bk_mtime=$(stat -c %Y "$latest_backup")
         bk_age=$(human_age $((NOW - bk_mtime)))
-        ok "Postgres 备份: ${backup_count} 个, 最新 ${bk_age} 前 (${bk_size})"
+        if [ -f "${latest_backup}.sha256" ] && (
+            cd "$(dirname "$latest_backup")" &&
+            sha256sum -c "$(basename "${latest_backup}").sha256" >/dev/null 2>&1
+        ); then
+            ok "Postgres 备份: db=${backup_database}, ${backup_count} 个, 最新 ${bk_age} 前 (${bk_size})"
+        else
+            warn "Postgres 最新备份缺少或未通过 SHA-256: ${latest_backup}"
+        fi
     else
         warn "Postgres 备份目录存在但无 dump 文件"
     fi

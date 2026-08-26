@@ -90,6 +90,28 @@ def test_deploy_script_accepts_root_and_legacy_wsl2_env_file_locations() -> None
     assert 'test -f $WSL_PROJECT/$DEPLOY_DIR/.env.wsl2' in text
 
 
+def test_postgres_backup_and_restore_are_database_scoped_and_verified() -> None:
+    backup = (
+        REPO_ROOT / "deploy" / "wsl2-dev" / "scripts" / "backup_postgres.sh"
+    ).read_text(encoding="utf-8")
+    restore = (
+        REPO_ROOT / "deploy" / "wsl2-dev" / "scripts" / "restore_postgres.sh"
+    ).read_text(encoding="utf-8")
+    health = (
+        REPO_ROOT / "deploy" / "wsl2-dev" / "scripts" / "cron_healthcheck.sh"
+    ).read_text(encoding="utf-8")
+
+    assert '${DB_NAME}_${timestamp}.dump' in backup
+    assert 'pg_restore --list < "${tmp_file}"' in backup
+    assert '"${out_file}.sha256"' in backup
+    assert 'name "${DB_NAME}_*.dump"' in restore
+    assert 'basename}" != "${DB_NAME}_"*.dump' in restore
+    assert 'sha256sum -c "${basename}.sha256"' in restore
+    assert 'pg_restore --list < "${backup_file}"' in restore
+    assert '--exit-on-error' in restore
+    assert 'backup_database="${POSTGRES_DB:-aats}"' in health
+
+
 def test_deploy_script_reports_actual_wsl_deployed_head() -> None:
     text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
 

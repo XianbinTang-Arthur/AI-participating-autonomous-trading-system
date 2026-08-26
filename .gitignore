@@ -13,6 +13,7 @@ __pycache__/
 !configs/templates/.env.*.example
 
 # WSL2 dev infra runtime data
+/backups/
 deploy/wsl2-dev/jaeger/badger/
 deploy/wsl2-dev/runtime/operator-tls/
 deploy/wsl2-dev/runtime/deployment-evidence/
