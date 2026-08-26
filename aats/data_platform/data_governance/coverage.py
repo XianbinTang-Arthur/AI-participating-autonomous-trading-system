@@ -14,7 +14,7 @@ from sqlalchemy import Engine, PrimaryKeyConstraint, UniqueConstraint, inspect, 
 from aats.data_platform.rdp_models import RdpBase
 
 
-ALGORITHM_VERSION = "rdp-coverage-v4"
+ALGORITHM_VERSION = "rdp-coverage-v5"
 _TIME_COLUMNS = (
     "ts",
     "event_ts",
@@ -210,6 +210,18 @@ def _recovery_route(table: str, status: str) -> tuple[str, str, str]:
             "rdp-rebuild",
             "从 ELIGIBLE dataset bundle 确定性重建并核对 fingerprint",
         )
+    if table == "meta.quality_reports":
+        return (
+            "deterministic_rebuild",
+            "data-quality",
+            "从合格数据窗口重新计算质量报告，不复制旧报告行",
+        )
+    if table.startswith(("meta.", "governance.")):
+        return (
+            "prospective_only",
+            "research-governance",
+            "等待未来真实导入、治理或审批操作生成；不得补写历史运行事实",
+        )
     if table.startswith("research.") or "lineage" in table or "intent" in table:
         return (
             "cannot_recover",
@@ -245,7 +257,11 @@ def _audit_table(connection, inspector, schema: str, table: str, start: datetime
     qualified = f"{schema}.{table}"
     if not inspector.has_table(table, schema=schema):
         return _empty(qualified, "missing", start, end, error_code="table_missing")
-    columns = {column["name"] for column in inspector.get_columns(table, schema=schema)}
+    column_details = {
+        column["name"]: column
+        for column in inspector.get_columns(table, schema=schema)
+    }
+    columns = set(column_details)
     time_column = next((candidate for candidate in _TIME_COLUMNS if candidate in columns), None)
     estimate = _estimated_rows(connection, schema, table)
     if time_column is None:
@@ -280,7 +296,9 @@ def _audit_table(connection, inspector, schema: str, table: str, start: datetime
         "COUNT(DISTINCT symbol) AS symbols" if "symbol" in columns else "NULL AS symbols",
         "COUNT(DISTINCT dataset_version) AS dataset_versions" if "dataset_version" in columns else "NULL AS dataset_versions",
         "COUNT(DISTINCT ingest_run_id) AS ingest_runs" if "ingest_run_id" in columns else "NULL AS ingest_runs",
-        "COUNT(*) FILTER (WHERE symbol IS NULL) AS null_symbol_rows" if "symbol" in columns else "NULL AS null_symbol_rows",
+        "COUNT(*) FILTER (WHERE symbol IS NULL) AS null_symbol_rows"
+        if _column_is_required(column_details, "symbol")
+        else "NULL AS null_symbol_rows",
         "COUNT(*) FILTER (WHERE confirm IS FALSE) AS unconfirmed_rows" if "confirm" in columns else "NULL AS unconfirmed_rows",
         "COUNT(*) FILTER (WHERE cardinality(quality_flags) > 0) AS quality_flagged_rows" if "quality_flags" in columns else "NULL AS quality_flagged_rows",
     ]
@@ -439,11 +457,30 @@ def _natural_key_columns(modeled_table, columns: set[str], time_column: str) -> 
                     item,
                 ),
             )
+        if modeled_table.schema in {"meta", "governance", "research"}:
+            primary_key = next(
+                (
+                    tuple(column.name for column in constraint.columns)
+                    for constraint in modeled_table.constraints
+                    if isinstance(constraint, PrimaryKeyConstraint)
+                ),
+                (),
+            )
+            if primary_key:
+                return primary_key
     if "symbol" in columns:
         return ("symbol", time_column)
     if "inst_id" in columns:
         return ("inst_id", time_column)
     return None
+
+
+def _column_is_required(
+    column_details: dict[str, dict[str, Any]],
+    column_name: str,
+) -> bool:
+    column = column_details.get(column_name)
+    return column is not None and column.get("nullable") is False
 
 
 def _database_enforces_unique_key(

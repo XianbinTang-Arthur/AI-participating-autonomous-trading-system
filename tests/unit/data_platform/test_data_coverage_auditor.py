@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import create_engine
 
 from aats.data_platform.data_governance.coverage import (
+    _column_is_required,
     _coverage_status,
     _database_enforces_unique_key,
     _gap_count,
@@ -50,6 +51,28 @@ def test_constrained_natural_key_does_not_require_duplicate_scan() -> None:
     assert _database_enforces_unique_key(table, ("symbol", "ts")) is False
 
 
+def test_metadata_uses_identity_key_and_nullable_symbol_is_not_a_quality_error() -> None:
+    quality_reports = RdpBase.metadata.tables["meta.quality_reports"]
+
+    assert _natural_key_columns(
+        quality_reports,
+        set(quality_reports.columns.keys()),
+        "window_start_ts",
+    ) == ("quality_report_id",)
+    assert _database_enforces_unique_key(
+        quality_reports,
+        ("quality_report_id",),
+    ) is True
+    assert _column_is_required(
+        {"symbol": {"name": "symbol", "nullable": True}},
+        "symbol",
+    ) is False
+    assert _column_is_required(
+        {"symbol": {"name": "symbol", "nullable": False}},
+        "symbol",
+    ) is True
+
+
 def test_gap_count_partitions_each_symbol_independently() -> None:
     class _Scalar:
         def scalar_one(self) -> int:
@@ -84,6 +107,7 @@ def test_recovery_matrix_never_claims_prospective_data_is_backfillable() -> None
             {"table": "staging.raw_liquidations", "status": "collector_unknown"},
             {"table": "silver.market_trade_flow_15m", "status": "missing"},
             {"table": "research.experiments", "status": "missing"},
+            {"table": "governance.parameter_releases", "status": "missing"},
             {
                 "table": "silver.market_liquidation_metrics_15m",
                 "status": "zero_event_with_healthy_collector",
@@ -97,6 +121,9 @@ def test_recovery_matrix_never_claims_prospective_data_is_backfillable() -> None
         "deterministic_rebuild"
     )
     assert by_dataset["research.experiments"]["classification"] == "cannot_recover"
+    assert by_dataset["governance.parameter_releases"]["classification"] == (
+        "prospective_only"
+    )
     assert "silver.market_liquidation_metrics_15m" not in by_dataset
 
 
