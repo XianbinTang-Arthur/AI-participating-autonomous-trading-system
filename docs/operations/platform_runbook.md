@@ -1,6 +1,6 @@
 # RDP 平台运行手册
 
-> 最后核对：2026-08-26（已提交基线 `c1b015ec`；含待提交的历史数据恢复与持续采集加固实现）。本手册面向当前 task-daemon、数据库队列和 10 个 workflow；早期仅含 4 个 workflow、JSON active parameter fallback 或直写 CLI 的说明均已失效。当前标准入口只允许模拟 profile。
+> 最后核对：2026-08-26（实现基线 `fe5596fd5ee4`；历史数据恢复与持续采集加固已完成标准 derivatives 模拟部署）。本手册面向当前 task-daemon、数据库队列和 10 个 workflow；早期仅含 4 个 workflow、JSON active parameter fallback 或直写 CLI 的说明均已失效。当前标准入口只允许模拟 profile。
 
 ## 1. 运行边界
 

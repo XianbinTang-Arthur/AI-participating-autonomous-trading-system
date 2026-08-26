@@ -1,7 +1,7 @@
 # AATS Task 与 SOW 历史索引
 
 > 文档状态：历史交付目录索引  
-> 最后核对：2026-08-25（目录与替代入口）
+> 最后核对：2026-08-26（目录与替代入口；RDP 数据治理任务状态已回填）
 
 本目录保存任务书、SOW、阶段设计、实施记录和交付报告。它是工程可追溯性材料，不是当前系统说明；“完成”“通过”“上线”等措辞只对文件记录的基线和验证范围成立。
 
@@ -14,9 +14,15 @@
 - 新任务材料继续写入本目录，不得写入 `docs/` 根层兼容区；
 - 同一任务有子目录时，以其 `README.md` 作为该任务入口。
 
+## 2026-08-26 RDP 数据治理实施记录
+
+- [`rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md`](rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md)：历史数据恢复、持续采集、不可变归档、双准入与完整模拟 RDP 的实施台账。工程实现、标准 derivatives 部署和 NO-GO 运行验证已回填；官方 1 日样本、随机归档恢复、故障注入、跨日采集与签名 UI 仍明确未完成。
+
+现行操作入口是 [`../operations/rdp_historical_data_recovery_runbook.md`](../operations/rdp_historical_data_recovery_runbook.md)，当前收益/上线门结论是 [`../testing/profit_readiness_acceptance.md`](../testing/profit_readiness_acceptance.md)。任务书不替代下一次运行前的新覆盖审计和健康检查。
+
 ## 2026-08-24 全系统审计整改 SOW
 
-以下文件是当前未提交整改工作区的实施边界与验证契约，不是生产已生效声明：
+以下文件记录 2026-08-24 至 2026-08-25 整改工作的实施边界与验证契约；其“完成”状态只对应各文件记录的当时基线，不是当前生产已生效声明：
 
 - [`phase3_post_audit_full_change_review_sow_2026_08_25.md`](phase3_post_audit_full_change_review_sow_2026_08_25.md)：Phase 3 全量变更复审、问题修复、完整提交与 derivatives 模拟栈运行观测；
 - [`fs_001_profile_apply_fail_closed_sow_2026_08_24.md`](fs_001_profile_apply_fail_closed_sow_2026_08_24.md)：profile 参数应用错误成功失败关闭；

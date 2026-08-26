@@ -1,8 +1,8 @@
 # RDP 历史数据恢复与持续采集运行手册
 
 > 文档状态：现行操作说明
-> 最后核对：2026-08-26（起始 HEAD `c1b015ec`；含待提交的数据恢复与采集加固实现）
-> 核对范围：当前代码、迁移、CLI 和单元契约；现场数据库覆盖、磁盘容量、网络和 collector 连续性必须在执行时重新验证
+> 最后核对：2026-08-26（实现基线 `fe5596fd5ee4`；derivatives generation `fe5596fd5ee4-20260826T151737Z-392-3966`）
+> 核对范围：当前代码、迁移、CLI、单元契约及本次受控 derivatives 模拟部署；数据库覆盖、磁盘容量、网络和 collector 连续性会漂移，执行时必须重新验证
 > 安全边界：只允许 RDP research/governance 数据库与 `derivatives` 模拟栈；禁止 live profile、真实订单和参数 apply
 
 本手册是历史数据恢复、raw archive、持续采集、retention 和历史 bundle 重建的当前操作入口。任务背景保留在 [`../task/rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md`](../task/rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md)，但执行时以本页和当前代码为准。
@@ -55,7 +55,7 @@ Windows 静态检查仍使用：
 
 ## 4. 第一步：只读覆盖审计
 
-覆盖审计读取全部 98 张当前 ORM 表；有时间列的表只扫描给定窗口，无时间列的表只读 planner estimate。它不会建表、补数或修改状态。
+覆盖审计在 PostgreSQL `REPEATABLE READ, READ ONLY` 快照中读取全部 98 张当前 ORM 表；有时间列的表只扫描给定窗口，无时间列的表只读 planner estimate。数据库已用完全一致的主键/唯一约束禁止重复时，审计直接报告重复为 0，不再重复执行高成本分组扫描。它不会建表、补数或修改状态。
 
 ```bash
 cd ~/aats
@@ -70,6 +70,8 @@ cd ~/aats
 - `official_backfill`、`deterministic_rebuild`、`prospective_only`、`cannot_recover` 恢复分类。
 
 任何 `audit_failed` 必须先修复审计本身，不能直接进入导入或重建。
+
+2026-08-26 的最后一次 v5 现场基线为 `coverage_20260826T151922950145Z.json`（SHA-256 `53672eb8f548cc41472d1082d5e793b4d721b0238bedc6a2f7bdee55d96b3607`）：`audit_failed=0`，但仍有 47 个 dataset 缺失、23 个 dataset 存在质量问题。该快照用于审计追溯，不得代替下一次操作前的新审计。
 
 ## 5. 第二步：先归档到期 live 原始事实
 
@@ -215,6 +217,8 @@ bash scripts/deploy.sh --profile derivatives --skip-commit
 不要手工运行 Compose 或 rsync。部署后至少验证：应用容器、RDP daemon、两个 collector、stage 18 schema/ledger、`/healthz`、`/system/health`、`/system/recovery`、治理快照、collector freshness 和最新覆盖 artifact。
 
 完整 RDP 只可在模拟环境触发。recommendation 可以生成和审阅，但本手册不授权 apply；live attribution 或 execution reconciliation 缺只读事实时保持 NO-GO/UNKNOWN。
+
+最后一次完整模拟 RDP（`task_235c5e4eb2a7` / `run_ff3e022b420444f7`）在约 7 秒内开始、10 个步骤全部完成，但结果为 `blocked_by_attribution`：四个策略/周期组合的精确 replay/live 对齐均为 0，系统动作均为 `pause`。这证明立即调度与失败关闭生效，不构成研究通过或参数应用授权。
 
 ## 12. 故障恢复
 

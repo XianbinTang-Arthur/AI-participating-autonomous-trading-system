@@ -1,7 +1,7 @@
 # 收益可信度整改验收矩阵
 
 > 文档状态：现行测试说明
-> 最后核对：2026-08-26（已提交基线 `c1b015ec`；历史数据治理实现待本轮提交与模拟部署复验；旧 generation 仅作历史证据）
+> 最后核对：2026-08-26（实现基线 `fe5596fd5ee4`；derivatives generation `fe5596fd5ee4-20260826T151737Z-392-3966`；旧 generation 仅作历史证据）
 > 边界：本文定义可执行验收，不把未运行的项目标记为通过。
 
 | 层级 | 验收项 | 通过条件 | 失败/未知处理 |
@@ -34,30 +34,50 @@
 
 ## 当前现场验收快照（非持续状态证明）
 
-2026-08-26 已恢复 WSL2 规定路径 `~/aats-venv`，Python/uv 与 Linux hash lock 安装成功，并新增可重复 bootstrap。该修复只消除了历史环境阻断；本轮新代码仍必须在提交后重新执行 WSL2/PostgreSQL 集成和标准 derivatives 部署，不能沿用下方旧 generation 代替。
+下列结论只对应 2026-08-26 实现基线 `fe5596fd5ee4` 和 deployment generation
+`fe5596fd5ee4-20260826T151737Z-392-3966`；它们不是持续状态证明：
 
-下列结论只对应 2026-08-25 最终提交和 deployment generation
-`2c798eab13de-20260825T205326Z-1584-9530`；它们不是持续状态证明：
+- WSL2 规定路径 `~/aats-venv` 已恢复为 Python 3.12.14，uv 0.12.5 发布资产 SHA-256 与 Linux
+  hash lock 均已验证；`aats`、`psycopg`、`pyarrow`、`pytest` 和 `SQLAlchemy` 可导入。Stage 18
+  在隔离 PostgreSQL 16 上前向、幂等、回滚、修复和约束验证 `3 passed`；
+- Ruff 全量通过；最终完整单元回归为 `4794 passed, 30 skipped, 94 subtests passed`；runtime
+  47、CI 41、外部镜像 9 项 lock contract 通过；
+- 标准部署 evidence 为
+  `/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260826T151904172220Z-derivatives-fe5596fd5ee4.json`。
+  Gateway、Market、Decision、Execution、RDP daemon 和两个 collector 均为 `healthy`，重启计数为
+  0；`/healthz` 为 `status=ok`，最近 10 分钟应用日志未匹配异常堆栈、数据库异常或非零进程退出；
+- v5 覆盖 artifact 为
+  `/app/artifacts/data_governance/coverage/coverage_20260826T151922950145Z.json`，SHA-256
+  `53672eb8f548cc41472d1082d5e793b4d721b0238bedc6a2f7bdee55d96b3607`。98 个 dataset 中
+  `missing=47`、`observed=26`、`observed_with_quality_issues=23`、`unbounded_not_scanned=2`、
+  `audit_failed=0`；恢复分类为 `cannot_recover=1`、`deterministic_rebuild=22`、
+  `official_backfill=26`、`prospective_only=21`；
+- 完整 RDP `task_235c5e4eb2a7` / `run_ff3e022b420444f7` 在约 7 秒内开始并完成 10 个步骤。
+  当前 Phase 3 `20260826_150925_f175fd1b`、Phase 4 `20260826_150933_12ddbb91` 与 decision round
+  `20260826_150943_630c50bf` 严格绑定，不再读取旧 JSON 快照；
+- 运行结论仍是 `blocked_by_attribution` / `not_ready_attribution_issue`。四个策略/周期组合均为
+  `aligned=0`、`live_only=0`，总计 `unattributable=5398`；系统对四个组合均给出 `pause`，8 条
+  recommendation 均未 approve、release 或 apply；
+- kill switch 保持 `HALTED`，`resume_authorized=false`。本轮没有启动 live profile、提交真实订单、
+  打开 holdout 或应用参数。服务重启使既有浏览器会话失效，签名页面视觉复核需重新登录后补做。
 
-- Ruff 全量通过；最终完整单元回归为 `4596 passed, 30 skipped, 94 subtests passed`；
-- 标准部署证据为
-  `/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260825T205451196702Z-derivatives-2c798eab13de.json`，
-  结果 `simulation_stack_healthy`，七个必需应用容器及基础设施 healthy，production/trading 均为 false；
-- 最终部署窗内应用日志没有匹配到新的 error、exception、timeout 或 reconnect；`/healthz` 为 200，
-  但仍只代表 Gateway liveness；
-- 2026-05-16 至 2026-05-28 半开窗口的 confirmed Silver 与 closed Gold 均为 1,152，时间缺口和
-  funding 缺失为 0。每个所需微观结构字段为 1,150/1,152 非空，缺失率 0.173611% ≤ 1%；
-- 微观结构 campaign 登记证据 SHA-256 为
-  `a38afb4618b372d88b9c5cea8e9a9ef58cfe875ecbb3e3d125a3637039586019`，统计证据 SHA-256 为
-  `ca311e020b3843905b1c6b289bc6d42daafc6825f0e16aac436c4e4e2537bab5`；三个候选 train/valid
-  成本后收益全部失败，holdout 保持封存。累计三个阶段的 10 个唯一候选通过数仍为 0；
-- 签名 Operator UI 只读复核显示 trial guard 为“监控中”，最近强平距离为正的 3,081.29%，没有
-  硬阻断；页面中的 7 个已关闭模拟样本和 24 小时模拟 PnL 未绑定合格候选，不构成收益证明；
-- WSL2 集成 pytest 已尝试，但规定路径 `~/aats-venv/bin/python` 不存在，因此该项是环境缺口、
-  未通过也未伪报成功。数据重建、campaign 和部署运行证据不能替代缺失的 pytest 环境。
+因此，当前工程链路可以运行并能对不合格数据/归因正确失败关闭，但距离收益可信仍有实质缺口：
+官方 1 日样本及 30/90 日窗未验收、历史 L2 来源未提供、47 个 dataset 缺失、23 个 dataset 有质量
+问题、精确归因为 0、归档恢复/DB outage/重连等故障矩阵未完成。production/trading readiness 固定为
+NO-GO；流程退出码 0 不能解释为策略通过。
 
-本快照只证明最终代码、数据研究链和模拟栈达到上述有限结论；候选经济性仍明确失败，参数
-readback、隔离故障矩阵、候选绑定的 L2/paper forward 和 live 入口仍未通过。
+### 2026-08-25 上一代快照（历史证据）
+
+下列结论只对应提交 `2c798eab` 和 generation `2c798eab13de-20260825T205326Z-1584-9530`：
+
+- 当时完整单元回归为 `4596 passed, 30 skipped, 94 subtests passed`，标准部署结果为
+  `simulation_stack_healthy`；
+- 当时 2026-05-16 至 2026-05-28 的 confirmed Silver/closed Gold 各 1,152，三个候选成本后收益
+  全部失败，holdout 保持封存，10 个唯一候选通过数为 0；
+- 当时 `~/aats-venv` 缺失，WSL2 集成未通过。该环境缺口已在 2026-08-26 修复并完成隔离 PostgreSQL
+  集成验证，因此不得再把它列为当前阻断；
+- 当时签名 Operator UI 的 PnL/样本没有绑定合格候选，不构成收益证明。该结论仍然有效，但页面状态
+  会漂移，必须在重新登录后重新取得。
 
 ## 较早现场验收快照（历史证据，不代表当前状态）
 

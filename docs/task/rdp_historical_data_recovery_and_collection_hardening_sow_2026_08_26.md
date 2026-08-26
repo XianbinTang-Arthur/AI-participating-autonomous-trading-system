@@ -1,8 +1,9 @@
 # RDP 历史数据恢复与持续采集加固任务书
 
-> 文档状态：实施任务书 / 实施与现场验收中
+> 文档状态：实施任务书 / 工程实施完成，现场验收部分完成
 > 编写日期：2026-08-26
 > 起始代码基线：`51448768bb3ff08fa44066d286f7383800d8d744`
+> 最后核对：2026-08-26（实现基线 `fe5596fd5ee4`；derivatives generation `fe5596fd5ee4-20260826T151737Z-392-3966`）
 > 工作区边界：起始工作区包含一组尚未提交的 RDP live attribution lineage 修复；必须先独立复审、验证并收口，禁止由本任务覆盖或重复实现
 > 核对范围：当前代码、迁移、RDP workflow、采集器、保留脚本、现行 RDP 文档与 OKX 官方公开历史数据能力
 > 运行时边界：本文是任务清单，不证明当前数据库覆盖、采集器新鲜度、容器健康、交易所账户状态或收益能力；实施期间禁止启动 live profile、提交真实订单、应用参数建议或输出凭证
@@ -52,14 +53,14 @@
 
 | 范围 | 当前状态 | 仍需现场证明 |
 | --- | --- | --- |
-| 前置 lineage | 已独立复审、测试并提交为 `c1b015ec` | 新 intent 的部署后真实对齐与 readiness |
+| 前置 lineage | 已独立复审、测试并提交为 `c1b015ec`；部署后完整 RDP 已使用新 intent 重新核验 | 四个策略/周期组合的精确 replay/live 对齐仍为 0，readiness 正确失败关闭 |
 | WSL2 Python | 规定路径 `~/aats-venv` 已恢复；bootstrap 已按固定 Python 3.12.14、uv 0.12.5、发布资产 SHA-256 和 Linux hash lock 实际重跑；关键依赖导入成功 | 标准部署同步后继续使用该路径，不再把环境缺失列为业务阻断 |
-| provenance/schema | contract、source/import/archive/gap/bundle/rebuild/continuity 模型与 Batch B stage 18 已实现；ORM 总数 98；来源类型、状态形状、金融数值与派生指纹约束失败关闭 | 隔离 PostgreSQL 的前向、幂等、回滚、修复和 schema guard 已通过；目标模拟库仍需由标准部署迁移并核对 ledger |
-| coverage/archive/retention | 只读覆盖 artifact、不可变 Parquet、resume、archive-before-delete 与恢复分类已实现 | 目标库覆盖快照、单日容量、随机恢复演练和到期分区删除 0/正确行数证据 |
+| provenance/schema | contract、source/import/archive/gap/bundle/rebuild/continuity 模型与 Batch B stage 18 已实现；ORM 总数 98；目标模拟库已由标准部署完成迁移并通过 ledger/schema guard | source registry、实际导入和恢复记录仍随后续受控样本产生 |
+| coverage/archive/retention | 只读覆盖 artifact、不可变 Parquet、resume、archive-before-delete 与恢复分类已实现；目标库 v5 快照已生成且无 `audit_failed` | 单日容量、随机恢复演练和真实到期分区删除 0/正确行数证据仍未执行 |
 | 官方历史导入 | confirmed OHLCV、funding、trade REST/file、L2 file 与 mark bar proxy 已实现；raw SHA-256、schema、序列、gap、唯一行数与 bundle 失败关闭 | 1 日官方样本；30/90 日需逐级容量批准；L2 官方文件尚未由本任务提供 |
-| 持续采集 | OI/mark/trades/BBO/books5/liquidation continuity、generation、drop/gap 与终态加固已实现 | 标准 derivatives 部署后的 collector freshness、重连和 DB outage 证据 |
+| 持续采集 | OI/mark/trades/BBO/books5/liquidation continuity、generation、drop/gap 与终态加固已实现；两个 collector 已部署、健康且持续 flush | 受控重连、DB outage、进程 kill/restart 和跨日连续观察仍未执行 |
 | 双准入与重建 | live/historical eligibility 和兼容矩阵已分离；bundle-scoped orderbook/trade-flow Silver 重建已实现 | OI/funding/liquidation/Gold 的 source-aware 扩展仍属于后续研究输入建设，不得声称已重建 |
-| API/UI/告警 | 数据治理读模型、Workspace 卡片、恢复矩阵与可靠性告警已实现 | 部署后签名页面、bounded query 与真实告警状态 |
+| API/UI/告警 | 数据治理读模型、Workspace 卡片、恢复矩阵与可靠性告警已实现；部署后的后端读模型和 bounded snapshot 路径已随完整 RDP 验证 | 服务重启使既有登录会话失效，签名页面视觉验收需操作员重新登录后补做 |
 | 执行事实/campaign/L2 replay | 未伪造；旧 intent 保持不可归因 | 需要只读账户授权、合格 30/90 日数据和独立预注册研究；当前保持 `UNKNOWN`/NO-GO |
 
 因此，本任务可以完成工程基础设施与一日受控样本验收，但没有官方 L2 文件、只读账户授权或足够连续观察时间时，RDP-DATA-025、052、053 及 30/90 日扩展不能被诚实标记为完成。它们不是用伪数据或放宽门禁可以解决的软件缺口。
@@ -67,11 +68,13 @@
 ### 2.2 2026-08-26 静态与隔离验证证据
 
 - Windows Ruff：`aats/` 通过；新增脚本与测试的定向 Ruff 通过；
-- Windows 完整单元回归：`4786 passed, 30 skipped, 94 subtests passed`；skip 均保留既有环境/可选依赖边界；
+- Windows 完整单元回归：`4794 passed, 30 skipped, 94 subtests passed`；skip 均保留既有环境/可选依赖边界；
 - 依赖供应链：runtime 47、CI 41、外部镜像 9 项 lock contract 通过；
 - WSL2 bootstrap：`~/aats-venv` 为 Python 3.12.14，`WSL_VENV_READY`，且 `psycopg`、`pyarrow`、`pytest`、`SQLAlchemy` 可导入；
 - WSL2 隔离 PostgreSQL：Stage 18 在 Testcontainers PostgreSQL 16 上的完整迁移、幂等、回滚、修复和约束验证共 `3 passed`；
-- 上述证据不替代目标 derivatives 模拟库、collector 连续性、覆盖快照、归档恢复和完整 RDP 的部署后现场验收。
+- WSL2 目标模拟部署：`fe5596fd5ee4-20260826T151737Z-392-3966` 成功；七个核心应用/采集容器均为 `healthy`、重启计数为 0；
+- 完整 RDP：`task_235c5e4eb2a7` / `run_ff3e022b420444f7` 的 10 个步骤均成功结束，最终以 `blocked_by_attribution` 正确 NO-GO，未应用任何参数；
+- 上述证据仍不替代官方 1 日样本、归档恢复、故障注入、跨日采集和签名 UI 的后续现场验收。
 
 ## 3. 模块职责与领域模型
 
@@ -287,7 +290,7 @@
 
 ### Phase 7：测试、部署与受控模拟验收
 
-- [ ] **RDP-DATA-070（P0）单元与属性测试**
+- [x] **RDP-DATA-070（P0）单元与属性测试**
   覆盖：分页、限速、checkpoint、去重、半开区间、时区、单位、checksum、原子归档、archive-before-delete、重采样无未来数据、稀疏强平、双 eligibility、bundle fingerprint、重建确定性和敏感字段脱敏。
 
 - [ ] **RDP-DATA-071（P0）WSL2/Postgres 集成测试**
@@ -297,11 +300,11 @@
   覆盖：网络断开、API 429/5xx、损坏 ZIP、磁盘不足、DB outage、进程 kill/restart、重复运行、时钟偏差、缓冲区 hard cap 和 archive checksum mismatch。
   验收：所有故障均可恢复或明确失败；不得产生静默数据丢失、重复事实或误报 succeeded。
 
-- [ ] **RDP-DATA-073（P0）代码审查与完整静态回归**
+- [x] **RDP-DATA-073（P0）代码审查与完整静态回归**
   工作：按 correctness、edge cases、security、performance、maintainability、test coverage 和金融正确性复审全部改动。
   验收：Ruff、受影响测试、完整 Windows unit 和最窄 WSL2 integration 实际通过；未运行项明确为未知。
 
-- [ ] **RDP-DATA-074（P0）标准 derivatives 模拟部署**
+- [x] **RDP-DATA-074（P0）标准 derivatives 模拟部署**
   依赖：RDP-DATA-070 至 RDP-DATA-073，且代码已提交。
   工作：只通过 `bash scripts/deploy.sh --profile derivatives --skip-commit` 部署；验证应用容器、RDP、两个 collector、schema、系统健康、恢复和数据 freshness。
   验收：不运行任何 live profile；`/healthz` 之外完成分层健康验证；simulation evidence 继续保持 `production_ready=false`。
@@ -311,7 +314,7 @@
   工作：按“1 日样本 → 30 日研究窗 → 目标 90 日”的门逐级导入，不一次性全量；启动并观察不可回填频道。
   验收：每一级先核对容量、checksum、gap、Silver/Gold 重建和 UI，再批准下一级；连续性不足时等待真实采集，不伪造通过。
 
-- [ ] **RDP-DATA-076（P0）完整 RDP 模拟运行与结果应用隔离**
+- [x] **RDP-DATA-076（P0）完整 RDP 模拟运行与结果应用隔离**
   依赖：RDP-DATA-050 至 RDP-DATA-075。
   工作：手动触发完整 RDP，监控 Run/Attempt/Step/Event、数据门、归因、研究、L2 和 readiness。
   验收：研究 recommendation 可以生成和审阅，但本任务不自动 apply；只有候选、统计、执行、归因和故障门全部通过，才另行提出参数应用计划；任何 NO-GO/UNKNOWN 保持失败关闭。
@@ -487,22 +490,58 @@ OPEN -> CLASSIFIED -> BACKFILLED | REBUILT | AWAITING_LIVE_COLLECTION
 
 | 任务 | 工程状态 | 现场状态 / 未完成边界 |
 | --- | --- | --- |
-| 000 | 已完成并独立提交 `c1b015ec` | 部署后新 intent 仍需用真实模拟运行复验 |
-| 001–003 | 审计器、恢复矩阵和容量字段已实现 | 目标模拟库的脱敏身份、覆盖快照、备份/恢复点和单日实际容量必须现场生成；未执行前不得写“完成” |
-| 010–011 | contract、registry、Stage 18 与 ORM 已完成；隔离 PostgreSQL 验证通过 | 目标模拟库 migration ledger 待标准部署核对 |
+| 000 | 已完成并独立提交 `c1b015ec`；新 intent 已在完整模拟 RDP 中复验 | 精确 replay/live 对齐仍为 0，readiness 保持 NO-GO；不能猜测补写 lineage |
+| 001–003 | 审计器、恢复矩阵和容量字段已实现；目标库 v5 覆盖快照已生成 | 单日实际导入容量、备份/恢复点和随机恢复仍待现场生成；未执行前不得写“完成” |
+| 010–011 | contract、registry、Stage 18 与 ORM 已完成；隔离 PostgreSQL 和目标模拟库 migration ledger/schema guard 均通过 | 后续每次来源/导入仍须按 registry 和 bundle 约束生成证据 |
 | 012–014 | 不可变 Parquet、resume、archive-before-delete、磁盘保护与 retention 硬门已完成 | 随机真实分区恢复、跨日连续运行和归档卷容量待现场验收 |
 | 020–024 | confirmed candle、funding、trade REST/file、L2 file、mark bar proxy 适配器已完成并定向测试 | 尚未导入官方 1 日样本；无官方 L2 文件时 023 保持 `awaiting_source`；30/90 日未获容量批准 |
 | 025 | 未实施，且未伪造 | 需要账户只读授权；旧 intent 继续 `unattributable` |
-| 030–033 | 频道事实、连接代次、MESSAGE/FLUSH/DROP/SHUTDOWN、gap 和 run 终态已完成 | 需 derivatives 模拟部署后观察 freshness、重连、DB outage 与有效零 |
+| 030–033 | 频道事实、连接代次、MESSAGE/FLUSH/DROP/SHUTDOWN、gap 和 run 终态已完成；部署后两个 collector 健康且持续 flush trades/OI/funding/BBO/books5/liquidation | 重连、DB outage、进程 kill/restart、跨日连续观察与有效零故障演练仍待执行 |
 | 034 | archive 已成为 data maintenance 中 retention 的不可绕过前置硬门 | 真实到期分区与跨日运行待观察 |
 | 040–042 | live/historical 双准入、连续性 fingerprint 与来源兼容矩阵已完成 | 现场 bundle/窗口必须继续按真实证据判定，不提供 override |
 | 043 | 部分完成：bundle-scoped historical orderbook/trade-flow Silver 重建与运行 ledger 已完成 | OI/funding/liquidation/Gold、quality report 和 artifact index 的 source-aware 重建尚未完成；不得声称完整派生层恢复 |
 | 044 | 分类 contract 与 gap 状态机已完成 | 尚未对目标库旧窗口逐一生成分类结果和 artifact，现场状态未完成 |
-| 050–053 | lineage 前置失败关闭已完成 | campaign、执行事实和资本资格依赖 30/90 日数据与只读对账，当前保持 NO-GO/UNKNOWN |
-| 060–063 | coverage artifact、API、Workspace UI、可靠性告警和现行 runbook 已完成 | 部署后 bounded query、签名页面和真实告警状态待验 |
+| 050–053 | lineage 前置失败关闭已完成；完整 RDP 对四个组合均生成 `pause`，未应用参数 | replay/live 精确对齐为 0；campaign、执行事实和资本资格依赖 30/90 日数据与只读对账，当前保持 NO-GO/UNKNOWN |
+| 060–063 | coverage artifact、API、Workspace UI、可靠性告警和现行 runbook 已完成；部署后 bounded snapshot 与治理 DB 快照已验证 | 重启后既有签名会话失效；页面视觉与真实告警交互需重新登录补验 |
 | 070 | 单元、半开边界、解析、幂等、连续性、归档与双准入测试已通过 | 无 |
 | 071 | Stage 18 隔离 PostgreSQL 前向、幂等、回滚、修复和约束验证通过 | collector→raw→silver→eligibility 与归档恢复的完整数据库集成仍待现场 |
 | 072 | 429/5xx、损坏输入、磁盘水位、buffer hard cap、drop、checksum 和重复运行等定向故障测试已实现 | 真实进程 kill/restart、DB outage 和资源压测待模拟现场 |
-| 073 | 完整静态回归与本次改动代码审查已完成 | 074–076 的标准模拟部署、完整 RDP 和现场文档回填尚待执行 |
+| 073 | 完整静态回归与本次改动代码审查已完成 | 无新增静态阻断 |
+| 074 | 标准 derivatives 模拟部署已完成；generation 与 evidence 已固化 | 本状态不是持续证明，后续部署必须重新核验 |
+| 075 | 持续采集已在模拟部署中运行且目标库覆盖快照已生成 | 官方 1 日样本、30/90 日扩展、随机归档恢复和故障注入未执行，因此仅部分完成 |
+| 076 | 完整 RDP 10/10 步骤已完成，结果按归因门失败关闭；recommendation 全部为 `pause`，未 apply | 数据/归因缺口仍是业务 NO-GO，不得将“流程退出码 0”误写为“研究通过” |
 
 本台账明确区分“已实现且静态/隔离验证通过”和“目标运行环境已证明”。后者只能由同一日期、同一 commit、同一 profile 的现场证据更新。
+
+## 20. 最终模拟现场证据（2026-08-26）
+
+### 20.1 代码、部署与运行健康
+
+- 实现提交：`fe5596fd5ee4`（此前依次为 `c1b015ec`、`42d2e14e`、`d222e291`、`1e0420fd`）；
+- 标准部署 generation：`fe5596fd5ee4-20260826T151737Z-392-3966`；
+- 部署 evidence：`/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260826T151904172220Z-derivatives-fe5596fd5ee4.json`；
+- 最终复核时，Gateway、Market、Decision、Execution、RDP daemon、microstructure collector、liquidations daemon 均为 `healthy`，重启计数为 0；`/healthz` 返回 `status=ok`。最近 10 分钟应用日志未匹配 `Traceback`、`CRITICAL`、`Unhandled`、`OperationalError`、`IntegrityError` 或非零进程退出；
+- kill switch 保持 `HALTED`，原因为 `trial_guard_threshold_breached`，`resume_authorized=false`；本任务未恢复它，也未启动 live profile、提交真实订单或应用参数。
+
+### 20.2 覆盖审计事实
+
+- v5 JSON artifact：`/app/artifacts/data_governance/coverage/coverage_20260826T151922950145Z.json`，SHA-256 `53672eb8f548cc41472d1082d5e793b4d721b0238bedc6a2f7bdee55d96b3607`；
+- v5 Markdown artifact：`/app/artifacts/data_governance/coverage/coverage_20260826T151922950145Z.md`，SHA-256 `3afa41f3aae7b4c8a910d00dd043bb35f0f59e370278c9b8549a423c424196c4`；
+- 98 个 dataset 的状态为：`missing=47`、`observed=26`、`observed_with_quality_issues=23`、`unbounded_not_scanned=2`、`audit_failed=0`；
+- 恢复分类为：`cannot_recover=1`、`deterministic_rebuild=22`、`official_backfill=26`、`prospective_only=21`；其余为空或仅待观测，不能把分类数解释为已恢复数；
+- `bronze.market_orderbook_payloads` 在同一 repeatable-read 快照中统计为 253,525 行，symbol 非空行 253,525，自然键重复 0。v5 同时消除了 `meta.ingest_runs` 可空 symbol 和无时间治理表主键的误报。
+
+### 20.3 完整 RDP 与真实阻断
+
+- task：`task_235c5e4eb2a7`；run：`run_ff3e022b420444f7`；排队于 23:07:36、约 7 秒内开始，未等待五分钟轮询；10 个步骤均进入完成态；
+- Phase 3：`20260826_150925_f175fd1b`，`replay_only=false`、`live_query_succeeded=true`；Phase 4：`20260826_150933_12ddbb91`；decision round：`20260826_150943_630c50bf`。决策读取的 Phase 3/4 ID 与本轮 DB 当前快照严格一致，不再误用旧 JSON 快照；
+- 最终结果为 `blocked_by_attribution` / `not_ready_attribution_issue`。四个策略/周期组合均为 `aligned=0`、`live_only=0`；总计 `unattributable=5398`，其中 15m replay-only 5,390、1h replay-only 2,160（不同组合会复用窗口，不能相加为独立样本数）；
+- 系统生成 8 条 recommendation，四个组合的系统动作均为 `pause`；没有执行 approve、release、apply 或 rollback。流程技术成功只证明门禁能正确阻断，不证明收益、资本资格或 production-ready。
+
+### 20.4 尚未完成且不能由软件伪造的事项
+
+1. 尚未执行官方 1 日历史样本，因此也未批准 30/90 日扩展；尚无本任务可用的官方 L2 文件；
+2. 尚未执行随机 archive 恢复、真实到期 retention、DB outage、网络重连、进程 kill/restart、磁盘压力和跨日连续观察；
+3. 47 个 dataset 仍缺失，23 个已有数据但存在质量问题；其中 `cannot_recover` 与 `prospective_only` 只能保留真实缺口或从现在持续采集；
+4. 服务重启后原浏览器登录会话失效，签名 RDP 页面视觉验收仍需操作员重新登录；后端运行、任务队列、DB 快照和 collector 已完成现场验证；
+5. 精确归因、候选经济性、执行校准、L2/paper forward、一次性 holdout 和 fault matrix 尚未同时通过，production/trading readiness 固定为 NO-GO。

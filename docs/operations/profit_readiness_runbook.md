@@ -1,7 +1,7 @@
 # 收益证据与模拟交易就绪运行手册
 
 > 文档状态：现行操作说明
-> 最后核对：2026-08-26（已提交基线 `c1b015ec`；历史数据治理实现待本轮提交与模拟部署复验；2026-08-25 模拟证据保留为历史快照）
+> 最后核对：2026-08-26（实现基线 `fe5596fd5ee4`；derivatives generation `fe5596fd5ee4-20260826T151737Z-392-3966`；2026-08-25 模拟证据保留为历史快照）
 > 适用范围：`derivatives` 本地模拟栈、RDP 研究库、Research Factory 研究产物
 > 禁止范围：真实资金、live profile、真实订单、手工绕过部署入口
 
@@ -9,6 +9,8 @@
 历史数据新增独立的 source、raw checksum、gap、bundle、historical eligibility 和 rebuild fingerprint 证据链；详见 [`rdp_historical_data_recovery_runbook.md`](rdp_historical_data_recovery_runbook.md)。历史 bundle 不能伪造 live collector heartbeat，mark-price bar proxy 不能满足 tick 门禁，公共强平零事件只有在同窗 continuity 健康且没有 drop/disconnect 时才是有效零。
 任何一步缺失、失败、过期、`UNKNOWN` 或 `DEGRADED`，都不能向后推导。格式 v1 最多产生
 `simulation_ready=true`，`production_ready` 与 `trading_ready` 固定为 `false`。
+
+2026-08-26 的最后一次现场复核中，规定路径 `~/aats-venv` 已恢复，标准 derivatives 模拟部署及核心容器健康；完整 RDP 10 个步骤完成，但因四个组合的精确 replay/live 对齐均为 0 而以 `blocked_by_attribution` 失败关闭，所有系统动作均为 `pause`，未应用参数。v5 覆盖审计仍有 47 个 dataset 缺失、23 个 dataset 存在质量问题；kill switch 保持 `HALTED` 且未获恢复授权。因此当前结论仍是 NO-GO，详见 [`../testing/profit_readiness_acceptance.md`](../testing/profit_readiness_acceptance.md) 和 [`rdp_historical_data_recovery_runbook.md`](rdp_historical_data_recovery_runbook.md)。
 
 ## 1. 当前能力与硬边界
 

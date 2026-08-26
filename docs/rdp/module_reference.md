@@ -1,6 +1,6 @@
 # RDP 代码模块参考
 
-> 最后核对：2026-08-26（已提交基线 `c1b015ec`，含待提交的历史数据恢复与持续采集加固实现）。本页按当前目录和运行入口组织，不再沿用早期“少量 Phase 文件清单”。RDP 总览见 [`aats/data_platform/README.md`](../../aats/data_platform/README.md)。
+> 最后核对：2026-08-26（实现基线 `fe5596fd5ee4`，历史数据恢复与持续采集加固已完成标准 derivatives 模拟部署）。本页按当前目录和运行入口组织，不再沿用早期“少量 Phase 文件清单”。RDP 总览见 [`aats/data_platform/README.md`](../../aats/data_platform/README.md)。
 
 ## 1. 根模块
 
