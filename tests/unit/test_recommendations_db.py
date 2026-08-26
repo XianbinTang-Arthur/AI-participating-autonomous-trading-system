@@ -254,6 +254,29 @@ def test_upsert_recommendation_round_trips_source_round_id() -> None:
     assert row["source_round_id"] == "round_source_001"
 
 
+def test_upsert_sql_does_not_erase_existing_source_round() -> None:
+    class _CaptureSession:
+        statement = ""
+
+        def execute(self, statement, _params):
+            self.statement = str(statement)
+
+    session = _CaptureSession()
+    db_upsert_recommendation(
+        session,  # type: ignore[arg-type]
+        recommendation_id="rec_lineage",
+        family="independent",
+        timeframe="15m",
+        recommendation_type="parameter_upgrade",
+        confidence="high",
+        reason="lineage test",
+        source_round_id=None,
+    )
+
+    assert "source_round_id                = COALESCE(" in session.statement
+    assert "governance.recommendations.source_round_id" in session.statement
+
+
 def test_upsert_recommendation_overwrites_existing_fields() -> None:
     session = _FakeRecSession()
     _seed_draft(session, "rec_A", family="independent", timeframe="15m")

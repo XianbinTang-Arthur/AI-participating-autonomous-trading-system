@@ -918,6 +918,7 @@ def _sync_registries_to_db_best_effort(
                     timeframe=rec["timeframe"],
                     recommendation_type=rec.get("recommendation_type", "require_review"),
                     target_parameter_set_id=rec.get("target_parameter_set_id"),
+                    source_round_id=rec.get("source_round_id"),
                     confidence=rec.get("confidence", "low"),
                     reason=rec.get("reason", ""),
                     evidence_bundle_ref=rec.get("evidence_bundle_ref"),

@@ -89,7 +89,10 @@ def db_upsert_recommendation(
                 timeframe                      = EXCLUDED.timeframe,
                 recommendation_type            = EXCLUDED.recommendation_type,
                 target_parameter_set_id        = EXCLUDED.target_parameter_set_id,
-                source_round_id                = EXCLUDED.source_round_id,
+                source_round_id                = COALESCE(
+                    EXCLUDED.source_round_id,
+                    governance.recommendations.source_round_id
+                ),
                 confidence                     = EXCLUDED.confidence,
                 reason                         = EXCLUDED.reason,
                 evidence_bundle_ref            = EXCLUDED.evidence_bundle_ref,

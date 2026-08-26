@@ -87,6 +87,59 @@ def test_decision_parameter_sets_use_db_first_registry_without_json_file(
     assert [item["parameter_set_id"] for item in selected] == ["candidate", "frozen"]
 
 
+def test_registry_batch_sync_preserves_recommendation_source_round(monkeypatch) -> None:
+    from contextlib import contextmanager
+
+    from aats.data_platform.decision_system import recommendation_registry
+    from aats.data_platform.governance import recommendations_db
+
+    captured = []
+
+    class _Session:
+        def __init__(self, _engine):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @contextmanager
+        def begin(self):
+            yield
+
+    class _Engine:
+        def dispose(self):
+            pass
+
+    monkeypatch.setattr(recommendation_registry, "try_governance_db", lambda: (_Engine(), True))
+    monkeypatch.setattr("sqlalchemy.orm.Session", _Session)
+    monkeypatch.setattr(
+        recommendations_db,
+        "db_upsert_recommendation",
+        lambda _session, **kwargs: captured.append(kwargs),
+    )
+    monkeypatch.setattr(recommendations_db, "db_upsert_active_decision", lambda *_a, **_k: None)
+
+    recommendation_registry._sync_registries_to_db_best_effort(
+        {
+            "recommendations": [
+                {
+                    "recommendation_id": "rec_1",
+                    "family": "independent",
+                    "timeframe": "15m",
+                    "recommendation_type": "parameter_upgrade",
+                    "source_round_id": "round_source_001",
+                }
+            ]
+        },
+        {"decisions": []},
+    )
+
+    assert captured[0]["source_round_id"] == "round_source_001"
+
+
 def test_scheduled_workflow_marker_propagates_pipeline_business_result(
     monkeypatch,
     capsys,
