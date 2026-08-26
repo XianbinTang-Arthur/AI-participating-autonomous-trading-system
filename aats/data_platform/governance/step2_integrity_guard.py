@@ -43,6 +43,42 @@ _STEP2_MISSING_REASON = (
 )
 
 
+def assess_step2_integrity(project_root: Path) -> dict[str, object]:
+    """Return the shared Step2 integrity decision used by UI and write APIs."""
+    try:
+        from aats.data_platform.governance.snapshot_db import (
+            ROUND_PHASE_STEP2,
+            is_snapshot_incomplete,
+            load_latest_research_round_snapshot,
+        )
+
+        snapshot = load_latest_research_round_snapshot(
+            phase=ROUND_PHASE_STEP2,
+            project_root=project_root,
+        )
+    except Exception:
+        logger.exception("step2 integrity check failed to load snapshot")
+        return {
+            "ok": False,
+            "code": "lookup_failed",
+            "reason": _STEP2_LOOKUP_FAILURE_REASON,
+        }
+
+    if snapshot is None:
+        return {
+            "ok": False,
+            "code": "snapshot_missing",
+            "reason": _STEP2_MISSING_REASON,
+        }
+    if is_snapshot_incomplete(snapshot):
+        return {
+            "ok": False,
+            "code": "manifest_missing_on_disk",
+            "reason": _STEP2_INCOMPLETE_REASON,
+        }
+    return {"ok": True, "code": None, "reason": None}
+
+
 def step2_integrity_blocking_reason(project_root: Path) -> str | None:
     """Return a blocking reason string, or ``None`` if Step2 is healthy.
 
@@ -66,33 +102,11 @@ def step2_integrity_blocking_reason(project_root: Path) -> str | None:
     deliberately does **not** include ``str(exc)`` in the return value —
     that string flows all the way to the dashboard response body.
     """
-    try:
-        from aats.data_platform.governance.snapshot_db import (
-            ROUND_PHASE_STEP2,
-            is_snapshot_incomplete,
-            load_latest_research_round_snapshot,
-        )
-
-        snapshot = load_latest_research_round_snapshot(
-            phase=ROUND_PHASE_STEP2,
-            project_root=project_root,
-        )
-    except Exception:
-        logger.exception("step2 integrity check failed to load snapshot")
-        return _STEP2_LOOKUP_FAILURE_REASON
-
-    # 明确区分"无快照"和"快照不完整"：前者 fail-closed 的唯一出路就是阻塞，
-    # 不能走 is_snapshot_incomplete，因为那个 helper 对 None 返回 False（契约
-    # 被 evidence_bundle / rollback / observation 共用）。在 gate 侧先做 None
-    # 守卫就能同时满足两边语义。
-    if snapshot is None:
-        return _STEP2_MISSING_REASON
-
-    if is_snapshot_incomplete(snapshot):
-        return _STEP2_INCOMPLETE_REASON
-    return None
+    assessment = assess_step2_integrity(project_root)
+    return None if assessment["ok"] else str(assessment["reason"])
 
 
 __all__ = [
+    "assess_step2_integrity",
     "step2_integrity_blocking_reason",
 ]

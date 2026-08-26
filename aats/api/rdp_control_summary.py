@@ -951,7 +951,7 @@ _HEALTH_ALERT_TITLE_LABELS = {
     "current_alerts": "当前告警文件",
     "readonly_access": "生产数据库连接",
     "active_parameter_sets": "Active 参数状态",
-    "rdp_task_queue_backlog_or_failures": "任务队列积压",
+    "rdp_task_queue_backlog_or_failures": "任务队列状态",
 }
 
 
@@ -1148,7 +1148,7 @@ def _reject_action_label_v2(recommendation_type: str) -> str:
 
 
 _WORKBENCH_HEALTH_ALERT_TITLE_LABELS = {
-    "queue_state": "任务队列积压",
+    "queue_state": "任务队列状态",
     "current_alerts": "最新告警结果",
     "current_alerts_missing": "最新告警结果",
     "readonly_access": "生产数据库连接",
@@ -1178,24 +1178,50 @@ def _summarize_queue_state(detail: str | None) -> str:
     text = str(detail or "").strip()
     if not text:
         return "任务队列里还有未处理的任务。"
-    match = re.search(
+    current_match = re.search(
+        r"pending\s*=\s*(\d+)\s*,\s*running\s*=\s*(\d+)\s*,\s*"
+        r"failed_latest\s*=\s*(\d+)\s*,\s*failed_history\s*=\s*(\d+)",
+        text,
+        re.IGNORECASE,
+    )
+    if current_match:
+        pending, running, failed_latest, failed_history = (
+            int(item) for item in current_match.groups()
+        )
+        current_parts: list[str] = []
+        if pending:
+            current_parts.append(f"待执行 {pending} 条")
+        if running:
+            current_parts.append(f"执行中 {running} 条")
+        if failed_latest:
+            current_parts.append(f"最新一次仍失败的流程 {failed_latest} 个")
+        if not current_parts:
+            return "当前队列没有待执行或未恢复的失败流程。"
+        summary = f"当前任务状态：{'，'.join(current_parts)}。"
+        if failed_history:
+            summary += f"另有历史失败终态 {failed_history} 条，不占用当前队列。"
+        return summary
+
+    legacy_match = re.search(
         r"pending\s*=\s*(\d+)\s*,\s*running\s*=\s*(\d+)\s*,\s*failed\s*=\s*(\d+)",
         text,
         re.IGNORECASE,
     )
-    if not match:
+    if not legacy_match:
         return f"任务队列仍有积压或失败：{text}"
-    pending, running, failed = (int(item) for item in match.groups())
+    pending, running, failed_history = (int(item) for item in legacy_match.groups())
     parts: list[str] = []
     if pending:
         parts.append(f"待执行 {pending} 条")
     if running:
         parts.append(f"执行中 {running} 条")
-    if failed:
-        parts.append(f"失败 {failed} 条")
     if not parts:
-        return "任务队列目前没有异常。"
-    return f"任务队列里还有未处理记录：{'，'.join(parts)}。"
+        summary = "当前队列没有待执行任务。"
+    else:
+        summary = f"当前任务状态：{'，'.join(parts)}。"
+    if failed_history:
+        summary += f"历史失败终态 {failed_history} 条，不占用当前队列。"
+    return summary
 
 
 def _humanize_operational_alert(title: str | None, message: str | None, code: str | None) -> tuple[str, str] | None:
@@ -1425,29 +1451,30 @@ def _build_workbench_alerts_payload(
     integrity_alerts: list[dict[str, Any]] = []
     operational_alerts: list[dict[str, Any]] = []
 
-    try:
-        from aats.data_platform.governance.snapshot_db import (
-            ROUND_PHASE_STEP2,
-            is_snapshot_incomplete,
-            load_latest_research_round_snapshot,
-        )
+    from aats.data_platform.governance.step2_integrity_guard import (
+        assess_step2_integrity,
+    )
 
-        step2_snapshot = load_latest_research_round_snapshot(
-            phase=ROUND_PHASE_STEP2,
-            project_root=root,
-        )
-        if is_snapshot_incomplete(step2_snapshot):
-            integrity_alerts.append({
-                "code": "step2_manifest_missing",
-                "severity": "danger",
-                "scope": "round",
-                "phase": "phase2",
-                "title": "Step2 研究快照不完整",
-                "message": "最新 Step2 目录缺少 round_manifest，当前轮次不能据此做正式审批。",
-                "blocks_approval": True,
-            })
-    except Exception as exc:
-        logger.warning("workbench alerts: failed to inspect step2 snapshot: %s", exc)
+    step2_assessment = assess_step2_integrity(root)
+    if not step2_assessment["ok"]:
+        step2_code = str(step2_assessment["code"] or "lookup_failed")
+        integrity_alerts.append({
+            "code": (
+                "step2_manifest_missing"
+                if step2_code == "manifest_missing_on_disk"
+                else f"step2_{step2_code}"
+            ),
+            "severity": "danger",
+            "scope": "round",
+            "phase": "phase2",
+            "title": {
+                "snapshot_missing": "Step2 研究快照不存在",
+                "manifest_missing_on_disk": "Step2 研究快照不完整",
+                "lookup_failed": "Step2 研究快照不可校验",
+            }.get(step2_code, "Step2 研究快照不可校验"),
+            "message": str(step2_assessment["reason"]),
+            "blocks_approval": True,
+        })
 
     # phase3 / phase4 payload 查询本身也要 fail-safe——真 DB/文件抖动不应让整个
     # /auth/dashboard/bundle 500，否则前端回到 "RDP 数据暂未就绪" 的 callout，
@@ -1883,21 +1910,13 @@ def _build_tuning_overview_payload(root: Path) -> dict[str, Any]:
     # 与 proposals / alerts 两处保持一致：当前 Step2 快照不完整时不能让 overview
     # 读起来像"可以放心点批准"。headline 显式告警，approvable_count 拉到 0。
     step2_incomplete_reason: str | None = None
-    try:
-        from aats.data_platform.governance.snapshot_db import (
-            ROUND_PHASE_STEP2,
-            is_snapshot_incomplete,
-            load_latest_research_round_snapshot,
-        )
+    from aats.data_platform.governance.step2_integrity_guard import (
+        assess_step2_integrity,
+    )
 
-        step2_snapshot = load_latest_research_round_snapshot(
-            phase=ROUND_PHASE_STEP2,
-            project_root=root,
-        )
-        if is_snapshot_incomplete(step2_snapshot):
-            step2_incomplete_reason = "manifest_missing_on_disk"
-    except Exception as exc:
-        logger.warning("tuning overview: failed to inspect step2 snapshot: %s", exc)
+    step2_assessment = assess_step2_integrity(root)
+    if not step2_assessment["ok"]:
+        step2_incomplete_reason = str(step2_assessment["code"] or "lookup_failed")
 
     proposals = [
         item for item in (registry.get("proposals") or [])
@@ -1949,30 +1968,30 @@ def _build_tuning_proposals_payload(root: Path) -> dict[str, Any]:
     # 但当前数据不完整不能点批准"。
     step2_incomplete_reason: str | None = None
     step2_incomplete_alert: dict[str, Any] | None = None
-    try:
-        from aats.data_platform.governance.snapshot_db import (
-            ROUND_PHASE_STEP2,
-            is_snapshot_incomplete,
-            load_latest_research_round_snapshot,
-        )
+    from aats.data_platform.governance.step2_integrity_guard import (
+        assess_step2_integrity,
+    )
 
-        step2_snapshot = load_latest_research_round_snapshot(
-            phase=ROUND_PHASE_STEP2,
-            project_root=root,
-        )
-        if is_snapshot_incomplete(step2_snapshot):
-            step2_incomplete_reason = "manifest_missing_on_disk"
-            step2_incomplete_alert = {
-                "code": "step2_manifest_missing",
-                "severity": "danger",
-                "scope": "round",
-                "phase": "phase2",
-                "title": "Step2 研究快照不完整",
-                "message": "最新 Step2 目录缺少 round_manifest，不能据此批准调优提案。",
-                "blocks_approval": True,
-            }
-    except Exception as exc:
-        logger.warning("tuning proposals: failed to inspect step2 snapshot: %s", exc)
+    step2_assessment = assess_step2_integrity(root)
+    if not step2_assessment["ok"]:
+        step2_incomplete_reason = str(step2_assessment["code"] or "lookup_failed")
+        step2_incomplete_alert = {
+            "code": (
+                "step2_manifest_missing"
+                if step2_incomplete_reason == "manifest_missing_on_disk"
+                else f"step2_{step2_incomplete_reason}"
+            ),
+            "severity": "danger",
+            "scope": "round",
+            "phase": "phase2",
+            "title": {
+                "snapshot_missing": "Step2 研究快照不存在",
+                "manifest_missing_on_disk": "Step2 研究快照不完整",
+                "lookup_failed": "Step2 研究快照不可校验",
+            }.get(step2_incomplete_reason, "Step2 研究快照不可校验"),
+            "message": str(step2_assessment["reason"]),
+            "blocks_approval": True,
+        }
 
     proposals = sorted(
         [
@@ -1986,7 +2005,7 @@ def _build_tuning_proposals_payload(root: Path) -> dict[str, Any]:
     for item in proposals[:8]:
         approval_enabled = step2_incomplete_reason is None
         disabled_reason = (
-            "当前 Step2 研究快照不完整，暂不能批准调优提案。"
+            str(step2_assessment["reason"])
             if not approval_enabled
             else None
         )

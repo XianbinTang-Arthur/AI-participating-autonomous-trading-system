@@ -738,7 +738,12 @@ def db_has_active_task(
 
 
 def db_get_task_queue_summary(session: Session) -> dict[str, Any]:
-    """聚合任务队列状态，供健康检查与 Operator 使用."""
+    """聚合任务队列状态，供健康检查与 Operator 使用.
+
+    ``failed_count`` 是审计口径的历史终态总数，不能直接解释为当前积压。
+    ``latest_failed_count`` 只统计“各 workflow 最新一条任务仍失败”的流程，
+    用于判断是否存在尚未被后续成功任务修复的执行故障。
+    """
     counts_row = session.execute(
         text("""
             SELECT
@@ -747,6 +752,15 @@ def db_get_task_queue_summary(session: Session) -> dict[str, Any]:
                 COUNT(*) FILTER (WHERE status = 'done') AS done_count,
                 COUNT(*) FILTER (WHERE status = 'failed') AS failed_count,
                 COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelled_count,
+                (
+                    SELECT COUNT(*)
+                    FROM (
+                        SELECT DISTINCT ON (workflow) workflow, status
+                        FROM governance.rdp_task_queue
+                        ORDER BY workflow, created_at DESC, task_id DESC
+                    ) AS latest_by_workflow
+                    WHERE latest_by_workflow.status = 'failed'
+                ) AS latest_failed_count,
                 MAX(requested_at) FILTER (WHERE status = 'pending') AS latest_pending_at,
                 MAX(started_at) FILTER (WHERE status = 'running') AS latest_running_at,
                 MAX(finished_at) FILTER (
@@ -772,6 +786,7 @@ def db_get_task_queue_summary(session: Session) -> dict[str, Any]:
         "running_count": int(counts_row.running_count or 0),
         "done_count": int(counts_row.done_count or 0),
         "failed_count": int(counts_row.failed_count or 0),
+        "latest_failed_count": int(counts_row.latest_failed_count or 0),
         "cancelled_count": int(counts_row.cancelled_count or 0),
         "latest_pending_at": (
             counts_row.latest_pending_at.isoformat()

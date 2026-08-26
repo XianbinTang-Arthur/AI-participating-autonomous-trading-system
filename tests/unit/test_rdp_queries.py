@@ -141,3 +141,67 @@ def test_query_rdp_health_uses_decision_round_snapshot_for_governance_and_decisi
     assert "governance_cycle=ok:" in workflow_check["detail"]
     assert "decision_cycle=ok:" in workflow_check["detail"]
     assert "workflow_runs_stale_or_missing" not in health["warnings"]
+
+
+def test_query_rdp_health_does_not_treat_historical_failures_as_queue_backlog(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(
+        "aats.data_platform.operations.environment_guard.get_current_environment",
+        lambda: "dev",
+    )
+    monkeypatch.setattr(
+        rdp_queries,
+        "_query_governance_runtime_state",
+        lambda: {
+            "connection_ok": True,
+            "errors": [],
+            "runtime_components": [],
+            "task_queue": {
+                "pending_count": 0,
+                "running_count": 0,
+                "failed_count": 31,
+                "latest_failed_count": 0,
+            },
+        },
+    )
+    monkeypatch.setattr(rdp_queries, "_check_db_initialization", lambda *_args, **_kwargs: (True, True))
+    monkeypatch.setattr(
+        rdp_queries,
+        "_collect_latest_workflow_runs",
+        lambda _root: {
+            "data_maintenance": {
+                "workflow": "data_maintenance",
+                "overall_status": "success",
+                "finished_at": now.isoformat(),
+            },
+        },
+    )
+    monkeypatch.setattr(
+        rdp_queries,
+        "_load_latest_decision_round_from_db",
+        lambda: {
+            "available": True,
+            "data_source": "db",
+            "round_id": "20260826_044509_2e1f9967",
+            "started_at": now.isoformat(),
+            "finished_at": now.isoformat(),
+        },
+    )
+    monkeypatch.setattr(
+        "aats.data_platform.live_query_adapter.check_live_db_health",
+        lambda: {"healthy": True, "connection_ok": True, "tables_checked": {}, "errors": []},
+    )
+    monkeypatch.setattr(
+        "aats.bootstrap.active_parameters.load_all_active_parameter_sets",
+        lambda project_root: {"independent_15m": {"parameter_set_id": "ps_live_1"}},
+    )
+
+    health = rdp_queries.query_rdp_health(tmp_path)
+    queue_check = next(item for item in health["checks"] if item["category"] == "task_queue")
+
+    assert queue_check["status"] == "ok"
+    assert "failed_history=31" in queue_check["detail"]
+    assert "rdp_task_queue_backlog_or_failures" not in health["warnings"]

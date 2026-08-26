@@ -125,7 +125,7 @@ def test_rdp_browser_e2e_click_chain_updates_page_and_requests(tmp_path: Path) -
   <body>
     <div id="app">loading</div>
     <script type="module">
-      import { renderRdpControlPanelV2 } from "/static/modules/views/rdp-control-panel.js";
+      import { renderRdpControlPanelV3 } from "/static/modules/views/rdp-control-panel.js";
       import { createRdpActionHandlers } from "/static/modules/actions/rdp-actions.js";
 
       window.confirm = () => true;
@@ -143,37 +143,45 @@ def test_rdp_browser_e2e_click_chain_updates_page_and_requests(tmp_path: Path) -
             body = init.body;
           }
         }
-        window.__requestLog.push({
+        const logEntry = {
           url,
           method: init.method || "GET",
           body,
-        });
-        return originalFetch(input, init);
+        };
+        window.__requestLog.push(logEntry);
+        const response = await originalFetch(input, init);
+        logEntry.status = response.status;
+        try {
+          logEntry.responseBody = await response.clone().json();
+        } catch (_error) {
+          logEntry.responseBody = null;
+        }
+        return response;
       };
 
       const state = {
         actionInFlight: false,
         flash: null,
-        data: { rdpControl: null },
+        data: { rdpWorkspace: null },
       };
+      window.__rdpState = state;
       const root = document.getElementById("app");
 
       async function requestJson(path, options = {}) {
-        const response = await fetch(path, {
-          method: options.method || "GET",
-          headers: { "Content-Type": "application/json" },
+          const response = await fetch(path, {
+            method: options.method || "GET",
+            headers: { "Content-Type": "application/json", ...(options.headers || {}) },
           body: options.body ? JSON.stringify(options.body) : undefined,
         });
         return response.json();
       }
 
       async function refreshDashboard() {
-        const payload = await requestJson("/rdp/control-summary");
-        state.data.rdpControl = payload;
-        root.innerHTML = renderRdpControlPanelV2({
-          rdpControl: payload,
+        const payload = await requestJson("/rdp/v3/workspace");
+        state.data.rdpWorkspace = payload;
+        root.innerHTML = renderRdpControlPanelV3({
+          workspace: payload,
           canAdmin: true,
-          uiState: {},
         });
         document.body.dataset.ready = "true";
       }
@@ -277,6 +285,32 @@ def test_rdp_browser_e2e_click_chain_updates_page_and_requests(tmp_path: Path) -
             },
         },
     }
+    gate_state: list[dict[str, object]] = []
+    release_state: list[dict[str, object]] = []
+    observation_state = {"status": "observing"}
+
+    def _latest_recommendations(*_args, **_kwargs) -> dict[str, object]:
+        registry = json.loads(
+            (root / "artifacts" / "decision_system" / "recommendation_registry.json").read_text(
+                encoding="utf-8",
+            ),
+        )
+        return {
+            "available": True,
+            "recommendations": registry.get("recommendations", []),
+        }
+
+    def _parameter_registry(_root: Path) -> dict[str, object]:
+        registry = json.loads(
+            (root / "artifacts" / "governance" / "current_parameter_registry.json").read_text(
+                encoding="utf-8",
+            ),
+        )
+        return {
+            "available": True,
+            "parameter_sets": registry.get("parameter_sets", []),
+            "status_distribution": {"frozen": 1, "candidate": 1},
+        }
 
     def _active_summary() -> dict[str, object]:
         active_sets = active_state["active_sets"]
@@ -322,6 +356,7 @@ def test_rdp_browser_e2e_click_chain_updates_page_and_requests(tmp_path: Path) -
             project_root / "artifacts" / "production_workflow" / "gates" / "gate_demo_1" / "pre_apply_gate_result.json",
             result,
         )
+        gate_state[:] = [result]
         return result
 
     def _fake_apply(
@@ -388,11 +423,78 @@ def test_rdp_browser_e2e_click_chain_updates_page_and_requests(tmp_path: Path) -
             "to_parameter_set_id": "ps_live_0",
         }
 
+    def _fake_release(
+        project_root: Path,
+        *,
+        recommendation_id: str,
+        actor: str,
+        observation_window_hours: int,
+        notes: str | None = None,
+        run_gate: bool = True,
+        run_apply: bool = True,
+    ) -> dict[str, object]:
+        del notes, run_gate
+        apply_result = _fake_apply(
+            project_root,
+            recommendation_id=recommendation_id,
+            actor=actor,
+            release_id="rel_demo_1",
+        ) if run_apply else {"ok": True}
+        release = {
+            "release_id": "rel_demo_1",
+            "recommendation_id": recommendation_id,
+            "family": "independent",
+            "timeframe": "15m",
+            "created_at": "2026-04-16T12:05:00Z",
+            "observation_window_hours": observation_window_hours,
+            "apply_result": "success" if apply_result.get("ok") else "failed",
+        }
+        release_state[:] = [release]
+        observation_state["status"] = "observing"
+        return {"ok": True, "release": release, "apply": apply_result}
+
+    def _fake_observation(
+        project_root: Path,
+        *,
+        release_id: str,
+        family: str,
+        timeframe: str,
+        window_hours: int,
+    ) -> dict[str, object]:
+        del project_root, family, timeframe, window_hours
+        observation_state["status"] = "rollback_recommended"
+        return {
+            "ok": True,
+            "release_id": release_id,
+            "observation_status": "rollback_recommended",
+        }
+
+    def _observation_queue(*_args, **_kwargs) -> list[dict[str, object]]:
+        if not release_state:
+            return []
+        release = release_state[0]
+        return [{
+            **release,
+            "combo_key": "independent_15m",
+            "required_window_hours": release["observation_window_hours"],
+            "observation_status": observation_state["status"],
+            "observation": {"recommendation": "rollback_recommended"},
+        }]
+
     with ExitStack() as stack:
         stack.enter_context(patch("aats.api.rdp_routes._project_root", lambda _request: root))
         stack.enter_context(patch("aats.api.rdp_routes._governance_session", _fake_governance_session))
+        stack.enter_context(patch("aats.api.rdp_routes.emit_token", return_value="e2e-apply-token"))
+        stack.enter_context(patch("aats.api.rdp_routes._require_composite_apply_token", return_value=None))
         stack.enter_context(patch("aats.api.rdp_control_summary._project_root", lambda _request: root))
         stack.enter_context(patch("aats.api.rdp_control_summary._governance_session", _fake_governance_session))
+        stack.enter_context(patch("aats.api.rdp_workspace._project_root", lambda _request: root))
+        stack.enter_context(
+            patch(
+                "aats.api.rdp_workspace.build_rdp_runs_panel",
+                return_value={"items": [], "total": 0},
+            ),
+        )
         stack.enter_context(
             patch(
                 "aats.api.rdp_control_summary._environment_summary",
@@ -426,6 +528,60 @@ def test_rdp_browser_e2e_click_chain_updates_page_and_requests(tmp_path: Path) -
             ),
         )
         stack.enter_context(
+            patch(
+                "aats.api.rdp_control_summary.query_latest_recommendations",
+                side_effect=_latest_recommendations,
+            ),
+        )
+        stack.enter_context(
+            patch(
+                "aats.api.rdp_control_summary.query_parameter_registry",
+                side_effect=_parameter_registry,
+            ),
+        )
+        stack.enter_context(
+            patch(
+                "aats.api.rdp_control_summary.query_latest_attribution",
+                return_value={"available": True, "round_id": "phase3_demo", "combos": []},
+            ),
+        )
+        stack.enter_context(
+            patch(
+                "aats.api.rdp_control_summary.query_latest_execution_realism",
+                return_value={"available": True, "round_id": "phase4_demo", "combos": []},
+            ),
+        )
+        stack.enter_context(
+            patch(
+                "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+                return_value={"round_id": "step2_demo", "manifest": {"status": "complete"}},
+            ),
+        )
+        stack.enter_context(
+            patch(
+                "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
+                return_value=False,
+            ),
+        )
+        stack.enter_context(
+            patch(
+                "aats.api.rdp_control_summary._load_recent_gate_results",
+                side_effect=lambda *_args, **_kwargs: list(gate_state),
+            ),
+        )
+        stack.enter_context(
+            patch(
+                "aats.api.rdp_control_summary._load_recent_releases",
+                side_effect=lambda *_args, **_kwargs: list(release_state),
+            ),
+        )
+        stack.enter_context(
+            patch(
+                "aats.api.rdp_control_summary._build_observation_queue",
+                side_effect=_observation_queue,
+            ),
+        )
+        stack.enter_context(
             patch("aats.api.rdp_control_summary.query_latest_decision_round", return_value={"available": False}),
         )
         stack.enter_context(
@@ -443,13 +599,41 @@ def test_rdp_browser_e2e_click_chain_updates_page_and_requests(tmp_path: Path) -
             patch("aats.data_platform.decision_system.recommendation_registry.try_governance_db", lambda: (None, False)),
         )
         stack.enter_context(
+            patch(
+                "aats.data_platform.decision_system.recommendation_registry._db_update_rec_status",
+                return_value=True,
+            ),
+        )
+        stack.enter_context(
             patch("aats.data_platform.governance.parameter_registry.try_governance_db", lambda: (None, False)),
         )
         stack.enter_context(
             patch("aats.data_platform.production_workflow.release_registry.try_governance_db", lambda: (None, False)),
         )
         stack.enter_context(
+            patch(
+                "aats.data_platform.production_workflow.release_registry.load_release_history",
+                side_effect=lambda _root: {
+                    "source": "db",
+                    "stale": False,
+                    "releases": list(release_state),
+                },
+            ),
+        )
+        stack.enter_context(
+            patch(
+                "aats.data_platform.production_workflow.release_registry.create_parameter_release",
+                side_effect=_fake_release,
+            ),
+        )
+        stack.enter_context(
             patch("aats.data_platform.production_workflow.observation_window.try_governance_db", lambda: (None, False)),
+        )
+        stack.enter_context(
+            patch(
+                "aats.data_platform.production_workflow.observation_window.run_observation",
+                side_effect=_fake_observation,
+            ),
         )
         stack.enter_context(
             patch("aats.data_platform.production_workflow.pre_apply_gate.run_pre_apply_gate", _fake_gate),
@@ -472,6 +656,18 @@ def test_rdp_browser_e2e_click_chain_updates_page_and_requests(tmp_path: Path) -
 
         with _live_server(app) as base_url:
             try:
+                initial_response = requests.get(
+                    f"{base_url}/rdp/v3/workspace",
+                    timeout=10,
+                )
+                assert initial_response.status_code == 200, initial_response.text
+                initial_workspace = initial_response.json()
+                assert initial_workspace["schema_version"] == "rdp.workspace.v3"
+                assert initial_workspace["research"]["items"], initial_workspace
+                assert any(
+                    action.get("ui_action") == "rdp-approve-only" and action.get("enabled") is True
+                    for action in initial_workspace["research"]["items"][0].get("actions", [])
+                ), initial_workspace["research"]["items"][0]
                 wait = WebDriverWait(driver, 20)
                 driver.get(f"{base_url}/e2e/rdp")
                 wait.until(lambda d: d.execute_script("return document.body.dataset.ready") == "true")
@@ -480,6 +676,31 @@ def test_rdp_browser_e2e_click_chain_updates_page_and_requests(tmp_path: Path) -
                 approve_button = driver.find_element(By.CSS_SELECTOR, '[data-action="rdp-approve-only"]')
                 driver.execute_script("arguments[0].click()", approve_button)
                 wait.until(lambda d: any(item["url"].endswith("/rdp/recommendations/rec_demo_1/approve") for item in _non_get_request_log(d)))
+                wait.until(lambda d: d.execute_script("return window.__rdpState.actionInFlight") is False)
+                approve_requests = [
+                    item for item in _non_get_request_log(driver)
+                    if item["url"].endswith("/rdp/recommendations/rec_demo_1/approve")
+                ]
+                assert approve_requests[-1]["status"] == 200, approve_requests[-1]
+                assert approve_requests[-1]["responseBody"].get("ok") is True, approve_requests[-1]
+                post_approval_response = requests.get(
+                    f"{base_url}/rdp/v3/workspace",
+                    timeout=10,
+                )
+                assert post_approval_response.status_code == 200, post_approval_response.text
+                persisted_registry = json.loads(
+                    (root / "artifacts" / "decision_system" / "recommendation_registry.json").read_text(
+                        encoding="utf-8",
+                    ),
+                )
+                assert persisted_registry["recommendations"][0]["status"] == "approved", persisted_registry
+                post_approval_workspace = post_approval_response.json()
+                assert post_approval_workspace["release"]["candidates"], post_approval_workspace
+                wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, '[data-action="rdp-run-gate"]')))
+
+                gate_button = driver.find_element(By.CSS_SELECTOR, '[data-action="rdp-run-gate"]')
+                driver.execute_script("arguments[0].click()", gate_button)
+                wait.until(lambda d: any(item["url"].endswith("/rdp/gates/run") for item in _non_get_request_log(d)))
                 wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, '[data-action="rdp-create-release"]')))
 
                 release_button = driver.find_element(By.CSS_SELECTOR, '[data-action="rdp-create-release"]')
@@ -501,6 +722,11 @@ def test_rdp_browser_e2e_click_chain_updates_page_and_requests(tmp_path: Path) -
                 assert any(
                     item["url"].endswith("/rdp/recommendations/rec_demo_1/approve")
                     and item["body"]["actor"] == "operator"
+                    for item in request_log
+                )
+                assert any(
+                    item["url"].endswith("/rdp/gates/run")
+                    and item["body"]["recommendation_id"] == "rec_demo_1"
                     for item in request_log
                 )
                 assert any(

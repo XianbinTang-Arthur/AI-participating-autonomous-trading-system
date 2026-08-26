@@ -884,16 +884,20 @@ def query_rdp_health(project_root: Path) -> dict[str, Any]:
     if governance_runtime.get("connection_ok") and task_queue:
         backlog = int(task_queue.get("pending_count", 0) or 0)
         running = int(task_queue.get("running_count", 0) or 0)
-        failed = int(task_queue.get("failed_count", 0) or 0)
+        failed_history = int(task_queue.get("failed_count", 0) or 0)
+        failed_latest = int(task_queue.get("latest_failed_count", 0) or 0)
         queue_status = "ok"
-        if backlog > 0 or failed > 0:
+        if backlog > 0 or failed_latest > 0:
             queue_status = "warn"
             warnings.append("rdp_task_queue_backlog_or_failures")
         checks.append({
             "category": "task_queue",
             "name": "queue_state",
             "status": queue_status,
-            "detail": f"pending={backlog}, running={running}, failed={failed}",
+            "detail": (
+                f"pending={backlog}, running={running}, "
+                f"failed_latest={failed_latest}, failed_history={failed_history}"
+            ),
         })
 
     runtime_components = {

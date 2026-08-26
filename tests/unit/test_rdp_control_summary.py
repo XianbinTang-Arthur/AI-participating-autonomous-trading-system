@@ -39,6 +39,27 @@ def _fake_snapshot_request(runtime: object | None = None) -> SimpleNamespace:
 
 
 class TestRdpControlSummary(TestCase):
+    def test_workbench_alerts_fail_closed_when_step2_snapshot_is_missing(self) -> None:
+        with (
+            patch(
+                "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+                return_value=None,
+            ),
+        ):
+            payload = rdp_control_summary._build_workbench_alerts_payload(
+                Path("."),
+                {"health": {}},
+                phase_payloads={
+                    "phase3": {"available": True},
+                    "phase4": {"available": True},
+                },
+            )
+
+        self.assertEqual(len(payload["integrity_alerts"]), 1)
+        alert = payload["integrity_alerts"][0]
+        self.assertEqual(alert["code"], "step2_snapshot_missing")
+        self.assertTrue(alert["blocks_approval"])
+
     def test_workbench_items_humanize_governance_blocking_flags(self) -> None:
         summary = {
             "governance_state": {
@@ -1244,7 +1265,7 @@ class TestRdpControlSummary(TestCase):
             ),
             patch(
                 "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
-                return_value=None,
+                return_value={"round_id": "step2_keep_active", "manifest": {"status": "complete"}},
             ),
             patch(
                 "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
@@ -1640,7 +1661,7 @@ class TestRdpControlSummary(TestCase):
             ),
             patch(
                 "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
-                return_value=None,
+                return_value={"round_id": "step2_detail", "manifest": {"status": "complete"}},
             ),
             patch(
                 "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
@@ -1781,7 +1802,7 @@ class TestRdpControlSummary(TestCase):
             ),
             patch(
                 "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
-                return_value=None,
+                return_value={"round_id": "round_step2_m7", "manifest": {"status": "complete"}},
             ),
             patch(
                 "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
@@ -1952,8 +1973,12 @@ class TestRdpControlSummary(TestCase):
 
         titles = [item["title"] for item in payload["operational_alerts"]]
         messages = [item["message"] for item in payload["operational_alerts"]]
-        self.assertEqual(titles.count("任务队列积压"), 1)
-        self.assertTrue(any("执行中 3 条" in message and "失败 315 条" in message for message in messages))
+        self.assertEqual(titles.count("任务队列状态"), 1)
+        self.assertTrue(any(
+            "执行中 3 条" in message
+            and "历史失败终态 315 条，不占用当前队列" in message
+            for message in messages
+        ))
         self.assertFalse(any("current_alerts.json not found" in message for message in messages))
         self.assertIn("当前还没有已生效的实盘参数。先完成治理结论，再决定是否发布。", messages)
 
