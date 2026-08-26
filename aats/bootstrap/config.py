@@ -1572,6 +1572,9 @@ class ApplicationRuntime:
             except Exception as exc:
                 await self._record_background_failure(subsystem="phase1_shadow_monitor", exc=exc)
             else:
+                await self._record_background_recovery(
+                    subsystem="phase1_shadow_monitor"
+                )
                 self.mark_critical_background_task_success(
                     "aats_phase1_shadow_monitor"
                 )
@@ -1714,7 +1717,30 @@ class ApplicationRuntime:
             error=str(exc),
         )
         error_type = type(exc).__name__
-        await asyncio.to_thread(self._record_background_failure_sync, subsystem=subsystem, message=message, error_type=error_type)
+        state = getattr(self, "background_failure_messages", None)
+        if state is None:
+            state = {}
+            self.background_failure_messages = state
+        state[subsystem] = message
+        try:
+            await asyncio.to_thread(
+                self._record_background_failure_sync,
+                subsystem=subsystem,
+                message=message,
+                error_type=error_type,
+            )
+        except Exception as record_exc:
+            # The failure sink commonly shares the same database as the failing
+            # worker.  Telemetry unavailability must not terminate the supervised
+            # loop: the progress deadline keeps health fail-closed, while a later
+            # successful business cycle can prove recovery.
+            log_event(
+                self.logger,
+                "background_failure_record_failed",
+                level="error",
+                subsystem=subsystem,
+                error_type=type(record_exc).__name__,
+            )
 
     def _record_background_failure_sync(self, *, subsystem: str, message: str, error_type: str) -> None:
         state = getattr(self, "background_failure_messages", None)
@@ -1763,16 +1789,28 @@ class ApplicationRuntime:
         )
 
     async def _record_background_recovery(self, *, subsystem: str) -> None:
-        await asyncio.to_thread(
-            self._record_background_recovery_sync,
-            subsystem=subsystem,
-        )
+        try:
+            await asyncio.to_thread(
+                self._record_background_recovery_sync,
+                subsystem=subsystem,
+            )
+        except Exception as record_exc:
+            # A recovery event is observability, not the business cycle itself.
+            # Retain the in-memory failure until its durable recovery marker can
+            # be written, but allow the critical loop to continue and report
+            # fresh progress.
+            log_event(
+                self.logger,
+                "background_recovery_record_failed",
+                level="error",
+                subsystem=subsystem,
+                error_type=type(record_exc).__name__,
+            )
 
     def _record_background_recovery_sync(self, *, subsystem: str) -> None:
         state = getattr(self, "background_failure_messages", None)
         if not state or subsystem not in state:
             return
-        state.pop(subsystem, None)
         self.event_store.append(
             build_envelope(
                 topic=topics.EXECUTION_ERROR_SUMMARIES,
@@ -1786,6 +1824,7 @@ class ApplicationRuntime:
                 source_component="runtime",
             )
         )
+        state.pop(subsystem, None)
         log_event(
             self.logger,
             "background_loop_recovered",

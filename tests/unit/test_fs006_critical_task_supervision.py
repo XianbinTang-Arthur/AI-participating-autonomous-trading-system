@@ -313,6 +313,57 @@ def test_failure_snapshot_never_contains_exception_body() -> None:
     assert "sensitive-exception-body" not in repr(failure)
 
 
+def test_background_failure_sink_outage_does_not_terminate_caller() -> None:
+    class _UnavailableEventStore:
+        def latest(self, *_args, **_kwargs):
+            raise RuntimeError("event-store-unavailable")
+
+    async def _run() -> None:
+        runtime = ApplicationRuntime.__new__(ApplicationRuntime)
+        runtime.background_failure_messages = {}
+        runtime.event_store = _UnavailableEventStore()
+        runtime.logger = object()
+        with patch("aats.bootstrap.config.log_event"):
+            await runtime._record_background_failure(
+                subsystem="phase1_shadow_monitor",
+                exc=RuntimeError("database-unavailable"),
+            )
+        assert "phase1_shadow_monitor" in runtime.background_failure_messages
+
+    asyncio.run(_run())
+
+
+def test_background_recovery_sink_outage_retains_failure_without_raising() -> None:
+    class _UnavailableEventStore:
+        def append(self, *_args, **_kwargs):
+            raise RuntimeError("event-store-unavailable")
+
+    async def _run() -> None:
+        runtime = ApplicationRuntime.__new__(ApplicationRuntime)
+        runtime.background_failure_messages = {
+            "phase1_shadow_monitor": "previous-failure"
+        }
+        runtime.event_store = _UnavailableEventStore()
+        runtime.logger = object()
+        with patch("aats.bootstrap.config.log_event"):
+            await runtime._record_background_recovery(
+                subsystem="phase1_shadow_monitor"
+            )
+        assert runtime.background_failure_messages == {
+            "phase1_shadow_monitor": "previous-failure"
+        }
+
+    asyncio.run(_run())
+
+
+def test_phase1_shadow_monitor_records_recovery_before_success_checkpoint() -> None:
+    source = inspect.getsource(ApplicationRuntime._monitor_phase1_shadow_loop)
+
+    recovery_offset = source.index("_record_background_recovery")
+    success_offset = source.index("mark_critical_background_task_success")
+    assert recovery_offset < success_offset
+
+
 def test_service_owned_long_running_tasks_are_exposed_for_supervision() -> None:
     async def _run() -> None:
         task = asyncio.create_task(asyncio.sleep(60), name="owned-task")
