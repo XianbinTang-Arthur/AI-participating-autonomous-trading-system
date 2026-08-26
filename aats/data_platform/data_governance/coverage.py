@@ -14,7 +14,7 @@ from sqlalchemy import Engine, PrimaryKeyConstraint, UniqueConstraint, inspect, 
 from aats.data_platform.rdp_models import RdpBase
 
 
-ALGORITHM_VERSION = "rdp-coverage-v3"
+ALGORITHM_VERSION = "rdp-coverage-v4"
 _TIME_COLUMNS = (
     "ts",
     "event_ts",
@@ -108,7 +108,11 @@ def audit_coverage(
         transaction = connection.begin()
         try:
             if engine.dialect.name == "postgresql":
-                connection.execute(text("SET TRANSACTION READ ONLY"))
+                connection.execute(
+                    text(
+                        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+                    )
+                )
                 connection.execute(
                     text("SELECT set_config('statement_timeout', :timeout, true)"),
                     {"timeout": f"{statement_timeout_ms}ms"},
@@ -290,13 +294,17 @@ def _audit_table(connection, inspector, schema: str, table: str, start: datetime
         ).mappings().one()
         modeled_table = RdpBase.metadata.tables.get(qualified)
         natural_key = _natural_key_columns(modeled_table, columns, time_column)
-        duplicates = _duplicate_count(
-            connection,
-            table_sql,
-            time_sql,
-            natural_key,
-            start,
-            end,
+        duplicates = (
+            0
+            if _database_enforces_unique_key(modeled_table, natural_key)
+            else _duplicate_count(
+                connection,
+                table_sql,
+                time_sql,
+                natural_key,
+                start,
+                end,
+            )
         )
         gaps = _gap_count(
             connection,
@@ -436,6 +444,28 @@ def _natural_key_columns(modeled_table, columns: set[str], time_column: str) -> 
     if "inst_id" in columns:
         return ("inst_id", time_column)
     return None
+
+
+def _database_enforces_unique_key(
+    modeled_table,
+    natural_key: tuple[str, ...] | None,
+) -> bool:
+    """Return whether PostgreSQL already rejects duplicates for this key.
+
+    Recounting duplicates across high-frequency payload tables is both
+    redundant and capable of exhausting the audit statement timeout.  An
+    exact modeled primary/unique constraint is stronger evidence than a
+    periodic scan, so constrained keys are reported as zero duplicates without
+    rereading the table.
+    """
+
+    if modeled_table is None or not natural_key:
+        return False
+    return any(
+        isinstance(constraint, (PrimaryKeyConstraint, UniqueConstraint))
+        and tuple(column.name for column in constraint.columns) == natural_key
+        for constraint in modeled_table.constraints
+    )
 
 
 def _duplicate_count(

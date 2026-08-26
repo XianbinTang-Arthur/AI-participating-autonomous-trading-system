@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 
 from aats.data_platform.data_governance.coverage import (
     _coverage_status,
+    _database_enforces_unique_key,
     _gap_count,
     _natural_key_columns,
     _symbol_windows,
@@ -38,6 +39,15 @@ def test_trade_duplicate_key_includes_trade_id() -> None:
         "ts",
         "trade_id",
     )
+
+
+def test_constrained_natural_key_does_not_require_duplicate_scan() -> None:
+    table = RdpBase.metadata.tables["bronze.market_orderbook_payloads"]
+    key = _natural_key_columns(table, set(table.columns.keys()), "ts")
+
+    assert key == ("snapshot_table", "symbol", "ts", "row_checksum")
+    assert _database_enforces_unique_key(table, key) is True
+    assert _database_enforces_unique_key(table, ("symbol", "ts")) is False
 
 
 def test_gap_count_partitions_each_symbol_independently() -> None:
