@@ -32,6 +32,7 @@ from aats.data_platform.governance._atomic_io import (
 
 
 TRADE_HISTORY_PATH = "/api/v5/market/history-trades"
+_TRADE_FILE_MAX_EDGE_GAP = timedelta(minutes=5)
 MARK_HISTORY_PATH = "/api/v5/market/history-mark-price-candles"
 _UTC = timezone.utc
 _DATABASE_BATCH_SIZE = 5_000
@@ -351,9 +352,11 @@ def import_trade_file(
     )
 
     rows_read = 0
+    earliest_ts: datetime | None = None
+    latest_ts: datetime | None = None
 
     def rows() -> Iterator[dict[str, Any]]:
-        nonlocal rows_read
+        nonlocal earliest_ts, latest_ts, rows_read
         for item in _iter_records(archived_path):
             parsed = _parse_trade(item, symbol)
             if parsed is None:
@@ -362,6 +365,16 @@ def import_trade_file(
                 raise ValueError("trade_history_symbol_mismatch")
             if start <= parsed["ts"] < end:
                 rows_read += 1
+                earliest_ts = (
+                    parsed["ts"]
+                    if earliest_ts is None
+                    else min(earliest_ts, parsed["ts"])
+                )
+                latest_ts = (
+                    parsed["ts"]
+                    if latest_ts is None
+                    else max(latest_ts, parsed["ts"])
+                )
                 yield parsed
 
     written = _write_trade_rows(
@@ -370,6 +383,12 @@ def import_trade_file(
         source_id=source_id,
         ingest_run_id=ingest_run_id,
         raw_sha256=digest,
+    )
+    gaps = _trade_file_edge_gaps(
+        start=start,
+        end=end,
+        earliest_ts=earliest_ts,
+        latest_ts=latest_ts,
     )
     return ImportStats(
         source_kind="okx_bulk",
@@ -380,8 +399,54 @@ def import_trade_file(
         rows_read=rows_read,
         rows_written=written,
         raw_sha256=(digest,),
-        gaps=(),
+        gaps=tuple(gaps),
     )
+
+
+def _trade_file_edge_gaps(
+    *,
+    start: datetime,
+    end: datetime,
+    earliest_ts: datetime | None,
+    latest_ts: datetime | None,
+) -> list[dict[str, str]]:
+    """Fail closed when an operator-supplied file does not span its UTC window.
+
+    OKX bulk files use an exchange-local calendar boundary while this importer
+    accepts UTC half-open windows.  Row filtering alone therefore cannot prove
+    that one daily file covers both UTC edges.  A short tolerance permits the
+    normal absence of a trade exactly at midnight without treating a visibly
+    truncated file as complete.
+    """
+
+    reason = "official_trade_history_coverage_unproven"
+    if earliest_ts is None or latest_ts is None:
+        return [
+            {
+                "reason": reason,
+                "gap_start": start.isoformat(),
+                "gap_end": end.isoformat(),
+            }
+        ]
+
+    gaps: list[dict[str, str]] = []
+    if earliest_ts - start > _TRADE_FILE_MAX_EDGE_GAP:
+        gaps.append(
+            {
+                "reason": reason,
+                "gap_start": start.isoformat(),
+                "gap_end": earliest_ts.isoformat(),
+            }
+        )
+    if end - latest_ts > _TRADE_FILE_MAX_EDGE_GAP:
+        gaps.append(
+            {
+                "reason": reason,
+                "gap_start": latest_ts.isoformat(),
+                "gap_end": end.isoformat(),
+            }
+        )
+    return gaps
 
 
 def import_l2_file(

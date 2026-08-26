@@ -80,6 +80,56 @@ def test_trade_file_is_immutable_archived_half_open_and_source_aware(tmp_path: P
     assert {params["side"] for params in _payloads(session)} == {"buy", "sell"}
 
 
+def test_trade_file_fails_eligibility_when_utc_window_edge_is_missing(
+    tmp_path: Path,
+) -> None:
+    start = datetime(2026, 8, 1, tzinfo=UTC)
+    end = start + timedelta(days=1)
+    source = tmp_path / "trades.jsonl"
+    records = [
+        {
+            "instId": "BTC-USDT-SWAP",
+            "ts": str(int((start + timedelta(milliseconds=1)).timestamp() * 1000)),
+            "tradeId": "1",
+            "px": "100",
+            "sz": "2",
+            "side": "buy",
+        },
+        {
+            "instId": "BTC-USDT-SWAP",
+            "ts": str(int((start + timedelta(hours=16)).timestamp() * 1000)),
+            "tradeId": "2",
+            "px": "101",
+            "sz": "3",
+            "side": "sell",
+        },
+    ]
+    source.write_text(
+        "\n".join(json.dumps(record) for record in records),
+        encoding="utf-8",
+    )
+
+    stats = import_trade_file(
+        _Session(),
+        path=source,
+        symbol="BTC-USDT-SWAP",
+        start=start,
+        end=end,
+        source_id="00000000-0000-0000-0000-000000000001",
+        ingest_run_id="00000000-0000-0000-0000-000000000002",
+        raw_archive_dir=tmp_path / "archive",
+    )
+
+    assert stats.rows_read == stats.rows_written == 2
+    assert stats.gaps == (
+        {
+            "reason": "official_trade_history_coverage_unproven",
+            "gap_start": (start + timedelta(hours=16)).isoformat(),
+            "gap_end": end.isoformat(),
+        },
+    )
+
+
 def test_l2_import_hashes_datetime_payload_and_reports_sequence_gap(tmp_path: Path) -> None:
     start = datetime(2026, 8, 1, tzinfo=UTC)
     source = tmp_path / "l2.jsonl"
