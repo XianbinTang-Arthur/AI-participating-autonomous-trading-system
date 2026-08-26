@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import stat
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -56,6 +59,60 @@ def test_parquet_archive_is_multi_batch_verifiable_and_non_overwriting(tmp_path:
     assert pq.read_table(target).to_pylist()[1]["px"] == 101.0
     with pytest.raises(FileExistsError, match="archive_target_exists"):
         _write_parquet_immutable(iter([[{"ts": scope.coverage_start}]]), target, manifest, scope)
+
+
+def test_archive_explicit_schema_preserves_late_nullable_and_varying_json_fields(
+    tmp_path: Path,
+) -> None:
+    scope = _scope()
+    target = tmp_path / "part-schema.parquet"
+    schema = pa.schema(
+        [
+            pa.field("symbol", pa.string()),
+            pa.field("ts", pa.timestamp("us", tz="UTC")),
+            pa.field("optional_value", pa.float64()),
+            pa.field("raw_payload", pa.string()),
+            pa.field("ingest_run_id", pa.string()),
+        ]
+    )
+    rows = iter(
+        [
+            [
+                {
+                    "symbol": scope.symbol,
+                    "ts": scope.coverage_start,
+                    "optional_value": None,
+                    "raw_payload": {"first": 1},
+                    "ingest_run_id": uuid.UUID("00000000-0000-0000-0000-000000000001"),
+                }
+            ],
+            [
+                {
+                    "symbol": scope.symbol,
+                    "ts": scope.coverage_start + timedelta(seconds=1),
+                    "optional_value": 2.5,
+                    "raw_payload": {"second": 2},
+                    "ingest_run_id": uuid.UUID("00000000-0000-0000-0000-000000000002"),
+                }
+            ],
+        ]
+    )
+
+    _write_parquet_immutable(
+        rows,
+        target,
+        target.with_suffix(".manifest.json"),
+        scope,
+        arrow_schema=schema,
+        json_columns=frozenset({"raw_payload"}),
+        string_columns=frozenset({"ingest_run_id"}),
+    )
+
+    restored = pq.read_table(target).to_pylist()
+    assert restored[1]["optional_value"] == 2.5
+    assert json.loads(restored[0]["raw_payload"]) == {"first": 1}
+    assert json.loads(restored[1]["raw_payload"]) == {"second": 2}
+    assert restored[1]["ingest_run_id"] == "00000000-0000-0000-0000-000000000002"
 
 
 def test_archive_verification_detects_tamper(tmp_path: Path) -> None:

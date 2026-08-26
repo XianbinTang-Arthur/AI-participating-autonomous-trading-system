@@ -79,6 +79,17 @@ class ArchiveArtifact:
     schema: str
 
 
+@dataclass(frozen=True)
+class ArchiveRestoreDrillResult:
+    dataset_name: str
+    symbol: str
+    row_count: int
+    min_event_ts: str
+    max_event_ts: str
+    parquet_sha256: str
+    restored_columns: tuple[str, ...]
+
+
 def archive_partition(
     session_factory: Callable[[], Any],
     scope: ArchiveScope,
@@ -132,6 +143,10 @@ def archive_partition(
         with session_factory() as session:
             _begin_repeatable_read_snapshot(session)
             source_count = _source_count(session, scope)
+            arrow_schema, json_columns, string_columns = _archive_arrow_contract(
+                session,
+                scope,
+            )
             artifact = _recover_existing_artifact(
                 target,
                 manifest_path,
@@ -144,6 +159,9 @@ def archive_partition(
                     target,
                     manifest_path,
                     scope,
+                    arrow_schema=arrow_schema,
+                    json_columns=json_columns,
+                    string_columns=string_columns,
                 )
         if source_count != artifact.row_count:
             raise RuntimeError(
@@ -258,6 +276,253 @@ def verify_archive_artifact(
     )
 
 
+def verify_archive_restore_drill(
+    session_factory: Callable[[], Any],
+    scope: ArchiveScope,
+    parquet_path: Path,
+    *,
+    expected_sha256: str,
+    expected_rows: int,
+    batch_size: int = 2_000,
+) -> ArchiveRestoreDrillResult:
+    """Restore an archive into an isolated PostgreSQL temp table and verify it.
+
+    The source table is never changed.  The temporary table is dropped at the
+    transaction boundary, while every archived row still has to survive the
+    current PostgreSQL column types and constraints.
+    """
+
+    if batch_size <= 0:
+        raise ValueError("archive_restore_batch_size_must_be_positive")
+    artifact = verify_archive_artifact(
+        parquet_path,
+        expected_sha256=expected_sha256,
+        expected_rows=expected_rows,
+        expected_scope=scope,
+    )
+    parquet = pq.ParquetFile(Path(artifact.parquet_path))
+    archive_columns = tuple(parquet.schema_arrow.names)
+    if not archive_columns:
+        raise RuntimeError("archive_restore_schema_empty")
+    if scope.time_column not in archive_columns:
+        raise RuntimeError("archive_restore_time_column_missing")
+
+    with session_factory() as session, session.begin():
+        column_types, generated_columns = _restore_column_contract(
+            session,
+            scope,
+            archive_columns,
+        )
+        restored_columns = tuple(
+            column for column in archive_columns if column not in generated_columns
+        )
+        if scope.time_column not in restored_columns:
+            raise RuntimeError("archive_restore_time_column_generated")
+        temporary_table = f"rdp_archive_restore_{uuid.uuid4().hex}"
+        session.execute(
+            text(
+                f"CREATE TEMP TABLE {_identifier(temporary_table)} "
+                f"(LIKE {_qualified(scope.table)} INCLUDING DEFAULTS "
+                "INCLUDING GENERATED INCLUDING IDENTITY INCLUDING CONSTRAINTS) "
+                "ON COMMIT DROP"
+            )
+        )
+        columns_sql = ", ".join(_identifier(column) for column in restored_columns)
+        values_sql = ", ".join(
+            (
+                f"CAST(:{column} AS {column_types[column]})"
+                if column_types[column] in {"json", "jsonb"}
+                else f":{column}"
+            )
+            for column in restored_columns
+        )
+        insert_statement = text(
+            f"INSERT INTO {_identifier(temporary_table)} ({columns_sql}) "
+            f"VALUES ({values_sql})"
+        )
+        restored_rows = 0
+        for batch in parquet.iter_batches(
+            batch_size=batch_size,
+            columns=list(restored_columns),
+        ):
+            payloads = []
+            for row in batch.to_pylist():
+                payloads.append(
+                    {
+                        column: (
+                            (
+                                row[column]
+                                if isinstance(row[column], str)
+                                else json.dumps(
+                                    row[column],
+                                    separators=(",", ":"),
+                                    default=str,
+                                )
+                            )
+                            if column_types[column] in {"json", "jsonb"}
+                            and row[column] is not None
+                            else row[column]
+                        )
+                        for column in restored_columns
+                    }
+                )
+            if payloads:
+                session.execute(insert_statement, payloads)
+                restored_rows += len(payloads)
+        restored = session.execute(
+            text(
+                f"SELECT COUNT(*) AS row_count, "
+                f"MIN({_identifier(scope.time_column)}) AS min_event_ts, "
+                f"MAX({_identifier(scope.time_column)}) AS max_event_ts "
+                f"FROM {_identifier(temporary_table)}"
+            )
+        ).mappings().one()
+        if int(restored["row_count"]) != artifact.row_count:
+            raise RuntimeError("archive_restore_row_count_mismatch")
+        if restored_rows != artifact.row_count:
+            raise RuntimeError("archive_restore_insert_count_mismatch")
+        min_event_ts = _utc_iso(restored["min_event_ts"])
+        max_event_ts = _utc_iso(restored["max_event_ts"])
+        if min_event_ts != _utc_iso(artifact.min_event_ts):
+            raise RuntimeError("archive_restore_min_timestamp_mismatch")
+        if max_event_ts != _utc_iso(artifact.max_event_ts):
+            raise RuntimeError("archive_restore_max_timestamp_mismatch")
+
+    return ArchiveRestoreDrillResult(
+        dataset_name=scope.dataset_name,
+        symbol=scope.symbol,
+        row_count=artifact.row_count,
+        min_event_ts=min_event_ts,
+        max_event_ts=max_event_ts,
+        parquet_sha256=artifact.sha256,
+        restored_columns=restored_columns,
+    )
+
+
+def _restore_column_contract(
+    session,
+    scope: ArchiveScope,
+    archive_columns: tuple[str, ...],
+) -> tuple[dict[str, str], set[str]]:
+    schema_name, table_name = scope.table.split(".", 1)
+    rows = session.execute(
+        text(
+            "SELECT column_name, data_type, is_generated FROM information_schema.columns "
+            "WHERE table_schema = :schema_name AND table_name = :table_name"
+        ),
+        {"schema_name": schema_name, "table_name": table_name},
+    ).mappings().all()
+    known = {str(row["column_name"]): str(row["data_type"]) for row in rows}
+    missing = sorted(set(archive_columns) - set(known))
+    if missing:
+        raise RuntimeError("archive_restore_schema_columns_missing")
+    for column in archive_columns:
+        _identifier(column)
+    generated = {
+        str(row["column_name"])
+        for row in rows
+        if str(row["is_generated"]).upper() == "ALWAYS"
+    }
+    return known, generated
+
+
+def _archive_arrow_contract(
+    session,
+    scope: ArchiveScope,
+) -> tuple[pa.Schema, frozenset[str], frozenset[str]]:
+    schema_name, table_name = scope.table.split(".", 1)
+    rows = session.execute(
+        text(
+            "SELECT column_name, data_type, udt_name, numeric_precision, "
+            "numeric_scale FROM information_schema.columns "
+            "WHERE table_schema = :schema_name AND table_name = :table_name "
+            "ORDER BY ordinal_position"
+        ),
+        {"schema_name": schema_name, "table_name": table_name},
+    ).mappings().all()
+    if not rows:
+        raise RuntimeError("archive_source_table_schema_missing")
+    fields: list[pa.Field] = []
+    json_columns: set[str] = set()
+    string_columns: set[str] = set()
+    for row in rows:
+        column = str(row["column_name"])
+        data_type = str(row["data_type"])
+        udt_name = str(row["udt_name"])
+        _identifier(column)
+        if data_type in {"json", "jsonb"}:
+            arrow_type = pa.string()
+            json_columns.add(column)
+        elif data_type in {"text", "character varying", "uuid"}:
+            arrow_type = pa.string()
+            string_columns.add(column)
+        elif data_type == "timestamp with time zone":
+            arrow_type = pa.timestamp("us", tz="UTC")
+        elif data_type == "timestamp without time zone":
+            arrow_type = pa.timestamp("us")
+        elif data_type == "numeric":
+            precision = int(row["numeric_precision"] or 38)
+            scale = int(row["numeric_scale"] or 0)
+            arrow_type = (
+                pa.decimal128(precision, scale)
+                if precision <= 38
+                else pa.decimal256(precision, scale)
+            )
+        elif data_type == "bigint":
+            arrow_type = pa.int64()
+        elif data_type == "integer":
+            arrow_type = pa.int32()
+        elif data_type == "boolean":
+            arrow_type = pa.bool_()
+        elif data_type == "double precision":
+            arrow_type = pa.float64()
+        elif data_type == "real":
+            arrow_type = pa.float32()
+        else:
+            raise RuntimeError(
+                f"archive_source_column_type_unsupported:{column}:{udt_name}"
+            )
+        fields.append(pa.field(column, arrow_type, nullable=True))
+    return (
+        pa.schema(fields),
+        frozenset(json_columns),
+        frozenset(string_columns),
+    )
+
+
+def _normalize_archive_rows(
+    rows: list[dict[str, Any]],
+    *,
+    json_columns: frozenset[str],
+    string_columns: frozenset[str],
+) -> list[dict[str, Any]]:
+    if not json_columns and not string_columns:
+        return rows
+    return [
+        {
+            column: (
+                json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+                if column in json_columns and value is not None
+                else str(value)
+                if column in string_columns and value is not None
+                else value
+            )
+            for column, value in row.items()
+        }
+        for row in rows
+    ]
+
+
+def _utc_iso(value: Any) -> str:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise RuntimeError("archive_restore_timestamp_not_timezone_aware")
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
 def register_local_capture_source(
     session,
     *,
@@ -332,13 +597,17 @@ def _write_parquet_immutable(
     target: Path,
     manifest_path: Path,
     scope: ArchiveScope,
+    *,
+    arrow_schema: pa.Schema | None = None,
+    json_columns: frozenset[str] = frozenset(),
+    string_columns: frozenset[str] = frozenset(),
 ) -> ArchiveArtifact:
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() or manifest_path.exists():
         raise FileExistsError(f"archive_target_exists:{target}")
     temporary = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
     writer: pq.ParquetWriter | None = None
-    arrow_schema: pa.Schema | None = None
+    effective_schema = arrow_schema
     row_count = 0
     min_ts: datetime | None = None
     max_ts: datetime | None = None
@@ -348,13 +617,14 @@ def _write_parquet_immutable(
         for rows in batches:
             if not rows:
                 continue
-            table = (
-                pa.Table.from_pylist(rows)
-                if arrow_schema is None
-                else pa.Table.from_pylist(rows, schema=arrow_schema)
+            normalized_rows = _normalize_archive_rows(
+                rows,
+                json_columns=json_columns,
+                string_columns=string_columns,
             )
+            table = pa.Table.from_pylist(normalized_rows, schema=effective_schema)
             if writer is None:
-                arrow_schema = table.schema
+                effective_schema = table.schema
                 writer = pq.ParquetWriter(
                     temporary,
                     table.schema,
@@ -392,7 +662,7 @@ def _write_parquet_immutable(
         digest = _sha256_file(target)
         schema = str(pq.read_schema(target))
         manifest = {
-            "schema_version": "rdp-archive-manifest-v1",
+            "schema_version": "rdp-archive-manifest-v2",
             "source_id": scope.source_id,
             "dataset_name": scope.dataset_name,
             "table": scope.table,
@@ -408,6 +678,7 @@ def _write_parquet_immutable(
             "min_sequence": min_sequence,
             "max_sequence": max_sequence,
             "schema": schema,
+            "json_encoded_columns": sorted(json_columns),
             "gap_summary": _sequence_gap_summary(min_sequence, max_sequence, row_count),
         }
         immutable_json_write(manifest, manifest_path)
