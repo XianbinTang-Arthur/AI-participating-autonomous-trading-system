@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import io
+import tarfile
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -155,6 +157,50 @@ def test_l2_import_hashes_datetime_payload_and_reports_sequence_gap(tmp_path: Pa
     assert stats.gaps[0]["reason"] == "sequence_discontinuity"
     hashes = [params["source_row_hash"] for params in _payloads(session)]
     assert all(len(value) == 64 for value in hashes)
+
+
+def test_l2_import_streams_okx_tar_gzip_data_member(tmp_path: Path) -> None:
+    start = datetime(2026, 8, 1, tzinfo=UTC)
+    rows = [
+        {
+            "instId": "BTC-USDT-SWAP",
+            "ts": str(int(start.timestamp() * 1000)),
+            "action": "snapshot",
+            "bids": [["100", "2", "1"]],
+            "asks": [["101", "3", "1"]],
+        },
+        {
+            "instId": "BTC-USDT-SWAP",
+            "ts": str(int((start + timedelta(milliseconds=10)).timestamp() * 1000)),
+            "action": "update",
+            "bids": [["100", "1", "1"]],
+            "asks": [],
+        },
+    ]
+    payload = ("\n".join(json.dumps(row) for row in rows) + "\n").encode()
+    source = tmp_path / "BTC-USDT-SWAP-L2orderbook-400lv-2026-08-01.tar.gz"
+    with tarfile.open(source, mode="w:gz") as archive:
+        member = tarfile.TarInfo("BTC-USDT-SWAP-L2orderbook-400lv-2026-08-01.data")
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+
+    session = _Session()
+    stats = import_l2_file(
+        session,
+        path=source,
+        symbol="BTC-USDT-SWAP",
+        start=start,
+        end=start + timedelta(seconds=1),
+        source_id="00000000-0000-0000-0000-000000000001",
+        ingest_run_id="00000000-0000-0000-0000-000000000002",
+        raw_archive_dir=tmp_path / "archive",
+    )
+
+    assert stats.rows_read == stats.rows_written == 2
+    assert stats.gaps == ()
+    archived = list((tmp_path / "archive").glob("official_l2_*.tar.gz"))
+    assert len(archived) == 1
+    assert archived[0].read_bytes() == source.read_bytes()
 
 
 def test_causal_resample_never_uses_future_or_crosses_sequence_gap() -> None:

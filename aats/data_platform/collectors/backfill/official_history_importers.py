@@ -13,6 +13,7 @@ import json
 import os
 import re
 import stat
+import tarfile
 import time
 import uuid
 import zipfile
@@ -1017,16 +1018,15 @@ def _execute_batched(session, statement, rows: Iterable[dict[str, Any]]) -> int:
 
 
 def _iter_records(path: Path) -> Iterator[dict[str, Any]]:
-    suffix = path.suffix.lower()
-    if suffix == ".zip":
+    archive_suffix = _official_source_suffix(path)
+    supported_members = (".csv", ".json", ".jsonl", ".ndjson", ".data")
+    if archive_suffix == ".zip":
         with zipfile.ZipFile(path) as archive:
             members = sorted(
                 (
                     info
                     for info in archive.infolist()
-                    if info.filename.lower().endswith(
-                        (".csv", ".json", ".jsonl", ".ndjson")
-                    )
+                    if info.filename.lower().endswith(supported_members)
                 ),
                 key=lambda info: info.filename,
             )
@@ -1039,6 +1039,27 @@ def _iter_records(path: Path) -> Iterator[dict[str, Any]]:
                         source,
                         uncompressed_size=member.file_size,
                     )
+        return
+    if archive_suffix in {".tar.gz", ".tgz"}:
+        supported_member_found = False
+        with tarfile.open(path, mode="r:gz") as archive:
+            for member in archive:
+                if not member.isfile() or not member.name.lower().endswith(
+                    supported_members
+                ):
+                    continue
+                source = archive.extractfile(member)
+                if source is None:
+                    raise ValueError("official_archive_member_unreadable")
+                supported_member_found = True
+                with source:
+                    yield from _records_from_binary(
+                        member.name,
+                        source,
+                        uncompressed_size=member.size,
+                    )
+        if not supported_member_found:
+            raise ValueError("official_archive_contains_no_supported_data_file")
         return
     with path.open("rb") as source:
         yield from _records_from_binary(
@@ -1058,7 +1079,7 @@ def _records_from_binary(
     text_source = io.TextIOWrapper(source, encoding="utf-8-sig", newline="")
     if lower.endswith(".csv"):
         yield from csv.DictReader(text_source)
-    elif lower.endswith((".jsonl", ".ndjson")):
+    elif lower.endswith((".jsonl", ".ndjson", ".data")):
         for line in text_source:
             if line.strip():
                 value = json.loads(line)
@@ -1107,9 +1128,7 @@ def _archive_source_file(
             output_handle.flush()
             os.fsync(output_handle.fileno())
         checksum = digest.hexdigest()
-        suffix = source.suffix.lower()
-        if suffix not in {".zip", ".csv", ".json", ".jsonl", ".ndjson"}:
-            raise ValueError("official_source_file_extension_unsupported")
+        suffix = _official_source_suffix(source)
         target = directory / f"{prefix}_{checksum}{suffix}"
         if target.exists():
             if _sha256_file(target) != checksum:
@@ -1122,6 +1141,23 @@ def _archive_source_file(
         return target, checksum
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _official_source_suffix(path: Path) -> str:
+    lower = path.name.lower()
+    for suffix in (
+        ".tar.gz",
+        ".tgz",
+        ".zip",
+        ".csv",
+        ".json",
+        ".jsonl",
+        ".ndjson",
+        ".data",
+    ):
+        if lower.endswith(suffix):
+            return suffix
+    raise ValueError("official_source_file_extension_unsupported")
 
 
 def _sha256_file(path: Path) -> str:
