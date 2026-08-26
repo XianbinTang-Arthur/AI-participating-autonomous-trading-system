@@ -44,6 +44,7 @@ from uuid import uuid4
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent
 _PIPELINE_RESULT_PREFIX = "RDP_PIPELINE_RESULT_JSON="
+_DECISION_RESULT_PREFIX = "RDP_DECISION_RESULT_JSON="
 _PARTIAL_SUCCESS_PHASES = frozenset({"step2", "step3", "phase3", "phase4"})
 
 logging.basicConfig(
@@ -221,11 +222,24 @@ def _find_latest_params_json() -> Path | None:
 
     return None
 
+
+def _extract_json_marker(text: str, prefix: str) -> dict | None:
+    for line in reversed((text or "").splitlines()):
+        stripped = line.strip()
+        if not stripped.startswith(prefix):
+            continue
+        try:
+            payload = json.loads(stripped[len(prefix):])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
 def _run_phase(
     name: str,
     cmd: list[str],
     *,
     dry_run: bool = False,
+    result_prefix: str | None = None,
 ) -> dict:
     """执行单个阶段, 返回结果 dict."""
     label = PHASE_LABELS[name]
@@ -242,16 +256,53 @@ def _run_phase(
 
     started = datetime.now(timezone.utc)
     try:
-        result = subprocess.run(cmd, cwd=str(_PROJECT_ROOT), timeout=7200)
+        if result_prefix:
+            result = subprocess.run(
+                cmd,
+                cwd=str(_PROJECT_ROOT),
+                timeout=7200,
+                capture_output=True,
+                text=True,
+            )
+            stdout = str(result.stdout or "")
+            stderr = str(result.stderr or "")
+            if stdout:
+                print(stdout, end="" if stdout.endswith("\n") else "\n")
+            if stderr:
+                print(
+                    stderr,
+                    end="" if stderr.endswith("\n") else "\n",
+                    file=sys.stderr,
+                )
+            structured_result = _extract_json_marker(
+                "\n".join(part for part in (stdout, stderr) if part),
+                result_prefix,
+            )
+        else:
+            result = subprocess.run(cmd, cwd=str(_PROJECT_ROOT), timeout=7200)
+            structured_result = None
         finished = datetime.now(timezone.utc)
         elapsed = (finished - started).total_seconds()
 
         if result.returncode == 0:
+            if result_prefix and structured_result is None:
+                error = f"missing structured result marker: {result_prefix}"
+                log.error("%s 合同失败：%s", label, error)
+                return {
+                    "phase": name,
+                    "status": "failed",
+                    "exit_code": 0,
+                    "elapsed_s": elapsed,
+                    "error": error,
+                }
             log.info("%s 完成 (%.0fs)", label, elapsed)
-            return {
+            phase_result = {
                 "phase": name, "status": "success",
                 "exit_code": 0, "elapsed_s": elapsed,
             }
+            if structured_result is not None:
+                phase_result["structured_result"] = structured_result
+            return phase_result
         elif result.returncode == 2 and name in _PARTIAL_SUCCESS_PHASES:
             # exit code 2 = 部分成功 (某些 batch 通过, 仍有可用产物)
             log.warning(
@@ -307,10 +358,21 @@ def _emit_pipeline_result(
             "exit_code": first_issue.get("exit_code"),
             "error": first_issue.get("error"),
         }
+    decision_phase = next(
+        (item for item in results if item.get("phase") == "decision"),
+        {},
+    )
+    decision_result = decision_phase.get("structured_result")
+    if not isinstance(decision_result, dict):
+        decision_result = {}
     payload = {
         "pipeline_id": pipeline_id,
         "status": status,
         "first_failure": first_failure,
+        "research_outcome": decision_result.get("research_outcome", "unknown"),
+        "decision_round_id": decision_result.get("round_id"),
+        "readiness": decision_result.get("readiness"),
+        "decision_result": decision_result or None,
     }
     print(
         _PIPELINE_RESULT_PREFIX
@@ -613,7 +675,12 @@ def main() -> int:
         # ── Decision ──
         elif phase == "decision":
             cmd = _build_decision_cmd(args)
-            r = _run_phase("decision", cmd, dry_run=args.dry_run)
+            r = _run_phase(
+                "decision",
+                cmd,
+                dry_run=args.dry_run,
+                result_prefix=_DECISION_RESULT_PREFIX,
+            )
             results.append(r)
 
         # 失败停止检查

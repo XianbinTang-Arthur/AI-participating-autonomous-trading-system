@@ -153,6 +153,18 @@ def test_daemon_maps_degraded_workflow_to_warning_run_status() -> None:
     ) == "succeeded_with_warnings"
 
 
+def test_daemon_preserves_structured_research_outcome() -> None:
+    daemon = importlib.import_module("scripts.rdp_task_daemon")
+
+    assert daemon._logical_research_outcome({
+        "research_outcome": "blocked_by_attribution",
+    }) == "blocked_by_attribution"
+    assert daemon._logical_research_outcome({"research_outcome": "unknown"}) is None
+    assert daemon._logical_research_outcome({
+        "research_outcome": "unexpected_future_value",
+    }) == "inconclusive"
+
+
 def test_recover_orphaned_running_tasks_marks_stale_rows_failed(monkeypatch) -> None:
     daemon = importlib.import_module("scripts.rdp_task_daemon")
 

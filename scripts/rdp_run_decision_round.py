@@ -32,6 +32,7 @@ log = logging.getLogger("rdp_decision_round")
 
 _SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent
+_DECISION_RESULT_PREFIX = "RDP_DECISION_RESULT_JSON="
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
@@ -53,6 +54,50 @@ from aats.data_platform.decision_system.report_builder import (
 )
 from aats.data_platform.governance._db_util import try_governance_db
 from aats.data_platform.governance.parameter_registry import load_registry
+
+
+def _research_outcome_from_readiness(readiness: str) -> str:
+    return {
+        "ready_for_next_live_test": "eligible",
+        "not_ready_attribution_issue": "blocked_by_attribution",
+        "not_ready_execution_issue": "blocked_by_execution",
+        "not_ready_governance_issue": "not_eligible",
+        "not_ready_more_research_needed": "not_eligible",
+    }.get(str(readiness or ""), "inconclusive")
+
+
+def _emit_decision_result(
+    *,
+    round_id: str,
+    readiness_report: dict,
+    upgrade_candidates: list[dict],
+    ft_decisions: list[dict],
+) -> None:
+    readiness = str(readiness_report.get("readiness") or "unknown")
+    decision_counts: dict[str, int] = {}
+    for decision in ft_decisions:
+        key = str(decision.get("decision") or "unknown")
+        decision_counts[key] = decision_counts.get(key, 0) + 1
+    payload = {
+        "round_id": round_id,
+        "readiness": readiness,
+        "research_outcome": _research_outcome_from_readiness(readiness),
+        "overall_confidence": readiness_report.get("overall_confidence"),
+        "checks_passed": readiness_report.get("checks_passed"),
+        "checks_total": readiness_report.get("checks_total"),
+        "blockers": list(readiness_report.get("blockers") or []),
+        "promote_candidate_count": sum(
+            1
+            for candidate in upgrade_candidates
+            if candidate.get("decision") == "promote_candidate"
+        ),
+        "decision_counts": decision_counts,
+    }
+    print(
+        _DECISION_RESULT_PREFIX
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        flush=True,
+    )
 
 
 def main() -> int:
@@ -259,6 +304,13 @@ def main() -> int:
     log.info("  State      : recommendations generated only; live parameters not applied")
     log.info("  Round dir  : %s", round_dir)
     log.info("=" * 60)
+
+    _emit_decision_result(
+        round_id=round_id,
+        readiness_report=readiness_report,
+        upgrade_candidates=upgrade_candidates,
+        ft_decisions=ft_decisions,
+    )
 
     if not args.no_print_summary:
         print()

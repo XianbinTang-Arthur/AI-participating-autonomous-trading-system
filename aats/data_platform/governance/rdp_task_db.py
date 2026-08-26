@@ -375,6 +375,7 @@ def db_update_task_status(
     error_message: str | None = None,
     log_tail: str | None = None,
     run_status: str | None = None,
+    research_outcome: str | None = None,
 ) -> bool:
     """更新任务状态（done / failed / cancelled）."""
     if status not in _TERMINAL_STATUSES:
@@ -453,6 +454,7 @@ def db_update_task_status(
         finished_at=now,
         error_code=error_code,
         error_summary=error_message,
+        research_outcome=research_outcome,
     )
     log.info("DB updated task: %s -> %s (exit=%s)", task_id, status, exit_code)
     return True

@@ -31,6 +31,17 @@ STEP_STATUSES = frozenset(
     {"pending", "running", "succeeded", "failed", "skipped", "cancelled"}
 )
 TRIGGER_KINDS = frozenset({"manual", "schedule", "auto_retry", "recovery"})
+RUN_RESEARCH_OUTCOMES = frozenset(
+    {
+        "unknown",
+        "eligible",
+        "not_eligible",
+        "inconclusive",
+        "blocked_by_data",
+        "blocked_by_attribution",
+        "blocked_by_execution",
+    }
+)
 
 
 def new_run_id() -> str:
@@ -462,9 +473,12 @@ def db_mark_run_terminal(
     finished_at: datetime,
     error_code: str | None = None,
     error_summary: str | None = None,
+    research_outcome: str | None = None,
 ) -> bool:
     if status not in RUN_TERMINAL_STATUSES:
         raise ValueError(f"invalid terminal RDP run status: {status!r}")
+    if research_outcome is not None and research_outcome not in RUN_RESEARCH_OUTCOMES:
+        raise ValueError(f"invalid RDP research outcome: {research_outcome!r}")
     result = session.execute(
         text(
             """
@@ -475,6 +489,7 @@ def db_mark_run_terminal(
                 current_step_key = NULL,
                 error_code = :error_code,
                 error_summary = :error_summary,
+                research_outcome = COALESCE(:research_outcome, research_outcome),
                 updated_at = :finished_at
             WHERE run_id = :run_id
               AND status IN ('running', 'cancellation_requested')
@@ -486,6 +501,7 @@ def db_mark_run_terminal(
             "finished_at": finished_at,
             "error_code": error_code,
             "error_summary": error_summary,
+            "research_outcome": research_outcome,
         },
     )
     if int(getattr(result, "rowcount", 1) or 0) == 0:
@@ -495,7 +511,11 @@ def db_mark_run_terminal(
         run_id=run_id,
         event_type="run.completed",
         attempt_no=attempt_no,
-        payload={"status": status, "error_code": error_code},
+        payload={
+            "status": status,
+            "error_code": error_code,
+            "research_outcome": research_outcome,
+        },
         occurred_at=finished_at,
     )
     return True

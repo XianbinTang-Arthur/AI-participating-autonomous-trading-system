@@ -71,6 +71,25 @@ def test_terminal_run_update_requires_active_current_state(monkeypatch) -> None:
     assert updated is False
     assert appended == []
     assert "status IN ('running', 'cancellation_requested')" in session.statements[0]
+    assert "research_outcome = COALESCE(:research_outcome, research_outcome)" in session.statements[0]
+
+
+def test_terminal_run_rejects_unknown_research_outcome() -> None:
+    session = _Session([])
+
+    try:
+        rdp_runs_db.db_mark_run_terminal(
+            session,
+            run_id="run_1",
+            attempt_no=1,
+            status="succeeded",
+            finished_at=datetime.now(timezone.utc),
+            research_outcome="made_up",
+        )
+    except ValueError as exc:
+        assert "invalid RDP research outcome" in str(exc)
+    else:
+        raise AssertionError("unknown research outcome must fail closed")
 
 
 def test_run_event_query_returns_latest_window_in_chronological_order() -> None:

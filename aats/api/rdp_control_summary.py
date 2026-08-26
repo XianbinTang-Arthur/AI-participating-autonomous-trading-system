@@ -1526,15 +1526,16 @@ def _build_workbench_alerts_payload(
         })
 
     deduped_operational_alerts: list[dict[str, Any]] = []
-    seen_operational_keys: set[tuple[str, str]] = set()
+    alert_index_by_title: dict[str, int] = {}
     for alert in operational_alerts:
-        dedupe_key = (
-            str(alert.get("title") or "").strip(),
-            str(alert.get("message") or "").strip(),
-        )
-        if dedupe_key in seen_operational_keys:
+        title_key = str(alert.get("title") or "").strip()
+        existing_index = alert_index_by_title.get(title_key)
+        if existing_index is not None:
+            existing = deduped_operational_alerts[existing_index]
+            if alert.get("severity") == "danger" and existing.get("severity") != "danger":
+                deduped_operational_alerts[existing_index] = alert
             continue
-        seen_operational_keys.add(dedupe_key)
+        alert_index_by_title[title_key] = len(deduped_operational_alerts)
         deduped_operational_alerts.append(alert)
 
     return {

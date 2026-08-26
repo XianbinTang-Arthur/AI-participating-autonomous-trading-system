@@ -287,6 +287,52 @@ class TestWorkbenchPhaseGate(unittest.TestCase):
             "historic warning 语义与 blocks_approval=True 矛盾",
         )
 
+    def test_same_operational_blocker_title_is_rendered_once(self) -> None:
+        from unittest.mock import patch
+
+        from aats.api import rdp_control_summary
+
+        summary = {
+            "health": {
+                "checks": [
+                    {
+                        "category": "database",
+                        "name": "readonly_access",
+                        "status": "warn",
+                        "detail": "read only",
+                    }
+                ],
+                "blocking_reasons": ["live_db_unhealthy"],
+                "warnings": [],
+            }
+        }
+        with (
+            patch(
+                "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+                return_value=None,
+            ),
+            patch(
+                "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
+                return_value=False,
+            ),
+        ):
+            payload = rdp_control_summary._build_workbench_alerts_payload(
+                Path("."),
+                summary,
+                phase_payloads={
+                    "phase3": {"available": True},
+                    "phase4": {"available": True},
+                },
+            )
+
+        matching = [
+            alert
+            for alert in payload["operational_alerts"]
+            if alert["title"] == "生产数据库连接"
+        ]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]["severity"], "danger")
+
 
 class TestStep2IntegrityGuard(unittest.TestCase):
     """H2 regression guard: Step2 guard 异常路径不能泄漏 str(exc) 到用户响应。"""

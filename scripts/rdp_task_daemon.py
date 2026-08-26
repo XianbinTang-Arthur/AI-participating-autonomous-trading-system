@@ -134,6 +134,17 @@ def _logical_run_status(
     return "failed"
 
 
+def _logical_research_outcome(
+    workflow_result: dict[str, object] | None,
+) -> str | None:
+    value = str((workflow_result or {}).get("research_outcome") or "").strip()
+    if not value or value == "unknown":
+        return None
+    from aats.data_platform.governance.rdp_runs_db import RUN_RESEARCH_OUTCOMES
+
+    return value if value in RUN_RESEARCH_OUTCOMES else "inconclusive"
+
+
 def _should_auto_retry(
     *,
     queue_status: str,
@@ -520,6 +531,7 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
             error_message=error_message or None,
             log_tail=log_tail or None,
             run_status=run_status,
+            research_outcome=_logical_research_outcome(workflow_result),
         )
 
     if not terminal_update_applied:
