@@ -495,6 +495,15 @@ ensure_wsl_runtime_prerequisites() {
     log_ok "WSL2 运行前置条件满足（vm.overcommit_memory=1）"
 }
 
+ensure_rdp_artifact_directory() {
+    log_info "准备持久化 RDP artifact 目录..."
+    # 应用镜像固定以 UID/GID 1000 的 aats 用户运行。host 侧运维命令可能以
+    # root 创建新证据，因此每次标准部署都只对仓库内这个精确目录校正归属，
+    # 不触碰数据库卷或仓库之外的路径。
+    wsl_root_run "install -d -o 1000 -g 1000 '$WSL_PROJECT/artifacts' && chown -R 1000:1000 '$WSL_PROJECT/artifacts'"
+    log_ok "RDP artifact 持久目录已就绪"
+}
+
 step_infra_up() {
     log_info "Step 6/8: 启动基础设施（Postgres/Redis/NATS/...）..."
     wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && docker compose -f docker-compose.yml --env-file $WSL2_ENV_FILE up -d --wait --wait-timeout 90"
@@ -653,6 +662,7 @@ main() {
     step_down
     step_prune
     ensure_wsl_runtime_prerequisites
+    ensure_rdp_artifact_directory
     step_infra_up
     step_schema_migrate
     step_app_up

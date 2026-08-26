@@ -20,6 +20,7 @@ from aats.data_platform.collectors.backfill.official_history_importers import (
     import_mark_price_rest,
     import_trade_file,
     import_trade_rest,
+    iter_l2_history,
 )
 
 
@@ -201,6 +202,43 @@ def test_l2_import_streams_okx_tar_gzip_data_member(tmp_path: Path) -> None:
     archived = list((tmp_path / "archive").glob("official_l2_*.tar.gz"))
     assert len(archived) == 1
     assert archived[0].read_bytes() == source.read_bytes()
+
+
+def test_l2_database_reader_uses_bounded_server_side_streaming() -> None:
+    start = datetime(2026, 8, 1, tzinfo=UTC)
+
+    class _Mappings:
+        def fetchmany(self, _size: int):
+            return []
+
+    class _StreamingResult:
+        closed = False
+
+        def mappings(self):
+            return _Mappings()
+
+        def close(self):
+            self.closed = True
+
+    class _StreamingSession:
+        options: dict[str, object] | None = None
+
+        def execute(self, statement, _params):
+            self.options = dict(statement.get_execution_options())
+            return _StreamingResult()
+
+    session = _StreamingSession()
+    assert list(
+        iter_l2_history(
+            session,
+            source_id="00000000-0000-0000-0000-000000000001",
+            symbol="BTC-USDT-SWAP",
+            start=start,
+            end=start + timedelta(days=1),
+            fetch_size=321,
+        )
+    ) == []
+    assert session.options == {"stream_results": True, "yield_per": 321}
 
 
 def test_causal_resample_never_uses_future_or_crosses_sequence_gap() -> None:

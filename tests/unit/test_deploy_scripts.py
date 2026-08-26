@@ -168,6 +168,17 @@ def test_derivatives_live_overlay_enables_execution_command_flow() -> None:
     assert 'AATS_EXECUTION_COMMAND_FLOW_ENABLED: "true"' in compose_text
 
 
+def test_rdp_artifacts_are_shared_and_persistent_across_container_rebuilds() -> None:
+    deploy = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+    services = (
+        REPO_ROOT / "deploy" / "wsl2-dev" / "docker-compose.aats.yml"
+    ).read_text(encoding="utf-8")
+
+    assert services.count("../../artifacts:/app/artifacts") == 2
+    assert "ensure_rdp_artifact_directory" in deploy
+    assert "chown -R 1000:1000 '$WSL_PROJECT/artifacts'" in deploy
+
+
 def test_deploy_runbook_no_longer_points_to_stale_sync_or_bootstrap_paths() -> None:
     runbook = (REPO_ROOT / "deploy" / "wsl2-dev" / "RUNBOOK.md").read_text(encoding="utf-8")
     readme = (REPO_ROOT / "deploy" / "wsl2-dev" / "README.md").read_text(encoding="utf-8")

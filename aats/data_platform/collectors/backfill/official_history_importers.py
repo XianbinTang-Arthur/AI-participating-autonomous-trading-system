@@ -580,36 +580,45 @@ def iter_l2_history(
     _validate_window(start, end)
     if fetch_size <= 0:
         raise ValueError("l2_history_fetch_size_must_be_positive")
-    rows = session.execute(
-        text(
+    statement = text(
             "SELECT symbol, ts, action, bids, asks, sequence_id, "
             "previous_sequence_id, checksum FROM staging.official_l2_history "
             "WHERE source_id = CAST(:source_id AS UUID) AND symbol = :symbol "
             "AND ts >= :start AND ts < :end "
             "ORDER BY ts ASC, sequence_id ASC NULLS FIRST, id ASC"
-        ),
+        ).execution_options(stream_results=True, yield_per=fetch_size)
+    result = session.execute(
+        statement,
         {
             "source_id": source_id,
             "symbol": symbol,
             "start": start,
             "end": end,
         },
-    ).mappings()
-    while True:
-        batch = rows.fetchmany(fetch_size)
-        if not batch:
-            break
-        for row in batch:
-            yield L2Event(
-                symbol=str(row["symbol"]),
-                ts=row["ts"],
-                action=str(row["action"]),
-                bids=tuple(_levels(row["bids"])),
-                asks=tuple(_levels(row["asks"])),
-                sequence_id=_optional_int(row["sequence_id"]),
-                previous_sequence_id=_optional_int(row["previous_sequence_id"]),
-                checksum=str(row["checksum"]) if row["checksum"] is not None else None,
-            )
+    )
+    rows = result.mappings()
+    try:
+        while True:
+            batch = rows.fetchmany(fetch_size)
+            if not batch:
+                break
+            for row in batch:
+                yield L2Event(
+                    symbol=str(row["symbol"]),
+                    ts=row["ts"],
+                    action=str(row["action"]),
+                    bids=tuple(_levels(row["bids"])),
+                    asks=tuple(_levels(row["asks"])),
+                    sequence_id=_optional_int(row["sequence_id"]),
+                    previous_sequence_id=_optional_int(row["previous_sequence_id"]),
+                    checksum=(
+                        str(row["checksum"])
+                        if row["checksum"] is not None
+                        else None
+                    ),
+                )
+    finally:
+        result.close()
 
 
 def causal_resample_l2(

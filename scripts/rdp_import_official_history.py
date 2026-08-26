@@ -262,28 +262,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if args.bundle_id is not None and args.bundle_id != bundle_id:
                     raise RuntimeError("operator_bundle_id_does_not_match_provenance")
-                bbo, bbo_gaps = causal_resample_l2_ordered(
-                    iter_l2_history(
-                        session,
-                        source_id=source_id,
-                        symbol=symbol,
-                        start=args.start,
-                        end=args.end,
-                    ),
-                    start=args.start,
-                    end=args.end,
-                    interval_ms=1_000,
-                    max_staleness_ms=args.max_staleness_ms,
-                )
-                bbo_written, _ = persist_resampled_l2(
-                    session,
-                    bundle_id=bundle_id,
-                    bbo_rows=bbo,
-                    books5_rows=(),
-                    transform_version="okx-bulk-l2-causal-resample-v1",
-                )
-                bbo_sample_count = len(bbo)
-                del bbo
+                # Raw/staging facts and the RESERVED bundle are a durable checkpoint.
+                # A later resample failure may be retried idempotently without losing a
+                # multi-gigabyte import transaction.
+                session.commit()
                 books5, books5_gaps = causal_resample_l2_ordered(
                     iter_l2_history(
                         session,
@@ -297,13 +279,30 @@ def main(argv: list[str] | None = None) -> int:
                     interval_ms=500,
                     max_staleness_ms=args.max_staleness_ms,
                 )
-                _, books5_written = persist_resampled_l2(
+                bbo = [
+                    row
+                    for row in books5
+                    if _is_one_second_sample(row.ts, args.start)
+                ]
+                bbo_gap_times = {
+                    gap["sample_ts"]
+                    for gap in books5_gaps
+                    if _is_one_second_sample(
+                        datetime.fromisoformat(str(gap["sample_ts"])),
+                        args.start,
+                    )
+                }
+                bbo_gaps = [
+                    gap for gap in books5_gaps if gap["sample_ts"] in bbo_gap_times
+                ]
+                bbo_written, books5_written = persist_resampled_l2(
                     session,
                     bundle_id=bundle_id,
-                    bbo_rows=(),
+                    bbo_rows=bbo,
                     books5_rows=books5,
                     transform_version="okx-bulk-l2-causal-resample-v1",
                 )
+                bbo_sample_count = len(bbo)
                 books5_sample_count = len(books5)
                 result = {
                     "import": asdict(stats),
@@ -427,6 +426,11 @@ def _safe_error_code(exc: Exception) -> str:
     ):
         return detail
     return type(exc).__name__
+
+
+def _is_one_second_sample(sample: datetime, start: datetime) -> bool:
+    delta = sample - start
+    return delta.days >= 0 and delta.microseconds == 0
 
 
 def _source_record(

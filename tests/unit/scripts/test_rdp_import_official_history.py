@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.rdp_import_official_history import _safe_error_code, main
+from scripts.rdp_import_official_history import (
+    _is_one_second_sample,
+    _safe_error_code,
+    main,
+)
 
 
 def test_official_import_error_code_keeps_safe_actionable_reason() -> None:
@@ -66,3 +70,21 @@ def test_official_import_valid_dry_run_has_no_database_or_network_side_effect(
 
     assert result == 2
     assert not raw.exists()
+
+
+def test_l2_half_second_samples_downsample_exactly_from_source_aligned_start() -> None:
+    start = _safe_time("2026-08-20T00:00:00.003+00:00")
+
+    assert _is_one_second_sample(start, start)
+    assert not _is_one_second_sample(
+        _safe_time("2026-08-20T00:00:00.503+00:00"), start
+    )
+    assert _is_one_second_sample(
+        _safe_time("2026-08-20T00:00:01.003+00:00"), start
+    )
+
+
+def _safe_time(value: str):
+    from datetime import datetime
+
+    return datetime.fromisoformat(value)

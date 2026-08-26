@@ -126,6 +126,9 @@ services:
       - "127.0.0.1:${AATS_API_PORT:-8000}:${AATS_API_PORT:-8000}"
     volumes:
       - ../../deploy/wsl2-dev/runtime/operator-tls:/app/deploy/wsl2-dev/runtime/operator-tls:ro
+      # 与 WSL2 checkout 共用持久目录：标准部署重建容器后证据仍存在，
+      # 且 host 侧 ~/aats-venv 运维命令与 Gateway 读取同一份 artifact。
+      - ../../artifacts:/app/artifacts
     networks:
       - aats
     # gateway 是 4 进程里最重的 API 层：跑所有 dashboard 查询 + ThreadPoolExecutor
@@ -242,6 +245,8 @@ services:
       # 指向与 AATS_DATABASE_URL 相同的实盘 DB，但通过独立变量名维持 RDP 边界。
       RDP_LIVE_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/${AATS_DB_NAME:-aats}
     command: ["python", "scripts/rdp_task_daemon.py", "--poll-interval", "10", "--enable-scheduler"]
+    volumes:
+      - ../../artifacts:/app/artifacts
     networks:
       - aats
     depends_on:
