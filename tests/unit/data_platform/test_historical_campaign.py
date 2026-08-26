@@ -12,6 +12,7 @@ from aats.data_platform.data_governance.historical_campaign import (
     assess_campaign_capacity,
     build_campaign_manifest,
     download_verified_file,
+    observe_capacity,
     start_campaign,
     validate_campaign_manifest,
 )
@@ -73,6 +74,27 @@ def test_capacity_gate_allows_30_days_and_blocks_90_days() -> None:
     assert ninety.approved is False
     assert ninety.reason_code == "capacity_projection_exceeds_safe_free_bytes"
     assert ninety.projected_incremental_bytes > ninety.safe_available_bytes
+
+
+def test_capacity_observation_accepts_not_yet_created_nested_target(
+    tmp_path: Path,
+) -> None:
+    class _Scalar:
+        def scalar_one(self):
+            return 123
+
+    class _CapacitySession:
+        def execute(self, _statement):
+            return _Scalar()
+
+    report = observe_capacity(
+        _CapacitySession(),
+        tmp_path / "campaigns" / "new-run" / "raw",
+        requested_days=1,
+    )
+
+    assert report.current_database_bytes == 123
+    assert report.disk_total_bytes > 0
 
 
 def test_bulk_manifest_accounts_for_trade_utc_boundary() -> None:

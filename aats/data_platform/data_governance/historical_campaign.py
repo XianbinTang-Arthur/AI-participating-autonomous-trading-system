@@ -115,9 +115,11 @@ def assess_campaign_capacity(
 
 def observe_capacity(session, storage_root: Path, *, requested_days: int) -> CapacityReport:
     resolved = storage_root.expanduser().resolve()
-    existing = resolved if resolved.exists() else resolved.parent
+    existing = resolved
+    while not existing.exists() and existing != existing.parent:
+        existing = existing.parent
     if not existing.exists():
-        raise ValueError("historical_campaign_storage_parent_missing")
+        raise ValueError("historical_campaign_storage_ancestor_missing")
     usage = shutil.disk_usage(existing)
     database_bytes = int(
         session.execute(text("SELECT pg_database_size(current_database())")).scalar_one()
