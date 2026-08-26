@@ -50,10 +50,10 @@ def test_empty_database_audit_is_read_only_complete_and_deterministic() -> None:
     second = audit_coverage(engine, window_end=end, window_days=30)
 
     assert first["read_only"] is True
-    assert len(first["tables"]) == len(RdpBase.metadata.tables) == 98
+    assert len(first["tables"]) == len(RdpBase.metadata.tables) == 101
     assert first["result_fingerprint_sha256"] == second["result_fingerprint_sha256"]
     assert all(table["status"] == "missing" for table in first["tables"])
-    assert first["summary"]["missing"] == 98
+    assert first["summary"]["missing"] == 101
 
 
 def test_trade_duplicate_key_includes_trade_id() -> None:

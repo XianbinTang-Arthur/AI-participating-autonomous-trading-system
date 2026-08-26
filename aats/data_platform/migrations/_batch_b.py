@@ -20,6 +20,7 @@ Batch B 按顺序执行版本化 schema 演进:
   - batch_b_16_profit_readiness_governance.sql: holdout + parameter activation audit ledgers
   - batch_b_17_rdp_run_observability.sql: logical runs + attempts/steps/events
   - batch_b_18_data_governance.sql: provenance + archive/gap/bundle/rebuild/continuity ledgers
+  - batch_b_19_historical_research_artifacts.sql: source-aware Gold + quality/index + campaign ledger
 
 每个 stage 对应一个 rollback SQL,逆序回滚。
 
@@ -65,6 +66,7 @@ BATCH_B_STAGES: tuple[str, ...] = (
     "batch_b_16_profit_readiness_governance",
     "batch_b_17_rdp_run_observability",
     "batch_b_18_data_governance",
+    "batch_b_19_historical_research_artifacts",
 )
 
 

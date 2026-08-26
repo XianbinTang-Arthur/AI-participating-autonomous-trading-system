@@ -9,10 +9,12 @@ from aats.data_platform.rdp_models import RdpBase
 ROOT = Path(__file__).resolve().parents[3]
 MIGRATION = ROOT / "aats/data_platform/migrations/batch_b_18_data_governance.sql"
 ROLLBACK = ROOT / "aats/data_platform/migrations/batch_b_18_data_governance_rollback.sql"
+ARTIFACT_MIGRATION = ROOT / "aats/data_platform/migrations/batch_b_19_historical_research_artifacts.sql"
+ARTIFACT_ROLLBACK = ROOT / "aats/data_platform/migrations/batch_b_19_historical_research_artifacts_rollback.sql"
 
 
 def test_data_governance_migration_is_last_and_transaction_wrapped() -> None:
-    assert BATCH_B_STAGES[-1] == "batch_b_18_data_governance"
+    assert BATCH_B_STAGES[-1] == "batch_b_19_historical_research_artifacts"
     migration = MIGRATION.read_text(encoding="utf-8")
     rollback = ROLLBACK.read_text(encoding="utf-8")
 
@@ -76,3 +78,25 @@ def test_rollback_drops_consumers_before_source_registry() -> None:
     assert rollback.index("DROP TABLE IF EXISTS meta.archive_partitions") < rollback.index(
         "DROP TABLE IF EXISTS meta.data_source_registry"
     )
+
+
+def test_source_aware_gold_schema_is_additive_and_matches_orm() -> None:
+    migration = ARTIFACT_MIGRATION.read_text(encoding="utf-8")
+    rollback = ARTIFACT_ROLLBACK.read_text(encoding="utf-8")
+    expected = {
+        "meta.historical_research_artifacts",
+        "gold.historical_replay_bars",
+        "meta.historical_campaign_runs",
+    }
+
+    assert migration.count("BEGIN;") == migration.count("COMMIT;") == 1
+    assert rollback.count("BEGIN;") == rollback.count("COMMIT;") == 1
+    assert expected <= set(RdpBase.metadata.tables)
+    for table in expected:
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in migration
+    assert "DROP TABLE IF EXISTS gold.historical_replay_bars" in rollback
+    assert "DROP TABLE IF EXISTS gold.market_swap_replay_bars" not in rollback
+    assert "source_candle_bundle_id" in migration
+    assert "source_funding_bundle_id" in migration
+    assert "quality_report JSONB" in migration
+    assert "artifact_index JSONB" in migration

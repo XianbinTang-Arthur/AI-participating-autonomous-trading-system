@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy import text
 
@@ -158,14 +158,16 @@ def start_historical_rebuild(session, plan: HistoricalRebuildPlan) -> str:
         return "started"
     existing = session.execute(
         text(
-            "SELECT status FROM meta.data_rebuild_runs "
+            "SELECT status, input_fingerprint, transform_version, git_commit, "
+            "output_fingerprint FROM meta.data_rebuild_runs "
             "WHERE operation_key = :operation_key FOR UPDATE"
         ),
         {"operation_key": plan.operation_key},
-    ).scalar_one()
-    if existing == "SUCCEEDED":
+    ).mappings().one()
+    if existing["status"] == "SUCCEEDED":
+        _verify_succeeded_rebuild(session, plan, existing)
         return "already_succeeded"
-    if existing == "RUNNING":
+    if existing["status"] == "RUNNING":
         raise RuntimeError("historical_rebuild_already_running")
     session.execute(
         text(
@@ -203,17 +205,12 @@ def execute_historical_rebuild(
             "end": plan.coverage_end,
         },
     ).mappings().all()
-    output_fingerprint = hashlib.sha256(
-        canonical_json_bytes(
-            {
-                "git_commit": plan.git_commit,
-                "transform_version": plan.transform_version,
-                "row_fingerprints": [row["output_fingerprint"] for row in output_rows],
-            }
-        )
-    ).hexdigest()
     if not output_rows:
         raise RuntimeError("historical_rebuild_produced_no_rows")
+    output_fingerprint = _aggregate_output_fingerprint(
+        plan,
+        [str(row["output_fingerprint"]) for row in output_rows],
+    )
     terminal = session.execute(
         text(
             "UPDATE meta.data_rebuild_runs SET status = 'SUCCEEDED', "
@@ -472,6 +469,59 @@ def _verify_source_material(session, plan: HistoricalRebuildPlan) -> None:
         raise RuntimeError("historical_bundle_source_row_count_mismatch")
     if observed_hashes != expected_hashes:
         raise RuntimeError("historical_bundle_source_partition_mismatch")
+
+
+def _verify_succeeded_rebuild(
+    session,
+    plan: HistoricalRebuildPlan,
+    run: Mapping[str, Any],
+) -> None:
+    _verify_plan_is_current(session, plan)
+    _verify_source_material(session, plan)
+    if (
+        str(run["input_fingerprint"]) != plan.bundle_fingerprint
+        or str(run["transform_version"]) != plan.transform_version
+        or str(run["git_commit"]) != plan.git_commit
+    ):
+        raise RuntimeError("historical_rebuild_succeeded_identity_mismatch")
+    table = (
+        "silver.historical_orderbook_metrics_15m"
+        if plan.purpose == "l2_replay"
+        else "silver.historical_trade_flow_15m"
+    )
+    row_fingerprints = session.execute(
+        text(
+            f"SELECT output_fingerprint FROM {table} "
+            "WHERE bundle_id = CAST(:bundle_id AS UUID) "
+            "AND symbol = :symbol AND ts >= :start AND ts < :end ORDER BY ts"
+        ),
+        _scope_params(plan),
+    ).scalars().all()
+    if not row_fingerprints:
+        raise RuntimeError("historical_rebuild_succeeded_output_missing")
+    if any(not re.fullmatch(r"[0-9a-f]{64}", str(item)) for item in row_fingerprints):
+        raise RuntimeError("historical_rebuild_succeeded_row_fingerprint_invalid")
+    observed = _aggregate_output_fingerprint(
+        plan,
+        [str(item) for item in row_fingerprints],
+    )
+    if observed != str(run["output_fingerprint"]):
+        raise RuntimeError("historical_rebuild_succeeded_output_fingerprint_mismatch")
+
+
+def _aggregate_output_fingerprint(
+    plan: HistoricalRebuildPlan,
+    row_fingerprints: list[str],
+) -> str:
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "git_commit": plan.git_commit,
+                "transform_version": plan.transform_version,
+                "row_fingerprints": row_fingerprints,
+            }
+        )
+    ).hexdigest()
 
 
 def _clear_output_scope(

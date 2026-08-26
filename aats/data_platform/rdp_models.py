@@ -2169,6 +2169,283 @@ class DataRebuildRunModel(RdpBase):
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 
+class HistoricalResearchArtifactModel(RdpBase):
+    """Versioned source-aware Gold output plus its quality/index evidence."""
+
+    __tablename__ = "historical_research_artifacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "operation_key",
+            name="uq_historical_research_artifact_operation",
+        ),
+        Index(
+            "idx_historical_research_artifact_scope",
+            "symbol",
+            "timeframe",
+            "coverage_start",
+            "coverage_end",
+            "status",
+        ),
+        Index(
+            "idx_historical_research_artifact_primary_bundle",
+            "primary_bundle_id",
+        ),
+        CheckConstraint(
+            "artifact_type = 'gold_replay_bars'",
+            name="chk_historical_research_artifact_type",
+        ),
+        CheckConstraint(
+            "timeframe IN ('15m','1H')",
+            name="chk_historical_research_artifact_timeframe",
+        ),
+        CheckConstraint(
+            "coverage_end > coverage_start",
+            name="chk_historical_research_artifact_range",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(input_bundles) = 'array' "
+            "AND jsonb_array_length(input_bundles) > 0",
+            name="chk_historical_research_artifact_input_shape",
+        ),
+        CheckConstraint(
+            "length(input_fingerprint) = 64 "
+            "AND input_fingerprint = lower(input_fingerprint) "
+            "AND (output_fingerprint IS NULL OR "
+            "(length(output_fingerprint) = 64 "
+            "AND output_fingerprint = lower(output_fingerprint)))",
+            name="chk_historical_research_artifact_hashes",
+        ),
+        CheckConstraint(
+            "git_commit = lower(git_commit) AND length(git_commit) IN (40, 64)",
+            name="chk_historical_research_artifact_git_commit",
+        ),
+        CheckConstraint(
+            "status IN ('PLANNED','RUNNING','SUCCEEDED','FAILED','CANCELLED')",
+            name="chk_historical_research_artifact_status",
+        ),
+        CheckConstraint(
+            "row_count >= 0",
+            name="chk_historical_research_artifact_row_count",
+        ),
+        CheckConstraint(
+            "(status = 'PLANNED' AND started_at IS NULL AND ended_at IS NULL "
+            "AND output_fingerprint IS NULL AND quality_report IS NULL "
+            "AND artifact_index IS NULL AND error_message IS NULL) OR "
+            "(status = 'RUNNING' AND started_at IS NOT NULL AND ended_at IS NULL "
+            "AND output_fingerprint IS NULL AND quality_report IS NULL "
+            "AND artifact_index IS NULL AND error_message IS NULL) OR "
+            "(status = 'SUCCEEDED' AND started_at IS NOT NULL "
+            "AND ended_at IS NOT NULL AND output_fingerprint IS NOT NULL "
+            "AND quality_report IS NOT NULL AND artifact_index IS NOT NULL "
+            "AND error_message IS NULL) OR "
+            "(status = 'FAILED' AND started_at IS NOT NULL "
+            "AND ended_at IS NOT NULL AND output_fingerprint IS NULL "
+            "AND quality_report IS NULL AND artifact_index IS NULL "
+            "AND error_message IS NOT NULL) OR "
+            "(status = 'CANCELLED' AND ended_at IS NOT NULL "
+            "AND output_fingerprint IS NULL)",
+            name="chk_historical_research_artifact_state_shape",
+        ),
+        {"schema": "meta"},
+    )
+
+    artifact_id = Column(
+        UUID(as_uuid=False), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    operation_key = Column(Text, nullable=False)
+    artifact_type = Column(
+        Text, nullable=False, server_default=text("'gold_replay_bars'")
+    )
+    primary_bundle_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("meta.dataset_bundles.bundle_id"),
+        nullable=False,
+    )
+    symbol = Column(Text, nullable=False)
+    timeframe = Column(Text, nullable=False)
+    coverage_start = Column(DateTime(timezone=True), nullable=False)
+    coverage_end = Column(DateTime(timezone=True), nullable=False)
+    input_bundles = Column(JSONB, nullable=False)
+    input_fingerprint = Column(String(64), nullable=False)
+    transform_version = Column(Text, nullable=False)
+    git_commit = Column(String(64), nullable=False)
+    status = Column(Text, nullable=False, server_default=text("'PLANNED'"))
+    row_count = Column(BigInteger, nullable=False, server_default=text("0"))
+    output_fingerprint = Column(String(64))
+    quality_report = Column(JSONB)
+    artifact_index = Column(JSONB)
+    started_at = Column(DateTime(timezone=True))
+    ended_at = Column(DateTime(timezone=True))
+    error_message = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class GoldHistoricalReplayBarModel(RdpBase):
+    """Immutable/versioned Gold rows bound to an evidence artifact."""
+
+    __tablename__ = "historical_replay_bars"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "artifact_id",
+            "symbol",
+            "timeframe",
+            "ts",
+            name="pk_gold_historical_replay_bars",
+        ),
+        Index(
+            "idx_gold_historical_replay_scope",
+            "symbol",
+            "timeframe",
+            "ts",
+        ),
+        Index(
+            "idx_gold_historical_replay_candle_bundle",
+            "source_candle_bundle_id",
+            "symbol",
+            "timeframe",
+            "ts",
+        ),
+        CheckConstraint(
+            "timeframe IN ('15m','1H')",
+            name="chk_gold_historical_replay_timeframe",
+        ),
+        CheckConstraint(
+            "open > 0 AND high > 0 AND low > 0 AND close > 0 "
+            "AND high >= open AND high >= close AND high >= low "
+            "AND low <= open AND low <= close",
+            name="chk_gold_historical_replay_ohlc",
+        ),
+        CheckConstraint(
+            "(volume IS NULL OR volume >= 0) "
+            "AND (quote_volume IS NULL OR quote_volume >= 0)",
+            name="chk_gold_historical_replay_volume",
+        ),
+        CheckConstraint(
+            "(source_funding_bundle_id IS NULL AND aligned_funding_rate IS NULL "
+            "AND funding_source_ts IS NULL) OR "
+            "(source_funding_bundle_id IS NOT NULL "
+            "AND (funding_source_ts IS NULL OR funding_source_ts <= ts))",
+            name="chk_gold_historical_replay_funding_shape",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(source_lineage) = 'array' "
+            "AND jsonb_array_length(source_lineage) > 0",
+            name="chk_gold_historical_replay_lineage_shape",
+        ),
+        CheckConstraint(
+            "length(output_fingerprint) = 64 "
+            "AND output_fingerprint = lower(output_fingerprint)",
+            name="chk_gold_historical_replay_fingerprint",
+        ),
+        {"schema": "gold"},
+    )
+
+    artifact_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("meta.historical_research_artifacts.artifact_id"),
+        nullable=False,
+    )
+    symbol = Column(Text, nullable=False)
+    timeframe = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    open = Column(Numeric(20, 10), nullable=False)
+    high = Column(Numeric(20, 10), nullable=False)
+    low = Column(Numeric(20, 10), nullable=False)
+    close = Column(Numeric(20, 10), nullable=False)
+    volume = Column(Numeric(28, 10))
+    quote_volume = Column(Numeric(28, 10))
+    is_closed = Column(Boolean, nullable=False)
+    aligned_funding_rate = Column(Numeric(18, 12))
+    funding_source_ts = Column(DateTime(timezone=True))
+    source_candle_bundle_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("meta.dataset_bundles.bundle_id"),
+        nullable=False,
+    )
+    source_funding_bundle_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("meta.dataset_bundles.bundle_id"),
+    )
+    source_lineage = Column(JSONB, nullable=False)
+    transform_version = Column(Text, nullable=False)
+    output_fingerprint = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class HistoricalCampaignRunModel(RdpBase):
+    """Capacity-gated multi-day official-history campaign checkpoint."""
+
+    __tablename__ = "historical_campaign_runs"
+    __table_args__ = (
+        UniqueConstraint("operation_key", name="uq_historical_campaign_operation"),
+        Index(
+            "idx_historical_campaign_scope",
+            "symbol",
+            "coverage_start",
+            "coverage_end",
+            "status",
+        ),
+        CheckConstraint(
+            "coverage_end > coverage_start",
+            name="chk_historical_campaign_range",
+        ),
+        CheckConstraint(
+            "requested_days > 0",
+            name="chk_historical_campaign_days",
+        ),
+        CheckConstraint(
+            "status IN ('PLANNED','BLOCKED','RUNNING','SUCCEEDED','FAILED','CANCELLED')",
+            name="chk_historical_campaign_status",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(capacity_report) = 'object' "
+            "AND jsonb_typeof(manifest) = 'object' "
+            "AND jsonb_typeof(checkpoint) = 'object'",
+            name="chk_historical_campaign_json",
+        ),
+        CheckConstraint(
+            "(status = 'BLOCKED' "
+            "AND capacity_report @> '{\"approved\": false}'::jsonb) OR "
+            "(status IN ('PLANNED','RUNNING','SUCCEEDED','FAILED') "
+            "AND capacity_report @> '{\"approved\": true}'::jsonb) OR "
+            "status = 'CANCELLED'",
+            name="chk_historical_campaign_capacity_status",
+        ),
+        CheckConstraint(
+            "(status IN ('PLANNED','BLOCKED') AND started_at IS NULL "
+            "AND ended_at IS NULL) OR "
+            "(status = 'RUNNING' AND started_at IS NOT NULL "
+            "AND ended_at IS NULL AND error_message IS NULL) OR "
+            "(status = 'SUCCEEDED' AND started_at IS NOT NULL "
+            "AND ended_at IS NOT NULL AND error_message IS NULL) OR "
+            "(status = 'FAILED' AND started_at IS NOT NULL "
+            "AND ended_at IS NOT NULL AND error_message IS NOT NULL) OR "
+            "(status = 'CANCELLED' AND ended_at IS NOT NULL)",
+            name="chk_historical_campaign_state_shape",
+        ),
+        {"schema": "meta"},
+    )
+
+    campaign_id = Column(
+        UUID(as_uuid=False), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    operation_key = Column(Text, nullable=False)
+    symbol = Column(Text, nullable=False)
+    coverage_start = Column(DateTime(timezone=True), nullable=False)
+    coverage_end = Column(DateTime(timezone=True), nullable=False)
+    requested_days = Column(Integer, nullable=False)
+    status = Column(Text, nullable=False, server_default=text("'PLANNED'"))
+    capacity_report = Column(JSONB, nullable=False)
+    manifest = Column(JSONB, nullable=False)
+    checkpoint = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    started_at = Column(DateTime(timezone=True))
+    ended_at = Column(DateTime(timezone=True))
+    error_message = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
 class CollectorContinuityEventModel(RdpBase):
     """按连接代次持久化采集器连续性事件。"""
 

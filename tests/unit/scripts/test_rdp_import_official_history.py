@@ -72,6 +72,28 @@ def test_official_import_valid_dry_run_has_no_database_or_network_side_effect(
     assert not raw.exists()
 
 
+def test_official_trade_file_dry_run_rejects_missing_primary_input(
+    tmp_path: Path,
+) -> None:
+    result = main(
+        [
+            "trade-file",
+            "--symbol",
+            "BTC-USDT-SWAP",
+            "--start",
+            "2026-08-01T00:00:00Z",
+            "--end",
+            "2026-08-02T00:00:00Z",
+            "--input",
+            str((tmp_path / "missing.zip").resolve()),
+            "--raw-archive-dir",
+            str((tmp_path / "raw").resolve()),
+        ]
+    )
+
+    assert result == 4
+
+
 def test_l2_half_second_samples_downsample_exactly_from_source_aligned_start() -> None:
     start = _safe_time("2026-08-20T00:00:00.003+00:00")
 

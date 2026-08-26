@@ -22,7 +22,7 @@ from aats.data_platform.collectors.backfill.official_history_importers import (
     causal_resample_l2_ordered,
     import_l2_file,
     import_mark_price_rest,
-    import_trade_file,
+    import_trade_files,
     import_trade_rest,
     iter_l2_history,
     persist_resampled_l2,
@@ -58,6 +58,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--start", required=True, type=_utc)
     parser.add_argument("--end", required=True, type=_utc)
     parser.add_argument("--input", type=Path)
+    parser.add_argument(
+        "--additional-input",
+        action="append",
+        default=[],
+        type=Path,
+        help="trade-file 可追加相邻官方文件，以完整覆盖同一 UTC 窗口",
+    )
     parser.add_argument("--raw-archive-dir", type=Path)
     parser.add_argument("--timeframe", choices=("15m", "1H"))
     parser.add_argument(
@@ -108,6 +115,16 @@ def main(argv: list[str] | None = None) -> int:
         if not args.input.expanduser().resolve().is_file():
             print("--input 文件不存在", file=sys.stderr)
             return 4
+    for additional in args.additional_input:
+        if not additional.expanduser().is_absolute():
+            print("--additional-input 必须是绝对路径", file=sys.stderr)
+            return 4
+        if not additional.expanduser().resolve().is_file():
+            print("--additional-input 文件不存在", file=sys.stderr)
+            return 4
+    if args.additional_input and args.mode != "trade-file":
+        print("--additional-input 只允许用于 trade-file", file=sys.stderr)
+        return 4
     if args.mode == "l2-file" and args.end - args.start > timedelta(days=1):
         print("L2 单次导入最多 1 个 UTC 日；请按日分区运行", file=sys.stderr)
         return 4
@@ -117,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
         "start": args.start.isoformat(),
         "end": args.end.isoformat(),
         "input": str(args.input.expanduser().resolve()) if args.input else None,
+        "additional_input_count": len(args.additional_input),
         "raw_archive_dir": (
             str(args.raw_archive_dir.expanduser().resolve())
             if args.raw_archive_dir
@@ -181,9 +199,9 @@ def main(argv: list[str] | None = None) -> int:
                     source_locator=source_locator,
                     timestamp_semantics=timestamp_semantics,
                 )
-                stats = import_trade_file(
+                stats = import_trade_files(
                     session,
-                    path=args.input,
+                    paths=(args.input, *args.additional_input),
                     symbol=symbol,
                     start=args.start,
                     end=args.end,

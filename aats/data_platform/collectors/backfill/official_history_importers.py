@@ -344,20 +344,63 @@ def import_trade_file(
     ingest_run_id: str,
     raw_archive_dir: Path,
 ) -> ImportStats:
-    _validate_window(start, end)
-    symbol = _validated_symbol(symbol)
-    archived_path, digest = _archive_source_file(
-        path,
-        raw_archive_dir,
-        prefix="official_trade",
+    return import_trade_files(
+        session,
+        paths=(path,),
+        symbol=symbol,
+        start=start,
+        end=end,
+        source_id=source_id,
+        ingest_run_id=ingest_run_id,
+        raw_archive_dir=raw_archive_dir,
     )
 
+
+def import_trade_files(
+    session,
+    *,
+    paths: Sequence[Path],
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    source_id: str,
+    ingest_run_id: str,
+    raw_archive_dir: Path,
+) -> ImportStats:
+    """Stream one or more official bulk files into one UTC source window.
+
+    OKX trade files are partitioned by an exchange-local day.  A UTC research
+    day therefore normally needs two adjacent files.  The hashes of every file
+    remain part of the resulting source identity.
+    """
+
+    _validate_window(start, end)
+    symbol = _validated_symbol(symbol)
+    if not paths:
+        raise ValueError("trade_history_files_required")
+    resolved_paths = tuple(path.expanduser().resolve() for path in paths)
+    if len(set(resolved_paths)) != len(resolved_paths):
+        raise ValueError("trade_history_duplicate_source_file")
+    archived: list[tuple[Path, str]] = []
+    for path in resolved_paths:
+        archived.append(
+            _archive_source_file(
+                path,
+                raw_archive_dir,
+                prefix="official_trade",
+            )
+        )
+    digests = [digest for _, digest in archived]
+    if len(set(digests)) != len(digests):
+        raise ValueError("trade_history_duplicate_source_content")
+
     rows_read = 0
+    written = 0
     earliest_ts: datetime | None = None
     latest_ts: datetime | None = None
 
-    def rows() -> Iterator[dict[str, Any]]:
-        nonlocal earliest_ts, latest_ts, rows_read
+    for archived_path, digest in archived:
+        batch: list[dict[str, Any]] = []
         for item in _iter_records(archived_path):
             parsed = _parse_trade(item, symbol)
             if parsed is None:
@@ -376,15 +419,24 @@ def import_trade_file(
                     if latest_ts is None
                     else max(latest_ts, parsed["ts"])
                 )
-                yield parsed
-
-    written = _write_trade_rows(
-        session,
-        rows(),
-        source_id=source_id,
-        ingest_run_id=ingest_run_id,
-        raw_sha256=digest,
-    )
+                batch.append(parsed)
+                if len(batch) >= _DATABASE_BATCH_SIZE:
+                    written += _write_trade_rows(
+                        session,
+                        batch,
+                        source_id=source_id,
+                        ingest_run_id=ingest_run_id,
+                        raw_sha256=digest,
+                    )
+                    batch = []
+        if batch:
+            written += _write_trade_rows(
+                session,
+                batch,
+                source_id=source_id,
+                ingest_run_id=ingest_run_id,
+                raw_sha256=digest,
+            )
     gaps = _trade_file_edge_gaps(
         start=start,
         end=end,
@@ -396,10 +448,10 @@ def import_trade_file(
         symbol=symbol,
         start=start,
         end=end,
-        pages_or_files=1,
+        pages_or_files=len(archived),
         rows_read=rows_read,
         rows_written=written,
-        raw_sha256=(digest,),
+        raw_sha256=tuple(digest for _, digest in archived),
         gaps=tuple(gaps),
     )
 

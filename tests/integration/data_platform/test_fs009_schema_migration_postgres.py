@@ -442,6 +442,35 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
                 start_historical_rebuild(session, plan),
                 "already_succeeded",
             )
+            original_row_fingerprint = session.execute(
+                text(
+                    "SELECT output_fingerprint "
+                    "FROM silver.historical_trade_flow_15m "
+                    "WHERE bundle_id = CAST(:bundle_id AS UUID)"
+                ),
+                {"bundle_id": bundle_id},
+            ).scalar_one()
+            session.execute(
+                text(
+                    "UPDATE silver.historical_trade_flow_15m "
+                    "SET output_fingerprint = :tampered "
+                    "WHERE bundle_id = CAST(:bundle_id AS UUID)"
+                ),
+                {"bundle_id": bundle_id, "tampered": "0" * 64},
+            )
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "historical_rebuild_succeeded_output_fingerprint_mismatch",
+            ):
+                start_historical_rebuild(session, plan)
+            session.execute(
+                text(
+                    "UPDATE silver.historical_trade_flow_15m "
+                    "SET output_fingerprint = :original "
+                    "WHERE bundle_id = CAST(:bundle_id AS UUID)"
+                ),
+                {"bundle_id": bundle_id, "original": original_row_fingerprint},
+            )
 
             row = session.execute(
                 text(
@@ -572,6 +601,226 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
         finally:
             reset_engine()
             archive_container.stop()
+
+    def test_stage_19_source_aware_gold_is_versioned_and_repeatable(self) -> None:
+        from sqlalchemy import text
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.collectors.backfill.official_history_importers import (
+            register_official_source,
+        )
+        from aats.data_platform.config import ResearchPlatformSettings
+        from aats.data_platform.data_governance.historical_gold import (
+            execute_historical_gold,
+            plan_historical_gold,
+            start_historical_gold,
+        )
+        from aats.data_platform.data_governance.registry import (
+            import_source_record,
+            persist_historical_bundle,
+        )
+        from aats.data_platform.db import apply_rdp_migrations, get_engine
+        from aats.data_platform.jobs.run_registry import create_ingest_run
+
+        settings = ResearchPlatformSettings(
+            database_url=self.container.get_connection_url(driver="psycopg2"),
+            _env_file=None,
+        )
+        report = apply_rdp_migrations(settings)
+        self.assertTrue(report.ok, report.error_message)
+        engine = get_engine(settings)
+        start = datetime(2026, 8, 10, tzinfo=timezone.utc)
+        end = start + timedelta(hours=1)
+        symbol = "STAGE19-USDT-SWAP"
+        candle_version = f"candle-{uuid.uuid4()}"
+        funding_version = f"funding-{uuid.uuid4()}"
+        with Session(engine) as session, session.begin():
+            candle_source_key = f"integration-candle-{uuid.uuid4()}"
+            candle_source_id = register_official_source(
+                session,
+                source_key=candle_source_key,
+                source_kind="okx_rest",
+                source_locator="/integration/candles",
+                timestamp_semantics="confirmed UTC candle opening time",
+            )
+            candle_source = import_source_record(
+                source_key=candle_source_key,
+                source_kind="okx_rest",
+                provider="OKX",
+                source_locator="/integration/candles",
+                coverage_start=start,
+                coverage_end=end,
+                timestamp_semantics="confirmed UTC candle opening time",
+                schema_version="integration-v1",
+                dataset_version=candle_version,
+                transform_version="integration-candle-v1",
+                git_commit="a" * 40,
+                raw_partition_sha256=("a" * 64,),
+                row_count=4,
+                gaps=(),
+            )
+            candle_bundle_id, candle_report = persist_historical_bundle(
+                session,
+                source_id=candle_source_id,
+                source=candle_source,
+                symbol=symbol,
+                role="candles",
+                purpose="ohlcv_research",
+                coverage_ratio=1.0,
+                causal_time_check=True,
+            )
+            self.assertTrue(candle_report.eligible)
+
+            funding_source_key = f"integration-funding-{uuid.uuid4()}"
+            funding_source_id = register_official_source(
+                session,
+                source_key=funding_source_key,
+                source_kind="okx_rest",
+                source_locator="/integration/funding",
+                timestamp_semantics="UTC funding settlement time",
+            )
+            funding_source = import_source_record(
+                source_key=funding_source_key,
+                source_kind="okx_rest",
+                provider="OKX",
+                source_locator="/integration/funding",
+                coverage_start=start,
+                coverage_end=end,
+                timestamp_semantics="UTC funding settlement time",
+                schema_version="integration-v1",
+                dataset_version=funding_version,
+                transform_version="integration-funding-v1",
+                git_commit="a" * 40,
+                raw_partition_sha256=("b" * 64,),
+                row_count=1,
+                gaps=(),
+            )
+            funding_bundle_id, funding_report = persist_historical_bundle(
+                session,
+                source_id=funding_source_id,
+                source=funding_source,
+                symbol=symbol,
+                role="funding",
+                purpose="funding_research",
+                coverage_ratio=1.0,
+                causal_time_check=True,
+            )
+            self.assertTrue(funding_report.eligible)
+
+            candle_run = create_ingest_run(
+                session,
+                run_type="backfill",
+                dataset_domain="candles",
+                instrument_type="SWAP",
+                symbol=symbol,
+                timeframe="15m",
+                trigger_mode="manual",
+            )
+            for index in range(4):
+                session.execute(
+                    text(
+                        "INSERT INTO silver.market_swap_candles_15m "
+                        "(symbol, ts, open, high, low, close, vol, vol_quote, "
+                        "confirm, ingest_run_id, dataset_version) VALUES "
+                        "(:symbol, :ts, 100, 102, 99, 101, 1, 101, TRUE, "
+                        "CAST(:run_id AS UUID), :dataset_version)"
+                    ),
+                    {
+                        "symbol": symbol,
+                        "ts": start + timedelta(minutes=15 * index),
+                        "run_id": candle_run,
+                        "dataset_version": candle_version,
+                    },
+                )
+            funding_run = create_ingest_run(
+                session,
+                run_type="backfill",
+                dataset_domain="funding",
+                instrument_type="SWAP",
+                symbol=symbol,
+                trigger_mode="manual",
+            )
+            session.execute(
+                text(
+                    "INSERT INTO silver.market_swap_funding "
+                    "(symbol, ts, funding_rate, ingest_run_id, dataset_version) "
+                    "VALUES (:symbol, :ts, 0.0001, CAST(:run_id AS UUID), :version)"
+                ),
+                {
+                    "symbol": symbol,
+                    "ts": start,
+                    "run_id": funding_run,
+                    "version": funding_version,
+                },
+            )
+
+            plan = plan_historical_gold(
+                session,
+                symbol=symbol,
+                timeframe="15m",
+                candle_bundle_id=candle_bundle_id,
+                funding_bundle_id=funding_bundle_id,
+                git_commit="c" * 40,
+            )
+            state, artifact_id = start_historical_gold(session, plan)
+            self.assertEqual(state, "started")
+            result = execute_historical_gold(
+                session,
+                plan,
+                artifact_id=artifact_id,
+            )
+            self.assertEqual(result.rows_written, 4)
+            self.assertTrue(result.quality_report["eligible"])
+            self.assertEqual(result.artifact_index["input_bundle_count"], 2)
+            state, same_artifact_id = start_historical_gold(session, plan)
+            self.assertEqual(state, "already_succeeded")
+            self.assertEqual(same_artifact_id, artifact_id)
+            original_row_fingerprint = session.execute(
+                text(
+                    "SELECT output_fingerprint FROM gold.historical_replay_bars "
+                    "WHERE artifact_id = CAST(:artifact_id AS UUID) ORDER BY ts LIMIT 1"
+                ),
+                {"artifact_id": artifact_id},
+            ).scalar_one()
+            session.execute(
+                text(
+                    "UPDATE gold.historical_replay_bars "
+                    "SET output_fingerprint = :tampered WHERE artifact_id = "
+                    "CAST(:artifact_id AS UUID) AND ts = :start"
+                ),
+                {
+                    "artifact_id": artifact_id,
+                    "start": start,
+                    "tampered": "0" * 64,
+                },
+            )
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "historical_gold_succeeded_artifact_fingerprint_mismatch",
+            ):
+                start_historical_gold(session, plan)
+            session.execute(
+                text(
+                    "UPDATE gold.historical_replay_bars "
+                    "SET output_fingerprint = :original WHERE artifact_id = "
+                    "CAST(:artifact_id AS UUID) AND ts = :start"
+                ),
+                {
+                    "artifact_id": artifact_id,
+                    "start": start,
+                    "original": original_row_fingerprint,
+                },
+            )
+            rows = session.execute(
+                text(
+                    "SELECT COUNT(*), COUNT(DISTINCT source_candle_bundle_id), "
+                    "COUNT(DISTINCT source_funding_bundle_id) "
+                    "FROM gold.historical_replay_bars "
+                    "WHERE artifact_id = CAST(:artifact_id AS UUID)"
+                ),
+                {"artifact_id": artifact_id},
+            ).one()
+            self.assertEqual(tuple(rows), (4, 1, 1))
 
 
 if __name__ == "__main__":

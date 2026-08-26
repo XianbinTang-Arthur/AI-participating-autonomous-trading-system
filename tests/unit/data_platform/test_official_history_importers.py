@@ -19,6 +19,7 @@ from aats.data_platform.collectors.backfill.official_history_importers import (
     import_l2_file,
     import_mark_price_rest,
     import_trade_file,
+    import_trade_files,
     import_trade_rest,
     iter_l2_history,
 )
@@ -131,6 +132,86 @@ def test_trade_file_fails_eligibility_when_utc_window_edge_is_missing(
             "gap_end": end.isoformat(),
         },
     )
+
+
+def test_adjacent_trade_files_jointly_cover_one_utc_window(tmp_path: Path) -> None:
+    start = datetime(2026, 8, 1, tzinfo=UTC)
+    end = start + timedelta(days=1)
+    first = tmp_path / "trade-1.jsonl"
+    second = tmp_path / "trade-2.jsonl"
+    first.write_text(
+        json.dumps(
+            {
+                "instId": "BTC-USDT-SWAP",
+                "ts": str(int((start + timedelta(milliseconds=1)).timestamp() * 1000)),
+                "tradeId": "1",
+                "px": "100",
+                "sz": "2",
+                "side": "buy",
+            }
+        ),
+        encoding="utf-8",
+    )
+    second.write_text(
+        json.dumps(
+            {
+                "instId": "BTC-USDT-SWAP",
+                "ts": str(int((end - timedelta(milliseconds=1)).timestamp() * 1000)),
+                "tradeId": "2",
+                "px": "101",
+                "sz": "3",
+                "side": "sell",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    stats = import_trade_files(
+        _Session(),
+        paths=(first, second),
+        symbol="BTC-USDT-SWAP",
+        start=start,
+        end=end,
+        source_id="00000000-0000-0000-0000-000000000001",
+        ingest_run_id="00000000-0000-0000-0000-000000000002",
+        raw_archive_dir=tmp_path / "archive",
+    )
+
+    assert stats.pages_or_files == 2
+    assert stats.rows_read == stats.rows_written == 2
+    assert len(stats.raw_sha256) == 2
+    assert stats.gaps == ()
+
+
+def test_trade_files_reject_duplicate_path_or_content(tmp_path: Path) -> None:
+    start = datetime(2026, 8, 1, tzinfo=UTC)
+    source = tmp_path / "trade-1.jsonl"
+    duplicate = tmp_path / "trade-2.jsonl"
+    payload = json.dumps(
+        {
+            "instId": "BTC-USDT-SWAP",
+            "ts": str(int((start + timedelta(seconds=1)).timestamp() * 1000)),
+            "tradeId": "1",
+            "px": "100",
+            "sz": "2",
+            "side": "buy",
+        }
+    )
+    source.write_text(payload, encoding="utf-8")
+    duplicate.write_text(payload, encoding="utf-8")
+    common = {
+        "symbol": "BTC-USDT-SWAP",
+        "start": start,
+        "end": start + timedelta(days=1),
+        "source_id": "00000000-0000-0000-0000-000000000001",
+        "ingest_run_id": "00000000-0000-0000-0000-000000000002",
+        "raw_archive_dir": tmp_path / "archive",
+    }
+
+    with pytest.raises(ValueError, match="duplicate_source_file"):
+        import_trade_files(_Session(), paths=(source, source), **common)
+    with pytest.raises(ValueError, match="duplicate_source_content"):
+        import_trade_files(_Session(), paths=(source, duplicate), **common)
 
 
 def test_l2_import_hashes_datetime_payload_and_reports_sequence_gap(tmp_path: Path) -> None:
