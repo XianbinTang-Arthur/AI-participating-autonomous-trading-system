@@ -295,6 +295,10 @@ def evaluate_parameter_set(
 
     return {
         "parameter_set_id": ps_id,
+        # 保留参数集所属研究轮次，供 recommendation 写入
+        # governance.recommendations.source_round_id。缺失该字段会让审批、
+        # 发布与回滚链无法证明候选来自哪一轮研究。
+        "source_round_id": parameter_set.get("source_round_id"),
         "family": family,
         "symbol": parameter_set.get("symbol", "BTC-USDT-SWAP"),
         "timeframe": timeframe,

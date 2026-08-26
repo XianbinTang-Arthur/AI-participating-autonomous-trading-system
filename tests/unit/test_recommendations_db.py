@@ -54,6 +54,7 @@ class _FakeResult:
 _REC_COLUMNS: tuple[str, ...] = (
     "recommendation_id", "family", "symbol", "timeframe",
     "recommendation_type", "target_parameter_set_id",
+    "source_round_id",
     "confidence", "reason", "evidence_bundle_ref",
     "status",
     "approved_by", "approved_at", "review_notes",
@@ -99,6 +100,7 @@ class _FakeRecSession:
             "timeframe": params.get("timeframe"),
             "recommendation_type": params.get("rec_type"),
             "target_parameter_set_id": params.get("target_ps_id"),
+            "source_round_id": params.get("source_round_id"),
             "confidence": params.get("confidence"),
             "reason": params.get("reason"),
             "evidence_bundle_ref": params.get("evidence_ref"),
@@ -230,6 +232,26 @@ def test_upsert_recommendation_inserts_new_row() -> None:
     assert "rec_A" in session.rows
     assert session.rows["rec_A"]["status"] == "draft"
     assert session.rows["rec_A"]["family"] == "independent"
+
+
+def test_upsert_recommendation_round_trips_source_round_id() -> None:
+    session = _FakeRecSession()
+    db_upsert_recommendation(
+        session,  # type: ignore[arg-type]
+        recommendation_id="rec_lineage",
+        family="independent",
+        timeframe="15m",
+        recommendation_type="parameter_upgrade",
+        confidence="high",
+        reason="lineage test",
+        target_parameter_set_id="ps_lineage",
+        source_round_id="round_source_001",
+    )
+
+    row = db_get_recommendation(session, "rec_lineage")  # type: ignore[arg-type]
+
+    assert row is not None
+    assert row["source_round_id"] == "round_source_001"
 
 
 def test_upsert_recommendation_overwrites_existing_fields() -> None:

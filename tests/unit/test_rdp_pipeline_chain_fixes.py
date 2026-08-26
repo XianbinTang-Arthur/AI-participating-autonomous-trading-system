@@ -244,6 +244,33 @@ def test_select_parameter_upgrade_candidates_dedupes_per_combo() -> None:
     assert [item["parameter_set_id"] for item in selected] == ["ps_b", "ps_c"]
 
 
+def test_parameter_candidate_preserves_source_round_lineage() -> None:
+    parameter_set = {
+        "parameter_set_id": "ps_lineage",
+        "source_round_id": "round_source_001",
+        "family": "independent",
+        "timeframe": "15m",
+        "status": "candidate",
+    }
+
+    with patch(
+        "aats.data_platform.decision_system.candidate_selector._evaluate_phase2_score",
+        return_value={"dimension": "phase2", "score": 0.0, "max_score": 3.0, "details": []},
+    ), patch(
+        "aats.data_platform.decision_system.candidate_selector._evaluate_phase3_score",
+        return_value={"dimension": "phase3", "score": 0.0, "max_score": 2.0, "details": []},
+    ), patch(
+        "aats.data_platform.decision_system.candidate_selector._evaluate_phase4_score",
+        return_value={"dimension": "phase4", "score": 0.0, "max_score": 2.0, "details": []},
+    ), patch(
+        "aats.data_platform.decision_system.candidate_selector._evaluate_governance_score",
+        return_value={"dimension": "phase5", "score": 0.0, "max_score": 2.0, "details": []},
+    ):
+        selected = select_parameter_upgrade_candidates([parameter_set], {})
+
+    assert selected[0]["source_round_id"] == "round_source_001"
+
+
 def test_decision_engine_ignores_failure_ratio_for_replay_only_phase3() -> None:
     evidence_bundle = {
         "phase2_evidence": {
