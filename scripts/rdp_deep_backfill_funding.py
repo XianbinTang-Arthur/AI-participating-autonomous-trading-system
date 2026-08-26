@@ -254,6 +254,8 @@ def deep_backfill_funding(
     dry_run: bool = False,
     merge_every_n_pages: int = 30,
     raw_archive_dir: Path | None = None,
+    refresh_existing: bool = False,
+    refresh_end: datetime | None = None,
 ) -> dict[str, Any]:
     """对单个 symbol 执行 funding 深度回填.
 
@@ -280,6 +282,13 @@ def deep_backfill_funding(
     settings = get_settings()
     if target_start.tzinfo is None or target_start.utcoffset() is None:
         raise ValueError("target_start must be timezone-aware")
+    if refresh_existing:
+        if refresh_end is None:
+            raise ValueError("refresh_end is required when refresh_existing is enabled")
+        if refresh_end.tzinfo is None or refresh_end.utcoffset() is None:
+            raise ValueError("refresh_end must be timezone-aware")
+        if refresh_end <= target_start:
+            raise ValueError("refresh_end must be after target_start")
     if not dry_run:
         if raw_archive_dir is None:
             raise ValueError("raw_archive_dir is required for an applied backfill")
@@ -288,6 +297,8 @@ def deep_backfill_funding(
     stats: dict[str, Any] = {
         "symbol": symbol,
         "target_start": target_start.isoformat(),
+        "mode": "refresh_existing" if refresh_existing else "backfill_missing_history",
+        "refresh_end": refresh_end.isoformat() if refresh_end is not None else None,
         "pages_fetched": 0,
         "rows_fetched": 0,
         "unique_rows_observed": 0,
@@ -323,7 +334,7 @@ def deep_backfill_funding(
         log.info("[%s funding] 数据库中无已有数据，将从当前时间开始向前回填", symbol)
 
     # 如果已有数据的最早时间已经早于目标，无需回填
-    if existing_min and existing_min <= target_start:
+    if not refresh_existing and existing_min and existing_min <= target_start:
         log.info(
             "[%s funding] 已有数据起点 %s 已早于目标 %s，无需回填",
             symbol,
@@ -333,12 +344,19 @@ def deep_backfill_funding(
         return stats
 
     # 2. 确定起始分页点
-    if existing_min:
+    if refresh_existing:
+        assert refresh_end is not None
+        page_from_ms = _ts_ms(refresh_end)
+    elif existing_min:
         page_from_ms = _ts_ms(existing_min)
     else:
         page_from_ms = _ts_ms(datetime.now(timezone.utc))
 
-    coverage_end = existing_min or _ms_to_dt(page_from_ms)
+    coverage_end = (
+        refresh_end
+        if refresh_existing
+        else (existing_min or _ms_to_dt(page_from_ms))
+    )
     if coverage_end <= target_start:
         return stats
 
@@ -365,10 +383,6 @@ def deep_backfill_funding(
     # 3. 分页拉取
     with httpx.Client() as client:
         while page < MAX_PAGES_HARD_LIMIT:
-            if page_from_ms in seen_cursors:
-                fetch_error = RuntimeError("okx_funding_pagination_stalled")
-                break
-            seen_cursors.add(page_from_ms)
             try:
                 raw_data, raw_response = _split_page_result(
                     _fetch_funding_page(
@@ -472,7 +486,12 @@ def deep_backfill_funding(
                 break
 
             # 下一页的起始点
-            page_from_ms = oldest_ts_in_page
+            next_cursor = oldest_ts_in_page - 1
+            if next_cursor >= page_from_ms or next_cursor in seen_cursors:
+                fetch_error = RuntimeError("okx_funding_pagination_stalled")
+                break
+            seen_cursors.add(page_from_ms)
+            page_from_ms = next_cursor
 
             # 分批合并（避免内存积累过大）
             if not dry_run and len(all_rows) >= merge_every_n_pages * API_LIMIT:
@@ -734,7 +753,7 @@ def _flush_and_merge(
 # ── CLI ────────────────────────────────────────────────────────────────
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="OKX API 深度历史 funding rate 回填",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -766,6 +785,16 @@ def main() -> None:
         help="目标回填起始日期 (YYYY-MM-DD)，与 --days 二选一",
     )
     parser.add_argument(
+        "--refresh-existing",
+        action="store_true",
+        help="覆盖刷新已存在窗口，而不是只向已有最早时间之前回填",
+    )
+    parser.add_argument(
+        "--refresh-end",
+        type=str,
+        help="覆盖刷新排他结束日期 (YYYY-MM-DD)，仅与 --refresh-existing 同用",
+    )
+    parser.add_argument(
         "--rate-limit", type=float, default=0.15,
         help="API 请求间隔秒数 (默认: 0.15)",
     )
@@ -783,7 +812,7 @@ def main() -> None:
         help="原始 OKX 响应不可变归档的绝对目录；非 dry-run 必填",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.target_start:
         target_start = datetime.strptime(args.target_start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -791,7 +820,18 @@ def main() -> None:
         target_start = datetime.now(timezone.utc) - timedelta(days=args.days)
     else:
         parser.error("必须指定 --days 或 --target-start")
-        return
+        return 2
+    refresh_end = (
+        datetime.strptime(args.refresh_end, "%Y-%m-%d").replace(
+            tzinfo=timezone.utc
+        )
+        if args.refresh_end
+        else None
+    )
+    if args.refresh_existing and refresh_end is None:
+        parser.error("--refresh-existing 必须同时指定 --refresh-end")
+    if not args.refresh_existing and refresh_end is not None:
+        parser.error("--refresh-end 只能与 --refresh-existing 同用")
     if not args.dry_run and args.raw_archive_dir is None:
         parser.error("非 dry-run 必须指定 --raw-archive-dir")
     if args.raw_archive_dir is not None and not args.raw_archive_dir.expanduser().is_absolute():
@@ -801,6 +841,9 @@ def main() -> None:
     log.info("OKX API 深度 funding 回填")
     log.info("  交易对  : %s", ", ".join(args.symbols))
     log.info("  目标起点: %s", target_start.strftime("%Y-%m-%d %H:%M UTC"))
+    log.info("  执行模式: %s", "覆盖刷新" if args.refresh_existing else "缺失历史回填")
+    if refresh_end is not None:
+        log.info("  刷新终点: %s (exclusive)", refresh_end.strftime("%Y-%m-%d %H:%M UTC"))
     log.info("  请求间隔: %.2fs", args.rate_limit)
     log.info("  试运行  : %s", "是" if args.dry_run else "否")
     log.info("=" * 60)
@@ -821,6 +864,8 @@ def main() -> None:
                 dry_run=args.dry_run,
                 merge_every_n_pages=args.merge_every,
                 raw_archive_dir=args.raw_archive_dir,
+                refresh_existing=args.refresh_existing,
+                refresh_end=refresh_end,
             )
             all_stats.append(result)
         except Exception as e:
@@ -849,7 +894,8 @@ def main() -> None:
                 " (API耗尽)" if s.get("api_exhausted") else "",
             )
     log.info("  总计: %d 行", total_rows)
+    return 1 if any("error" in item for item in all_stats) else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

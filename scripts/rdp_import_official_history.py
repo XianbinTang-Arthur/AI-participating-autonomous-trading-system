@@ -14,6 +14,7 @@ from pathlib import Path
 import httpx
 
 _ROOT = Path(__file__).resolve().parent.parent
+_SAFE_ERROR_CODE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_:=-]{0,159}$")
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
@@ -397,6 +398,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
         return 0
     except Exception as exc:
+        error_code = _safe_error_code(exc)
         if run_id is not None:
             try:
                 with get_session() as session:
@@ -404,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
                         session,
                         run_id,
                         status="failed",
-                        error_message=type(exc).__name__,
+                        error_message=error_code,
                     )
             except Exception as status_exc:
                 print(
@@ -412,8 +414,19 @@ def main(argv: list[str] | None = None) -> int:
                     f"{type(status_exc).__name__}",
                     file=sys.stderr,
                 )
-        print(f"ERROR: {type(exc).__name__}", file=sys.stderr)
+        print(f"ERROR: {error_code}", file=sys.stderr)
         return 3
+
+
+def _safe_error_code(exc: Exception) -> str:
+    """Expose an actionable internal code without leaking paths or responses."""
+
+    detail = str(exc).strip()
+    if isinstance(exc, (RuntimeError, ValueError)) and _SAFE_ERROR_CODE.fullmatch(
+        detail
+    ):
+        return detail
+    return type(exc).__name__
 
 
 def _source_record(
