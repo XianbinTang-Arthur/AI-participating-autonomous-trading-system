@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from pathlib import Path
 
 from aats.data_platform.operations import workflow_dispatcher
 from scripts import rdp_run_decision_round, rdp_run_scheduled_workflow
@@ -56,6 +57,34 @@ def test_decision_result_marker_contains_release_relevant_truth(capsys) -> None:
     assert payload["research_outcome"] == "blocked_by_attribution"
     assert payload["promote_candidate_count"] == 1
     assert payload["decision_counts"] == {"keep_active": 2}
+
+
+def test_decision_parameter_sets_use_db_first_registry_without_json_file(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    registry_path = tmp_path / "artifacts/governance/current_parameter_registry.json"
+    assert registry_path.exists() is False
+    observed_paths = []
+    monkeypatch.setattr(
+        rdp_run_decision_round,
+        "load_registry",
+        lambda path: observed_paths.append(path) or {
+            "parameter_sets": [
+                {"parameter_set_id": "candidate", "status": "candidate"},
+                {"parameter_set_id": "frozen", "status": "frozen"},
+                {"parameter_set_id": "draft", "status": "draft"},
+            ],
+        },
+    )
+
+    selected = rdp_run_decision_round._load_decision_parameter_sets(
+        tmp_path,
+        include_draft=False,
+    )
+
+    assert observed_paths == [registry_path]
+    assert [item["parameter_set_id"] for item in selected] == ["candidate", "frozen"]
 
 
 def test_scheduled_workflow_marker_propagates_pipeline_business_result(

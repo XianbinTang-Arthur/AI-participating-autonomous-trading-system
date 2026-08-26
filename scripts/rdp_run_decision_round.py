@@ -100,6 +100,28 @@ def _emit_decision_result(
     )
 
 
+def _load_decision_parameter_sets(
+    project_root: pathlib.Path,
+    *,
+    include_draft: bool,
+) -> list[dict]:
+    """从 DB-first registry 读取本轮允许评估的参数集.
+
+    JSON 文件只是审计副本，容器重建后可能不存在；不能在调用
+    ``load_registry`` 前用文件存在性短路 DB 真源。
+    """
+    registry_path = project_root / "artifacts/governance/current_parameter_registry.json"
+    registry = load_registry(registry_path)
+    allowed_statuses = {"frozen", "candidate"}
+    if include_draft:
+        allowed_statuses.add("draft")
+    return [
+        parameter_set
+        for parameter_set in registry.get("parameter_sets", [])
+        if parameter_set.get("status") in allowed_statuses
+    ]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Phase 6: Closed-Loop Decision Round",
@@ -145,19 +167,15 @@ def main() -> int:
     log.info("[2/6] Selecting parameter upgrade candidates...")
 
     # 从 governance registry 获取 parameter sets
-    gov_registry_path = project_root / "artifacts/governance/current_parameter_registry.json"
-    parameter_sets: list[dict] = []
     # 默认只评估治理确认的参数集（frozen + candidate），
     # draft 需要显式 --include-draft 才纳入
     allowed_statuses = {"frozen", "candidate"}
     if args.include_draft:
         allowed_statuses.add("draft")
-    if gov_registry_path.exists():
-        reg = load_registry(gov_registry_path)
-        parameter_sets = [
-            ps for ps in reg.get("parameter_sets", [])
-            if ps.get("status") in allowed_statuses
-        ]
+    parameter_sets = _load_decision_parameter_sets(
+        project_root,
+        include_draft=args.include_draft,
+    )
     log.info("  Parameter sets to evaluate: %d (statuses: %s)",
              len(parameter_sets), sorted(allowed_statuses))
 
