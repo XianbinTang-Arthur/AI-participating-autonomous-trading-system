@@ -44,7 +44,7 @@ function Get-RequiredContainers {
         'derivatives-live-monolith' { return @('aats-gateway', 'aats-rdp-daemon', 'aats-liquidations-daemon', 'aats-microstructure-collector') }
         'spot' { return @('aats-gateway', 'aats-market', 'aats-decision', 'aats-execution', 'aats-rdp-daemon') }
         'spot-live' { return @('aats-gateway', 'aats-market', 'aats-decision', 'aats-execution', 'aats-rdp-daemon') }
-        'derivatives' { return @('aats-gateway', 'aats-market', 'aats-decision', 'aats-execution', 'aats-rdp-daemon') }
+        'derivatives' { return @('aats-gateway', 'aats-market', 'aats-decision', 'aats-execution', 'aats-rdp-daemon', 'aats-liquidations-daemon', 'aats-microstructure-collector') }
         'derivatives-live' { return @('aats-gateway', 'aats-market', 'aats-decision', 'aats-execution', 'aats-rdp-daemon', 'aats-liquidations-daemon', 'aats-microstructure-collector') }
         default { throw "Unsupported profile: $ResolvedProfile" }
     }
