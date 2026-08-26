@@ -17,16 +17,24 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from aats.data_platform.attribution.taxonomy import (
     ALIGNMENT_STATUS_LIVE_ONLY,
     ALIGNMENT_STATUS_REPLAY_ONLY,
+    ALIGNMENT_STATUS_UNATTRIBUTABLE,
     ATTRIBUTION_NOT_APPLICABLE,
     ATTRIBUTION_SUCCESS,
 )
+from aats.data_platform.governance._time_util import parse_iso_datetime_utc
 
 log = logging.getLogger(__name__)
+
+
+def _decimal(value: Any) -> Decimal:
+    return Decimal(str(value if value is not None else "0"))
 
 
 def classify_all(
@@ -60,11 +68,44 @@ def classify_all(
     fills = fills or {}
     recon_snapshots = recon_snapshots or []
 
-    # 取时间窗口内最新的 reconciliation snapshot
-    latest_recon = recon_snapshots[0] if recon_snapshots else None
+    reconciliation_by_event: dict[datetime, dict[str, Any]] = {}
+    historical_reconciliation: list[tuple[datetime, dict[str, Any]]] = []
+    for snapshot in recon_snapshots:
+        attribution_event_ts = parse_iso_datetime_utc(
+            snapshot.get("attribution_event_ts"),
+            context="attribution.layer_classifier.attribution_event_ts",
+        )
+        if attribution_event_ts is not None:
+            reconciliation_by_event[attribution_event_ts] = snapshot
+            continue
+        created_at = parse_iso_datetime_utc(
+            snapshot.get("created_at"),
+            context="attribution.layer_classifier.reconciliation_created_at",
+        )
+        if created_at is not None:
+            historical_reconciliation.append((created_at, snapshot))
+    historical_reconciliation.sort(key=lambda item: item[0])
 
     results: list[dict[str, Any]] = []
     for row in alignment_rows:
+        event_ts = parse_iso_datetime_utc(
+            row.get("live_ts") or row.get("replay_ts"),
+            context="attribution.layer_classifier.row_event_ts",
+        )
+        latest_recon = (
+            reconciliation_by_event.get(event_ts)
+            if event_ts is not None
+            else None
+        )
+        if latest_recon is None and event_ts is not None:
+            latest_recon = next(
+                (
+                    snapshot
+                    for created_at, snapshot in reversed(historical_reconciliation)
+                    if created_at <= event_ts
+                ),
+                None,
+            )
         classified = _classify_single(
             row,
             allocations=allocations,
@@ -111,6 +152,13 @@ def _classify_single(
         result["final_attribution_reason"] = "live_only_no_replay_bar"
         return result
 
+    if status == ALIGNMENT_STATUS_UNATTRIBUTABLE:
+        result["final_attribution_category"] = ATTRIBUTION_NOT_APPLICABLE
+        result["final_attribution_reason"] = str(
+            row.get("lineage_error") or "live_lineage_incomplete"
+        )
+        return result
+
     # ---- Replay 没想开：不需要归因 ----
     replay_selectable = row.get("replay_selectable", False)
     replay_opening = row.get("replay_opening", False)
@@ -144,21 +192,27 @@ def _classify_single(
         return result
 
     # 已对齐（aligned）
-    live_route = row.get("live_route_action", "")
-    if live_route == "hold" or live_route == "":
+    live_route = str(row.get("live_route_action") or "missing")
+    if live_route != "override_target":
+        reason = f"intent_route_action_{live_route}"
         result["final_attribution_category"] = "strategy_blocked"
-        result["final_attribution_reason"] = "intent_route_action_hold"
-        result["strategy_reason"] = "intent_route_action_hold"
+        result["final_attribution_reason"] = reason
+        result["strategy_reason"] = reason
         return result
 
     result["strategy_reason"] = "passed"
 
     # ---- Layer 2: Permission — automatic_enabled? ----
     auto_enabled = row.get("live_automatic_enabled")
-    if auto_enabled is False:
+    if auto_enabled is not True:
         result["final_attribution_category"] = "permission_disabled"
-        result["final_attribution_reason"] = "automatic_enabled_false"
-        result["permission_reason"] = "automatic_enabled_false"
+        reason = (
+            "automatic_enabled_false"
+            if auto_enabled is False
+            else "automatic_enabled_missing"
+        )
+        result["final_attribution_reason"] = reason
+        result["permission_reason"] = reason
         return result
 
     result["permission_reason"] = "passed"
@@ -172,73 +226,95 @@ def _classify_single(
         result["allocator_reason"] = "no_allocation_found"
         return result
 
-    approved_notional = float(alloc.get("portfolio_approved_notional") or 0)
+    approved_notional = _decimal(alloc.get("portfolio_approved_notional"))
     if approved_notional <= 0:
         result["final_attribution_category"] = "allocator_rejected"
         result["final_attribution_reason"] = "approved_notional_zero"
         result["allocator_reason"] = "approved_notional_zero"
         return result
 
-    alloc_route = alloc.get("route_action", "")
-    if alloc_route == "hold":
+    alloc_route = str(alloc.get("route_action") or "missing")
+    if alloc_route != "override_target":
+        reason = f"route_action_{alloc_route}"
         result["final_attribution_category"] = "allocator_rejected"
-        result["final_attribution_reason"] = "route_action_hold"
-        result["allocator_reason"] = "route_action_hold"
+        result["final_attribution_reason"] = reason
+        result["allocator_reason"] = reason
         return result
 
     result["allocator_reason"] = "passed"
 
     # ---- Layer 4: Budget — budget 足够? ----
     budget = budgets.get(alloc_id)
-    if budget:
-        bm = float(budget.get("budget_multiplier") or 0)
-        if bm <= 0:
-            result["final_attribution_category"] = "budget_rejected"
-            result["final_attribution_reason"] = "budget_multiplier_zero"
-            result["budget_reason"] = "budget_multiplier_zero"
-            return result
+    if not budget:
+        result["final_attribution_category"] = "budget_rejected"
+        result["final_attribution_reason"] = "budget_snapshot_missing"
+        result["budget_reason"] = "budget_snapshot_missing"
+        return result
+    bm = _decimal(budget.get("budget_multiplier"))
+    if bm <= 0:
+        result["final_attribution_category"] = "budget_rejected"
+        result["final_attribution_reason"] = "budget_multiplier_zero"
+        result["budget_reason"] = "budget_multiplier_zero"
+        return result
 
-        budget_cut = float(budget.get("portfolio_budget_cut_notional") or 0)
-        budget_approved = float(budget.get("approved_notional") or 0)
-        if budget_approved <= 0 and budget_cut > 0:
-            result["final_attribution_category"] = "budget_rejected"
-            result["final_attribution_reason"] = "portfolio_budget_cut_full"
-            result["budget_reason"] = "portfolio_budget_cut_full"
-            return result
+    budget_cut = _decimal(budget.get("portfolio_budget_cut_notional"))
+    budget_approved = _decimal(budget.get("approved_notional"))
+    if budget_approved <= 0 and budget_cut > 0:
+        result["final_attribution_category"] = "budget_rejected"
+        result["final_attribution_reason"] = "portfolio_budget_cut_full"
+        result["budget_reason"] = "portfolio_budget_cut_full"
+        return result
 
-        if budget.get("clamped") and budget_approved <= 0:
-            result["final_attribution_category"] = "budget_rejected"
-            result["final_attribution_reason"] = "budget_clamped_to_zero"
-            result["budget_reason"] = "budget_clamped_to_zero"
-            return result
+    if budget.get("clamped") and budget_approved <= 0:
+        result["final_attribution_category"] = "budget_rejected"
+        result["final_attribution_reason"] = "budget_clamped_to_zero"
+        result["budget_reason"] = "budget_clamped_to_zero"
+        return result
 
     result["budget_reason"] = "passed"
 
-    # ---- Layer 5: Risk — reconciliation 不阻止? ----
-    if latest_recon:
-        if latest_recon.get("halt_required"):
-            result["final_attribution_category"] = "risk_rejected"
-            result["final_attribution_reason"] = "halt_required"
-            result["risk_reason"] = "halt_required"
-            return result
+    # ---- Layer 5: Risk — 必须有当时可见的 reconciliation 证据且不阻止 ----
+    if latest_recon is None:
+        result["final_attribution_category"] = "risk_rejected"
+        result["final_attribution_reason"] = "reconciliation_snapshot_missing"
+        result["risk_reason"] = "reconciliation_snapshot_missing"
+        return result
 
-        if latest_recon.get("only_reduce_required"):
-            result["final_attribution_category"] = "risk_rejected"
-            result["final_attribution_reason"] = "only_reduce_required"
-            result["risk_reason"] = "only_reduce_required"
-            return result
+    if latest_recon.get("halt_required"):
+        result["final_attribution_category"] = "risk_rejected"
+        result["final_attribution_reason"] = "halt_required"
+        result["risk_reason"] = "halt_required"
+        return result
 
-        if latest_recon.get("review_required"):
-            result["final_attribution_category"] = "risk_rejected"
-            result["final_attribution_reason"] = "review_required"
-            result["risk_reason"] = "review_required"
-            return result
+    if latest_recon.get("only_reduce_required"):
+        result["final_attribution_category"] = "risk_rejected"
+        result["final_attribution_reason"] = "only_reduce_required"
+        result["risk_reason"] = "only_reduce_required"
+        return result
 
-        if latest_recon.get("safe_to_trade") is False:
-            result["final_attribution_category"] = "risk_rejected"
-            result["final_attribution_reason"] = "safe_to_trade_false"
-            result["risk_reason"] = "safe_to_trade_false"
-            return result
+    if latest_recon.get("review_required"):
+        result["final_attribution_category"] = "risk_rejected"
+        result["final_attribution_reason"] = "review_required"
+        result["risk_reason"] = "review_required"
+        return result
+
+    if latest_recon.get("bundle_recovery_required"):
+        result["final_attribution_category"] = "risk_rejected"
+        result["final_attribution_reason"] = "bundle_recovery_required"
+        result["risk_reason"] = "bundle_recovery_required"
+        return result
+
+    if latest_recon.get("safe_to_trade") is not True:
+        result["final_attribution_category"] = "risk_rejected"
+        result["final_attribution_reason"] = "safe_to_trade_false"
+        result["risk_reason"] = "safe_to_trade_false"
+        return result
+
+    if latest_recon.get("resume_eligible") is not True:
+        result["final_attribution_category"] = "risk_rejected"
+        result["final_attribution_reason"] = "resume_not_eligible"
+        result["risk_reason"] = "resume_not_eligible"
+        return result
 
     result["risk_reason"] = "passed"
 
@@ -253,14 +329,24 @@ def _classify_single(
 
     latest_bundle = decision_bundles[-1]
     bundle_status = latest_bundle.get("status", "")
-    if bundle_status in ("rejected", "cancelled"):
+    if bundle_status in ("blocked", "review_required"):
         result["final_attribution_category"] = "execution_blocked"
         result["final_attribution_reason"] = f"bundle_status_{bundle_status}"
         result["execution_reason"] = f"bundle_status_{bundle_status}"
         return result
+    if bundle_status not in (
+        "planned",
+        "submitted",
+        "partial_fill_recovery",
+        "recovered",
+    ):
+        result["final_attribution_category"] = "execution_blocked"
+        result["final_attribution_reason"] = "bundle_status_unknown"
+        result["execution_reason"] = "bundle_status_unknown"
+        return result
 
-    net_exposure = float(latest_bundle.get("net_approved_exposure") or 0)
-    if net_exposure <= 0 and bundle_status not in ("executed", "submitted"):
+    net_exposure = _decimal(latest_bundle.get("net_approved_exposure"))
+    if net_exposure <= 0:
         result["final_attribution_category"] = "execution_blocked"
         result["final_attribution_reason"] = "net_approved_exposure_zero"
         result["execution_reason"] = "net_approved_exposure_zero"
@@ -277,12 +363,21 @@ def _classify_single(
         return result
 
     latest_order = decision_orders[-1]
-    order_state = latest_order.get("state", "")
+    order_state = str(latest_order.get("state") or "").upper()
     result["order_status"] = order_state
 
-    if order_state in ("rejected", "cancelled"):
+    if order_state in (
+        "CANCELED",
+        "CANCELLED",
+        "REJECTED",
+        "FAILED",
+        "BLOCKED",
+        "DRY_RUN",
+        "EXPIRED",
+    ):
+        reason = f"order_state_{order_state.lower()}"
         result["final_attribution_category"] = "order_not_created"
-        result["final_attribution_reason"] = f"order_state_{order_state}"
+        result["final_attribution_reason"] = reason
         return result
 
     # ---- Layer 8: Fill — fill 出现? ----
@@ -294,9 +389,12 @@ def _classify_single(
         result["fill_status"] = "not_found"
         return result
 
-    total_fill_qty = sum(float(f.get("fill_qty") or 0) for f in order_fills)
-    requested_qty = float(latest_order.get("requested_qty") or 0)
-    if requested_qty > 0 and total_fill_qty < requested_qty * 0.5:
+    total_fill_qty = sum(
+        (_decimal(fill.get("fill_qty")) for fill in order_fills),
+        start=Decimal("0"),
+    )
+    requested_qty = _decimal(latest_order.get("requested_qty"))
+    if requested_qty > 0 and total_fill_qty < requested_qty * Decimal("0.5"):
         result["final_attribution_category"] = "fill_not_observed"
         result["final_attribution_reason"] = "partial_fill_only"
         result["fill_status"] = "partial"

@@ -1,6 +1,6 @@
 # RDP Operator 工作流 SOP
 
-> 最后核对：2026-08-25（起始代码基线 `70f1a581`，含本轮 RDP 业务逻辑整改工作区）。本 SOP 只使用当前 Operator API/UI 和 Run/attempt queue；旧直写 CLI、4-workflow 清单和 active JSON fallback 已移除。
+> 最后核对：2026-08-26（起始代码基线 `51448768`，含本轮未提交 live attribution lineage 修复）。本 SOP 只使用当前 Operator API/UI 和 Run/attempt queue；旧直写 CLI、4-workflow 清单和 active JSON fallback 已移除。
 
 ## 1. 每日观察
 
@@ -81,6 +81,8 @@ UI 会自动从当前 session 申请短时 token；直接调用 API 时必须显
 - queued Run 可立即取消；running Run 的取消先登记，再由 daemon 终止当前子进程并写 `cancelled` 终态。
 - `succeeded_with_warnings` 表示任务完成但存在 allow-failure 或研究批次部分成功；`partially_succeeded` 表示硬失败前后仍有可用阶段产物，两者都不能写成完整成功。
 - 运行详情优先看 `run.error_summary` 和首个失败步骤；日志 tail 只是诊断补充，最后一个成功阶段不能覆盖前面的失败。
+- `research_cycle` 的完整 RDP 默认执行 Phase 3 live attribution。后台必须已注入只读 `RDP_LIVE_DATABASE_URL`；缺失或不可查询时任务失败关闭，不会隐式改成 replay-only。纯回放只允许维护者在受控 CLI 中显式使用 `--replay-only`，其结果不能通过发布 readiness。
+- Phase 3 必须同时证明 live 查询成功、至少一个 `family + symbol + timeframe + signal_bar_start` 精确对齐，并且没有缺 lineage 的 live intent；旧 intent 不按 `created_at` 猜测或回填。
 
 完整 schedule 见 [平台运行手册](platform_runbook.md)。
 
@@ -93,6 +95,7 @@ UI 会自动从当前 session 申请短时 token；直接调用 API 时必须显
 | Gate blocked | 根据 failed checks 修复后重跑；不跳 gate |
 | Active set 与预期不符 | 停止发布，查 DB active set/history/release/runtime provenance |
 | DB active loader 失败 | runtime 已退化到 profile 参数；恢复数据库，不能靠 JSON fallback |
+| Phase 3 显示 zero exact alignment / unattributable lineage | 先确认标准部署已应用 root migration、新 intent 已写入 timeframe/bar/parameter/generation/snapshot lineage；旧记录不猜测回填。历史市场数据覆盖度另行处理 |
 | Run queued | 看 `eligible_at`、trigger kind、当前执行槽和 daemon heartbeat；不要把合法等待写成 DB 故障 |
 | Run running 无 heartbeat | daemon 只回收超过 30 秒无 task heartbeat 的 running attempt；旧 attempt 应变 failed/-3，Run 错误码为 `worker_orphan_recovered`，新鲜心跳不得被另一 daemon 误杀 |
 | Run 失败后未自动排队 | 先看 failure class；只有 `transient_infrastructure` 会自动重试一次，其余需要修复根因后由 `POST /rdp/v2/runs/{run_id}/retry` 人工重试 |

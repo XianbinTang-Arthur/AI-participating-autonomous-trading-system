@@ -181,6 +181,16 @@ class StrategySleeveIntent(SchemaBase):
     inventory_policy: StrategyInventoryPolicy
     route_action: StrategyRouteAction = "hold_current"
     family_action: StrategyFamilyAction = "hold_family"
+    allocation_id: str | None = None
+    timeframe: Literal["15m", "1h"] | None = None
+    signal_bar_start: datetime | None = None
+    signal_bar_end: datetime | None = None
+    market_data_asof: datetime | None = None
+    parameter_set_id: str | None = None
+    runtime_generation: str | None = None
+    code_version: str | None = None
+    market_snapshot_ref: str | None = None
+    feature_snapshot_ref: str | None = None
     headline: str | None = None
     selectable: bool = False
     execution_compatible: bool = False

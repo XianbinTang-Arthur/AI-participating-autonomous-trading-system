@@ -45,6 +45,12 @@ def test_research_cycle_full_pipeline_task_enabled_for_manual_trigger() -> None:
     assert _task(cfg, "full_pipeline")["enabled"] is True
 
 
+def test_research_cycle_full_pipeline_defaults_to_live_attribution() -> None:
+    command = _task(_load("research_cycle"), "full_pipeline")["command"]
+    assert "--replay-only" not in command
+    assert "rdp_run_full_pipeline.py" in command
+
+
 # ── decision_cycle ──────────────────────────────────────────────
 
 def test_decision_cycle_schedule_disabled() -> None:

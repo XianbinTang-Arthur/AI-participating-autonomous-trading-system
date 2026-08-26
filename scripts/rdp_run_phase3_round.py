@@ -102,8 +102,6 @@ def _run_single_attribution(
         "--dataset-version", dataset_version,
         "--artifact-root", str(artifact_root),
     ]
-    if live_db_url:
-        cmd.extend(["--live-db-url", live_db_url])
     if replay_only:
         cmd.append("--replay-only")
     if ensure_schema:
@@ -114,7 +112,10 @@ def _run_single_attribution(
         cmd.extend(["--params-json", params_json, "--parameter-set", ft_key])
 
     log.info("  CMD: %s", " ".join(cmd))
-    proc = subprocess.run(cmd, capture_output=True)
+    child_env = os.environ.copy()
+    if live_db_url:
+        child_env["RDP_LIVE_DATABASE_URL"] = live_db_url
+    proc = subprocess.run(cmd, capture_output=True, env=child_env)
 
     # 始终记录 stderr 以便调试
     if proc.stderr:
@@ -156,7 +157,13 @@ def _run_single_attribution(
             tfm = json.load(f)
 
     # 读 alignment CSV 统计
-    alignment_stats = {"total": 0, "aligned": 0, "replay_only": 0, "live_only": 0}
+    alignment_stats = {
+        "total": 0,
+        "aligned": 0,
+        "replay_only": 0,
+        "live_only": 0,
+        "unattributable": 0,
+    }
     alignment_file = run_dir / "replay_live_alignment.csv"
     if alignment_file.exists():
         with alignment_file.open(encoding="utf-8") as f:
@@ -170,6 +177,8 @@ def _run_single_attribution(
                     alignment_stats["replay_only"] += 1
                 elif status == "live_only":
                     alignment_stats["live_only"] += 1
+                elif status == "unattributable":
+                    alignment_stats["unattributable"] += 1
 
     return {
         "family": family,
@@ -184,6 +193,7 @@ def _run_single_attribution(
         "attribution_summary": summary,
         "top_failure_modes": tfm,
         "alignment_stats": alignment_stats,
+        "live_query_succeeded": proc.returncode == 0 and not replay_only,
         "error": None,
     }
 
@@ -214,7 +224,7 @@ def _aggregate_summaries(
 # =========================================================================
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Phase 3 Round Runner: 批量 live attribution 归因",
     )
@@ -243,7 +253,13 @@ def main() -> None:
     args = parser.parse_args()
 
     live_db_url = args.live_db_url or os.environ.get("RDP_LIVE_DATABASE_URL")
-    replay_only = args.replay_only or (not live_db_url)
+    if not live_db_url and not args.replay_only:
+        log.error(
+            "Phase 3 live attribution requires --live-db-url or "
+            "RDP_LIVE_DATABASE_URL. Use --replay-only explicitly for replay-only analysis."
+        )
+        return 2
+    replay_only = args.replay_only
 
     started_at = datetime.now(timezone.utc).isoformat()
     round_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:8]
@@ -371,6 +387,10 @@ def main() -> None:
         "symbol": _SYMBOL,
         "window": {"start": args.start, "end": args.end},
         "replay_only": replay_only,
+        "live_query_succeeded": (
+            not replay_only
+            and all(result.get("live_query_succeeded") for result in results)
+        ),
         "overall_status": (
             "succeeded" if n_fail == 0
             else "failed" if (n_ok + n_partial) == 0
@@ -383,6 +403,8 @@ def main() -> None:
                 "timeframe": r["timeframe"],
                 "status": r["status"],
                 "run_dir": r.get("run_dir"),
+                "live_query_succeeded": bool(r.get("live_query_succeeded", False)),
+                "alignment_stats": r.get("alignment_stats"),
             }
             for r in results
         ],
@@ -402,6 +424,7 @@ def main() -> None:
             "attribution_summary": r.get("attribution_summary"),
             "top_failure_modes": r.get("top_failure_modes"),
             "alignment_stats": r.get("alignment_stats"),
+            "live_query_succeeded": bool(r.get("live_query_succeeded", False)),
             "layer_analysis": all_layer_analyses.get(r["key"]),
         }
     if not save_research_round_snapshot(
@@ -464,10 +487,11 @@ def main() -> None:
 
     # 退出码: 0=全部成功/partial, 2=部分失败, 3=全部失败
     if n_fail > 0 and (n_ok + n_partial) == 0:
-        sys.exit(3)
+        return 3
     elif n_fail > 0:
-        sys.exit(2)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

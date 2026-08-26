@@ -833,6 +833,7 @@ def build_settings_overrides(
         if dropped_optional:
             dropped_optional_by_combo[combo_key] = sorted(dropped_optional)
 
+        mapped_value_applied = False
         for rdp_param, settings_field in mapping.items():
             if rdp_param not in values:
                 continue
@@ -844,10 +845,17 @@ def build_settings_overrides(
                 )
                 continue
             overrides[settings_field] = values[rdp_param]
+            mapped_value_applied = True
 
-        applied_combos.append(combo_key)
+        if mapped_value_applied:
+            applied_combos.append(combo_key)
 
     if applied_combos:
+        overrides["active_parameter_set_ids"] = {
+            combo_key: str(all_sets_raw[combo_key].get("parameter_set_id") or "")
+            for combo_key in applied_combos
+            if str(all_sets_raw[combo_key].get("parameter_set_id") or "").strip()
+        }
         log.info(
             "Active parameter overrides: %d fields from %s",
             len(overrides),

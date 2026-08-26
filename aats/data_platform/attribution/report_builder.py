@@ -47,10 +47,14 @@ def build_attribution_report(
     aligned = sum(1 for r in alignment_rows if r.get("alignment_status") == "aligned")
     replay_only = sum(1 for r in alignment_rows if r.get("alignment_status") == "replay_only")
     live_only = sum(1 for r in alignment_rows if r.get("alignment_status") == "live_only")
+    unattributable = sum(
+        1 for r in alignment_rows if r.get("alignment_status") == "unattributable"
+    )
     _add(f"- Total events: **{total}**")
     _add(f"- Aligned (replay + live match): **{aligned}**")
     _add(f"- Replay-only (no live match): **{replay_only}**")
     _add(f"- Live-only (no replay match): **{live_only}**")
+    _add(f"- Unattributable (incomplete live lineage): **{unattributable}**")
     _add("")
 
     # Replay openings count
@@ -145,11 +149,12 @@ def build_phase3_conclusion(
     # ---- 2. What Was Aligned ----
     _add("## 2. What Was Aligned")
     _add("")
-    _add("| Family/TF | Total | Aligned | Replay-Only | Live-Only |")
-    _add("|-----------|-------|---------|-------------|-----------|")
+    _add("| Family/TF | Total | Aligned | Replay-Only | Live-Only | Unattributable |")
+    _add("|-----------|-------|---------|-------------|-----------|----------------|")
     for ft_key, stats in all_alignment_stats.items():
         _add(f"| {ft_key} | {stats.get('total', 0)} | {stats.get('aligned', 0)} "
-             f"| {stats.get('replay_only', 0)} | {stats.get('live_only', 0)} |")
+             f"| {stats.get('replay_only', 0)} | {stats.get('live_only', 0)} "
+             f"| {stats.get('unattributable', 0)} |")
     _add("")
 
     # ---- 3. Top Failure Modes (all combos) ----

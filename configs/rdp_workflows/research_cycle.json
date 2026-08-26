@@ -20,8 +20,8 @@
     },
     {
       "name": "full_pipeline",
-      "description": "一键运行 Phase 2 -> Step 3 -> 导入 -> Phase 3 -> Phase 4 -> 治理 -> 决策。可由 weekly schedule 自动触发，也可由操作员手动触发；发布仍需经过审批与 gate。",
-      "command": "python scripts/rdp_run_full_pipeline.py --lookback-days 90 --replay-only --no-stop-on-failure",
+      "description": "一键运行 Phase 2 -> Step 3 -> 导入 -> Phase 3 live attribution -> Phase 4 -> 治理 -> 决策。可由 weekly schedule 自动触发，也可由操作员手动触发；缺少只读 live DB 配置时失败关闭，发布仍需经过审批与 gate。",
+      "command": "python scripts/rdp_run_full_pipeline.py --lookback-days 90 --no-stop-on-failure",
       "timeout_seconds": 1800,
       "enabled": true,
       "allow_failure": false

@@ -5,7 +5,7 @@
   P0-2: positive_adjusted_edge_ratio 字段名错配 → positive_edge_ratio
   P0-3: approve/reject_recommendation 状态守卫失效 → return None
   P0-4: readiness_evaluator Check 2 读取不存在的 manifest["status"] → 从 combos 推导
-  P0-5: rdp_run_live_attribution exit code 2 从未设置 → live_fallback 追踪
+  P0-5: rdp_run_live_attribution 缺 live DB 时必须 exit code 2，禁止隐式 replay fallback
   P0-6: Phase 4 SQL 表名直接拼接 → 白名单校验
 """
 
@@ -53,14 +53,14 @@ class TestLiveAttributionMainReturnType:
         )
         assert "sys.exit(main())" in text, "应使用 sys.exit(main()) 而非直接调用 main()"
 
-    def test_live_fallback_variable_exists(self):
-        """main() 中应有 live_fallback 变量追踪。"""
+    def test_missing_live_db_fails_closed_without_implicit_fallback(self):
+        """缺 live URL 时必须返回 2，不能把 live attribution 改成 replay-only。"""
         text = (_PROJECT_ROOT / "scripts" / "rdp_run_live_attribution.py").read_text(
             encoding="utf-8",
         )
-        assert "live_fallback" in text, "应有 live_fallback 变量追踪"
-        assert "live_fallback = True" in text, "应在无 live URL 时设置 live_fallback = True"
-        assert "return 2" in text, "应在 live_fallback 时返回 exit code 2"
+        assert "args.replay_only = True" not in text
+        assert "Use --replay-only explicitly" in text
+        assert "return 2" in text, "缺少 live DB 时应返回 exit code 2"
 
     def test_no_bare_sys_exit_zero(self):
         """不应有裸 sys.exit(0) 调用（应改为 return 0）。"""
@@ -487,9 +487,21 @@ class TestReadinessEvaluatorCheck2:
         }
 
         if p3_round_count > 0:
-            latest: dict[str, Any] = {"round_id": "test_round"}
+            latest: dict[str, Any] = {
+                "round_id": "test_round",
+                "live_query_succeeded": True,
+            }
             if p3_combos is not None:
-                latest["combos"] = p3_combos
+                latest["combos"] = {
+                    key: {
+                        **combo,
+                        "alignment_stats": {
+                            "aligned": 1,
+                            "unattributable": 0,
+                        },
+                    }
+                    for key, combo in p3_combos.items()
+                }
             if p3_latest_extra:
                 latest.update(p3_latest_extra)
             p3_evidence["latest_round"] = latest
@@ -571,8 +583,8 @@ class TestReadinessEvaluatorCheck2:
         )
         assert check2["passed"] is False
 
-    def test_check2_uses_overall_status_when_no_combos(self):
-        """无 combos 但有 overall_status → 使用 overall_status。"""
+    def test_check2_rejects_overall_status_without_alignment_evidence(self):
+        """无 combos/alignment 时不能只凭 overall_status 通过。"""
         from aats.data_platform.decision_system.readiness_evaluator import (
             evaluate_promotion_readiness,
         )
@@ -588,7 +600,8 @@ class TestReadinessEvaluatorCheck2:
             c for c in result["checks"]
             if c["check"] == "attribution_no_severe_issue"
         )
-        assert check2["passed"] is True
+        assert check2["passed"] is False
+        assert "zero_exact_alignment" in check2["detail"]
 
     def test_check2_no_status_no_combos_fails(self):
         """无 combos 且无 status/overall_status → unknown → 不通过。"""
@@ -820,9 +833,16 @@ class TestReadinessEvaluatorIntegration:
                     "round_id": "test",
                     "overall_status": "succeeded",
                     "replay_only": False,
+                    "live_query_succeeded": True,
                     "combos": {
-                        "independent_15m": {"status": "succeeded"},
-                        "independent_1h": {"status": "succeeded"},
+                        "independent_15m": {
+                            "status": "succeeded",
+                            "alignment_stats": {"aligned": 1, "unattributable": 0},
+                        },
+                        "independent_1h": {
+                            "status": "succeeded",
+                            "alignment_stats": {"aligned": 1, "unattributable": 0},
+                        },
                     },
                 },
             },
@@ -937,8 +957,12 @@ def _gate_evidence_with_overrides(
                 "round_id": "r1",
                 "replay_only": False,
                 "overall_status": "succeeded",
+                "live_query_succeeded": True,
                 "combos": {
-                    "independent_15m": {"status": "succeeded"},
+                    "independent_15m": {
+                        "status": "succeeded",
+                        "alignment_stats": {"aligned": 1, "unattributable": 0},
+                    },
                 },
             },
         },

@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import subprocess
 import sys
 import time as _time
@@ -142,7 +143,7 @@ def parse_args() -> argparse.Namespace:
     p3 = p.add_argument_group("Phase 3 参数")
     p3.add_argument("--live-db-url",
                     help="Phase 3: Live AATS 数据库 URL "
-                         "(未指定时自动启用 --replay-only)")
+                         "(默认读取 RDP_LIVE_DATABASE_URL；缺失时失败关闭)")
     p3.add_argument("--replay-only", action="store_true",
                     help="Phase 3: 仅 replay 分析, 不连接 live DB")
 
@@ -240,10 +241,21 @@ def _run_phase(
     *,
     dry_run: bool = False,
     result_prefix: str | None = None,
+    child_env: dict[str, str] | None = None,
 ) -> dict:
     """执行单个阶段, 返回结果 dict."""
     label = PHASE_LABELS[name]
-    cmd_display = " ".join(cmd)
+    display_parts: list[str] = []
+    redact_next = False
+    for part in cmd:
+        if redact_next:
+            display_parts.append("<redacted-live-db-url>")
+            redact_next = False
+            continue
+        display_parts.append(part)
+        if part == "--live-db-url":
+            redact_next = True
+    cmd_display = " ".join(display_parts)
 
     print(f"\n{'=' * 60}")
     print(f"  {label}")
@@ -263,6 +275,7 @@ def _run_phase(
                 timeout=7200,
                 capture_output=True,
                 text=True,
+                env=child_env,
             )
             stdout = str(result.stdout or "")
             stderr = str(result.stderr or "")
@@ -279,7 +292,12 @@ def _run_phase(
                 result_prefix,
             )
         else:
-            result = subprocess.run(cmd, cwd=str(_PROJECT_ROOT), timeout=7200)
+            result = subprocess.run(
+                cmd,
+                cwd=str(_PROJECT_ROOT),
+                timeout=7200,
+                env=child_env,
+            )
             structured_result = None
         finished = datetime.now(timezone.utc)
         elapsed = (finished - started).total_seconds()
@@ -438,12 +456,8 @@ def _build_phase3_cmd(
     ]
     if ensure:
         cmd.append("--ensure-schema")
-    if args.live_db_url:
-        cmd.extend(["--live-db-url", args.live_db_url])
-    if args.replay_only or not args.live_db_url:
+    if args.replay_only:
         cmd.append("--replay-only")
-        if not args.replay_only and not args.live_db_url:
-            log.info("Phase 3: 未指定 --live-db-url, 自动启用 --replay-only 模式")
     if params_json:
         cmd.extend(["--params-json", params_json])
     cmd.append("--no-print-summary")
@@ -513,6 +527,17 @@ def main() -> int:
     needs_dates = any(p in phases for p in ("phase3", "phase4"))
     if needs_dates and (not args.start or not args.end):
         print("错误: Phase 3/4 需要 --start 和 --end 参数（或使用 --lookback-days）。")
+        return 2
+
+    if (
+        "phase3" in phases
+        and not args.replay_only
+        and not (args.live_db_url or os.environ.get("RDP_LIVE_DATABASE_URL"))
+    ):
+        print(
+            "错误: Phase 3 live attribution 需要 --live-db-url 或 "
+            "RDP_LIVE_DATABASE_URL；如确需纯回放，必须显式传入 --replay-only。"
+        )
         return 2
 
     pipeline_id = (
@@ -651,7 +676,15 @@ def main() -> int:
             if ensure:
                 schema_done = True
 
-            r = _run_phase("phase3", cmd, dry_run=args.dry_run)
+            phase3_env = os.environ.copy()
+            if args.live_db_url:
+                phase3_env["RDP_LIVE_DATABASE_URL"] = args.live_db_url
+            r = _run_phase(
+                "phase3",
+                cmd,
+                dry_run=args.dry_run,
+                child_env=phase3_env,
+            )
             results.append(r)
 
         # ── Phase 4 ──

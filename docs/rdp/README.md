@@ -1,7 +1,7 @@
 # AATS RDP 文档索引
 
 > 文档状态：现行索引  
-> 最后核对：2026-08-25（本轮全链路审查起始 HEAD `70f1a581`；实现位于未提交工作树）
+> 最后核对：2026-08-26（本轮修复起始 HEAD `51448768`；含未提交 live attribution lineage 修复）
 
 ## 当前入口
 
@@ -17,6 +17,7 @@
 - [`../operations/rdp_ui_quickstart.md`](../operations/rdp_ui_quickstart.md)：Workspace V3 页面结构与操作速查；
 - [`../operations/rdp_workflow_calendar.md`](../operations/rdp_workflow_calendar.md)：当前 workflow 日历。
 - [`../task/fs_004_research_selection_holdout_sow_2026_08_25.md`](../task/fs_004_research_selection_holdout_sow_2026_08_25.md)：Research Factory v2 的 train/valid 选择、test 内容封存与仍开放的最终 OOS 边界。
+- [`../task/rdp_live_attribution_lineage_fix_sow_2026_08_26.md`](../task/rdp_live_attribution_lineage_fix_sow_2026_08_26.md)：完整 RDP 默认 live attribution、精确 lineage、schema migration 与 readiness fail-closed 边界。
 
 ## 深入参考
 

@@ -43,9 +43,17 @@ STRATEGY_SLEEVE_INTENTS = TableContract(
         "allocation_id", "state", "route_action", "inventory_policy",
         "product_type", "margin_mode", "symbol",
         "budget_multiplier", "automatic_enabled",
+        "timeframe", "signal_bar_start", "signal_bar_end", "market_data_asof",
+        "parameter_set_id", "runtime_generation", "code_version",
+        "market_snapshot_ref", "feature_snapshot_ref",
         "payload", "created_at",
     ),
-    nullable_columns=("payload",),
+    nullable_columns=(
+        "payload",
+        "timeframe", "signal_bar_start", "signal_bar_end", "market_data_asof",
+        "parameter_set_id", "runtime_generation", "code_version",
+        "market_snapshot_ref", "feature_snapshot_ref",
+    ),
     used_by_phases=("phase3",),
     notes="Phase 3 attribution: 策略意图分析 — 谁想做什么",
 )

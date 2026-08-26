@@ -3,7 +3,7 @@
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
 > 文档状态：现行专题参考
-> 最后核对：2026-08-24（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；未提交 Phase 3E schema 整改工作区）
+> 最后核对：2026-08-26（起始 HEAD `51448768bb3ff08fa44066d286f7383800d8d744`；含本轮未提交 RDP attribution lineage 修复）
 > 核对范围：RDP 读取主交易库的静态契约；不证明当前 live 库、账户或表内数据健康
 
 
@@ -13,8 +13,8 @@ RDP 读取主交易系统 production DB 的表结构契约文档。这里的 `RD
 
 - RDP 对 production DB **只读访问**，不写入、不修改
 - 连接通过 `RDP_LIVE_DATABASE_URL` 配置
-- 所有查询通过 `aats.data_platform.live_query_adapter` 统一收口
-- 禁止在脚本中直接写 SQL
+- 通用 live facts 查询通过 `aats.data_platform.live_query_adapter` / `live_facts.query_adapter` 收口；Phase 3 的关联查询位于 `aats.data_platform.attribution.alignment`，连接会话强制 PostgreSQL `default_transaction_read_only=on`
+- 业务脚本不得临时拼接或散落新增 production SQL；新增查询必须进入上述受控模块并同步本契约
 
 ## 2. 数据库信息
 
@@ -23,7 +23,7 @@ RDP 读取主交易系统 production DB 的表结构契约文档。这里的 `RD
 | 引擎 | PostgreSQL 15+ |
 | 访问方式 | SQLAlchemy + raw SQL text |
 | 连接池 | pool_size=3, max_overflow=5 |
-| 只读强制 | 逻辑层 rollback + 建议使用 DB readonly 用户 |
+| 只读强制 | Phase 3 session 设置 `default_transaction_read_only=on`；同时要求 DB readonly 身份 |
 
 ## 3. RDP 需要读取的表
 
@@ -46,11 +46,20 @@ RDP 读取主交易系统 production DB 的表结构契约文档。这里的 `RD
 | symbol | VARCHAR(64) | 交易对 |
 | budget_multiplier | NUMERIC(36,18) | 预算乘数 |
 | automatic_enabled | BOOLEAN | 是否自动执行 |
+| timeframe | VARCHAR(8), nullable | 决策时间框架；旧记录为空时不可归因 |
+| signal_bar_start | TIMESTAMP TZ, nullable | 产生信号的 K 线起点 |
+| signal_bar_end | TIMESTAMP TZ, nullable | 产生信号的 K 线终点 |
+| market_data_asof | TIMESTAMP TZ, nullable | 决策实际可见的市场数据时点 |
+| parameter_set_id | VARCHAR(128), nullable | active parameter set 或 profile default 来源标识 |
+| runtime_generation | VARCHAR(128), nullable | 标准部署运行代次 |
+| code_version | VARCHAR(64), nullable | 从标准部署代次取得的代码提交前缀 |
+| market_snapshot_ref | VARCHAR(128), nullable | 市场快照事件引用 |
+| feature_snapshot_ref | VARCHAR(128), nullable | 特征快照事件引用 |
 | payload | JSON | 完整载荷 |
 | created_at | TIMESTAMP TZ | 创建时间 |
 
-**索引**: (family, created_at), (symbol, created_at), (decision_id, created_at)
-**时间字段**: `created_at`
+**索引**: (family, created_at), (symbol, created_at), (decision_id, created_at), (family, symbol, timeframe, signal_bar_start)
+**时间字段**: 新记录按 `signal_bar_start` 选择研究窗口并精确归因；仅缺少该字段的旧记录按 `created_at` 纳入不可归因审计，绝不据此匹配
 **Symbol 字段**: `symbol`
 **Family 字段**: `family`
 
@@ -241,10 +250,11 @@ RDP 读取主交易系统 production DB 的表结构契约文档。这里的 `RD
 
 ## 10. Contract 维护注意事项
 
-> **已知偏差（2026-04-12 审查发现）**: attribution 模块中的 live 查询
-> 目前直接使用 `attribution/alignment.py` 内的 raw SQL，绕过了
-> `live_query_adapter` 统一收口。建议后续将 attribution live 查询
-> 迁移到 adapter 层，确保所有 production DB 访问统一管理。
+> **现行边界（2026-08-26）**: attribution 的多表关联查询仍由
+> `attribution/alignment.py` 集中维护，没有复用通用 adapter；但 Phase 3 创建的
+> PostgreSQL session 已强制 transaction readonly，字段契约由
+> `live_facts/contracts.py` 校验。后续若统一 adapter，必须保持精确 lineage 和
+> fail-closed 语义。
 >
 > 维护本文档时，应同步检查 `aats/storage/sqlalchemy_models.py` ORM
 > 定义，确保 contract 表格与实际字段一致。

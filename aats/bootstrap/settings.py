@@ -179,6 +179,13 @@ class AATSSettings(BaseSettings):
         description="Active parameters 数据库连接串 (指向 aats_research governance schema)。"
                     "为 None 时 fallback 到文件模式。容器侧通过 AATS_ACTIVE_PARAMETER_DB_URL 注入。",
     )
+    active_parameter_set_ids: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Runtime provenance map keyed by family_timeframe. Populated from the same "
+            "governance registry that supplies active parameter values."
+        ),
+    )
     database_single_runtime_guard_enabled: bool = True
     database_runtime_lock_key: int = 42_420_001
     # ── 多进程切片化（Stage 3）─────────────────────────────────────

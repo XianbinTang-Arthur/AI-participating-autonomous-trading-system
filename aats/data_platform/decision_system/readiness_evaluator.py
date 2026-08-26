@@ -57,8 +57,9 @@ def evaluate_promotion_readiness(
       同时失败，确信现在不宜上线）。
 
     Phase 3 / Phase 4 均不允许"无数据即跳过通过"：
-    - Phase 3 无 round、``latest_round.replay_only=True``、或 combos / overall_status
-      无法证明成功 → ``attribution_no_severe_issue`` failed。
+    - Phase 3 无 round、``latest_round.replay_only=True``、live 查询未成功、零精确
+      alignment、存在不可归因 live lineage，或 combos / overall_status 无法证明成功
+      → ``attribution_no_severe_issue`` failed。
     - Phase 4 无 round、或 latest round 所有 combo 都缺少可用 ``cost_summary``
       → ``execution_not_severe`` failed。
 
@@ -127,7 +128,34 @@ def evaluate_promotion_readiness(
     else:
         p3_latest = p3.get("latest_round", {})
         p3_combos = p3_latest.get("combos", {})
-        if p3_combos:
+        aligned_total = sum(
+            int((combo.get("alignment_stats") or {}).get("aligned", 0) or 0)
+            for combo in p3_combos.values()
+        )
+        unattributable_total = sum(
+            int((combo.get("alignment_stats") or {}).get("unattributable", 0) or 0)
+            for combo in p3_combos.values()
+        )
+        live_query_succeeded = bool(p3_latest.get("live_query_succeeded", False))
+        if not live_query_succeeded:
+            attribution_ok = False
+            p3_status = "live_query_failed_or_unproven"
+            detail = p3_status
+            blocker = "Phase 3 未证明 live DB 查询成功，无法进行实盘归因"
+        elif aligned_total <= 0:
+            attribution_ok = False
+            p3_status = "zero_exact_alignment"
+            detail = f"{p3_status};aligned={aligned_total}"
+            blocker = "Phase 3 精确 replay/live 对齐样本为 0，无法 promote"
+        elif unattributable_total > 0:
+            attribution_ok = False
+            p3_status = "unattributable_live_lineage"
+            detail = f"{p3_status};count={unattributable_total};aligned={aligned_total}"
+            blocker = (
+                "Phase 3 存在缺失 lineage 的 live intent，禁止猜测性归因: "
+                f"count={unattributable_total}"
+            )
+        elif p3_combos:
             combo_statuses = [combo.get("status", "unknown") for combo in p3_combos.values()]
             attribution_ok = any(status in ("succeeded", "partial_success") for status in combo_statuses)
             p3_status = (
@@ -135,18 +163,26 @@ def evaluate_promotion_readiness(
                 else "partial_success" if attribution_ok
                 else "failed"
             )
+            detail = f"latest_phase3_status={p3_status};aligned={aligned_total}"
+            blocker = (
+                "Phase 3 combos/overall_status 无法证明成功: "
+                f"latest_phase3_status={p3_status}"
+            )
         else:
             p3_status = p3_latest.get("overall_status", p3_latest.get("status", "unknown"))
             attribution_ok = p3_status in ("succeeded", "partial_success")
+            detail = f"latest_phase3_status={p3_status};aligned={aligned_total}"
+            blocker = (
+                "Phase 3 combos/overall_status 无法证明成功: "
+                f"latest_phase3_status={p3_status}"
+            )
         checks.append({
             "check": "attribution_no_severe_issue",
             "passed": attribution_ok,
-            "detail": f"latest_phase3_status={p3_status}",
+            "detail": detail,
         })
         if not attribution_ok:
-            blockers.append(
-                f"Phase 3 combos/overall_status 无法证明成功: latest_phase3_status={p3_status}",
-            )
+            blockers.append(blocker)
 
     p4 = evidence_bundle.get("phase4_evidence", {})
     p4_round_count = p4.get("round_count", 0)

@@ -54,7 +54,7 @@ Usage:
 Exit codes:
     0 = 成功
     1 = 参数错误
-    2 = 部分成功（replay 正常但 live 连接失败）
+    2 = live attribution 配置缺失（未显式选择 replay-only）
 """
 
 from __future__ import annotations
@@ -284,11 +284,32 @@ def _run_replay(
 
 
 def _create_live_session(live_db_url: str) -> Any:
-    """创建 live DB session。"""
+    """创建强制只读的 live DB session。"""
     from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
     from sqlalchemy.orm import Session
 
-    engine = create_engine(live_db_url, echo=False)
+    from aats.storage.connection_budget import RDP_LIVE_QUERY_POOL
+
+    parsed = make_url(live_db_url)
+    engine_options: dict[str, Any] = {
+        "echo": False,
+        "pool_pre_ping": True,
+    }
+    if parsed.get_backend_name() == "postgresql":
+        existing_options = str(parsed.query.get("options") or "").strip()
+        readonly_option = "-c default_transaction_read_only=on"
+        merged_options = (
+            existing_options
+            if "default_transaction_read_only" in existing_options
+            else f"{existing_options} {readonly_option}".strip()
+        )
+        engine_options.update({
+            "pool_size": RDP_LIVE_QUERY_POOL.pool_size,
+            "max_overflow": RDP_LIVE_QUERY_POOL.max_overflow,
+            "connect_args": {"options": merged_options},
+        })
+    engine = create_engine(live_db_url, **engine_options)
     return Session(engine)
 
 
@@ -315,6 +336,7 @@ def _run_alignment_and_attribution(
         query_reconciliation_snapshots,
     )
     from aats.data_platform.attribution.layer_classifier import classify_all
+    from aats.data_platform.governance._time_util import parse_iso_datetime_utc
 
     if replay_only or not live_db_url:
         log.info("Replay-only mode: skipping live data queries")
@@ -333,6 +355,7 @@ def _run_alignment_and_attribution(
         live_intents = query_live_intents(
             live_session,
             family=family, symbol=symbol,
+            timeframe=timeframe,
             start_ts=start_ts, end_ts=end_ts,
         )
         log.info("Found %d live intents", len(live_intents))
@@ -373,9 +396,20 @@ def _run_alignment_and_attribution(
         fills = query_live_fills(live_session, order_ids=all_order_ids)
 
         log.info("Querying reconciliation snapshots...")
+        attribution_event_times = sorted({
+            event_ts
+            for row in alignment_rows
+            if row.get("alignment_status") == "aligned" and row.get("live_ts")
+            if (
+                event_ts := parse_iso_datetime_utc(
+                    row["live_ts"],
+                    context="rdp_run_live_attribution.live_ts",
+                )
+            ) is not None
+        })
         recon = query_reconciliation_snapshots(
             live_session, symbol=symbol,
-            start_ts=start_ts, end_ts=end_ts,
+            event_times=attribution_event_times,
         )
 
         log.info("Running layer classification...")
@@ -391,7 +425,9 @@ def _run_alignment_and_attribution(
         return alignment_rows, classified
 
     finally:
+        bind = live_session.get_bind()
         live_session.close()
+        bind.dispose()
 
 
 # =========================================================================
@@ -411,6 +447,7 @@ def _write_alignment_csv(
     fieldnames = [
         "family", "symbol", "timeframe",
         "replay_ts", "live_ts", "alignment_status",
+        "lineage_error",
         "replay_opening", "live_opening",
         "final_attribution_category", "final_attribution_reason",
         "strategy_reason", "permission_reason",
@@ -420,6 +457,9 @@ def _write_alignment_csv(
         "replay_action", "replay_selectable", "replay_execution_compatible",
         "replay_blocking_reasons", "replay_expected_net_edge_bps",
         "live_state", "live_route_action", "live_automatic_enabled",
+        "live_intent_id", "live_decision_id", "live_allocation_id",
+        "live_parameter_set_id", "live_runtime_generation", "live_code_version",
+        "live_market_snapshot_ref", "live_feature_snapshot_ref",
     ]
 
     with output_path.open("w", newline="", encoding="utf-8") as f:
@@ -488,14 +528,12 @@ def main() -> int:
 
     # Live DB URL: CLI > env > None
     live_db_url = args.live_db_url or os.environ.get("RDP_LIVE_DATABASE_URL")
-    live_fallback = False
     if not live_db_url and not args.replay_only:
-        log.warning(
-            "No --live-db-url or RDP_LIVE_DATABASE_URL set. "
-            "Running in replay-only mode."
+        log.error(
+            "Phase 3 live attribution requires --live-db-url or "
+            "RDP_LIVE_DATABASE_URL. Use --replay-only explicitly for replay-only analysis."
         )
-        args.replay_only = True
-        live_fallback = True
+        return 2
 
     start_ts = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end_ts = datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -628,8 +666,6 @@ def main() -> int:
     print(f"Report: {run_dir / 'live_attribution_report.md'}")
     print(f"Artifacts: {run_dir}")
 
-    if live_fallback:
-        return 2  # partial: replay 正常但 live 不可用
     return 0
 
 

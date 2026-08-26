@@ -433,17 +433,26 @@ def _enrich_round_from_manifest(
     )
     if snapshot:
         summary = snapshot.get("summary", {}) or {}
+        manifest_payload = snapshot.get("manifest", {}) or {}
         combos = summary.get("combos", {}) or {}
         enriched: dict[str, Any] = {
             "round_id": snapshot.get("round_id"),
             "started_at": snapshot.get("started_at"),
             "status": snapshot.get("status", "unknown"),
             "replay_only": bool(snapshot.get("replay_only", False)),
+            "live_query_succeeded": bool(
+                manifest_payload.get("live_query_succeeded", False)
+            ),
             "combos": {},
         }
         for key, combo in combos.items():
             combo_data: dict[str, Any] = {"status": combo.get("status", "unknown")}
             if phase == "phase3":
+                combo_data["live_query_succeeded"] = bool(
+                    combo.get("live_query_succeeded", False)
+                )
+                if combo.get("alignment_stats") is not None:
+                    combo_data["alignment_stats"] = combo.get("alignment_stats")
                 if combo.get("attribution_summary") is not None:
                     combo_data["attribution_summary"] = combo.get("attribution_summary")
                 if combo.get("top_failure_modes") is not None:
@@ -463,12 +472,19 @@ def _enrich_round_from_manifest(
         "started_at": round_info.get("started_at"),
         "status": round_info.get("status", manifest.get("overall_status", "unknown")),
         "replay_only": bool(manifest.get("replay_only", False)),
+        "live_query_succeeded": bool(manifest.get("live_query_succeeded", False)),
         "combos": {},
     }
 
     for combo in manifest.get("combos", []):
         key = combo.get("key", "?")
         combo_data: dict[str, Any] = {"status": combo.get("status", "unknown")}
+        if phase == "phase3":
+            combo_data["live_query_succeeded"] = bool(
+                combo.get("live_query_succeeded", False)
+            )
+            if combo.get("alignment_stats") is not None:
+                combo_data["alignment_stats"] = combo.get("alignment_stats")
         run_dir = combo.get("run_dir")
         if run_dir:
             run_path = pathlib.Path(run_dir)

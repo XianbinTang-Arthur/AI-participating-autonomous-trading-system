@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
+import re
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
@@ -113,6 +114,18 @@ _EXPECTED_NUMERIC_COLUMNS: tuple[tuple[str, str], ...] = (
     ("strategy_execution_bundles", "net_approved_exposure"),
     ("strategy_execution_bundles", "expected_cost_bps"),
     ("strategy_execution_bundles", "expected_edge_bps"),
+)
+
+_EXPECTED_RUNTIME_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("strategy_sleeve_intents", "timeframe"),
+    ("strategy_sleeve_intents", "signal_bar_start"),
+    ("strategy_sleeve_intents", "signal_bar_end"),
+    ("strategy_sleeve_intents", "market_data_asof"),
+    ("strategy_sleeve_intents", "parameter_set_id"),
+    ("strategy_sleeve_intents", "runtime_generation"),
+    ("strategy_sleeve_intents", "code_version"),
+    ("strategy_sleeve_intents", "market_snapshot_ref"),
+    ("strategy_sleeve_intents", "feature_snapshot_ref"),
 )
 
 _SCHEMA_MIGRATIONS_TABLE = "schema_migrations"
@@ -267,6 +280,17 @@ def create_schema(runtime: DatabaseRuntime) -> None:
     Base.metadata.create_all(runtime.engine)
 
 
+def _has_executable_sql(sql: str) -> bool:
+    """Return False for migration markers that contain comments only."""
+    without_block_comments = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
+    without_comments = re.sub(
+        r"--[^\r\n]*",
+        "",
+        without_block_comments,
+    )
+    return bool(without_comments.strip())
+
+
 def apply_current_migrations(runtime: DatabaseRuntime) -> list[str]:
     migrations_dir = Path(__file__).resolve().parents[2] / "migrations"
     applied_versions: list[str] = []
@@ -289,7 +313,8 @@ def apply_current_migrations(runtime: DatabaseRuntime) -> list[str]:
                     if recorded_checksum != checksum:
                         raise RuntimeError(f"database_migration_checksum_mismatch:{version}")
                     continue
-                cursor.execute(sql)
+                if _has_executable_sql(sql):
+                    cursor.execute(sql)
                 connection.execute(
                     text(
                         f"""
@@ -380,6 +405,29 @@ def validate_runtime_schema(runtime: DatabaseRuntime) -> None:
         for row in rows
     }
     missing = [f"{table}.{column}" for table, column in expected if (table, column) not in actual]
+    required_pairs_sql = ", ".join(
+        f"('{table}', '{column}')" for table, column in _EXPECTED_RUNTIME_COLUMNS
+    )
+    with runtime.engine.connect() as connection:
+        required_rows = connection.execute(
+            text(
+                f"""
+                SELECT table_name, column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND (table_name, column_name) IN ({required_pairs_sql})
+                """
+            )
+        ).mappings().all()
+    actual_required = {
+        (str(row["table_name"]), str(row["column_name"]))
+        for row in required_rows
+    }
+    missing.extend(
+        f"{table}.{column}"
+        for table, column in _EXPECTED_RUNTIME_COLUMNS
+        if (table, column) not in actual_required
+    )
     mismatches = [
         (
             f"{table}.{column}",

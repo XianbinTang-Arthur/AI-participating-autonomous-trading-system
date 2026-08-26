@@ -148,6 +148,10 @@ class StrategySleeveIntentModel(Base):
         Index("ix_strategy_sleeve_intents_sleeve_created", "strategy_sleeve_id", "created_at"),
         Index("ix_strategy_sleeve_intents_decision_created", "decision_id", "created_at"),
         Index("ix_strategy_sleeve_intents_symbol_created", "symbol", "created_at"),
+        Index(
+            "ix_strategy_sleeve_intents_attribution_lineage",
+            "family", "symbol", "timeframe", "signal_bar_start",
+        ),
     )
 
     sleeve_intent_id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -161,6 +165,15 @@ class StrategySleeveIntentModel(Base):
     inventory_policy: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     route_action: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     allocation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    timeframe: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    signal_bar_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    signal_bar_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    market_data_asof: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    parameter_set_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    runtime_generation: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    code_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    market_snapshot_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    feature_snapshot_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # Legacy column name retained for compatibility. The persisted meaning is now
     # "currently eligible to auto-enter the execution chain", aligned with approved_for_execution.
     automatic_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

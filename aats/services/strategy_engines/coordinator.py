@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from decimal import Decimal
 import hashlib
 
@@ -271,6 +272,7 @@ class StrategyCoordinatorService:
         candidate_lists_by_family = self.family_registry.evaluate_all(evaluation_context)
         candidates_by_family = StrategyFamilyRegistry.primary_candidate_map(candidate_lists_by_family)
         sleeve_intents = self._build_sleeve_intents(
+            context=context,
             base_target=directional_target,
             candidates_by_family=candidates_by_family,
         )
@@ -622,9 +624,58 @@ class StrategyCoordinatorService:
             )
         return base_target.model_copy(update=updates)
 
+    @staticmethod
+    def _signal_bar_window(
+        context: DecisionContext,
+    ) -> tuple[datetime | None, datetime | None]:
+        snapshot = context.market_snapshot
+        if snapshot is None:
+            return None, None
+        bar = snapshot.kline_15m if context.timeframe == "15m" else snapshot.kline_1h
+        bar_start = bar.ts
+        if bar_start is None:
+            return None, None
+        bar_seconds = 900 if context.timeframe == "15m" else 3600
+        return bar_start, bar_start + timedelta(seconds=bar_seconds)
+
+    def _intent_attribution_lineage(
+        self,
+        *,
+        context: DecisionContext,
+        family: StrategyFamily,
+    ) -> dict[str, object]:
+        signal_bar_start, signal_bar_end = self._signal_bar_window(context)
+        combo_key = f"{family}_{context.timeframe.lower()}"
+        parameter_set_id = self.settings.active_parameter_set_ids.get(combo_key)
+        if not parameter_set_id:
+            parameter_set_id = f"profile_default:{self.settings.config_profile}"
+        runtime_generation = self.settings.runtime_readiness_generation
+        code_version = (
+            runtime_generation.split("-", 1)[0]
+            if runtime_generation
+            else None
+        )
+        market_data_asof = (
+            context.market_snapshot.snapshot_ts
+            if context.market_snapshot is not None
+            else context.as_of_ts
+        )
+        return {
+            "timeframe": context.timeframe,
+            "signal_bar_start": signal_bar_start,
+            "signal_bar_end": signal_bar_end,
+            "market_data_asof": market_data_asof,
+            "parameter_set_id": parameter_set_id,
+            "runtime_generation": runtime_generation,
+            "code_version": code_version,
+            "market_snapshot_ref": context.market_snapshot_ref,
+            "feature_snapshot_ref": context.feature_snapshot_ref,
+        }
+
     def _build_sleeve_intents(
         self,
         *,
+        context: DecisionContext,
         base_target: PositionTarget,
         candidates_by_family: dict[StrategyFamily, StrategyCandidate],
     ) -> list[StrategySleeveIntent]:
@@ -684,6 +735,7 @@ class StrategyCoordinatorService:
                         )
                     )
                 intent = StrategySleeveIntent(
+                    **self._intent_attribution_lineage(context=context, family=family),
                     decision_id=base_target.decision_id,
                     family=family,
                     strategy_sleeve_id=strategy_sleeve_id,
@@ -753,6 +805,7 @@ class StrategyCoordinatorService:
                     account_current_qty = leg_current_qty
                     account_target_qty = leg_target_qty
                 intent = StrategySleeveIntent(
+                    **self._intent_attribution_lineage(context=context, family=family),
                     decision_id=base_target.decision_id,
                     family=family,
                     strategy_sleeve_id=strategy_sleeve_id,

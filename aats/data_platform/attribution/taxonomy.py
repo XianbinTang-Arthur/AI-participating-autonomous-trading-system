@@ -45,18 +45,26 @@ REASON_CODES: dict[str, list[str]] = {
         "score_not_stable",
         "net_edge_below_safe_minimum",
         "no_intent_in_window",
-        "intent_route_action_hold",
+        "intent_route_action_hold_current",
+        "intent_route_action_advisory_only",
+        "intent_route_action_protective_fallback",
+        "intent_route_action_missing",
     ],
     "permission_disabled": [
         "automatic_enabled_false",
+        "automatic_enabled_missing",
         "family_disabled",
     ],
     "allocator_rejected": [
         "no_allocation_found",
         "approved_notional_zero",
-        "route_action_hold",
+        "route_action_hold_current",
+        "route_action_advisory_only",
+        "route_action_protective_fallback",
+        "route_action_missing",
     ],
     "budget_rejected": [
+        "budget_snapshot_missing",
         "budget_multiplier_zero",
         "portfolio_budget_cut_full",
         "budget_clamped_to_zero",
@@ -65,19 +73,27 @@ REASON_CODES: dict[str, list[str]] = {
         "only_reduce_required",
         "halt_required",
         "review_required",
+        "bundle_recovery_required",
+        "reconciliation_snapshot_missing",
         "resume_not_eligible",
         "safe_to_trade_false",
     ],
     "execution_blocked": [
-        "bundle_status_rejected",
-        "bundle_status_cancelled",
+        "bundle_status_blocked",
+        "bundle_status_review_required",
+        "bundle_status_unknown",
         "bundle_not_found",
         "net_approved_exposure_zero",
     ],
     "order_not_created": [
         "no_order_found",
-        "order_state_rejected",
+        "order_state_canceled",
         "order_state_cancelled",
+        "order_state_rejected",
+        "order_state_failed",
+        "order_state_blocked",
+        "order_state_dry_run",
+        "order_state_expired",
     ],
     "fill_not_observed": [
         "no_fill_found",
@@ -105,6 +121,7 @@ for _codes in REASON_CODES.values():
 ALIGNMENT_STATUS_ALIGNED = "aligned"
 ALIGNMENT_STATUS_REPLAY_ONLY = "replay_only"
 ALIGNMENT_STATUS_LIVE_ONLY = "live_only"
+ALIGNMENT_STATUS_UNATTRIBUTABLE = "unattributable"
 
 # =========================================================================
 # 特殊标记

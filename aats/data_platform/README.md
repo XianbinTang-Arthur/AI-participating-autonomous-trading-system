@@ -88,7 +88,7 @@ python scripts/rdp_task_daemon.py --poll-interval 10 --enable-scheduler
 | `observation_cycle` | 每小时第 30 分钟 | 是 | release observation 推进 |
 | `data_maintenance` | 每日 04:00 | 是 | daily ingest、artifact index、retention |
 | `governance_cycle` | 每日 07:00 | 是 | quality、artifact validation、round/candidate 治理 |
-| `research_cycle` | 每周日 08:00 | 是 | 数据刷新和 full pipeline |
+| `research_cycle` | 每周日 08:00 | 是 | 数据刷新和 full pipeline；Phase 3 默认 live attribution，缺 live DB 时失败关闭 |
 | `decision_cycle` | 每周日 10:00 | **否** | 保留定义，不自动调度 |
 | `release_cycle` | 每小时整点 | **否** | 定义保留；任务队列还显式冻结入队 |
 
