@@ -64,6 +64,7 @@ OPERATOR_TLS_CERT_CONTAINER=""
 OPERATOR_TLS_KEY_CONTAINER=""
 DEPLOYMENT_EVIDENCE_PATH=""
 RUNTIME_READINESS_GENERATION=""
+DEPLOYED_GIT_COMMIT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -229,7 +230,13 @@ compose_env_prefix() {
         log_error "runtime readiness generation 尚未生成"
         return 1
     fi
-    printf "AATS_RUNTIME_READINESS_GENERATION='%s'" "$RUNTIME_READINESS_GENERATION"
+    if [[ ! "$DEPLOYED_GIT_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        log_error "deployed Git commit 尚未生成或格式无效"
+        return 1
+    fi
+    printf "AATS_RUNTIME_READINESS_GENERATION='%s' AATS_DEPLOYED_GIT_COMMIT='%s'" \
+        "$RUNTIME_READINESS_GENERATION" \
+        "$DEPLOYED_GIT_COMMIT"
     if [[ "$OPERATOR_TLS_ENABLED" == true ]]; then
         printf " AATS_OPERATOR_TLS_CERT_FILE='%s' AATS_OPERATOR_TLS_KEY_FILE='%s'" \
             "$OPERATOR_TLS_CERT_CONTAINER" \
@@ -246,6 +253,7 @@ prepare_runtime_readiness_generation() {
         log_error "无法为 runtime readiness 生成合法 deployed revision"
         exit 1
     fi
+    DEPLOYED_GIT_COMMIT="${deployed_rev,,}"
     deployed_short="${deployed_rev:0:12}"
     generated_at="$(date -u +%Y%m%dT%H%M%SZ)"
     RUNTIME_READINESS_GENERATION="${deployed_short}-${generated_at}-$$-${RANDOM}"

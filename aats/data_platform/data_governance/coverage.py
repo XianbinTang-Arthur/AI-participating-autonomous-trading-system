@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -31,6 +33,7 @@ _TIME_COLUMNS = (
     "created_at",
 )
 _TIMEFRAME_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600}
+_FULL_GIT_COMMIT = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 
 
 @dataclass(frozen=True)
@@ -70,14 +73,18 @@ def database_fingerprint(engine: Engine) -> str:
 
 
 def git_commit(project_root: str = ".") -> str:
+    deployed_commit = os.environ.get("AATS_DEPLOYED_GIT_COMMIT", "").strip()
+    if _FULL_GIT_COMMIT.fullmatch(deployed_commit):
+        return deployed_commit
     try:
-        return subprocess.check_output(
+        repository_commit = subprocess.check_output(
             ["git", "-C", project_root, "rev-parse", "HEAD"],
             text=True,
             stderr=subprocess.DEVNULL,
         ).strip()
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
+    return repository_commit if _FULL_GIT_COMMIT.fullmatch(repository_commit) else "unknown"
 
 
 def audit_coverage(

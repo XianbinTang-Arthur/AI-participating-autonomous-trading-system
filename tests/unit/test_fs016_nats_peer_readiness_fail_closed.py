@@ -328,8 +328,13 @@ def test_standard_deploy_generates_and_injects_required_generation() -> None:
         "prepare_runtime_readiness_generation\n"
     ) < deploy_source.index("step_build\n")
     assert "AATS_RUNTIME_READINESS_GENERATION='" in deploy_source
+    assert "AATS_DEPLOYED_GIT_COMMIT='" in deploy_source
     assert "--runtime-readiness-generation '$RUNTIME_READINESS_GENERATION'" in deploy_source
     assert (
         'AATS_RUNTIME_READINESS_GENERATION: "${AATS_RUNTIME_READINESS_GENERATION:?'
+        in compose_source
+    )
+    assert (
+        'AATS_DEPLOYED_GIT_COMMIT: "${AATS_DEPLOYED_GIT_COMMIT:?'
         in compose_source
     )

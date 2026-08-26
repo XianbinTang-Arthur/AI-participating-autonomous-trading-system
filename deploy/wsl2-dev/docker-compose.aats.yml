@@ -35,6 +35,9 @@ x-aats-common-env: &aats-common-env
   # FS-016：每次标准 deploy 生成同一非秘密代次，四主进程 readiness key 只接受
   # 本代次 peer。required interpolation 阻止手工 Compose 静默使用空代次。
   AATS_RUNTIME_READINESS_GENERATION: "${AATS_RUNTIME_READINESS_GENERATION:?runtime readiness generation required}"
+  # 不在镜像内复制 .git；标准部署显式注入完整 revision，供数据 provenance、
+  # 重建指纹和审计证据使用。required interpolation 防止来源记录退化为 unknown。
+  AATS_DEPLOYED_GIT_COMMIT: "${AATS_DEPLOYED_GIT_COMMIT:?deployed Git commit required}"
   # 数据库名 AATS_DB_NAME 来自 .env.<profile>，用户名/密码来自 .env.wsl2。
   # 两份 env 文件都在项目根目录，通过 --env-file ../../.env.* 注入。
   AATS_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/${AATS_DB_NAME:-aats}

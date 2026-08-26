@@ -14,8 +14,32 @@ from aats.data_platform.data_governance.coverage import (
     _zero_status,
     audit_coverage,
     build_recovery_matrix,
+    git_commit,
 )
 from aats.data_platform.rdp_models import RdpBase
+
+
+def test_git_commit_prefers_valid_deployed_revision(monkeypatch) -> None:
+    deployed = "a" * 40
+    monkeypatch.setenv("AATS_DEPLOYED_GIT_COMMIT", deployed)
+    monkeypatch.setattr(
+        "aats.data_platform.data_governance.coverage.subprocess.check_output",
+        lambda *args, **kwargs: "b" * 40,
+    )
+
+    assert git_commit("/app") == deployed
+
+
+def test_git_commit_ignores_invalid_deployed_revision_and_fails_closed(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AATS_DEPLOYED_GIT_COMMIT", "short-revision")
+    monkeypatch.setattr(
+        "aats.data_platform.data_governance.coverage.subprocess.check_output",
+        lambda *args, **kwargs: "not-a-commit",
+    )
+
+    assert git_commit("/app") == "unknown"
 
 
 def test_empty_database_audit_is_read_only_complete_and_deterministic() -> None:
