@@ -615,6 +615,9 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
             plan_historical_gold,
             start_historical_gold,
         )
+        from aats.data_platform.data_governance.historical_campaign import (
+            update_campaign_checkpoint,
+        )
         from aats.data_platform.data_governance.registry import (
             import_source_record,
             persist_historical_bundle,
@@ -821,6 +824,40 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
                 {"artifact_id": artifact_id},
             ).one()
             self.assertEqual(tuple(rows), (4, 1, 1))
+
+            campaign_id = session.execute(
+                text(
+                    "INSERT INTO meta.historical_campaign_runs "
+                    "(operation_key, symbol, coverage_start, coverage_end, "
+                    "requested_days, status, capacity_report, manifest, started_at) "
+                    "VALUES (:operation_key, :symbol, :start, :end, 1, 'RUNNING', "
+                    "'{\"approved\": true}'::jsonb, '{}'::jsonb, NOW()) "
+                    "RETURNING campaign_id"
+                ),
+                {
+                    "operation_key": f"integration-campaign-{uuid.uuid4()}",
+                    "symbol": symbol,
+                    "start": start,
+                    "end": start + timedelta(days=1),
+                },
+            ).scalar_one()
+            update_campaign_checkpoint(
+                session,
+                str(campaign_id),
+                checkpoint_key="candle:15m",
+                payload={"status": "succeeded", "bundle_id": candle_bundle_id},
+            )
+            checkpoint = session.execute(
+                text(
+                    "SELECT checkpoint FROM meta.historical_campaign_runs "
+                    "WHERE campaign_id = :campaign_id"
+                ),
+                {"campaign_id": campaign_id},
+            ).scalar_one()
+            self.assertEqual(
+                checkpoint["candle:15m"]["bundle_id"],
+                candle_bundle_id,
+            )
 
 
 if __name__ == "__main__":

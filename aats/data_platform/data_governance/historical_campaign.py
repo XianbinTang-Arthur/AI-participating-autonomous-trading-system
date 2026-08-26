@@ -412,7 +412,8 @@ def update_campaign_checkpoint(
     result = session.execute(
         text(
             "UPDATE meta.historical_campaign_runs SET checkpoint = checkpoint || "
-            "jsonb_build_object(:checkpoint_key, CAST(:payload AS jsonb)), "
+            "jsonb_build_object(CAST(:checkpoint_key AS TEXT), "
+            "CAST(:payload AS jsonb)), "
             "updated_at = NOW() WHERE campaign_id = CAST(:campaign_id AS UUID) "
             "AND status = 'RUNNING'"
         ),
