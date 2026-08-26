@@ -58,11 +58,26 @@ def evaluate_fill_feasibility(
     Returns:
         每条增加了 feasibility 字段的结果列表。
     """
+    fully_fillable_ratio = _require_nonnegative_finite(
+        "fully_fillable_ratio", fully_fillable_ratio,
+    )
+    partially_fillable_ratio = _require_nonnegative_finite(
+        "partially_fillable_ratio", partially_fillable_ratio,
+    )
+    max_fillable_fraction = _require_nonnegative_finite(
+        "max_fillable_fraction", max_fillable_fraction,
+    )
+    if partially_fillable_ratio <= fully_fillable_ratio:
+        raise ValueError("partially_fillable_ratio must be greater than fully_fillable_ratio")
+    if max_fillable_fraction > 1:
+        raise ValueError("max_fillable_fraction must be <= 1")
     results: list[dict[str, Any]] = []
 
     for row in aligned_rows:
-        candidate_qty = float(row.get("candidate_qty", 0))
-        bar_volume = row.get("bar_volume")
+        candidate_qty = _finite_number(row.get("candidate_qty"))
+        if candidate_qty is None or candidate_qty <= 0:
+            raise ValueError("candidate_qty must be a finite positive number")
+        bar_volume = _finite_number(row.get("bar_volume"))
         alignment_status = row.get("alignment_status", "")
 
         # 无市场数据
@@ -80,7 +95,7 @@ def evaluate_fill_feasibility(
             ))
             continue
 
-        bar_vol = float(bar_volume)
+        bar_vol = bar_volume
         volume_ratio = candidate_qty / bar_vol if bar_vol > 0 else float("inf")
 
         # 分类
@@ -126,6 +141,23 @@ def evaluate_fill_feasibility(
     log.info("Fill feasibility: %s", cats)
 
     return results
+
+
+def _finite_number(value: Any) -> float | None:
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _require_nonnegative_finite(name: str, value: Any) -> float:
+    parsed = _finite_number(value)
+    if parsed is None or parsed < 0:
+        raise ValueError(f"{name} must be a finite non-negative number")
+    return parsed
 
 
 def _estimate_levels_consumed(volume_ratio: float) -> int:

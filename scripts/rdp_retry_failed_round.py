@@ -124,9 +124,19 @@ def main() -> None:
                 print(f"\n[DRY-RUN] 将执行: {plan['full_rerun_command']}")
             else:
                 print("\n执行重跑...")
-                cmd = plan["full_rerun_command"]
-                log.info("CMD: %s", cmd)
-                result = subprocess.run(cmd, shell=True)
+                cmd = list(plan.get("full_rerun_argv") or [])
+                if not cmd or not all(isinstance(part, str) and part for part in cmd):
+                    print("ERROR: retry plan 缺少合法的 full_rerun_argv", file=sys.stderr)
+                    sys.exit(1)
+                if cmd[0] == "python":
+                    cmd[0] = sys.executable
+                log.info("CMD argv: %s", cmd)
+                result = subprocess.run(
+                    cmd,
+                    shell=False,
+                    cwd=str(_PROJECT_ROOT),
+                    check=False,
+                )
                 print(f"\n重跑完成, exit code: {result.returncode}")
                 sys.exit(result.returncode)
 

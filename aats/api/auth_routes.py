@@ -785,6 +785,8 @@ def _dashboard_snapshot_default_payload(snapshot_key: str) -> dict[str, Any]:
         return {}
     if panel_key == "rdpRuns":
         return {"items": [], "limit": 20}
+    if panel_key == "rdpWorkspace":
+        return {}
     if panel_key == "metrics":
         return {}
     if panel_key == "accountState":
@@ -947,6 +949,10 @@ async def _load_dashboard_snapshot_panel(runtime: ApplicationRuntime, snapshot_k
                 from aats.api.rdp_v2 import build_rdp_runs_panel
 
                 return build_rdp_runs_panel()
+            if panel_key == "rdpWorkspace":
+                from aats.api.rdp_workspace import build_rdp_workspace
+
+                return build_rdp_workspace(request)
             if panel_key == "rdpControl":
                 from aats.api.rdp_control_summary import build_rdp_control_summary
 
@@ -1368,6 +1374,10 @@ def _protected_dashboard_panel_payload(
         from aats.api.rdp_v2 import build_rdp_runs_panel
 
         return build_rdp_runs_panel()
+    if panel_key == "rdpWorkspace":
+        from aats.api.rdp_workspace import build_rdp_workspace
+
+        return build_rdp_workspace(request)
     if panel_key == "rdpControl":
         from aats.api.rdp_control_summary import build_rdp_control_summary
 

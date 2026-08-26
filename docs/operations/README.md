@@ -14,7 +14,7 @@
 | [`platform_runbook.md`](platform_runbook.md) | RDP daemon、队列、调度与恢复 | RDP 操作不能替代主交易恢复 |
 | [`rdp_operator_workflow.md`](rdp_operator_workflow.md) | RDP Operator 标准流程 | 禁止使用已硬禁用的旧 CLI |
 | [`parameter_governance.md`](parameter_governance.md) | 参数治理状态与证据 | active parameter 真源是 Postgres |
-| [`parameter_apply_and_rollback.md`](parameter_apply_and_rollback.md) | apply/rollback API、安全门和审计 | direct apply/rollback 需要短期 token；组合 release 路径安全依赖不同 |
+| [`parameter_apply_and_rollback.md`](parameter_apply_and_rollback.md) | apply/rollback API、安全门和审计 | 所有实际 apply 路径及 rollback 都需要 action-bound 短时 token |
 | [`production_parameter_change_runbook.md`](production_parameter_change_runbook.md) | 生产参数变更全流程 | 当前 live 部署禁用；只可准备/审阅证据，不得执行 runtime 发布 |
 | [`rdp_scheduling_strategy.md`](rdp_scheduling_strategy.md) | scheduler 语义 | 以 workflow JSON、allowlist 和 daemon timeout 为真源 |
 | [`rdp_workflow_calendar.md`](rdp_workflow_calendar.md) | 当前 workflow 日历 | decision/release disabled；release 禁止入队 |

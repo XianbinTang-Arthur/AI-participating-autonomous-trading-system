@@ -88,7 +88,7 @@ ATTRIBUTION_METRICS: list[MetricDefinition] = [
     MetricDefinition(
         name="risk_rejected_ratio",
         layer="attribution",
-        description="风控拒绝���比率",
+        description="风控拒绝比率",
         direction="lower_is_better",
         unit="ratio",
     ),

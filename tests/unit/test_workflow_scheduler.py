@@ -230,7 +230,7 @@ def test_scheduler_dry_run_does_not_create_task_or_write_state(tmp_path: Path) -
     create_task_mock.assert_not_called()
 
 
-def test_scheduler_marks_slot_processed_when_active_task_exists(tmp_path: Path) -> None:
+def test_scheduler_keeps_slot_pending_when_active_task_exists(tmp_path: Path) -> None:
     _write_state(
         tmp_path,
         {
@@ -278,7 +278,7 @@ def test_scheduler_marks_slot_processed_when_active_task_exists(tmp_path: Path) 
     state = load_scheduler_state(tmp_path)
     assert (
         state["workflows"]["decision_cycle"]["last_processed_slot"]
-        == "2026-04-16T10:00:00+00:00"
+        == "2026-04-15T10:00:00+00:00"
     )
 
 
@@ -772,12 +772,10 @@ def test_iter_due_slots_weekly_spans_multiple_weeks() -> None:
     ]
 
 
-def test_scheduler_backfills_all_missing_custom_15min_slots_in_one_tick(
+def test_scheduler_coalesces_missing_custom_slots_into_latest_window(
     tmp_path: Path,
 ) -> None:
-    """daemon 停机后 last_processed 落后多个 15min slot,
-    一次 tick 必须把所有缺失 slot 都 enqueue, state 推进到 latest.
-    """
+    """滚动窗口命令不接受历史 slot，停机缺口必须合并为一次最新窗口执行。"""
     _write_state(
         tmp_path,
         {
@@ -825,12 +823,18 @@ def test_scheduler_backfills_all_missing_custom_15min_slots_in_one_tick(
 
     enqueued_slots = [item["slot"] for item in result["enqueued"]]
     assert enqueued_slots == [
-        "2026-04-23T11:15:00+00:00",
-        "2026-04-23T11:30:00+00:00",
-        "2026-04-23T11:45:00+00:00",
         "2026-04-23T12:00:00+00:00",
     ]
-    assert task_counter["n"] == 4
+    assert task_counter["n"] == 1
+    assert result["coalesced"] == [
+        {
+            "workflow": "candles_rolling_15m",
+            "slot_count": 4,
+            "from_slot": "2026-04-23T11:15:00+00:00",
+            "to_slot": "2026-04-23T12:00:00+00:00",
+            "reason": "滚动窗口工作流合并为一次最新窗口执行",
+        },
+    ]
     state = load_scheduler_state(tmp_path)
     assert (
         state["workflows"]["candles_rolling_15m"]["last_processed_slot"]
@@ -838,13 +842,10 @@ def test_scheduler_backfills_all_missing_custom_15min_slots_in_one_tick(
     )
 
 
-def test_scheduler_backfill_does_not_stall_when_middle_slot_has_active_task(
+def test_scheduler_coalesced_slot_remains_pending_when_active_task_exists(
     tmp_path: Path,
 ) -> None:
-    """补齐过程中间某个 slot 遇到 active task (create_task_if_idle 返回 existing)
-    不能阻断后续 slot 补齐, state 最终推进到 latest 已处理 slot;
-    每个 slot 在 report 里都要有独立条目 (enqueued 或 skipped), 不能吞细节.
-    """
+    """已有任务不代表最新窗口已覆盖，不能提前推进调度水位。"""
     _write_state(
         tmp_path,
         {
@@ -861,14 +862,8 @@ def test_scheduler_backfill_does_not_stall_when_middle_slot_has_active_task(
     now = datetime(2026, 4, 23, 11, 46, tzinfo=UTC)  # latest = 11:45
     schedule = {"enabled": True, "frequency": "custom", "interval_minutes": 15}
 
-    call_order: list[str] = []
-
     def _create_task(_session, **_kwargs):
-        call_order.append("call")
-        # 第 1 / 3 次成功, 第 2 次模拟 "已有 active task" 的 ON CONFLICT 分支
-        if len(call_order) == 2:
-            return (None, {"task_id": "task_existing_mid"})
-        return (f"task_backfill_{len(call_order)}", None)
+        return (None, {"task_id": "task_existing"})
 
     with (
         patch(
@@ -893,22 +888,17 @@ def test_scheduler_backfill_does_not_stall_when_middle_slot_has_active_task(
             tmp_path, now=now, save_state=True, initialize_if_missing=False,
         )
 
-    enqueued_slots = [item["slot"] for item in result["enqueued"]]
+    assert result["enqueued"] == []
     skipped_slots = [
         item["slot"]
         for item in result["skipped"]
         if item.get("workflow") == "candles_rolling_15m"
     ]
-    # 1st (11:15) enqueued, 2nd (11:30) skipped as active task, 3rd (11:45) enqueued.
-    assert enqueued_slots == [
-        "2026-04-23T11:15:00+00:00",
-        "2026-04-23T11:45:00+00:00",
-    ]
-    assert skipped_slots == ["2026-04-23T11:30:00+00:00"]
+    assert skipped_slots == ["2026-04-23T11:45:00+00:00"]
     state = load_scheduler_state(tmp_path)
     assert (
         state["workflows"]["candles_rolling_15m"]["last_processed_slot"]
-        == "2026-04-23T11:45:00+00:00"
+        == "2026-04-23T11:00:00+00:00"
     )
 
 

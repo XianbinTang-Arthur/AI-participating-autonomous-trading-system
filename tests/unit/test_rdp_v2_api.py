@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
 
 from aats.api.auth import OperatorPrincipal, require_read_access, require_write_access
-from aats.api.rdp_v2 import rdp_v2_router
+from aats.api.rdp_v2 import build_rdp_runs_panel, rdp_v2_router
 
 
 class _Session:
@@ -65,6 +65,31 @@ def test_create_run_requires_idempotency_key() -> None:
         json={"workflow": "research_cycle"},
     )
     assert response.status_code == 422
+
+
+def test_workspace_run_panel_never_pages_out_active_runs() -> None:
+    terminal_runs = [
+        {"run_id": f"run_terminal_{index}", "status": "succeeded"}
+        for index in range(20)
+    ]
+    old_queued = {"run_id": "run_old_queued", "status": "queued"}
+
+    def _list_runs(_session, *, limit, offset, status=None, workflow=None):
+        del limit, offset, workflow
+        if status == "queued":
+            return [old_queued]
+        if status in {"running", "cancellation_requested"}:
+            return []
+        return terminal_runs
+
+    with patch("aats.api.rdp_v2.governance_session", _session), patch(
+        "aats.data_platform.governance.rdp_runs_db.db_list_runs",
+        side_effect=_list_runs,
+    ):
+        payload = build_rdp_runs_panel(limit=20)
+
+    assert payload["items"][0] == old_queued
+    assert len(payload["items"]) == 21
 
 
 def test_create_run_returns_logical_run_and_binds_authenticated_actor() -> None:
@@ -184,3 +209,23 @@ def test_run_detail_maps_governance_db_failure_to_retryable_503() -> None:
         "code": "governance_db_unavailable",
         "retryable": True,
     }
+
+
+def test_retry_run_rechecks_current_manual_availability() -> None:
+    with patch("aats.api.rdp_v2.governance_session", _session), patch(
+        "aats.data_platform.governance.rdp_runs_db.db_get_run",
+        return_value=_run("failed"),
+    ), patch(
+        "aats.data_platform.governance.rdp_runs_db.db_get_run_attempts",
+        return_value=[{"task_id": "task_1", "attempt_no": 1}],
+    ), patch(
+        "aats.data_platform.operations.workflow_dispatcher.describe_manual_trigger_availability",
+        return_value={"enabled": False, "disabled_reason": "full_pipeline 任务已禁用"},
+    ), patch(
+        "aats.data_platform.governance.rdp_task_db.db_create_task_if_idle",
+    ) as create_mock:
+        response = TestClient(_app()).post("/rdp/v2/runs/run_123/retry")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "workflow_not_manually_available"
+    create_mock.assert_not_called()

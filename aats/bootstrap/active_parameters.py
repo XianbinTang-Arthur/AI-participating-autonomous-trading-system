@@ -365,7 +365,7 @@ def _try_load_from_db(db_url: str | None = None) -> dict[str, Any] | None:
     - 如果治理层已接管（表存在且有行），返回结果中
       ``governance_managed=True`` + ``paused_combos=[...]``。
     - 调用方据此决定是否 fallback 到文件 registry。
-      治理层主动 pause �� combo 不应从文件补齐。
+      治理层主动 pause 的 combo 不应从文件补齐。
 
     Returns
     -------
@@ -396,7 +396,7 @@ def _try_load_from_db(db_url: str | None = None) -> dict[str, Any] | None:
 
                 # ── 查询治理决策状态 ──
                 # 如果 governance.active_decisions 存在且有行，说明治理层
-                # 已接管参数管理。DB 返回空 active sets 是治���层主动 pause
+                # 已接管参数管理。DB 返回空 active sets 是治理层主动 pause
                 # 的结果，不应 fallback 到文件 registry。
                 governance_managed = False
                 paused_combos: set[str] = set()

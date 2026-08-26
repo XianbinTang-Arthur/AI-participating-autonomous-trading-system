@@ -2,7 +2,7 @@
 
 > 项目定位声明：RDP 只在严格风控、可审计、可恢复、可治理的边界内为主交易系统提供研究证据和受控参数。完整定位见 [项目定位声明](../../docs/project_positioning.md)。
 
-最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；未提交 Phase 3A–3V 整改工作区）
+最后核对：2026-08-25（起始 HEAD `70f1a581a81f55697c9b68167539ad0db86fc06a`；含同一待提交工作树内的 RDP 业务逻辑整改与 Workspace V3 重构）
 适用范围：`aats/data_platform/`、`scripts/rdp_*.py`、`configs/rdp_workflows/`、RDP API 与任务守护进程。
 
 本文是 RDP 当前入口。逐文件模块清单见 [RDP 代码模块参考](../../docs/rdp/module_reference.md)，日常操作见 [平台运行手册](../../docs/operations/platform_runbook.md)，完整系统边界见 [项目代码审查与系统说明](../../docs/code_review/README.md)。
@@ -15,7 +15,7 @@ RDP 是研究和治理子系统，不是实时交易执行器。
 - RDP 对 live 交易库只读，写入集中在独立 research/governance 数据库。
 - recommendation、candidate、verdict 和 research artifact 都不会自行改变交易行为。
 - runtime active parameter 的唯一真源是 Postgres `governance.active_parameter_sets`。
-- 参数写入必须经受保护的 Operator API、权限校验、gate、actor 和 history；直接 apply/rollback 还要求短时 HMAC token。组合 release 端点当前没有 token 依赖，详见第 7 节的策略差异。旧的直写 CLI 已禁用并返回退出码 2。
+- 参数写入必须经受保护的 Operator API、权限校验、gate、actor 和 history；apply/rollback 以及包含 apply 的组合 release 入口都要求 action-bound 短时 HMAC token。旧的直写 CLI 已禁用并返回退出码 2。
 - Research Factory 只产出证据、结论和人工应用设计，不写 runtime、active parameters、managed config 或 OKX。
 - 当前不允许自动 release：`release_cycle` 配置禁用，且任务队列显式阻止它入队。
 - Phase 3V 的 real-data runner 使用 train stability + valid selection 双门；test 只参与
@@ -63,7 +63,7 @@ OKX REST / 历史 ZIP / live 只读事实
 | RDP task daemon | `scripts/rdp_task_daemon.py` | 在容器内启用 scheduler、领取 attempt、同步 Run heartbeat、执行/取消 workflow、写终态与重试关系 |
 | Workflow scheduler | `scripts/rdp_schedule_workflows.py` / `operations/workflow_scheduler.py` | 从数据库调度状态和 JSON 定义计算到期 slot，原子入队 |
 | Workflow dispatcher | `operations/workflow_dispatcher.py` | 校验 workflow 和任务、按顺序执行、写运行报告并上报结构化 Run Step/Event |
-| Gateway RDP API | `aats/api/rdp_routes.py`、`rdp_v2.py`、`rdp_profile_routes.py` | Run 创建/详情/取消/重试，以及查询、审批、gate、release/apply/rollback、workbench、profile/sleeve 治理 |
+| Gateway RDP API | `aats/api/rdp_routes.py`、`rdp_v2.py`、`rdp_workspace.py`、`rdp_profile_routes.py` | Run 创建/详情/取消/重试、Workspace V3，以及查询、审批、gate、release/apply/rollback、兼容 workbench、profile/sleeve 治理 |
 | Rolling collectors | `collectors/rolling/`、相关 `scripts/rdp_*` | Candle、funding、OI、mark、long/short 等增量采集 |
 | Research Factory | `research_factory/`、`research/` | 证据输入、实验、verdict、治理审查与人工应用设计 |
 
@@ -127,7 +127,7 @@ Gateway 和 scheduler 都向 `governance.rdp_task_queue` 写任务，daemon 负�
 1. 审阅并批准 recommendation。
 2. 运行 pre-apply gate。
 3. 若调用 `POST /rdp/parameters/apply`，先通过 `POST /rdp/operator-tokens` 获取 `action=apply` 的短时 token，并携带 `X-Rdp-Apply-Token`。
-4. 也可调用组合入口 `POST /rdp/releases/create`；当前代码只要求 write access + integrity/gate，不要求 token。这是现有安全策略差异，不应在文档中隐去。
+4. 也可调用组合入口 `POST /rdp/releases/create`；该入口同样要求 `action=apply` token，并在任何 apply 副作用前校验。
 5. 核对 `GET /rdp/parameters/active`、apply history、release history 和主交易 `/system/health`。
 6. 观察失败时，通过携带 `action=rollback` token 的 `POST /rdp/parameters/rollback` 回滚。
 
@@ -168,7 +168,7 @@ Gateway 和 scheduler 都向 `governance.rdp_task_queue` 写任务，daemon 负�
 
 ## 9. API 与 Operator UI
 
-FastAPI 当前注册 50 个 `/rdp/*` 端点，覆盖：
+Gateway 当前注册 56 个 `/rdp/*` 端点，其中包括 5 个 Run V2 路由和 1 个 Workspace V3 路由，覆盖：
 
 - health、active parameters、apply history；
 - attribution、execution、decision、readiness；
@@ -178,6 +178,8 @@ FastAPI 当前注册 50 个 `/rdp/*` 端点，覆盖：
 - workbench、tuning proposal；
 - profile recommendation/type review；
 - sleeve advice。
+
+当前 UI 只读取 `GET /rdp/v3/workspace` 返回的单一版本化业务快照；旧 control/workbench/tuning 读接口继续保留给兼容脚本，不再由页面异步拼接。写入继续调用既有受保护接口。
 
 完整方法与路径以运行时 `/openapi.json` 和 [项目代码审查与系统说明](../../docs/code_review/README.md) 为准。`/healthz` 只表示 Gateway 存活，不代表 RDP、交易或参数发布已 ready。
 

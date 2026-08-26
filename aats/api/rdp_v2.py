@@ -82,11 +82,22 @@ def _db_unavailable(exc: OperationalError, *, operation: str) -> HTTPException:
 
 
 def build_rdp_runs_panel(*, limit: int = 20) -> dict[str, Any]:
-    """Build the cheap, snapshot-friendly run list used by the RDP workspace."""
+    """Build the snapshot run list without allowing active runs to page out."""
     from aats.data_platform.governance.rdp_runs_db import db_list_runs
 
     with governance_session() as session:
-        return {"items": db_list_runs(session, limit=limit, offset=0), "limit": limit}
+        recent = db_list_runs(session, limit=limit, offset=0)
+        active: list[dict[str, Any]] = []
+        for status in ("queued", "running", "cancellation_requested"):
+            active.extend(db_list_runs(session, limit=100, offset=0, status=status))
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for run in [*active, *recent]:
+        run_id = str(run.get("run_id") or "")
+        if run_id and run_id not in seen:
+            seen.add(run_id)
+            merged.append(run)
+    return {"items": merged, "limit": limit}
 
 
 @rdp_v2_router.get("/runs", dependencies=[Depends(require_read_access)])
@@ -272,12 +283,16 @@ async def cancel_run(
 @rdp_v2_router.post("/runs/{run_id}/retry", status_code=202)
 async def retry_run(
     run_id: str,
+    request: Request,
     principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     from aats.data_platform.governance.rdp_runs_db import db_get_run, db_get_run_attempts
     from aats.data_platform.governance.rdp_task_db import (
         WorkflowEnqueueBlockedError,
         db_create_task_if_idle,
+    )
+    from aats.data_platform.operations.workflow_dispatcher import (
+        describe_manual_trigger_availability,
     )
 
     workflow_name = "unknown"
@@ -307,6 +322,19 @@ async def retry_run(
                 )
             parent = attempts[-1]
             workflow_name = str(run["workflow"])
+            availability = describe_manual_trigger_availability(
+                _project_root(request),
+                workflow_name,
+            )
+            if not availability.get("enabled"):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "workflow_not_manually_available",
+                        "workflow": workflow_name,
+                        "message": availability.get("disabled_reason"),
+                    },
+                )
             task_id, existing = db_create_task_if_idle(
                 session,
                 workflow=workflow_name,

@@ -150,14 +150,6 @@ P0_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
 P0_DASHBOARD_SNAPSHOT_PANEL_KEYS = frozenset(P0_DASHBOARD_SNAPSHOT_POLICIES)
 
 P1_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
-    "rdpRuns": DashboardSnapshotPolicy(
-        panel_key="rdpRuns",
-        ttl_seconds=3.0,
-        stale_after_seconds=10.0,
-        hard_expire_seconds=120.0,
-        timeout_seconds=3.0,
-        priority="p1",
-    ),
     "latestDecision": DashboardSnapshotPolicy(
         panel_key="latestDecision",
         ttl_seconds=5.0,
@@ -211,6 +203,26 @@ P1_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
 P1_DASHBOARD_SNAPSHOT_PANEL_KEYS = frozenset(P1_DASHBOARD_SNAPSHOT_POLICIES)
 
 P2_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
+    "rdpRuns": DashboardSnapshotPolicy(
+        panel_key="rdpRuns",
+        ttl_seconds=3.0,
+        stale_after_seconds=10.0,
+        hard_expire_seconds=120.0,
+        timeout_seconds=3.0,
+        priority="p2",
+        startup_prewarm=False,
+        scheduled_refresh=False,
+    ),
+    "rdpWorkspace": DashboardSnapshotPolicy(
+        panel_key="rdpWorkspace",
+        ttl_seconds=3.0,
+        stale_after_seconds=15.0,
+        hard_expire_seconds=120.0,
+        timeout_seconds=25.0,
+        priority="p2",
+        startup_prewarm=True,
+        scheduled_refresh=False,
+    ),
     "trialGuard": DashboardSnapshotPolicy(
         panel_key="trialGuard",
         ttl_seconds=10.0,
@@ -302,6 +314,7 @@ P2_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
         hard_expire_seconds=360.0,
         timeout_seconds=15.0,
         priority="p2",
+        startup_prewarm=False,
         scheduled_refresh=False,
     ),
     "rdpWorkbenchOverview": DashboardSnapshotPolicy(
@@ -311,6 +324,7 @@ P2_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
         hard_expire_seconds=360.0,
         timeout_seconds=15.0,
         priority="p2",
+        startup_prewarm=False,
         scheduled_refresh=False,
     ),
     "rdpWorkbenchItems": DashboardSnapshotPolicy(
@@ -340,6 +354,7 @@ P2_DASHBOARD_SNAPSHOT_POLICIES: dict[str, DashboardSnapshotPolicy] = {
         hard_expire_seconds=420.0,
         timeout_seconds=20.0,
         priority="p2",
+        startup_prewarm=False,
         scheduled_refresh=False,
     ),
     "rdpTuningProposals": DashboardSnapshotPolicy(

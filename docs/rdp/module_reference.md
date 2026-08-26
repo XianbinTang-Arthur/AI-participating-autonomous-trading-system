@@ -1,6 +1,6 @@
 # RDP 代码模块参考
 
-> 最后核对：2026-08-25（代码基线 `0b58dbad` + RDP 2.0 未提交工作区）。本页按当前目录和运行入口组织，不再沿用早期“少量 Phase 文件清单”。RDP 总览见 [`aats/data_platform/README.md`](../../aats/data_platform/README.md)。
+> 最后核对：2026-08-25（起始代码基线 `70f1a581`，含本轮 RDP 业务逻辑整改工作区）。本页按当前目录和运行入口组织，不再沿用早期“少量 Phase 文件清单”。RDP 总览见 [`aats/data_platform/README.md`](../../aats/data_platform/README.md)。
 
 ## 1. 根模块
 
@@ -98,8 +98,8 @@ Research Factory 是当前最大的 RDP 子域，覆盖：
 | `recommendations_db.py` / `parameter_sets_db.py` | recommendation、active decision 和参数版本表访问 |
 | `active_params_db.py` | `governance.active_parameter_sets` DB 操作 |
 | `profile_apply_saga.py` | 跨 research/live 边界的 profile apply saga 与补偿 |
-| `rdp_task_db.py` | 10 个 workflow allowlist、原子入队、SKIP LOCKED claim、状态与孤儿恢复 |
-| `rdp_runs_db.py` | 逻辑 Run、attempt 投影、step/event、幂等、心跳、取消与重试状态真源 |
+| `rdp_task_db.py` | 10 个 workflow allowlist、原子入队、SKIP LOCKED claim、终态单调写入与仅回收失去心跳的孤儿任务 |
+| `rdp_runs_db.py` | 逻辑 Run、attempt 投影、单调 step/event、幂等、心跳、取消与重试状态真源；详情返回最近一段事件而非最早一段 |
 | `operational_state_db.py` | scheduler 等运行状态真源 |
 | `snapshot_db.py` | 治理和 research round DB-first snapshot |
 | `quality_monitor.py` | 治理质量巡检 |
@@ -120,11 +120,11 @@ Research Factory 是当前最大的 RDP 子域，覆盖：
 
 | 文件 | 职责 |
 | --- | --- |
-| `workflow_dispatcher.py` | 加载 10 份 JSON 定义、校验任务并执行 |
+| `workflow_dispatcher.py` | 加载 10 份 JSON 定义、校验任务、执行、首个失败提取和失败分类；部分成功保持 warning/partial 语义 |
 | `rdp_run_observer.py` | 从 daemon 继承 `run_id/attempt_no`，best-effort 上报顶层步骤与事件 |
-| `workflow_scheduler.py` | UTC slot 计算、bootstrap、数据库调度状态、到期入队 |
+| `workflow_scheduler.py` | UTC slot 计算、bootstrap、数据库调度状态、滚动窗口漏槽合并与到期入队 |
 | `rdp_daemon_health.py` | daemon heartbeat/healthcheck |
-| `failure_registry.py` / `retry_manager.py` | workflow failure 与补跑 |
+| `failure_registry.py` / `retry_manager.py` | legacy workflow failure 与受冻结/disabled/安全命令执行契约约束的人工补跑 |
 | `reliability_checks.py` / `alerting.py` | 可靠性检查和告警摘要 |
 | `strategy_tuning_registry.py` / `strategy_tuning_review.py` | tuning proposal/review 生命周期 |
 
@@ -137,11 +137,13 @@ RDP daemon 的标准容器入口是 `scripts/rdp_task_daemon.py --poll-interval 
 | `aats/bootstrap/active_parameters.py` | runtime active parameter DB-only loader；数据库失败返回空 registry，不读 JSON fallback |
 | `aats/api/rdp_routes.py` | RDP 核心查询、审批、token、apply/rollback、workflow、workbench 和 tuning API |
 | `aats/api/rdp_v2.py` | `/rdp/v2/runs` 创建、列表、详情、协作取消与 retry API；actor 绑定 Principal |
+| `aats/api/rdp_workspace.py` | `rdp.workspace.v3` 单一读模型；投影生命周期、真实队列优先级、workflow capability、候选资格和下一步动作 |
+| `aats/api/rdp_workspace_routes.py` | `GET /rdp/v3/workspace`；只读鉴权，治理数据库不可达返回可重试 503 |
 | `aats/api/rdp_profile_routes.py` | profile recommendation、profile type review、sleeve advice API |
 | `aats/api/rdp_apply_token.py` | v2 HMAC apply/rollback token 签发与验证 |
 | `aats/services/operator/rdp_queries.py` | Operator RDP 查询聚合 |
 
-FastAPI 当前共有 55 个 `/rdp/*` 路由，其中 5 个是 Run V2 路由。完整清单以运行时 `/openapi.json` 和 [项目代码审查与系统说明](../code_review/README.md) 为准。
+核心 `rdp_router` 当前组合 41 个路由；Gateway 加上 profile/sleeve 子路由后共注册 56 个 `/rdp/*` 路由，其中 5 个是 Run V2 路由、1 个是 Workspace V3 路由。完整清单以运行时 `/openapi.json` 和 [项目代码审查与系统说明](../code_review/README.md) 为准。
 
 ## 8. 维护规则
 
@@ -150,3 +152,4 @@ FastAPI 当前共有 55 个 `/rdp/*` 路由，其中 5 个是 Run V2 路由。�
 3. 修改 active parameter 路径时必须明确“治理 registry 存储语义”和“runtime loader 真源语义”。
 4. 新增写 API 时必须有认证依赖、token/gate（如适用）、审计和负向测试。
 5. 带 Phase/Stage/日期的旧设计只作历史证据，不能覆盖本页当前边界。
+6. 当前 UI 只读取 `rdpWorkspace`；旧 control/workbench/tuning 读接口仅作兼容，不得重新拼成多个异步页面真源。

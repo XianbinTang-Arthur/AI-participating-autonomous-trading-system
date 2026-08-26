@@ -31,7 +31,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -71,8 +71,11 @@ DEFAULT_TIMEOUT = 1800  # 30 分钟
 # 保留最后 N 行日志
 LOG_TAIL_LINES = 50
 HEARTBEAT_INTERVAL_SECONDS = 5
+ORPHAN_STALE_SECONDS = 30
+ORPHAN_SCAN_INTERVAL_SECONDS = 30
 LOCAL_HEARTBEAT_PATH = Path("/tmp/rdp_daemon_heartbeat.json")
 RUNTIME_COMPONENT = "rdp-daemon"
+_WORKFLOW_RESULT_PREFIX = "RDP_WORKFLOW_RESULT_JSON="
 
 _shutdown = False
 
@@ -101,6 +104,49 @@ def tail_lines(text: str, n: int) -> str:
     """取最后 n 行."""
     lines = text.splitlines()
     return "\n".join(lines[-n:]) if len(lines) > n else text
+
+
+def _extract_workflow_result(log_tail: str) -> dict[str, object] | None:
+    for line in reversed((log_tail or "").splitlines()):
+        stripped = line.strip()
+        if not stripped.startswith(_WORKFLOW_RESULT_PREFIX):
+            continue
+        try:
+            payload = json.loads(stripped[len(_WORKFLOW_RESULT_PREFIX):])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+    return None
+
+
+def _logical_run_status(
+    *,
+    queue_status: str,
+    workflow_result: dict[str, object] | None,
+) -> str:
+    if queue_status == "cancelled":
+        return "cancelled"
+    overall = str((workflow_result or {}).get("overall_status") or "")
+    if queue_status == "done":
+        return "succeeded_with_warnings" if overall == "degraded" else "succeeded"
+    if overall == "partial":
+        return "partially_succeeded"
+    return "failed"
+
+
+def _should_auto_retry(
+    *,
+    queue_status: str,
+    trigger_kind: str | None,
+    workflow_result: dict[str, object] | None,
+) -> bool:
+    """仅自动重试已明确识别的临时基础设施故障，未知失败保持人工可见。"""
+    return (
+        queue_status == "failed"
+        and trigger_kind != "auto_retry"
+        and str((workflow_result or {}).get("failure_class") or "")
+        == "transient_infrastructure"
+    )
 
 
 def _utcnow() -> datetime:
@@ -372,6 +418,7 @@ def _recover_orphaned_running_tasks() -> list[dict[str, object]]:
             session,
             error_message="rdp_daemon_restarted_before_task_finished",
             exit_code=-3,
+            stale_before=_utcnow() - timedelta(seconds=ORPHAN_STALE_SECONDS),
         )
     if recovered:
         log.warning(
@@ -402,7 +449,7 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
     run_id = task["run_id"]
     attempt_no = int(task["attempt_no"])
     workflow = task["workflow"]
-    requested_by = task.get("requested_by")  # R3: auto_retry 防循环判定用
+    trigger_kind = str(task.get("trigger_kind") or "")
     log.info("=== Processing task %s: workflow=%s ===", task_id, workflow)
 
     active_task = {
@@ -445,17 +492,61 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
         )
 
     status = "done" if exit_code == 0 else ("cancelled" if exit_code == -4 else "failed")
+    workflow_result = _extract_workflow_result(log_tail)
+    if workflow_result is None and exit_code == -1:
+        workflow_result = {
+            "overall_status": "failed",
+            "failure_class": "transient_infrastructure",
+            "error_summary": error_message or "Workflow execution timed out",
+        }
+    structured_error = str((workflow_result or {}).get("error_summary") or "").strip()
+    if structured_error and (
+        exit_code != 0
+        or (workflow_result or {}).get("overall_status") == "degraded"
+    ):
+        error_message = structured_error[:500]
     if error_message == "" and exit_code != 0:
         error_message = f"Process exited with code {exit_code}"
+    run_status = _logical_run_status(
+        queue_status=status,
+        workflow_result=workflow_result,
+    )
 
     with get_session() as session:
-        db_update_task_status(
+        terminal_update_applied = db_update_task_status(
             session, task_id,
             status=status,
             exit_code=exit_code,
             error_message=error_message or None,
             log_tail=log_tail or None,
+            run_status=run_status,
         )
+
+    if not terminal_update_applied:
+        log.warning(
+            "rdp_workflow_late_result_ignored task_id=%s workflow=%s exit_code=%s",
+            task_id,
+            workflow,
+            exit_code,
+            extra={
+                "event_name": "rdp_workflow_late_result_ignored",
+                "task_id": task_id,
+                "workflow": workflow,
+                "exit_code": exit_code,
+            },
+        )
+        return {
+            "processed": True,
+            "task_id": task_id,
+            "run_id": run_id,
+            "attempt_no": attempt_no,
+            "workflow": workflow,
+            "status": "superseded",
+            "exit_code": exit_code,
+            "error_message": "Late worker result ignored because task is already terminal",
+            "auto_retry_enqueued": None,
+            "finished_at": _utcnow().isoformat(),
+        }
 
     # RDP Bug 6 修复: 失败告警
     # 失败时打 structured error log，方便 Loki+Grafana alert rule
@@ -475,12 +566,9 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
             },
         )
 
-        # R3 Bug 6 retry: 自动产生 15min 延迟 retry task (只 retry 1 次)
-        # 防循环: requested_by 带 "auto_retry_of_" 前缀，daemon 对其再失败
-        # 不再入队新 retry。scheduler 路径 (requested_by="scheduler") 正常触发。
-        # 手动触发 (requested_by 为操作员名) 也 retry 1 次 —— 临时故障应该能自动恢复。
+        # 自动 retry 只覆盖明确的临时基础设施故障。代码异常、数据不足、
+        # gate 阻断和未知失败保持终态，避免相同错误延迟 15 分钟后无意义重跑。
         _RETRY_DELAY_MINUTES = 15
-        is_retry_already = str(requested_by or "").startswith("auto_retry_of_")
         if workflow in _blocked_workflows():
             log.warning(
                 "rdp_workflow_retry_skipped original=%s workflow=%s reason=golden_path_freeze",
@@ -492,7 +580,11 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
                     "reason": "golden_path_freeze",
                 },
             )
-        elif not is_retry_already:
+        elif _should_auto_retry(
+            queue_status=status,
+            trigger_kind=trigger_kind,
+            workflow_result=workflow_result,
+        ):
             from datetime import timedelta as _timedelta
 
             retry_eligible = _utcnow() + _timedelta(minutes=_RETRY_DELAY_MINUTES)
@@ -533,7 +625,7 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
                     "rdp_workflow_retry_enqueue_failed original=%s workflow=%s",
                     task_id, workflow,
                 )
-        else:
+        elif trigger_kind == "auto_retry":
             log.warning(
                 "rdp_workflow_retry_exhausted original=%s workflow=%s "
                 "(retry already failed, no further retry)",
@@ -542,6 +634,25 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
                     "event_name": "rdp_workflow_retry_exhausted",
                     "task_id": task_id,
                     "workflow": workflow,
+                },
+            )
+        else:
+            failure_class = str(
+                (workflow_result or {}).get("failure_class")
+                or "unknown_non_retryable",
+            )
+            log.warning(
+                "rdp_workflow_retry_skipped original=%s workflow=%s "
+                "reason=non_retryable_failure failure_class=%s",
+                task_id,
+                workflow,
+                failure_class,
+                extra={
+                    "event_name": "rdp_workflow_retry_skipped",
+                    "original_task_id": task_id,
+                    "workflow": workflow,
+                    "reason": "non_retryable_failure",
+                    "failure_class": failure_class,
                 },
             )
 
@@ -555,6 +666,8 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
         "status": status,
         "exit_code": exit_code,
         "error_message": error_message or None,
+        "run_status": run_status,
+        "failure_class": (workflow_result or {}).get("failure_class"),
         "auto_retry_enqueued": auto_retry_enqueued,  # R3: retry task_id or None
         "finished_at": _utcnow().isoformat(),
     }
@@ -602,8 +715,12 @@ def main() -> int:
         return 0
 
     last_task: dict[str, object] | None = None
+    last_orphan_scan = time.monotonic()
     while not _shutdown:
         try:
+            if time.monotonic() - last_orphan_scan >= ORPHAN_SCAN_INTERVAL_SECONDS:
+                _recover_orphaned_running_tasks()
+                last_orphan_scan = time.monotonic()
             if args.enable_scheduler:
                 _run_scheduler_once()
             processed = process_one_task(poll_interval=args.poll_interval)

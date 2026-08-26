@@ -302,7 +302,7 @@ class IndependentReplayAdapter(BaseReplayAdapter):
 
         recent = history[-min_confirm_ticks:]
 
-        # 条件 1：所有 recent 评��� >= entry_threshold（参数化）
+        # 条件 1：所有 recent 评分 >= entry_threshold（参数化）
         support_count = sum(1 for s in recent if s >= entry_threshold)
         if support_count < min_confirm_ticks:
             return False
@@ -313,7 +313,7 @@ class IndependentReplayAdapter(BaseReplayAdapter):
         if drawdown_bps > threshold_bps:
             return False
 
-        # ���件 3（可选）：如果启用了 min_score_drawdown_bps，额外检查
+        # 条件 3（可选）：如果启用了 min_score_drawdown_bps，额外检查
         if min_score_drawdown_bps is not None and drawdown_bps > min_score_drawdown_bps:
             return False
 

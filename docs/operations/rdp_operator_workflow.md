@@ -1,6 +1,6 @@
 # RDP Operator 工作流 SOP
 
-> 最后核对：2026-08-25（代码基线 `0b58dbad` + RDP 2.0 未提交工作区）。本 SOP 只使用当前 Operator API/UI 和 Run/attempt queue；旧直写 CLI、4-workflow 清单和 active JSON fallback 已移除。
+> 最后核对：2026-08-25（起始代码基线 `70f1a581`，含本轮 RDP 业务逻辑整改工作区）。本 SOP 只使用当前 Operator API/UI 和 Run/attempt queue；旧直写 CLI、4-workflow 清单和 active JSON fallback 已移除。
 
 ## 1. 每日观察
 
@@ -43,10 +43,10 @@
 当前入口：
 
 - 单独 apply：`POST /rdp/parameters/apply`，需要 `action=apply` 的短时 `X-Rdp-Apply-Token`；
-- release + apply：`POST /rdp/releases/create`，当前只要求 write access + integrity/gate；
-- approve + release + apply：`POST /rdp/recommendations/{id}/approve-and-release`，策略与组合 release 相同。
+- release + apply：`POST /rdp/releases/create`，需要 write access、integrity/gate 和 `action=apply` token；
+- approve + release + apply：`POST /rdp/recommendations/{id}/approve-and-release`，需要同一组控制，token 校验先于审批写入。
 
-组合端点没有 token 依赖是当前代码事实，不等于可绕过 gate。生产不使用 `skip_gate=true`。
+UI 会自动从当前 session 申请短时 token；直接调用 API 时必须显式携带。`skip_apply=true` 不要求 apply token，生产仍不得使用 `skip_gate=true`。
 
 发布后：
 
@@ -77,8 +77,10 @@
 - 手动 Run 会立即取得稳定 `run_id`，并优先于尚未启动的定时任务；单 daemon
   正在执行时仍需等待执行槽，UI 会显示真实等待原因；
 - daemon 通过数据库 claim 执行，不能手工把状态改为 running；
-- 自动重试复用同一 `run_id`、递增 attempt，并遵循 `earliest_start_at`；
+- 自动重试仅针对已识别的临时基础设施故障，复用同一 `run_id`、递增 attempt，并遵循 `earliest_start_at`；TypeError/ValueError、数据不足、gate 阻断和未知错误不会自动重跑；
 - queued Run 可立即取消；running Run 的取消先登记，再由 daemon 终止当前子进程并写 `cancelled` 终态。
+- `succeeded_with_warnings` 表示任务完成但存在 allow-failure 或研究批次部分成功；`partially_succeeded` 表示硬失败前后仍有可用阶段产物，两者都不能写成完整成功。
+- 运行详情优先看 `run.error_summary` 和首个失败步骤；日志 tail 只是诊断补充，最后一个成功阶段不能覆盖前面的失败。
 
 完整 schedule 见 [平台运行手册](platform_runbook.md)。
 
@@ -92,7 +94,8 @@
 | Active set 与预期不符 | 停止发布，查 DB active set/history/release/runtime provenance |
 | DB active loader 失败 | runtime 已退化到 profile 参数；恢复数据库，不能靠 JSON fallback |
 | Run queued | 看 `eligible_at`、trigger kind、当前执行槽和 daemon heartbeat；不要把合法等待写成 DB 故障 |
-| Run running 无 heartbeat | 查 orphan recovery；旧 attempt 应变 failed/-3，Run 错误码为 `worker_orphan_recovered` |
+| Run running 无 heartbeat | daemon 只回收超过 30 秒无 task heartbeat 的 running attempt；旧 attempt 应变 failed/-3，Run 错误码为 `worker_orphan_recovered`，新鲜心跳不得被另一 daemon 误杀 |
+| Run 失败后未自动排队 | 先看 failure class；只有 `transient_infrastructure` 会自动重试一次，其余需要修复根因后由 `POST /rdp/v2/runs/{run_id}/retry` 人工重试 |
 | Rollback 无 target | 不猜测版本；人工审查合法 parameter set |
 
 ## 7. 禁止事项

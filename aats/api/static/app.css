@@ -2812,3 +2812,364 @@ input::placeholder {
     grid-template-columns: 1fr;
   }
 }
+
+/* RDP Platform V3: 单一 workspace 快照的紧凑研究运营布局。 */
+.rdp-v3-shell {
+  display: grid;
+  gap: 14px;
+}
+
+.rdp-v3-shell .primary-status-panel,
+.rdp-v3-shell .surface-card {
+  margin: 0;
+}
+
+.rdp-v3-eyebrow {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--muted, #91a1b4);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.rdp-v3-lifecycle {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(150px, 1fr));
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.rdp-v3-stage {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: 9px;
+  min-height: 110px;
+  padding: 12px;
+  border: 1px solid var(--border, #253447);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--panel, #0f1822) 92%, transparent);
+}
+
+.rdp-v3-stage.is-current {
+  border-color: var(--accent, #65a9ff);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent, #65a9ff) 35%, transparent);
+}
+
+.rdp-v3-stage.tone-danger { border-color: color-mix(in srgb, #ff6b7d 58%, var(--border, #253447)); }
+.rdp-v3-stage.tone-warning { border-color: color-mix(in srgb, #f4b860 48%, var(--border, #253447)); }
+.rdp-v3-stage.tone-positive { border-color: color-mix(in srgb, #55cf9a 42%, var(--border, #253447)); }
+
+.rdp-v3-stage__index,
+.rdp-v3-queue__position {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 9px;
+  color: var(--text, #eff6ff);
+  background: color-mix(in srgb, var(--accent, #65a9ff) 18%, transparent);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.rdp-v3-stage__body,
+.rdp-v3-stage__body p {
+  min-width: 0;
+}
+
+.rdp-v3-stage__head,
+.rdp-v3-run__head,
+.rdp-v3-research-item__head,
+.rdp-v3-release-item__head,
+.rdp-v3-subsection__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rdp-v3-stage__head {
+  flex-direction: column;
+}
+
+.rdp-v3-stage__body p,
+.rdp-v3-workflow-bar p,
+.rdp-v3-run p,
+.rdp-v3-research-item p,
+.rdp-v3-release-item p,
+.rdp-v3-alert-strip p {
+  margin: 5px 0;
+  color: var(--muted, #91a1b4);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.rdp-v3-stage__body > span,
+.rdp-v3-queue__item > div > span,
+.rdp-v3-recent-runs article > div > span,
+.rdp-v3-observation-item > div > span,
+.rdp-v3-tuning-list article > div > span {
+  color: var(--muted, #91a1b4);
+  font-size: 11px;
+}
+
+.rdp-v3-workflow-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 13px 16px;
+  border: 1px solid var(--border, #253447);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--panel, #0f1822) 94%, transparent);
+}
+
+.rdp-v3-workflow-bar p {
+  margin-bottom: 0;
+}
+
+.rdp-v3-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.rdp-v3-primary-grid {
+  display: grid;
+  grid-template-columns: minmax(330px, 5fr) minmax(420px, 7fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.rdp-v3-card {
+  min-width: 0;
+}
+
+.rdp-v3-run,
+.rdp-v3-research-item,
+.rdp-v3-release-item,
+.rdp-v3-alert-strip article,
+.rdp-v3-evidence-grid article {
+  padding: 13px;
+  border: 1px solid var(--border, #253447);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--panel-strong, #111d29) 90%, transparent);
+}
+
+.rdp-v3-run.tone-info,
+.rdp-v3-research-item.tone-warning {
+  border-color: color-mix(in srgb, var(--accent, #65a9ff) 38%, var(--border, #253447));
+}
+
+.rdp-v3-research-item.tone-danger,
+.rdp-v3-alert-strip article.tone-danger {
+  border-color: color-mix(in srgb, #ff6b7d 55%, var(--border, #253447));
+}
+
+.rdp-v3-inline-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin: 8px 0 10px;
+  color: var(--muted, #91a1b4);
+  font-size: 12px;
+}
+
+.rdp-v3-subsection {
+  margin-top: 13px;
+}
+
+.rdp-v3-subsection__head {
+  align-items: center;
+  margin-bottom: 7px;
+}
+
+.rdp-v3-subsection__head h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.rdp-v3-subsection__head span {
+  color: var(--muted, #91a1b4);
+  font-size: 12px;
+}
+
+.rdp-v3-queue,
+.rdp-v3-recent-runs,
+.rdp-v3-research-list,
+.rdp-v3-release-list,
+.rdp-v3-observation-list,
+.rdp-v3-tuning-list {
+  display: grid;
+  gap: 8px;
+}
+
+.rdp-v3-queue__item,
+.rdp-v3-recent-runs article,
+.rdp-v3-observation-item,
+.rdp-v3-tuning-list article {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border, #253447) 65%, transparent);
+}
+
+.rdp-v3-queue__item:last-child,
+.rdp-v3-recent-runs article:last-child,
+.rdp-v3-observation-item:last-child,
+.rdp-v3-tuning-list article:last-child {
+  border-bottom: 0;
+}
+
+.rdp-v3-queue__item p {
+  margin: 2px 0;
+  color: var(--muted, #91a1b4);
+  font-size: 12px;
+}
+
+.rdp-v3-details {
+  margin-top: 10px;
+  border-top: 1px solid var(--border, #253447);
+  padding-top: 9px;
+}
+
+.rdp-v3-details summary {
+  cursor: pointer;
+  color: var(--accent, #65a9ff);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.rdp-v3-evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.rdp-v3-evidence-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 10px;
+  margin: 10px 0 8px;
+}
+
+.rdp-v3-evidence-metrics div {
+  min-width: 0;
+}
+
+.rdp-v3-evidence-metrics dt,
+.rdp-v3-evidence-source {
+  color: var(--muted, #91a1b4);
+  font-size: 11px;
+}
+
+.rdp-v3-evidence-metrics dd {
+  margin: 2px 0 0;
+  color: var(--text, #edf4ff);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.rdp-v3-research-item ul {
+  margin: 7px 0;
+  padding-left: 18px;
+  color: var(--muted, #91a1b4);
+  font-size: 12px;
+}
+
+.rdp-v3-alert-strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin-bottom: 9px;
+}
+
+.rdp-v3-three-columns {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.rdp-v3-three-columns > section {
+  min-width: 0;
+}
+
+.rdp-v3-empty {
+  padding: 18px;
+  border: 1px dashed var(--border, #253447);
+  border-radius: 13px;
+  text-align: center;
+}
+
+.rdp-v3-empty--compact {
+  padding: 13px;
+}
+
+.rdp-v3-empty p,
+.rdp-v3-muted {
+  margin: 5px 0 0;
+  color: var(--muted, #91a1b4);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.rdp-v3-footnote .summary-strip {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (max-width: 1180px) {
+  .rdp-v3-lifecycle {
+    grid-template-columns: repeat(3, minmax(190px, 1fr));
+  }
+
+  .rdp-v3-primary-grid,
+  .rdp-v3-three-columns {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .rdp-v3-lifecycle {
+    grid-template-columns: repeat(6, minmax(220px, 1fr));
+  }
+
+  .rdp-v3-workflow-bar,
+  .rdp-v3-run__head,
+  .rdp-v3-research-item__head,
+  .rdp-v3-release-item__head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .rdp-v3-actions,
+  .rdp-v3-actions button {
+    width: 100%;
+  }
+
+  .rdp-v3-queue__item,
+  .rdp-v3-recent-runs article,
+  .rdp-v3-observation-item,
+  .rdp-v3-tuning-list article {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .rdp-v3-queue__item .rdp-v3-actions,
+  .rdp-v3-recent-runs article .rdp-v3-actions,
+  .rdp-v3-observation-item .rdp-v3-actions,
+  .rdp-v3-tuning-list article .rdp-v3-actions {
+    grid-column: 1 / -1;
+  }
+
+  .rdp-v3-evidence-grid,
+  .rdp-v3-alert-strip,
+  .rdp-v3-footnote .summary-strip {
+    grid-template-columns: 1fr;
+  }
+}

@@ -386,7 +386,7 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    parser = argparse.ArgumentParser(description="Quality Monitor: 治理层��量巡检")
+    parser = argparse.ArgumentParser(description="Quality Monitor: 治理层质量巡检")
     parser.add_argument("--run", action="store_true", help="运行全部巡检")
     args = parser.parse_args()
 

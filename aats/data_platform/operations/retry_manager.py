@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import subprocess
-from datetime import datetime, timezone
 from pathlib import Path
 
 from aats.data_platform.operations.failure_registry import (
@@ -14,9 +12,18 @@ from aats.data_platform.operations.failure_registry import (
     record_retry_attempt,
 )
 from aats.data_platform.operations.workflow_dispatcher import (
+    _run_task,
+    describe_manual_trigger_availability,
     load_workflow_config,
     run_workflow,
 )
+
+
+def _manual_retry_block_reason(root: Path, workflow_name: str) -> str | None:
+    availability = describe_manual_trigger_availability(root, workflow_name)
+    if availability.get("enabled"):
+        return None
+    return str(availability.get("disabled_reason") or "workflow 当前禁止人工补跑")
 
 
 def retry_single_task(
@@ -50,6 +57,14 @@ def retry_single_task(
 
     workflow_name = failure["workflow"]
     task_name = failure["task_name"]
+    blocked_reason = _manual_retry_block_reason(root, workflow_name)
+    if blocked_reason is not None:
+        return {
+            "success": False,
+            "failure_id": failure_id,
+            "detail": blocked_reason,
+            "blocked": True,
+        }
 
     # 加载 workflow 配置找到命令
     try:
@@ -73,6 +88,13 @@ def retry_single_task(
             "failure_id": failure_id,
             "detail": f"task '{task_name}' not found in workflow '{workflow_name}'",
         }
+    if task_config.get("enabled", True) is False:
+        return {
+            "success": False,
+            "failure_id": failure_id,
+            "detail": f"task '{task_name}' is disabled and cannot be retried",
+            "blocked": True,
+        }
 
     command = task_config["command"]
     timeout = timeout_override or task_config.get("timeout_seconds", 120)
@@ -85,29 +107,15 @@ def retry_single_task(
             "dry_run": True,
         }
 
-    # 实际执行
-    now = datetime.now(timezone.utc)
-    try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=str(root),
-        )
-        success = result.returncode == 0
-        detail = (
-            f"exit_code={result.returncode}, "
-            f"stdout={result.stdout[:200] if result.stdout else ''}, "
-            f"stderr={result.stderr[:200] if result.stderr else ''}"
-        )
-    except subprocess.TimeoutExpired:
-        success = False
-        detail = f"timeout after {timeout}s"
-    except Exception as e:
-        success = False
-        detail = f"error: {e}"
+    retry_task = {**task_config, "timeout_seconds": timeout}
+    result = _run_task(root, retry_task)
+    success = result.get("status") in {"success", "success_with_warnings"}
+    detail = str(
+        result.get("error")
+        or result.get("warning_summary")
+        or result.get("output_tail")
+        or f"status={result.get('status')}",
+    )[:500]
 
     # 记录补跑结果
     record_retry_attempt(
@@ -121,7 +129,7 @@ def retry_single_task(
         "workflow": workflow_name,
         "command": command,
         "detail": detail,
-        "retried_at": now.isoformat(),
+        "retried_at": result.get("finished_at"),
     }
 
 
@@ -145,6 +153,15 @@ def retry_workflow(
         }
 
     workflow_name = failure["workflow"]
+    blocked_reason = _manual_retry_block_reason(root, workflow_name)
+    if blocked_reason is not None:
+        return {
+            "success": False,
+            "failure_id": failure_id,
+            "workflow": workflow_name,
+            "detail": blocked_reason,
+            "blocked": True,
+        }
 
     if dry_run:
         return {

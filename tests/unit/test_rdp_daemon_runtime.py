@@ -105,6 +105,54 @@ def test_execute_workflow_handles_large_output_without_pipe_deadlock(
     assert "x" in log_tail
 
 
+def test_daemon_reads_structured_workflow_failure_from_log_tail() -> None:
+    daemon = importlib.import_module("scripts.rdp_task_daemon")
+    payload = daemon._extract_workflow_result(
+        "older output\n"
+        "RDP_WORKFLOW_RESULT_JSON={\"overall_status\":\"partial\","
+        "\"error_summary\":\"Phase 4 failed\","
+        "\"failure_class\":\"deterministic_code_or_contract\"}",
+    )
+
+    assert payload is not None
+    assert payload["error_summary"] == "Phase 4 failed"
+    assert daemon._logical_run_status(
+        queue_status="failed",
+        workflow_result=payload,
+    ) == "partially_succeeded"
+
+
+def test_daemon_auto_retries_only_known_transient_failures() -> None:
+    daemon = importlib.import_module("scripts.rdp_task_daemon")
+    transient = {"failure_class": "transient_infrastructure"}
+    deterministic = {"failure_class": "deterministic_code_or_contract"}
+
+    assert daemon._should_auto_retry(
+        queue_status="failed",
+        trigger_kind="manual",
+        workflow_result=transient,
+    ) is True
+    assert daemon._should_auto_retry(
+        queue_status="failed",
+        trigger_kind="manual",
+        workflow_result=deterministic,
+    ) is False
+    assert daemon._should_auto_retry(
+        queue_status="failed",
+        trigger_kind="auto_retry",
+        workflow_result=transient,
+    ) is False
+
+
+def test_daemon_maps_degraded_workflow_to_warning_run_status() -> None:
+    daemon = importlib.import_module("scripts.rdp_task_daemon")
+
+    assert daemon._logical_run_status(
+        queue_status="done",
+        workflow_result={"overall_status": "degraded"},
+    ) == "succeeded_with_warnings"
+
+
 def test_recover_orphaned_running_tasks_marks_stale_rows_failed(monkeypatch) -> None:
     daemon = importlib.import_module("scripts.rdp_task_daemon")
 

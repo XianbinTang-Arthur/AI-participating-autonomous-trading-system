@@ -1,6 +1,6 @@
 # RDP Workflow 调度日历
 
-> 最后核对：2026-08-22（代码基线 `be9179e`）。时间均为 UTC，以 `configs/rdp_workflows/*.json` 为声明真相；实际执行还受 scheduler state、environment guard、task queue 和 freeze 约束。
+> 最后核对：2026-08-25（起始代码基线 `70f1a581`，含本轮 RDP 整改工作区）。时间均为 UTC，以 `configs/rdp_workflows/*.json` 为声明真相；实际执行还受 scheduler state、environment guard、task queue 和 freeze 约束。
 
 ## 当前 10 个 Workflow
 
@@ -35,9 +35,10 @@
 
 - 首次 scheduler bootstrap 固定排队 `data_maintenance → research_cycle`。
 - 其他 workflow 首次只记录最新 slot，避免从 Unix epoch 全量回补。
-- daemon 停机后，scheduler 会枚举 `last_processed` 之后至当前的到期 slot。
+- daemon 停机后，scheduler 会计算 `last_processed` 之后的全部到期 slot，但只为最新滚动窗口创建一次任务，并在报告的 `coalesced` 中记录合并范围。现行命令不接收历史 slot，逐 slot 入队不能形成历史回放。
 - 同 workflow 的 partial unique index 阻止并行 pending/running。
-- 自动 retry 可设置 `earliest_start_at`，未到时间不会被 claim。
+- 已有 active task 时不会推进 `last_processed_slot`，避免把尚未覆盖的最新窗口误记为已处理。
+- 自动 retry 只用于明确分类为 `transient_infrastructure` 的失败，复用同一 `run_id` 并设置 `earliest_start_at`；代码异常、业务门禁、数据不足和未知失败保持终态等待人工处理。
 
 ## 时区
 

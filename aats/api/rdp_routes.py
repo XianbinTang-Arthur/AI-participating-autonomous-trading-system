@@ -54,6 +54,7 @@ from aats.api.rdp_control_summary import (
 )
 from aats.api.auth import OperatorPrincipal, require_read_access, require_write_access
 from aats.api.rdp_v2 import rdp_v2_router
+from aats.api.rdp_workspace_routes import rdp_workspace_router
 from aats.data_platform.governance.step2_integrity_guard import (
     step2_integrity_blocking_reason as _step2_integrity_blocking_reason,
 )
@@ -108,6 +109,35 @@ rdp_router = APIRouter(
     tags=["RDP"],
 )
 rdp_router.include_router(rdp_v2_router)
+rdp_router.include_router(rdp_workspace_router)
+
+
+def _verify_action_token(
+    *,
+    request: Request,
+    raw_token: str | None,
+    required_action: str,
+) -> str:
+    """校验 action-bound token，并把审计字段写入 request state。"""
+    if not raw_token:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "missing_apply_token", "action": required_action},
+        )
+    try:
+        actor, exp_ts = verify_token(raw_token, required_action)
+    except InvalidTokenError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "invalid_apply_token",
+                "reason": str(exc),
+                "action": required_action,
+            },
+        ) from None
+    request.state.apply_token_actor = actor
+    request.state.apply_token_exp_ts = exp_ts
+    return actor
 
 
 def _require_apply_token(required_action: str):
@@ -127,25 +157,11 @@ def _require_apply_token(required_action: str):
             convert_underscores=False,
         ),
     ) -> str:
-        if not x_rdp_apply_token:
-            raise HTTPException(
-                status_code=403,
-                detail={"code": "missing_apply_token", "action": required_action},
-            )
-        try:
-            actor, exp_ts = verify_token(x_rdp_apply_token, required_action)
-        except InvalidTokenError as exc:
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "code": "invalid_apply_token",
-                    "reason": str(exc),
-                    "action": required_action,
-                },
-            ) from None
-        request.state.apply_token_actor = actor
-        request.state.apply_token_exp_ts = exp_ts
-        return actor
+        return _verify_action_token(
+            request=request,
+            raw_token=x_rdp_apply_token,
+            required_action=required_action,
+        )
 
     return _dep
 
@@ -174,6 +190,28 @@ def _enforce_token_actor_matches_session(
             "session_actor": session_id,
             "token_actor": token_actor,
         },
+    )
+
+
+def _require_composite_apply_token(
+    *,
+    request: Request,
+    principal: OperatorPrincipal,
+    raw_token: str | None,
+    run_apply: bool,
+) -> None:
+    """组合发布只在会执行 apply 时要求与 session 绑定的 apply token。"""
+    if not run_apply:
+        return
+    token_actor = _verify_action_token(
+        request=request,
+        raw_token=raw_token,
+        required_action="apply",
+    )
+    _enforce_token_actor_matches_session(
+        principal=principal,
+        token_actor=token_actor,
+        action="apply",
     )
 
 
@@ -682,6 +720,11 @@ async def approve_and_release_api(
     recommendation_id: str,
     body: ApproveAndReleaseRequest,
     principal: OperatorPrincipal = Depends(require_write_access),
+    x_rdp_apply_token: str | None = Header(
+        default=None,
+        alias="X-Rdp-Apply-Token",
+        convert_underscores=False,
+    ),
 ) -> dict[str, Any]:
     """审批 + gate + release + apply 一条龙（draft → approved → active）。
 
@@ -689,12 +732,9 @@ async def approve_and_release_api(
     （后者自带 gate + apply）= 2 个独立 HTTP 请求。把这两步折叠成一次调用，
     让 operator UI "审批并发布" 按钮能原子地走完整个治理链。
 
-    语义和 token 策略上，本端点对齐 ``/releases/create`` 而非 ``/parameters/apply``：
-    同样走 ``require_write_access`` + Step2 integrity gate，但不额外要求
-    ``X-Rdp-Apply-Token``。原因：``/releases/create`` 本身就是"gate + release +
-    apply"的官方组合入口且未要求 token；如果给这个语义相同的端点再加一道锁，
-    operator 就会被迫走两条政策不一致的路径，反而更乱。若未来把 HMAC token
-    推广到所有写动作，``/releases/create`` 与本端点应同步硬化，保持对等。
+    当 ``skip_apply=False`` 时，本端点与 ``/parameters/apply``、
+    ``/releases/create`` 一样要求 action=apply 的短时 ``X-Rdp-Apply-Token``；
+    token 校验先于审批和任何持久化，避免组合入口绕过参数应用的第二道授权。
 
     失败恢复：
       - 审批失败（404 / CAS race）：recommendation 未变，release 未创建，回 HTTP 错误
@@ -731,6 +771,13 @@ async def approve_and_release_api(
 
     root = _project_root(request)
     actor = _resolve_actor(principal, body.actor)
+
+    _require_composite_apply_token(
+        request=request,
+        principal=principal,
+        raw_token=x_rdp_apply_token,
+        run_apply=not body.skip_apply,
+    )
 
     # Step2 integrity gate：approve / release / apply 三条路径各自都有这个
     # 门闸；合并路径只做一次，保证"在任何时刻 Step2 降级都在源头拒绝"，
@@ -963,12 +1010,24 @@ async def create_release_api(
     request: Request,
     body: CreateReleaseRequest,
     principal: OperatorPrincipal = Depends(require_write_access),
+    x_rdp_apply_token: str | None = Header(
+        default=None,
+        alias="X-Rdp-Apply-Token",
+        convert_underscores=False,
+    ),
 ) -> dict[str, Any]:
     """创建 parameter release（gate + apply 完整流程）."""
     from aats.data_platform.production_workflow.release_registry import (
         create_parameter_release,
     )
     root = _project_root(request)
+
+    _require_composite_apply_token(
+        request=request,
+        principal=principal,
+        raw_token=x_rdp_apply_token,
+        run_apply=not body.skip_apply,
+    )
 
     # Server-side integrity gate：/releases/create 触发 gate + apply 全链路，
     # 比单独 /parameters/apply 影响更大（会生成 parameter_release 行并进入
@@ -1137,7 +1196,7 @@ async def evaluate_rollback_api(
 
 # ══════════════════════════════════════════════════════════════════
 #  RDP Task Queue 端点（UI 触发 workflow + 状态查询）
-# ═══════════════════════════════════════════��══════════════════════
+# ══════════════════════════════════════════════════════════════════
 
 
 @rdp_router.post(
@@ -1195,10 +1254,12 @@ async def trigger_task_api(
         body.workflow,
     )
     if not availability.get("enabled"):
+        blocked_by_freeze = bool(availability.get("blocked_by_freeze"))
         return _response(
             ok=False,
             message=str(availability.get("disabled_reason") or "当前 workflow 不能手动触发。"),
-            blocked_by_config=True,
+            blocked_by_freeze=blocked_by_freeze,
+            blocked_by_config=not blocked_by_freeze,
         )
 
     try:

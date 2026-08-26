@@ -605,7 +605,7 @@ class TestKillSwitchSyncDispatch(unittest.IsolatedAsyncioTestCase):
 
 # ─────────────────────────────────────────────────────────────────────
 # Kill Switch Redis TTL + staleness
-# ──────────────────────────────────────────────────────────────��──────
+# ────────────────────────────────────────────────────────────────────
 
 
 class TestKillSwitchRedisTTL(unittest.IsolatedAsyncioTestCase):

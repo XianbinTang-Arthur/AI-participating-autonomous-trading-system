@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -178,16 +179,26 @@ def _identify_top_execution_failure(
         return "no_candidates"
 
     # 统计各类问题
-    no_data = sum(1 for r in slippage_rows
-                  if r.get("feasibility_category") == "insufficient_market_data")
+    no_data = sum(
+        1
+        for r in slippage_rows
+        if r.get("feasibility_category") == "insufficient_market_data"
+        or r.get("slippage_data_quality") == "no_data"
+    )
     not_fillable = sum(1 for r in slippage_rows
                        if r.get("feasibility_category") == "not_fillable")
-    negative_edge = sum(1 for r in slippage_rows
-                        if r.get("cost_adjusted_edge_bps") is not None
-                        and r["cost_adjusted_edge_bps"] <= 0)
-    high_slippage = sum(1 for r in slippage_rows
-                        if r.get("estimated_slippage_bps") is not None
-                        and r["estimated_slippage_bps"] > 5.0)
+    negative_edge = sum(
+        1
+        for r in slippage_rows
+        if (_finite_number(r.get("cost_adjusted_edge_bps"))) is not None
+        and _finite_number(r.get("cost_adjusted_edge_bps")) <= 0
+    )
+    high_slippage = sum(
+        1
+        for r in slippage_rows
+        if (_finite_number(r.get("estimated_slippage_bps"))) is not None
+        and _finite_number(r.get("estimated_slippage_bps")) > 5.0
+    )
 
     counts = {
         "insufficient_data": no_data,
@@ -201,3 +212,14 @@ def _identify_top_execution_failure(
 
     top = max(counts, key=lambda k: counts[k])
     return f"{top}({counts[top]})"
+
+
+def _finite_number(value: Any) -> float | None:
+    """将 CSV/JSON 标量规范化为有限浮点数；空值和非有限值都视为缺失。"""
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None

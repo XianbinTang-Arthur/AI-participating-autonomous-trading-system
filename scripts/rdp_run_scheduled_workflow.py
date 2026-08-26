@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -39,6 +40,7 @@ if sys.platform == "win32":
         pass
 
 ROOT = Path(__file__).resolve().parent.parent
+_WORKFLOW_RESULT_PREFIX = "RDP_WORKFLOW_RESULT_JSON="
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -133,6 +135,20 @@ def main() -> int:
         if output_tail:
             for line in output_tail.splitlines():
                 print(f"         {line}")
+
+    marker_payload = {
+        "run_id": report.get("run_id"),
+        "workflow": report.get("workflow"),
+        "overall_status": report.get("overall_status"),
+        "error_summary": report.get("error_summary"),
+        "failure_class": report.get("failure_class"),
+        "first_failure": report.get("first_failure"),
+    }
+    print(
+        _WORKFLOW_RESULT_PREFIX
+        + json.dumps(marker_payload, ensure_ascii=False, separators=(",", ":")),
+        flush=True,
+    )
 
     # "degraded" = 所有失败 task 都是 allow_failure=true 的（见 workflow_dispatcher）
     # → 通过 structured log 暴露但不触发 exit=1，避免 hourly workflow 节奏被

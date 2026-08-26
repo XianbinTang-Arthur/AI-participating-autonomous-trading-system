@@ -152,7 +152,7 @@ const DEFERRED_VIEW_PANELS = {
   exitExecution: new Set(["exitExecutionActionHistoryPage"]),
   replay: new Set(["replayStatus", "replayRecentValidations"]),
   aiAnalysis: new Set(["aiRecent", "aiShadowRecent", "aiShadowEvaluations", "profileControlSummary"]),
-  rdp: new Set(["rdpWorkbenchItems", "rdpWorkbenchAlerts", "rdpTuningProposals"]),
+  rdp: new Set(),
 };
 
 export function viewSpecs(view, state = null) {
@@ -236,13 +236,7 @@ export function viewSpecs(view, state = null) {
       ["aiRuntime", "/ai/runtime"],
     ],
     rdp: [
-      ["rdpRuns", "/rdp/v2/runs?limit=20&offset=0"],
-      ["rdpControl", "/rdp/control-summary"],
-      ["rdpWorkbenchOverview", "/rdp/workbench/overview"],
-      ["rdpWorkbenchItems", "/rdp/workbench/items"],
-      ["rdpWorkbenchAlerts", "/rdp/workbench/alerts"],
-      ["rdpTuningOverview", "/rdp/tuning/overview"],
-      ["rdpTuningProposals", "/rdp/tuning/proposals"],
+      ["rdpWorkspace", "/rdp/v3/workspace?run_limit=20"],
     ],
     admin: [
       ["operatorUsers", "/auth/users"],

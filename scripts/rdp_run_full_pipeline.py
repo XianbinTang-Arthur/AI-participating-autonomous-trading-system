@@ -31,6 +31,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import subprocess
 import sys
@@ -42,6 +43,8 @@ from uuid import uuid4
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent
+_PIPELINE_RESULT_PREFIX = "RDP_PIPELINE_RESULT_JSON="
+_PARTIAL_SUCCESS_PHASES = frozenset({"step2", "step3", "phase3", "phase4"})
 
 logging.basicConfig(
     level=logging.INFO,
@@ -188,7 +191,7 @@ def _resolve_phases(args: argparse.Namespace) -> list[str]:
 
 
 def _find_latest_params_json() -> Path | None:
-    """查找最新��参数文件。
+    """查找最新参数文件。
 
     优先使用 Step 3 merged 结果；仅当 Step 3 不存在时才回退到 Step 2。
     """
@@ -249,7 +252,7 @@ def _run_phase(
                 "phase": name, "status": "success",
                 "exit_code": 0, "elapsed_s": elapsed,
             }
-        elif result.returncode == 2:
+        elif result.returncode == 2 and name in _PARTIAL_SUCCESS_PHASES:
             # exit code 2 = 部分成功 (某些 batch 通过, 仍有可用产物)
             log.warning(
                 "%s 部分成功 (exit=2, %.0fs) — 部分 batch 失败但仍有产物",
@@ -278,6 +281,42 @@ def _run_phase(
             "phase": name, "status": "error",
             "exit_code": -1, "error": str(exc),
         }
+
+
+def _emit_pipeline_result(
+    *,
+    pipeline_id: str,
+    status: str,
+    results: list[dict],
+) -> None:
+    first_issue = next(
+        (
+            item
+            for item in results
+            if item.get("status") in ("partial_success", "failed", "timeout", "error")
+        ),
+        None,
+    )
+    first_failure = None
+    if first_issue is not None:
+        phase = str(first_issue.get("phase") or "unknown")
+        first_failure = {
+            "phase": phase,
+            "phase_label": PHASE_LABELS.get(phase, phase),
+            "status": first_issue.get("status"),
+            "exit_code": first_issue.get("exit_code"),
+            "error": first_issue.get("error"),
+        }
+    payload = {
+        "pipeline_id": pipeline_id,
+        "status": status,
+        "first_failure": first_failure,
+    }
+    print(
+        _PIPELINE_RESULT_PREFIX
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        flush=True,
+    )
 
 
 # =========================================================================
@@ -650,13 +689,23 @@ def main() -> int:
         first_fail = next(r for r in results if r["status"] in ("failed", "timeout", "error"))
         print()
         print(f"  恢复命令: 添加 --start-from {first_fail['phase']} 从失败处重跑")
+        _emit_pipeline_result(
+            pipeline_id=pipeline_id,
+            status="partially_succeeded" if ok > 0 or partial > 0 else "failed",
+            results=results,
+        )
         return 1
 
     print()
     if not args.dry_run and "decision" in ran_phases:
         print("  当前状态: 研究与治理建议已生成, 尚未应用到 live 参数")
-        print("  下一步: 查看 decision 报告, 如需应用参数:")
-        print("    python scripts/approve_recommendation_and_apply.py --rec-id <ID>")
+        print("  下一步: 在 RDP 工作台审查 decision 与 gate；禁止使用已停用的直写 CLI")
+
+    _emit_pipeline_result(
+        pipeline_id=pipeline_id,
+        status="succeeded_with_warnings" if partial > 0 else "succeeded",
+        results=results,
+    )
 
     return 0
 

@@ -1399,9 +1399,28 @@ def _build_task_lane_summary(tasks: dict[str, Any]) -> tuple[dict[str, Any], dic
     return current_execution, next_queue
 
 
+def _load_workbench_phase_payloads(root: Path) -> dict[str, dict[str, Any]]:
+    payloads: dict[str, dict[str, Any]] = {}
+    for phase, query_fn in (
+        ("phase3", query_latest_attribution),
+        ("phase4", query_latest_execution_realism),
+    ):
+        try:
+            payload = query_fn(root)
+        except Exception:
+            logger.exception("workbench: %s payload query failed", phase)
+            payload = {"available": False, "incomplete_reason": "query_failed"}
+        if not isinstance(payload, dict):
+            payload = {"available": False, "incomplete_reason": "query_failed"}
+        payloads[phase] = payload
+    return payloads
+
+
 def _build_workbench_alerts_payload(
     root: Path,
     summary: dict[str, Any],
+    *,
+    phase_payloads: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     integrity_alerts: list[dict[str, Any]] = []
     operational_alerts: list[dict[str, Any]] = []
@@ -1434,22 +1453,11 @@ def _build_workbench_alerts_payload(
     # /auth/dashboard/bundle 500，否则前端回到 "RDP 数据暂未就绪" 的 callout，
     # 等于又撞上 B2 的回归场景。任一 query 抛异常就降级为 "unavailable"，让下面
     # 的 gate 当作缺 round 处理（阻塞审批，显示告警）。
-    safe_phase_payloads: list[tuple[str, dict[str, Any], str]] = []
-    for phase, query_fn, title in (
-        ("phase3", query_latest_attribution, "最新归因结果不完整"),
-        ("phase4", query_latest_execution_realism, "最新执行评估不完整"),
-    ):
-        try:
-            payload = query_fn(root)
-        except Exception:
-            logger.exception("workbench alerts: %s payload query failed", phase)
-            payload = {
-                "available": False,
-                "incomplete_reason": "query_failed",
-            }
-        if not isinstance(payload, dict):
-            payload = {"available": False, "incomplete_reason": "query_failed"}
-        safe_phase_payloads.append((phase, payload, title))
+    phase_payloads = phase_payloads or _load_workbench_phase_payloads(root)
+    safe_phase_payloads = [
+        ("phase3", phase_payloads.get("phase3", {}), "最新归因结果不完整"),
+        ("phase4", phase_payloads.get("phase4", {}), "最新执行评估不完整"),
+    ]
 
     for phase, payload, title in safe_phase_payloads:
         if payload.get("available"):
@@ -1733,6 +1741,8 @@ def _build_workbench_items_payload(
     root: Path,
     summary: dict[str, Any],
     alerts_payload: dict[str, Any],
+    *,
+    phase_payloads: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     governance_state = summary.get("governance_state") or {}
     combo_states = {
@@ -1749,34 +1759,9 @@ def _build_workbench_items_payload(
     # H6 修复：query_latest_attribution / query_latest_execution_realism 读 DB
     # 或文件，一旦抖动原来会把 /auth/dashboard/bundle 打成 500。这里降级为
     # unavailable payload，并叠加一条 blocking alert，让下游门禁继续阻止审批。
-    try:
-        phase3_payload = query_latest_attribution(root)
-    except Exception:
-        logger.exception("workbench items: phase3 attribution query failed")
-        phase3_payload = {"available": False, "incomplete_reason": "query_failed"}
-        blocking_integrity.append({
-            "code": "query_failed",
-            "severity": "danger",
-            "scope": "phase",
-            "phase": "phase3",
-            "title": "最新归因结果查询失败",
-            "message": "PHASE3 数据查询异常，已按 fail-closed 阻止本轮审批。",
-            "blocks_approval": True,
-        })
-    try:
-        phase4_payload = query_latest_execution_realism(root)
-    except Exception:
-        logger.exception("workbench items: phase4 execution realism query failed")
-        phase4_payload = {"available": False, "incomplete_reason": "query_failed"}
-        blocking_integrity.append({
-            "code": "query_failed",
-            "severity": "danger",
-            "scope": "phase",
-            "phase": "phase4",
-            "title": "最新执行评估查询失败",
-            "message": "PHASE4 数据查询异常，已按 fail-closed 阻止本轮审批。",
-            "blocks_approval": True,
-        })
+    phase_payloads = phase_payloads or _load_workbench_phase_payloads(root)
+    phase3_payload = phase_payloads.get("phase3", {})
+    phase4_payload = phase_payloads.get("phase4", {})
 
     items: list[dict[str, Any]] = []
     for combo_key, rec in by_combo.items():
@@ -2054,10 +2039,14 @@ def _build_tuning_proposals_payload(root: Path) -> dict[str, Any]:
     }
 
 
-def build_rdp_workbench_overview(request: Request) -> dict[str, Any]:
-    root = _project_root(request)
-    summary = build_rdp_control_summary(request)
-    alerts_payload = _build_workbench_alerts_payload(root, summary)
+def _build_rdp_workbench_overview_payload(
+    root: Path,
+    summary: dict[str, Any],
+    *,
+    alerts_payload: dict[str, Any] | None = None,
+    tuning_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    alerts_payload = alerts_payload or _build_workbench_alerts_payload(root, summary)
     pending_items_by_combo = _select_workbench_pending_recommendations(summary)
     pending_item_count = len(pending_items_by_combo)
     integrity_blocked_item_count = _count_workbench_integrity_blocked_items(
@@ -2065,7 +2054,7 @@ def build_rdp_workbench_overview(request: Request) -> dict[str, Any]:
         alerts_payload,
     )
     release_candidates_payload = _build_release_candidates_payload(summary)
-    tuning_payload = _build_tuning_overview_payload(root)
+    tuning_payload = tuning_payload or _build_tuning_overview_payload(root)
     current_execution, next_queue = _build_task_lane_summary(summary.get("tasks") or {})
     primary_action, secondary_actions = _build_manual_workflow_actions(root, summary.get("tasks") or {})
     observation_queue = summary.get("observation_queue") or []
@@ -2126,6 +2115,48 @@ def build_rdp_workbench_overview(request: Request) -> dict[str, Any]:
             ) else "blocked",
             "latest_gate": operations_summary.get("latest_gate_status") or "not_run",
         },
+    }
+
+
+def build_rdp_workbench_overview(request: Request) -> dict[str, Any]:
+    root = _project_root(request)
+    summary = build_rdp_control_summary(request)
+    return _build_rdp_workbench_overview_payload(root, summary)
+
+
+def build_rdp_workbench_bundle(
+    request: Request,
+    *,
+    control_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """从同一份控制摘要派生 V3 工作台的研究、治理与调优读模型。"""
+    root = _project_root(request)
+    summary = control_summary if isinstance(control_summary, dict) else build_rdp_control_summary(request)
+    phase_payloads = _load_workbench_phase_payloads(root)
+    alerts = _build_workbench_alerts_payload(
+        root,
+        summary,
+        phase_payloads=phase_payloads,
+    )
+    tuning_overview = _build_tuning_overview_payload(root)
+    workbench = _build_workbench_items_payload(
+        root,
+        summary,
+        alerts,
+        phase_payloads=phase_payloads,
+    )
+    workbench["release_candidates"] = _build_release_candidates_payload(summary)
+    return {
+        "overview": _build_rdp_workbench_overview_payload(
+            root,
+            summary,
+            alerts_payload=alerts,
+            tuning_payload=tuning_overview,
+        ),
+        "workbench": workbench,
+        "alerts": alerts,
+        "tuning_overview": tuning_overview,
+        "tuning_proposals": _build_tuning_proposals_payload(root),
     }
 
 

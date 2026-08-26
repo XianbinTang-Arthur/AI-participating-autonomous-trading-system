@@ -1,15 +1,20 @@
 # AATS RDP 文档索引
 
 > 文档状态：现行索引  
-> 最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；Phase 3A–3W 整改提交候选）
+> 最后核对：2026-08-25（本轮全链路审查起始 HEAD `70f1a581`；实现位于未提交工作树）
 
 ## 当前入口
 
 - [`../../aats/data_platform/README.md`](../../aats/data_platform/README.md)：RDP 总览、模块边界和安全原则；
 - [`module_reference.md`](module_reference.md)：当前代码模块、API 与数据层导航；
+- [`../design/rdp_platform_v3_architecture_2026_08_25.md`](../design/rdp_platform_v3_architecture_2026_08_25.md)：当前统一工作台、单一读模型、队列语义和发布资格设计；
+- [`../task/rdp_platform_v3_refactor_sow_2026_08_25.md`](../task/rdp_platform_v3_refactor_sow_2026_08_25.md)：V3 实施、测试、发布和模拟验收范围；
+- [`../review/rdp_platform_v3_code_review_2026_08_25.md`](../review/rdp_platform_v3_code_review_2026_08_25.md)：V3 单一读模型、队列、发布资格、前端证据与安全动作复核；
+- [`../review/rdp_full_business_logic_audit_2026_08_25.md`](../review/rdp_full_business_logic_audit_2026_08_25.md)：全链路业务逻辑审查发现、修复和验证证据；
 - [`../task/rdp_2_run_observability_sow_2026_08_25.md`](../task/rdp_2_run_observability_sow_2026_08_25.md)：RDP 2.0 Run/Attempt/Step/Event 纵向切片、验收与兼容边界；
 - [`../operations/platform_runbook.md`](../operations/platform_runbook.md)：daemon、队列、调度和恢复；
 - [`../operations/rdp_operator_workflow.md`](../operations/rdp_operator_workflow.md)：Operator 标准流程；
+- [`../operations/rdp_ui_quickstart.md`](../operations/rdp_ui_quickstart.md)：Workspace V3 页面结构与操作速查；
 - [`../operations/rdp_workflow_calendar.md`](../operations/rdp_workflow_calendar.md)：当前 workflow 日历。
 - [`../task/fs_004_research_selection_holdout_sow_2026_08_25.md`](../task/fs_004_research_selection_holdout_sow_2026_08_25.md)：Research Factory v2 的 train/valid 选择、test 内容封存与仍开放的最终 OOS 边界。
 

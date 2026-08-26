@@ -55,7 +55,7 @@ _DASHBOARD_SNAPSHOT_REFRESH_LOCK_ATTR = "_dashboard_snapshot_mutation_refresh_lo
 _DASHBOARD_SNAPSHOT_REFRESH_LAST_ATTR = "_dashboard_snapshot_mutation_refresh_last_at"
 _DASHBOARD_SNAPSHOT_MUTATION_EAGER_PANEL_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("/ai/operating-mode/", ("aiConfigModel",)),
-    ("/rdp/", ("rdpControl", "rdpWorkbenchOverview")),
+    ("/rdp/", ("rdpWorkspace",)),
     ("/strategy-profiles/", ("profileControlSummary",)),
 )
 

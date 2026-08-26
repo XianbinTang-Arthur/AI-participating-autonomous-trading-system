@@ -221,8 +221,8 @@ def _run_single_experiment(
 
     # ---------- P1-1: 显式参数归一化 ----------
     # 将扁平 cost keys 组装成 cost_config 嵌套结构后再传给 from_dict()，
-    # 消除对 from_dict() ��部隐式收口逻辑的依赖。
-    # ��持两种写法：
+    # 消除对 from_dict() 内部隐式收口逻辑的依赖。
+    # 支持两种写法：
     #   (a) 扁平: {"taker_fee_bps": 3, "slippage_bps": 1}
     #   (b) 嵌套: {"cost_config": {"taker_fee_bps": 3, "slippage_bps": 1}}
     _FLAT_COST_KEYS = {"taker_fee_bps", "slippage_bps"}
@@ -426,7 +426,7 @@ def _write_experiment_refs(
     batch_run_id: str,
     output_path: pathlib.Path,
 ) -> pathlib.Path:
-    """写 experiment_refs.json：记录 label → experiment_id + ���物路径映射。"""
+    """写 experiment_refs.json：记录 label → experiment_id + 产物路径映射。"""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     refs = {
         "batch_run_id": batch_run_id,

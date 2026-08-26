@@ -374,7 +374,8 @@ def db_update_task_status(
     exit_code: int | None = None,
     error_message: str | None = None,
     log_tail: str | None = None,
-) -> None:
+    run_status: str | None = None,
+) -> bool:
     """更新任务状态（done / failed / cancelled）."""
     if status not in _TERMINAL_STATUSES:
         raise ValueError(f"Invalid terminal status: {status!r}, expected one of {_TERMINAL_STATUSES}")
@@ -382,7 +383,7 @@ def db_update_task_status(
     task_row = session.execute(
         text(
             """
-            SELECT run_id, attempt_no
+            SELECT run_id, attempt_no, status
             FROM governance.rdp_task_queue
             WHERE task_id = :task_id
             FOR UPDATE
@@ -390,6 +391,17 @@ def db_update_task_status(
         ),
         {"task_id": task_id},
     ).fetchone()
+    if task_row is None:
+        log.warning("DB task terminal update ignored: task not found: %s", task_id)
+        return False
+    if str(task_row.status) != "running":
+        log.warning(
+            "DB task terminal update ignored: task=%s current=%s requested=%s",
+            task_id,
+            task_row.status,
+            status,
+        )
+        return False
     session.execute(
         text("""
             UPDATE governance.rdp_task_queue
@@ -398,7 +410,7 @@ def db_update_task_status(
                 exit_code = :exit_code,
                 error_message = :error_message,
                 log_tail = :log_tail
-            WHERE task_id = :task_id
+            WHERE task_id = :task_id AND status = 'running'
         """),
         {
             "task_id": task_id,
@@ -409,27 +421,41 @@ def db_update_task_status(
             "now": now,
         },
     )
-    if task_row is not None:
+    if run_status is None:
         run_status = {
             "done": "succeeded",
             "failed": "failed",
             "cancelled": "cancelled",
         }[status]
-        error_code = None
-        if status == "failed":
-            error_code = "worker_orphan_recovered" if exit_code == _ORPHAN_RECOVERY_EXIT_CODE else "workflow_failed"
-        elif status == "cancelled":
-            error_code = "operator_cancelled"
-        db_mark_run_terminal(
-            session,
-            run_id=task_row.run_id,
-            attempt_no=int(task_row.attempt_no),
-            status=run_status,
-            finished_at=now,
-            error_code=error_code,
-            error_summary=error_message,
+    allowed_run_statuses = {
+        "done": {"succeeded", "succeeded_with_warnings"},
+        "failed": {"failed", "partially_succeeded"},
+        "cancelled": {"cancelled"},
+    }[status]
+    if run_status not in allowed_run_statuses:
+        raise ValueError(
+            f"run_status {run_status!r} is inconsistent with task status {status!r}",
         )
+    error_code = None
+    if status == "failed":
+        error_code = (
+            "worker_orphan_recovered"
+            if exit_code == _ORPHAN_RECOVERY_EXIT_CODE
+            else "workflow_failed"
+        )
+    elif status == "cancelled":
+        error_code = "operator_cancelled"
+    db_mark_run_terminal(
+        session,
+        run_id=task_row.run_id,
+        attempt_no=int(task_row.attempt_no),
+        status=run_status,
+        finished_at=now,
+        error_code=error_code,
+        error_summary=error_message,
+    )
     log.info("DB updated task: %s -> %s (exit=%s)", task_id, status, exit_code)
+    return True
 
 
 def db_recover_orphaned_running_tasks(
@@ -437,40 +463,45 @@ def db_recover_orphaned_running_tasks(
     *,
     error_message: str = "rdp_daemon_restarted_before_task_finished",
     exit_code: int = _ORPHAN_RECOVERY_EXIT_CODE,
+    stale_before: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    """将 daemon 异常退出后遗留的 running 任务统一回收成 failed。"""
+    """原子回收失去心跳的 running 任务；新鲜任务视为仍被其它 daemon 持有。"""
+    now = datetime.now(timezone.utc)
     rows = session.execute(
         text(
             """
-            SELECT task_id, run_id, attempt_no, workflow, requested_at, started_at
-            FROM governance.rdp_task_queue
-            WHERE status = 'running'
-            ORDER BY started_at ASC NULLS LAST, requested_at ASC
-            """
-        ),
-    ).fetchall()
-
-    if not rows:
-        return []
-
-    now = datetime.now(timezone.utc)
-    session.execute(
-        text(
-            """
-            UPDATE governance.rdp_task_queue
+            WITH stale_tasks AS (
+                SELECT task_id
+                FROM governance.rdp_task_queue
+                WHERE status = 'running'
+                  AND (
+                    CAST(:stale_before AS TIMESTAMPTZ) IS NULL
+                    OR COALESCE(heartbeat_at, started_at, requested_at) <= :stale_before
+                  )
+                ORDER BY started_at ASC NULLS LAST, requested_at ASC
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE governance.rdp_task_queue AS task
             SET status = 'failed',
                 finished_at = :now,
                 exit_code = :exit_code,
                 error_message = :error_message
-            WHERE status = 'running'
+            FROM stale_tasks
+            WHERE task.task_id = stale_tasks.task_id
+            RETURNING task.task_id, task.run_id, task.attempt_no, task.workflow,
+                      task.requested_at, task.started_at
             """
         ),
         {
             "now": now,
             "exit_code": exit_code,
             "error_message": error_message,
+            "stale_before": stale_before,
         },
-    )
+    ).fetchall()
+
+    if not rows:
+        return []
 
     for row in rows:
         db_mark_run_terminal(

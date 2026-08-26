@@ -395,6 +395,7 @@ _SLIPPAGE_FIELDS = [
     "candidate_id", "family", "timeframe",
     "candidate_ts", "candidate_side", "candidate_qty",
     "candidate_action",
+    "feasibility_category",
     "arrival_mid_px", "estimated_fill_vwap_px",
     "half_spread_bps", "volume_impact_bps",
     "estimated_slippage_bps", "estimated_fee_bps",

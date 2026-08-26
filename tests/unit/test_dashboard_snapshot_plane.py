@@ -91,6 +91,8 @@ class DashboardSnapshotPlaneTest(unittest.IsolatedAsyncioTestCase):
 
     def test_rdp_p2_reports_skip_scheduler_refresh_without_emptying_primary_startup(self) -> None:
         for panel_key in (
+            "rdpRuns",
+            "rdpWorkspace",
             "rdpControl",
             "rdpWorkbenchOverview",
             "rdpWorkbenchItems",
@@ -100,9 +102,17 @@ class DashboardSnapshotPlaneTest(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertIn(panel_key, P2_DASHBOARD_SNAPSHOT_PANEL_KEYS)
             self.assertFalse(DASHBOARD_SNAPSHOT_POLICIES[panel_key].scheduled_refresh)
-        for panel_key in ("rdpControl", "rdpWorkbenchOverview", "rdpTuningOverview"):
+        for panel_key in ("rdpWorkspace",):
             self.assertTrue(DASHBOARD_SNAPSHOT_POLICIES[panel_key].startup_prewarm)
-        for panel_key in ("rdpWorkbenchItems", "rdpWorkbenchAlerts", "rdpTuningProposals"):
+        for panel_key in (
+            "rdpRuns",
+            "rdpControl",
+            "rdpWorkbenchOverview",
+            "rdpWorkbenchItems",
+            "rdpWorkbenchAlerts",
+            "rdpTuningOverview",
+            "rdpTuningProposals",
+        ):
             self.assertFalse(DASHBOARD_SNAPSHOT_POLICIES[panel_key].startup_prewarm)
 
     def test_dashboard_snapshot_policy_slo_guardrails(self) -> None:

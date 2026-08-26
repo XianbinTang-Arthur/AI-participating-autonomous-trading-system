@@ -65,18 +65,27 @@ def estimate_slippage(
     Returns:
         每条增加了 slippage 字段的结果列表。
     """
+    taker_fee_bps = _require_nonnegative_finite("taker_fee_bps", taker_fee_bps)
+    min_half_spread_bps = _require_nonnegative_finite(
+        "min_half_spread_bps", min_half_spread_bps,
+    )
+    spread_fraction = _require_nonnegative_finite("spread_fraction", spread_fraction)
+    impact_coefficient = _require_nonnegative_finite(
+        "impact_coefficient", impact_coefficient,
+    )
     results: list[dict[str, Any]] = []
 
     for row in feasibility_rows:
-        bar_close = row.get("bar_close")
-        bar_range_bps = row.get("bar_range_bps")
-        volume_ratio = row.get("volume_ratio")
+        bar_close = _finite_number(row.get("bar_close"))
+        bar_range_bps = _finite_number(row.get("bar_range_bps"))
+        volume_ratio = _finite_number(row.get("volume_ratio"))
         candidate_side = row.get("candidate_side", "buy")
         feasibility_category = row.get("feasibility_category", "")
 
         # 无市场数据或不可成交的情况
         if (bar_close is None or bar_close <= 0
-                or bar_range_bps is None
+                or bar_range_bps is None or bar_range_bps < 0
+                or volume_ratio is None or volume_ratio < 0
                 or feasibility_category == "insufficient_market_data"):
             results.append(_make_slippage_row(
                 row,
@@ -107,21 +116,27 @@ def estimate_slippage(
         slippage_bps = half_spread + vol_impact
 
         # ---- 4. 预估成交 VWAP ----
-        arrival_px = float(bar_close)
+        arrival_px = bar_close
         if candidate_side == "buy":
             fill_vwap = arrival_px * (1 + slippage_bps / 10000)
-        else:
+        elif candidate_side == "sell":
             fill_vwap = arrival_px * (1 - slippage_bps / 10000)
+        else:
+            raise ValueError(f"unsupported candidate_side: {candidate_side!r}")
 
         # ---- 5. 总执行成本 ----
         total_cost_bps = slippage_bps + taker_fee_bps
 
         # ---- 6. 与 replay 假设成本的比较 ----
-        assumed_cost = float(row.get("cost_bps", 0))
+        assumed_cost = _finite_or_default(row, "cost_bps", default=0.0)
         cost_vs_assumed = total_cost_bps - assumed_cost if assumed_cost > 0 else None
 
         # ---- 7. 成本调整后的 edge ----
-        expected_net_edge = float(row.get("expected_net_edge_bps", 0))
+        expected_net_edge = _finite_or_default(
+            row,
+            "expected_net_edge_bps",
+            default=0.0,
+        )
         if assumed_cost > 0:
             # cost_adjusted = net_edge + assumed_cost - realistic_cost
             cost_adjusted_edge = expected_net_edge + assumed_cost - total_cost_bps
@@ -154,6 +169,33 @@ def estimate_slippage(
         log.warning("No valid slippage estimates produced")
 
     return results
+
+
+def _finite_number(value: Any) -> float | None:
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _require_nonnegative_finite(name: str, value: Any) -> float:
+    parsed = _finite_number(value)
+    if parsed is None or parsed < 0:
+        raise ValueError(f"{name} must be a finite non-negative number")
+    return parsed
+
+
+def _finite_or_default(row: dict[str, Any], key: str, *, default: float) -> float:
+    raw_value = row.get(key)
+    if raw_value is None or raw_value == "":
+        return default
+    parsed = _finite_number(raw_value)
+    if parsed is None:
+        raise ValueError(f"{key} must be a finite number")
+    return parsed
 
 
 def _make_slippage_row(

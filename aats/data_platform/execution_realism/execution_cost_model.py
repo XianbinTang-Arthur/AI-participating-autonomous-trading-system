@@ -45,44 +45,20 @@ def build_execution_cost_summary(
     no_data_count = feasibility_counts.get("insufficient_market_data", 0)
 
     # ---- 2. 滑点统计 ----
-    valid_slippage = [
-        r["estimated_slippage_bps"]
-        for r in slippage_rows
-        if r.get("estimated_slippage_bps") is not None
-    ]
+    valid_slippage = _finite_values(slippage_rows, "estimated_slippage_bps")
 
-    valid_total_cost = [
-        r["estimated_total_execution_cost_bps"]
-        for r in slippage_rows
-        if r.get("estimated_total_execution_cost_bps") is not None
-    ]
-    valid_fee = [
-        r["estimated_fee_bps"]
-        for r in slippage_rows
-        if r.get("estimated_fee_bps") is not None
-    ]
+    valid_total_cost = _finite_values(slippage_rows, "estimated_total_execution_cost_bps")
+    valid_fee = _finite_values(slippage_rows, "estimated_fee_bps")
     valid_funding = [
         _funding_bps(row)
         for row in slippage_rows
         if _funding_bps(row) is not None
     ]
-    row_turnover = [
-        r["turnover"]
-        for r in slippage_rows
-        if r.get("turnover") is not None
-    ]
+    row_turnover = _finite_values(slippage_rows, "turnover")
 
-    valid_cost_adjusted_edge = [
-        r["cost_adjusted_edge_bps"]
-        for r in slippage_rows
-        if r.get("cost_adjusted_edge_bps") is not None
-    ]
+    valid_cost_adjusted_edge = _finite_values(slippage_rows, "cost_adjusted_edge_bps")
 
-    valid_cost_vs_assumed = [
-        r["cost_vs_assumed_bps"]
-        for r in slippage_rows
-        if r.get("cost_vs_assumed_bps") is not None
-    ]
+    valid_cost_vs_assumed = _finite_values(slippage_rows, "cost_vs_assumed_bps")
 
     slippage_stats = _compute_distribution_stats(valid_slippage) if valid_slippage else {}
     cost_stats = _compute_distribution_stats(valid_total_cost) if valid_total_cost else {}
@@ -118,16 +94,8 @@ def build_execution_cost_summary(
         else {"mean": action_turnover_ratio, "count": total}
     )
 
-    opening_slippage = [
-        r["estimated_slippage_bps"]
-        for r in opening_rows
-        if r.get("estimated_slippage_bps") is not None
-    ]
-    close_slippage = [
-        r["estimated_slippage_bps"]
-        for r in close_rows
-        if r.get("estimated_slippage_bps") is not None
-    ]
+    opening_slippage = _finite_values(opening_rows, "estimated_slippage_bps")
+    close_slippage = _finite_values(close_rows, "estimated_slippage_bps")
 
     summary = {
         "total_candidates": total,
@@ -253,7 +221,26 @@ def _empty_summary() -> dict[str, Any]:
 
 def _funding_bps(row: dict[str, Any]) -> float | None:
     if row.get("funding_bps") is not None:
-        return row["funding_bps"]
+        return _finite_number(row["funding_bps"])
     if row.get("funding_adjustment_bps") is not None:
-        return row["funding_adjustment_bps"]
+        return _finite_number(row["funding_adjustment_bps"])
     return None
+
+
+def _finite_values(rows: list[dict[str, Any]], key: str) -> list[float]:
+    values: list[float] = []
+    for row in rows:
+        value = _finite_number(row.get(key))
+        if value is not None:
+            values.append(value)
+    return values
+
+
+def _finite_number(value: Any) -> float | None:
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None

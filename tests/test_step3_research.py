@@ -477,7 +477,7 @@ check(
 print()
 
 # ══════════════════════════════════════════════════════════════
-# 9. P0 ��复验证: auto-fix 后 values 更新 (级联场景)
+# 9. P0 修复验证: auto-fix 后 values 更新 (级联场景)
 # ══════════════════════════════════════════════════════════════
 print("=" * 60)
 print("9. P0 修复: auto-fix 级联不使用过期 values")
@@ -604,7 +604,7 @@ with_short_ok = {
 cr_short_ok = _s3._validate_constraints(with_short_ok)
 check("short_close=0.20 <= short_entry=0.40: 通过", cr_short_ok["all_passed"])
 
-# 11c: 两者存在且违���
+# 11c: 两者存在且违规
 with_short_bad = {
     "test_ft": {
         **no_short["test_ft"],

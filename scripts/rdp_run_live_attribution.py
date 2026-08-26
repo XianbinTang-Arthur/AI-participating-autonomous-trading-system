@@ -474,7 +474,7 @@ def main() -> int:
     # ---- P0: 参数注入 ----
     parser.add_argument(
         "--params-json", default=None,
-        help="JSON 文件路径，支持 parameter_candidates.json 或平坦 dict ��式",
+        help="JSON 文件路径，支持 parameter_candidates.json 或平坦 dict 格式",
     )
     parser.add_argument(
         "--parameter-set", default=None,

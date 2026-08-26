@@ -126,7 +126,7 @@ python scripts/rdp_retry_failed_round.py --action rerun \
     --round-dir <path> --phase <phase>
 ```
 
-注意: 重跑会创建**新的 round**，不会覆盖旧 round。旧 round 仍可追溯。
+注意：重跑会创建**新的 round**，不会覆盖旧 round。旧 round 仍可追溯。执行器只接受由当前代码生成的结构化参数数组，使用当前 Python 环境和 `shell=False`；manifest 字段不会被解释为 shell 语法。若计划缺少 `full_rerun_argv`，执行会失败关闭。
 
 ---
 

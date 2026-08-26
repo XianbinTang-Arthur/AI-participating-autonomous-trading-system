@@ -305,10 +305,15 @@ def db_get_run_events(
             """
             SELECT sequence_no, run_id, attempt_no, step_key, event_type,
                    payload, occurred_at
-            FROM governance.rdp_run_events
-            WHERE run_id = :run_id
+            FROM (
+                SELECT sequence_no, run_id, attempt_no, step_key, event_type,
+                       payload, occurred_at
+                FROM governance.rdp_run_events
+                WHERE run_id = :run_id
+                ORDER BY sequence_no DESC
+                LIMIT :limit
+            ) AS recent_events
             ORDER BY sequence_no ASC
-            LIMIT :limit
             """
         ),
         {"run_id": run_id, "limit": limit},
@@ -376,8 +381,8 @@ def db_mark_run_running(
     run_id: str,
     attempt_no: int,
     started_at: datetime,
-) -> None:
-    session.execute(
+) -> bool:
+    result = session.execute(
         text(
             """
             UPDATE governance.rdp_runs
@@ -393,6 +398,8 @@ def db_mark_run_running(
         ),
         {"run_id": run_id, "started_at": started_at},
     )
+    if int(getattr(result, "rowcount", 1) or 0) == 0:
+        return False
     db_append_run_event(
         session,
         run_id=run_id,
@@ -400,6 +407,7 @@ def db_mark_run_running(
         attempt_no=attempt_no,
         occurred_at=started_at,
     )
+    return True
 
 
 def db_touch_run_heartbeat(
@@ -454,10 +462,10 @@ def db_mark_run_terminal(
     finished_at: datetime,
     error_code: str | None = None,
     error_summary: str | None = None,
-) -> None:
+) -> bool:
     if status not in RUN_TERMINAL_STATUSES:
         raise ValueError(f"invalid terminal RDP run status: {status!r}")
-    session.execute(
+    result = session.execute(
         text(
             """
             UPDATE governance.rdp_runs
@@ -469,6 +477,7 @@ def db_mark_run_terminal(
                 error_summary = :error_summary,
                 updated_at = :finished_at
             WHERE run_id = :run_id
+              AND status IN ('running', 'cancellation_requested')
             """
         ),
         {
@@ -479,6 +488,8 @@ def db_mark_run_terminal(
             "error_summary": error_summary,
         },
     )
+    if int(getattr(result, "rowcount", 1) or 0) == 0:
+        return False
     db_append_run_event(
         session,
         run_id=run_id,
@@ -487,6 +498,7 @@ def db_mark_run_terminal(
         payload={"status": status, "error_code": error_code},
         occurred_at=finished_at,
     )
+    return True
 
 
 def db_mark_run_requeued(
@@ -667,15 +679,60 @@ def db_upsert_run_step(
                  :allow_failure, :started_at, :finished_at, :exit_code, :error_code,
                  :error_summary, CAST(:payload AS JSONB), :now, :now)
             ON CONFLICT (run_id, attempt_no, step_key) DO UPDATE SET
-                status = EXCLUDED.status,
-                allow_failure = EXCLUDED.allow_failure,
-                started_at = COALESCE(governance.rdp_run_steps.started_at, EXCLUDED.started_at),
-                finished_at = EXCLUDED.finished_at,
-                exit_code = EXCLUDED.exit_code,
-                error_code = EXCLUDED.error_code,
-                error_summary = EXCLUDED.error_summary,
-                payload = governance.rdp_run_steps.payload || EXCLUDED.payload,
-                updated_at = EXCLUDED.updated_at
+                status = CASE
+                    WHEN governance.rdp_run_steps.status
+                         IN ('succeeded', 'failed', 'skipped', 'cancelled')
+                    THEN governance.rdp_run_steps.status
+                    ELSE EXCLUDED.status
+                END,
+                allow_failure = CASE
+                    WHEN governance.rdp_run_steps.status
+                         IN ('succeeded', 'failed', 'skipped', 'cancelled')
+                    THEN governance.rdp_run_steps.allow_failure
+                    ELSE EXCLUDED.allow_failure
+                END,
+                started_at = CASE
+                    WHEN governance.rdp_run_steps.status
+                         IN ('succeeded', 'failed', 'skipped', 'cancelled')
+                    THEN governance.rdp_run_steps.started_at
+                    ELSE COALESCE(governance.rdp_run_steps.started_at, EXCLUDED.started_at)
+                END,
+                finished_at = CASE
+                    WHEN governance.rdp_run_steps.status
+                         IN ('succeeded', 'failed', 'skipped', 'cancelled')
+                    THEN governance.rdp_run_steps.finished_at
+                    ELSE EXCLUDED.finished_at
+                END,
+                exit_code = CASE
+                    WHEN governance.rdp_run_steps.status
+                         IN ('succeeded', 'failed', 'skipped', 'cancelled')
+                    THEN governance.rdp_run_steps.exit_code
+                    ELSE EXCLUDED.exit_code
+                END,
+                error_code = CASE
+                    WHEN governance.rdp_run_steps.status
+                         IN ('succeeded', 'failed', 'skipped', 'cancelled')
+                    THEN governance.rdp_run_steps.error_code
+                    ELSE EXCLUDED.error_code
+                END,
+                error_summary = CASE
+                    WHEN governance.rdp_run_steps.status
+                         IN ('succeeded', 'failed', 'skipped', 'cancelled')
+                    THEN governance.rdp_run_steps.error_summary
+                    ELSE EXCLUDED.error_summary
+                END,
+                payload = CASE
+                    WHEN governance.rdp_run_steps.status
+                         IN ('succeeded', 'failed', 'skipped', 'cancelled')
+                    THEN governance.rdp_run_steps.payload
+                    ELSE governance.rdp_run_steps.payload || EXCLUDED.payload
+                END,
+                updated_at = CASE
+                    WHEN governance.rdp_run_steps.status
+                         IN ('succeeded', 'failed', 'skipped', 'cancelled')
+                    THEN governance.rdp_run_steps.updated_at
+                    ELSE EXCLUDED.updated_at
+                END
             RETURNING step_run_id, run_id, attempt_no, step_key, step_order, status,
                       allow_failure, started_at, finished_at, exit_code, error_code,
                       error_summary, log_ref, artifact_refs, payload, created_at, updated_at
@@ -734,6 +791,7 @@ def db_sync_run_step_progress(
                 total_steps = :total_steps,
                 updated_at = :now
             WHERE run_id = :run_id
+              AND status IN ('queued', 'running', 'cancellation_requested')
             """
         ),
         {

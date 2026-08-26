@@ -115,7 +115,7 @@ def find_baseline_for_release(
     return None
 
 
-# ── Observation 对比 ──���───────────────────────────────────────
+# ── Observation 对比 ──────────────────────────────────────────
 
 def _load_observation(root: Path, release_id: str) -> dict | None:
     from aats.data_platform.production_workflow.observation_window import (

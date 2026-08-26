@@ -373,7 +373,7 @@ def _enqueue_single_workflow(
     report: dict[str, Any],
     action_label: str = "enqueued",
     reason_label: str = "scheduled",
-) -> None:
+) -> str:
     guard = guard_workflow_execution(workflow_name)
     if not guard.allowed:
         if not dry_run:
@@ -387,7 +387,7 @@ def _enqueue_single_workflow(
                 "slot": slot_key,
             },
         )
-        return
+        return "blocked"
 
     try:
         with get_session() as session:
@@ -403,7 +403,7 @@ def _enqueue_single_workflow(
                             "task_id": active_task["task_id"],
                         },
                     )
-                    return
+                    return "active"
                 task_id = None
             else:
                 # 真插入：原子创建，如已有活跃任务则由 ON CONFLICT 分支返回
@@ -414,7 +414,6 @@ def _enqueue_single_workflow(
                     requested_by=actor,
                 )
                 if task_id is None:
-                    workflow_state["last_processed_slot"] = slot_key
                     workflow_state["last_action"] = "active_task_present"
                     workflow_state["last_reason"] = (
                         active_task["task_id"] if active_task else "unknown_active_task"
@@ -427,7 +426,7 @@ def _enqueue_single_workflow(
                             "task_id": (active_task or {}).get("task_id"),
                         },
                     )
-                    return
+                    return "active"
     except Exception as exc:  # pragma: no cover - defensive
         log.exception("scheduler failed to enqueue workflow %s", workflow_name)
         report["ok"] = False
@@ -438,7 +437,7 @@ def _enqueue_single_workflow(
                 "error": str(exc),
             },
         )
-        return
+        return "error"
 
     if not dry_run:
         workflow_state["last_processed_slot"] = slot_key
@@ -452,6 +451,7 @@ def _enqueue_single_workflow(
             "task_id": task_id,
         },
     )
+    return "preview" if dry_run else "enqueued"
 
 
 def _run_bootstrap_sequence(
@@ -613,6 +613,7 @@ def enqueue_due_workflows(
         "dry_run": dry_run,
         "initialized": False,
         "enqueued": [],
+        "coalesced": [],
         "skipped": [],
         "errors": [],
     }
@@ -736,26 +737,31 @@ def _enqueue_due_workflows_locked(
             )
             continue
 
-        # Gap backfill: when daemon outage leaves multiple slots missed,
-        # enqueue each in order. _enqueue_single_workflow advances
-        # last_processed_slot per accepted slot (enqueued / active_task /
-        # blocked_by_environment), so idempotency and ordering are preserved.
-        # A DB failure on any slot leaves last_processed_slot at the previous
-        # slot and breaks the loop so the next tick retries from the same point.
-        for slot in due_slots:
-            slot_key = _canonical_slot_key(slot) or ""
-            errors_before = len(report["errors"])
-            _enqueue_single_workflow(
-                workflow_name=workflow_name,
-                schedule=schedule,
-                workflow_state=workflow_state,
-                slot_key=slot_key,
-                actor=actor,
-                dry_run=dry_run,
-                report=report,
+        # 所有现行周期命令都按“当前滚动窗口/自身水位”执行，并不接收历史 slot。
+        # 因此停机期间漏掉多个 slot 时，只能且只应创建一次最新窗口执行；逐 slot
+        # 入队既不能回放历史，还会与 one-active-per-workflow 唯一约束冲突并造成
+        # “状态已推进、任务却未创建”的静默丢槽。
+        latest_due_slot = due_slots[-1]
+        slot_key = _canonical_slot_key(latest_due_slot) or ""
+        if len(due_slots) > 1:
+            report["coalesced"].append(
+                {
+                    "workflow": workflow_name,
+                    "slot_count": len(due_slots),
+                    "from_slot": _canonical_slot_key(due_slots[0]),
+                    "to_slot": slot_key,
+                    "reason": "滚动窗口工作流合并为一次最新窗口执行",
+                },
             )
-            if len(report["errors"]) > errors_before:
-                break
+        _enqueue_single_workflow(
+            workflow_name=workflow_name,
+            schedule=schedule,
+            workflow_state=workflow_state,
+            slot_key=slot_key,
+            actor=actor,
+            dry_run=dry_run,
+            report=report,
+        )
 
     if save_state and not dry_run:
         save_scheduler_state(project_root, state)

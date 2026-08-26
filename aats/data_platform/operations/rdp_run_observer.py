@@ -109,6 +109,7 @@ class RdpRunObserver:
         raw_status = str(result.get("status") or "error")
         status = {
             "success": "succeeded",
+            "success_with_warnings": "succeeded",
             "dry_run": "succeeded",
             "disabled": "skipped",
             "skipped": "skipped",
@@ -139,7 +140,11 @@ class RdpRunObserver:
                 exit_code=result.get("exit_code"),
                 error_code=(f"step_{raw_status}" if status == "failed" else None),
                 error_summary=error_summary,
-                payload={"workflow_status": raw_status},
+                payload={
+                    "workflow_status": raw_status,
+                    "warning_summary": result.get("warning_summary"),
+                    "failure_class": result.get("failure_class"),
+                },
             )
             db_sync_run_step_progress(
                 session,

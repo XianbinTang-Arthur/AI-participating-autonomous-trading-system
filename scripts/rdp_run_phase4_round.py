@@ -155,11 +155,15 @@ def _run_single_execution_realism(
                 for field in ("estimated_slippage_bps", "estimated_total_execution_cost_bps",
                               "cost_adjusted_edge_bps", "bar_range_bps", "bar_volume",
                               "half_spread_bps", "volume_impact_bps"):
-                    if field in row and row[field]:
+                    if field in row:
+                        raw_value = row[field]
+                        if raw_value in (None, ""):
+                            row[field] = None
+                            continue
                         try:
-                            row[field] = float(row[field])
+                            row[field] = float(raw_value)
                         except (ValueError, TypeError):
-                            pass
+                            row[field] = None
 
     # 读 execution_alignment.csv 统计
     alignment_stats = {"total": 0, "matched": 0, "no_bar_data": 0}

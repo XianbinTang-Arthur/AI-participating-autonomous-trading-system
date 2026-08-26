@@ -99,17 +99,17 @@ class TestDashboardLayoutDensityContract(unittest.TestCase):
         self.assertIn('class="ai-analysis-flow__performance"', self.ai_analysis)
         self.assertNotIn('<div class="span-4">${workspace.aiHero}</div>', self.ai_analysis)
 
-    def test_rdp_runtime_status_is_assigned_to_the_shorter_main_column(self) -> None:
-        render_start = self.rdp.index("export function renderRdpControlPanelV2")
-        render_end = self.rdp.index("function renderEvidenceMetricList", render_start)
-        render_source = self.rdp[render_start:render_end]
-        runtime = render_source.index("${renderRuntimeRailCard")
-        main_column_end = render_source.index("</section>", runtime)
-        alerts = render_source.index("${renderIntegrityAlertsCard", main_column_end)
-        self.assertLess(runtime, main_column_end)
-        self.assertLess(main_column_end, alerts)
-        self.assertIn("RDP 当前待处理、发布与后台状态", render_source)
-        self.assertIn("RDP 侧栏：告警与观察窗口", render_source)
+    def test_rdp_v3_uses_one_compact_workspace_with_independent_primary_columns(self) -> None:
+        self.assertIn("export function renderRdpControlPanelV3", self.rdp)
+        self.assertIn("rdp-v3-primary-grid", self.rdp)
+        self.assertIn("renderRuns(workspace.execution", self.rdp)
+        self.assertIn("renderResearch(workspace.research", self.rdp)
+        self.assertIn("renderRelease(workspace.release", self.rdp)
+        self.assertIn("renderLifecycle(workspace.lifecycle", self.rdp)
+        self.assertIn(
+            "grid-template-columns: minmax(330px, 5fr) minmax(420px, 7fr)",
+            _css_block(self.css, ".rdp-v3-primary-grid {"),
+        )
 
 
 if __name__ == "__main__":

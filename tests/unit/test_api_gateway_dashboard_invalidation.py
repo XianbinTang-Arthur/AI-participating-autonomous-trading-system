@@ -48,7 +48,7 @@ class ApiGatewayDashboardInvalidationTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             main._eager_dashboard_snapshot_panels_for_mutation("/rdp/tasks/trigger"),
-            ("rdpControl", "rdpWorkbenchOverview"),
+            ("rdpWorkspace",),
         )
         self.assertEqual(
             main._eager_dashboard_snapshot_panels_for_mutation("/strategy-profiles/profiles/trend/activate"),
@@ -103,7 +103,7 @@ class ApiGatewayDashboardInvalidationTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(refreshed)
         self.assertEqual(plane.invalidations, ["post_mutation"])
         self.assertEqual(plane.scheduled_refreshes, ["post_mutation"])
-        self.assertEqual(plane.eager_refreshes, [("post_mutation", ("rdpControl", "rdpWorkbenchOverview"))])
+        self.assertEqual(plane.eager_refreshes, [("post_mutation", ("rdpWorkspace",))])
 
 
 if __name__ == "__main__":

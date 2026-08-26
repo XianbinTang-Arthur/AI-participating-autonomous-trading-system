@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--verbose", "-v",
         action="store_true",
-        help="输出详细信���",
+        help="输出详细信息",
     )
     p.add_argument(
         "--json",
@@ -86,7 +86,7 @@ def main() -> int:
     print("=" * 60)
     print("RDP Live DB 连接验证")
     print("=" * 60)
-    print(f"时��: {datetime.now(timezone.utc).isoformat()}")
+    print(f"时间: {datetime.now(timezone.utc).isoformat()}")
     print(f"Readonly 模式: {settings.live_db_readonly}")
     print()
 

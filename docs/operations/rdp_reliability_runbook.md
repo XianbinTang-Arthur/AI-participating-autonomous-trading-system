@@ -2,7 +2,7 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
-> 最后核对：2026-08-24（起始 HEAD `00b6df0` + 未提交 Phase 3F 覆盖层）。当前 scheduler/daemon 在容器内运行，workflow 共 10 个；`decision_cycle`、`release_cycle` disabled，旧 active JSON seed 和直写 rollback CLI 不可用。标准入口只允许模拟 profile。
+> 最后核对：2026-08-25（起始代码基线 `70f1a581`，含本轮 RDP 业务逻辑整改工作区）。workflow 共 10 个；`decision_cycle`、`release_cycle` disabled，旧 active JSON seed 和直写 rollback CLI 不可用。标准入口只允许模拟 profile；本文不以静态代码推断当前容器在线。
 
 
 ## 概述
@@ -47,8 +47,9 @@
      --workflow data_maintenance --run-id <RUN_ID> \
      --task <TASK> --error "<ERROR>"
 4. 修复后补跑:
-   python scripts/rdp_retry_workflow_failure.py \
-     --failure-id <FAILURE_ID> --mode task
+   优先在 Run 详情调用 POST /rdp/v2/runs/<RUN_ID>/retry；
+   legacy failure-id 补跑器也会重新检查 workflow freeze/disabled 状态，
+   并复用 dispatcher 的 shell=False 命令执行契约。
 5. 验证: 检查 governance_cycle 是否能正常运行
 ```
 
@@ -103,6 +104,7 @@
 2. 用 scripts/rdp_schedule_workflows.py --dry-run --json 查看应到期 slot。
 3. 需要补跑时通过 POST /rdp/tasks/trigger 入队，不绕开任务队列直接执行。
 4. 确认同 workflow active 唯一约束和 earliest_start_at。
+5. 多个漏掉的周期 slot 会合并为一次最新滚动窗口任务；检查 scheduler report 的 `coalesced`，不要把它误读为历史逐槽回放。
 ```
 
 ### Scenario 6: `rdp-daemon` 心跳陈旧或丢失
@@ -113,7 +115,7 @@
    psql ... -c "SELECT component, status, heartbeat_at FROM governance.rdp_runtime_status"
 3. 检查 daemon 容器日志:
    docker logs aats-rdp-daemon --tail 200
-4. 如模拟栈 daemon 已停止或报错，修复原因后通过 `bash scripts/deploy.sh --profile derivatives --skip-commit` 重建/恢复，禁止手工 restart 单个 Compose 服务；live 当前不得恢复部署。
+4. 如模拟栈 daemon 已停止或报错，修复原因后通过 `bash scripts/deploy.sh --profile derivatives --skip-commit` 重建/恢复，禁止手工 restart 单个 Compose 服务；live 当前不得恢复部署。daemon 只回收超过 30 秒无任务心跳的 running attempt，避免并行 daemon 启动时误杀健康任务。
 5. 再次确认 /rdp/health 中 heartbeat 已恢复 < 45s
 ```
 

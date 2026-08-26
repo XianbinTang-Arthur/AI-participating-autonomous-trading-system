@@ -248,7 +248,7 @@ def _evaluate_governance(root: Path, release: dict) -> dict:
     return {"dimension": "governance", "score": "positive", "detail": "governance healthy"}
 
 
-# ── 综合评估 ────────���─────────────────────────────────────────
+# ── 综合评估 ──────────────────────────────────────────────────
 
 def evaluate_release_effectiveness(
     root: Path,
@@ -392,7 +392,7 @@ def _derive_effectiveness(dimensions: list[dict], release: dict) -> str:
 
 
 def _effectiveness_detail(dimensions: list[dict], conclusion: str) -> str:
-    """生成 effectiveness 描��."""
+    """生成 effectiveness 描述。"""
     parts = [f"conclusion={conclusion}"]
     for d in dimensions:
         parts.append(f"{d['dimension']}={d['score']}")

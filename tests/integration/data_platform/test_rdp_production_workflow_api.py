@@ -6,10 +6,17 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from aats.api.rdp_apply_token import emit_token
 from aats.api.rdp_routes import rdp_router
+
+
+@pytest.fixture(autouse=True)
+def _set_apply_token_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RDP_APPLY_TOKEN_SECRET", "production-workflow-test-secret")
 
 
 def _build_runtime() -> SimpleNamespace:
@@ -22,6 +29,10 @@ def _build_runtime() -> SimpleNamespace:
         ),
         environment_capabilities=SimpleNamespace(local_only=True),
     )
+
+
+def _apply_headers() -> dict[str, str]:
+    return {"X-Rdp-Apply-Token": emit_token(actor="operator", action="apply")}
 
 
 @contextmanager
@@ -55,6 +66,7 @@ def test_create_release_api_rejects_prod_skip_gate() -> None:
                 "skip_gate": True,
                 "skip_apply": False,
             },
+            headers=_apply_headers(),
         )
 
     assert response.status_code == 200
@@ -836,6 +848,7 @@ def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_
                 "actor": "operator",
                 "observation_window_hours": 24,
             },
+            headers=_apply_headers(),
         ).json()
         assert released["ok"] is True
         release_id = released["release"]["release_id"]
@@ -1162,6 +1175,7 @@ def test_create_release_blocked_when_step2_snapshot_incomplete(tmp_path) -> None
                 "skip_gate": False,
                 "skip_apply": False,
             },
+            headers=_apply_headers(),
         )
 
     assert response.status_code == 200

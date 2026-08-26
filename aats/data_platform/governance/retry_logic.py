@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import pathlib
+import shlex
 from datetime import datetime, timezone
 from typing import Any
 
@@ -60,8 +61,15 @@ def generate_retry_plan(
         "failed_combos": [],
         "retry_commands": [],
         "full_rerun_command": None,
+        "full_rerun_argv": None,
         "notes": [],
     }
+
+    if phase not in PHASE_RUNNERS:
+        plan["notes"].append(
+            f"不支持的 phase: {phase}；可选: {', '.join(sorted(PHASE_RUNNERS))}",
+        )
+        return plan
 
     # 读取 manifest
     manifest_path = round_dir / "round_manifest.json"
@@ -126,7 +134,7 @@ def generate_retry_plan(
     extra_args: list[str] = []
     if phase == "phase4":
         taker_fee = manifest.get("taker_fee_bps")
-        if taker_fee:
+        if taker_fee is not None:
             extra_args.extend(["--taker-fee-bps", str(taker_fee)])
     if manifest.get("replay_only"):
         extra_args.append("--replay-only")
@@ -135,11 +143,12 @@ def generate_retry_plan(
     if round_script and start and end:
         cmd_parts = [
             "python", round_script,
-            "--start", start,
-            "--end", end,
+            "--start", str(start),
+            "--end", str(end),
         ]
         cmd_parts.extend(extra_args)
-        plan["full_rerun_command"] = " ".join(cmd_parts)
+        plan["full_rerun_argv"] = cmd_parts
+        plan["full_rerun_command"] = shlex.join(cmd_parts)
 
     # 2. 单 combo 重跑命令
     if single_script and start and end:
@@ -153,18 +162,19 @@ def generate_retry_plan(
 
             cmd_parts = [
                 "python", single_script,
-                "--family", family,
-                "--timeframe", timeframe,
-                "--symbol", manifest.get("symbol", "BTC-USDT-SWAP"),
-                "--start", start,
-                "--end", end,
+                "--family", str(family),
+                "--timeframe", str(timeframe),
+                "--symbol", str(manifest.get("symbol", "BTC-USDT-SWAP")),
+                "--start", str(start),
+                "--end", str(end),
             ]
             cmd_parts.extend(extra_args)
 
             plan["retry_commands"].append({
                 "combo_key": key,
                 "original_status": fc["status"],
-                "command": " ".join(cmd_parts),
+                "argv": cmd_parts,
+                "command": shlex.join(cmd_parts),
             })
 
     # 建议

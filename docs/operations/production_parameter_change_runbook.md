@@ -50,7 +50,7 @@ research evidence
 - `POST /rdp/releases/create`：对已批准 recommendation 执行 gate + release + apply；
 - `POST /rdp/recommendations/{id}/approve-and-release`：approve + gate + release + apply。
 
-两者当前依赖 Operator write access 和 Step2 integrity gate，但没有额外的 HMAC apply token。直接 `POST /rdp/parameters/apply` 则要求 `action=apply` 的 `X-Rdp-Apply-Token`。这是当前代码真实存在的策略差异；不要在文档中声称三条路径策略相同。
+两者与直接 `POST /rdp/parameters/apply` 一样，在实际执行 apply 时依赖 Operator write access、Step2 integrity gate 和当前 session 签发的 `action=apply` 短时 `X-Rdp-Apply-Token`。token 校验先于 approve/release 写入；`skip_apply=true` 的纯治理记录操作不要求该 token。
 
 发布响应必须检查：
 

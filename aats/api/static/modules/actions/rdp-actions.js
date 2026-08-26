@@ -23,7 +23,7 @@ export function createRdpActionHandlers({
 
   function defaultObservationWindowHours() {
     const hours = Number(
-      state?.data?.rdpControl?.environment?.required_observation_window_hours || 24,
+      state?.data?.rdpWorkspace?.environment?.required_observation_window_hours || 24,
     );
     return Number.isFinite(hours) && hours > 0 ? Math.floor(hours) : 24;
   }
@@ -47,13 +47,92 @@ export function createRdpActionHandlers({
     return parsed.toLocaleString("zh-CN", { hour12: false });
   }
 
+  const runStatusLabels = {
+    queued: "等待执行",
+    running: "运行中",
+    cancellation_requested: "正在取消",
+    succeeded: "成功",
+    succeeded_with_warnings: "成功（有警告）",
+    partially_succeeded: "部分成功",
+    failed: "失败",
+    cancelled: "已取消",
+  };
+  const attemptStatusLabels = {
+    pending: "等待执行",
+    running: "运行中",
+    done: "完成",
+    failed: "失败",
+    cancelled: "已取消",
+  };
+  const stepStatusLabels = {
+    pending: "等待执行",
+    running: "运行中",
+    succeeded: "成功",
+    failed: "失败",
+    skipped: "已跳过",
+    cancelled: "已取消",
+  };
+  const triggerLabels = {
+    manual: "手动触发",
+    schedule: "定时触发",
+    auto_retry: "自动重试",
+    recovery: "恢复任务",
+  };
+  const workflowLabels = {
+    candles_rolling_15m: "15 分钟 K 线采集",
+    data_maintenance: "数据维护",
+    decision_cycle: "决策周期",
+    governance_cycle: "治理周期",
+    microstructure_silver_15m: "微观结构数据加工",
+    observation_cycle: "发布观察",
+    okx_rest_history_rolling_1h: "OKX 历史数据补充",
+    release_cycle: "自动发布",
+    reliability_cycle: "可靠性检查",
+    research_cycle: "完整 RDP 研究",
+  };
+  const stepLabels = {
+    daily_ingest: "每日数据采集",
+    refresh_recent_data: "刷新近期数据",
+    quality_monitor: "数据质量检查",
+    artifact_index_rebuild: "重建研究产物索引",
+    artifact_validation: "校验研究产物",
+    full_pipeline: "完整研究流水线",
+    phase2: "阶段 2：数据与研究准备",
+    step3: "阶段 3：策略研究",
+    import_candidates: "导入候选参数",
+    phase3: "阶段 3：候选验证",
+    phase4: "阶段 4：组合验证",
+    phase5: "阶段 5：执行真实性评估",
+    decision: "阶段 6：闭环决策",
+  };
+  const eventLabels = {
+    run_created: "运行已创建",
+    run_started: "运行已开始",
+    run_requeued: "运行已重新排队",
+    run_cancel_requested: "已请求取消运行",
+    run_finished: "运行已结束",
+    step_started: "步骤已开始",
+    step_finished: "步骤已结束",
+  };
+
+  function workflowLabel(value) {
+    const key = String(value || "");
+    return workflowLabels[key] || (key ? `流程 ${key}` : "未知流程");
+  }
+
+  function stepLabel(value) {
+    const key = String(value || "");
+    return stepLabels[key] || (key ? `步骤 ${key}` : "等待步骤上报");
+  }
+
   function buildRunDrawer(detail) {
     const run = detail?.run || {};
     const attempts = detail?.attempts || [];
     const steps = detail?.steps || [];
     const events = detail?.events || [];
     const currentStepSummary = run.current_step_key
-      || (run.status === "queued"
+      ? stepLabel(run.current_step_key)
+      : (run.status === "queued"
         ? "尚未开始执行"
         : run.status === "running" || run.status === "cancellation_requested"
           ? "等待执行步骤上报"
@@ -63,7 +142,7 @@ export function createRdpActionHandlers({
           <article class="rdp-workitem tone-${attempt.status === "done" ? "positive" : (attempt.status === "failed" ? "danger" : "warning")}">
             <div class="rdp-workitem__header">
               <strong>尝试 ${escapeHtml(String(attempt.attempt_no || 1))}</strong>
-              <span>${escapeHtml(String(attempt.status || "unknown"))}</span>
+              <span>${escapeHtml(attemptStatusLabels[attempt.status] || "状态未知")}</span>
             </div>
             <p class="meta-copy">任务 ${escapeHtml(String(attempt.task_id || "—"))}</p>
             <p class="meta-copy">可执行时间 ${escapeHtml(formatRunTime(attempt.earliest_start_at))}；退出码 ${escapeHtml(String(attempt.exit_code ?? "—"))}</p>
@@ -74,26 +153,26 @@ export function createRdpActionHandlers({
     const stepRows = steps.length
       ? steps.map((step) => `
           <div class="kv-row">
-            <span class="kv-row__label">${escapeHtml(step.step_key || "未命名步骤")}</span>
-            <strong class="kv-row__value">${escapeHtml(step.status || "pending")}</strong>
+            <span class="kv-row__label">${escapeHtml(stepLabel(step.step_key))}</span>
+            <strong class="kv-row__value">${escapeHtml(stepStatusLabels[step.status] || "状态未知")}</strong>
             <span class="meta-copy">尝试 ${escapeHtml(String(step.attempt_no || 1))}${step.error_summary ? ` · ${escapeHtml(step.error_summary)}` : ""}</span>
           </div>
         `).join("")
       : '<p class="meta-copy">步骤尚未开始上报。</p>';
     const eventRows = events.slice(-20).reverse().map((event) => `
-      <li><strong>${escapeHtml(event.event_type || "event")}</strong> · ${escapeHtml(formatRunTime(event.occurred_at))}</li>
+      <li><strong>${escapeHtml(eventLabels[event.event_type] || `事件 ${event.event_type || "未知"}`)}</strong> · ${escapeHtml(formatRunTime(event.occurred_at))}</li>
     `).join("");
     return {
       eyebrow: "RDP 运行详情",
       title: String(run.run_id || "运行详情"),
-      summary: `${run.workflow || "未知流程"} · ${run.status || "unknown"}`,
+      summary: `${workflowLabel(run.workflow)} · ${runStatusLabels[run.status] || "状态未知"}`,
       body: `
         <div class="kv-list">
-          <div class="kv-row"><span class="kv-row__label">触发来源</span><strong class="kv-row__value">${escapeHtml(run.trigger_kind || "unknown")}</strong></div>
+          <div class="kv-row"><span class="kv-row__label">触发来源</span><strong class="kv-row__value">${escapeHtml(triggerLabels[run.trigger_kind] || "来源未知")}</strong></div>
           <div class="kv-row"><span class="kv-row__label">进度</span><strong class="kv-row__value">${escapeHtml(`${run.completed_steps || 0}/${run.total_steps || 0}`)}</strong><span class="meta-copy">${escapeHtml(currentStepSummary)}</span></div>
           <div class="kv-row"><span class="kv-row__label">开始 / 完成</span><strong class="kv-row__value">${escapeHtml(formatRunTime(run.started_at))}</strong><span class="meta-copy">${escapeHtml(formatRunTime(run.finished_at))}</span></div>
         </div>
-        ${run.error_summary ? `<div class="notice tone-danger">${escapeHtml(run.error_summary)}</div>` : ""}
+        ${run.error_summary ? `<div class="notice tone-${["partially_succeeded", "succeeded_with_warnings"].includes(run.status) ? "warning" : "danger"}"><strong>${escapeHtml(run.error_code || "运行异常")}</strong><br>${escapeHtml(run.error_summary)}</div>` : ""}
         <h3 class="rdp-subtle-heading">执行尝试</h3>
         <div class="rdp-worklist">${attemptRows}</div>
         <h3 class="rdp-subtle-heading">步骤</h3>
@@ -106,17 +185,15 @@ export function createRdpActionHandlers({
 
   function mergeRunIntoState(run) {
     if (!run?.run_id) return;
-    const current = Array.isArray(state.data.rdpRuns?.items)
-      ? state.data.rdpRuns.items
-      : [];
-    state.data.rdpRuns = {
-      ...(state.data.rdpRuns || {}),
-      items: [
-        run,
-        ...current.filter((item) => item?.run_id !== run.run_id),
-      ].slice(0, Number(state.data.rdpRuns?.limit || 20)),
-      limit: Number(state.data.rdpRuns?.limit || 20),
-    };
+    const workspace = state.data.rdpWorkspace || {};
+    const execution = workspace.execution || { capacity: 1, queued_runs: [], recent_runs: [] };
+    const queuedRuns = Array.isArray(execution.queued_runs) ? execution.queued_runs : [];
+    execution.queued_runs = [
+      { ...run, status_label: "等待执行", waiting_reason: "任务已创建，正在等待 RDP daemon 领取。" },
+      ...queuedRuns.filter((item) => item?.run_id !== run.run_id),
+    ].map((item, index) => ({ ...item, queue_position: index + 1 }));
+    execution.queued_count = execution.queued_runs.length;
+    state.data.rdpWorkspace = { ...workspace, execution };
     if (typeof renderShell === "function") renderShell();
   }
 
@@ -155,11 +232,11 @@ export function createRdpActionHandlers({
       setFlash(
         state,
         "info",
-        `${label}已创建：${run.run_id || "Run"}，状态 ${run.status || "queued"}${replayText}。`,
+        `${label}已创建：${run.run_id || "运行"}，状态 ${runStatusLabels[run.status] || "等待执行"}${replayText}。`,
       );
       finishAction();
       actionFinished = true;
-      await refreshPanels(["rdpRuns"]);
+      await refreshPanels(["rdpWorkspace"]);
     } catch (error) {
       setFlash(state, "danger", error instanceof Error ? error.message : String(error));
       renderBanners();
@@ -196,7 +273,7 @@ export function createRdpActionHandlers({
       setFlash(state, "info", `运行 ${truncateForConfirm(runId)} 已进入 ${result?.run?.status || "取消流程"}。`);
       finishAction();
       actionFinished = true;
-      await refreshPanels(["rdpRuns"]);
+      await refreshPanels(["rdpWorkspace"]);
     } catch (error) {
       setFlash(state, "danger", error instanceof Error ? error.message : String(error));
       renderBanners();
@@ -218,7 +295,7 @@ export function createRdpActionHandlers({
       setFlash(state, "info", `运行 ${truncateForConfirm(runId)} 已创建尝试 ${result?.attempts?.length || "—"}。`);
       finishAction();
       actionFinished = true;
-      await refreshPanels(["rdpRuns"]);
+      await refreshPanels(["rdpWorkspace"]);
     } catch (error) {
       setFlash(state, "danger", error instanceof Error ? error.message : String(error));
       renderBanners();
@@ -256,39 +333,6 @@ export function createRdpActionHandlers({
         setFlash(state, "warning", result.message || "审批失败。");
       }
       await refreshDashboard({ manual: true });
-      if (result.ok && result.recommendation) {
-        const approved = result.recommendation;
-        const pending = state.data.rdpControl?.pending_recommendations || [];
-        const controlItem = pending.find((item) => item.recommendation_id === recommendationId);
-        if (controlItem) Object.assign(controlItem, approved);
-        const workbench = state.data.rdpWorkbenchItems;
-        if (workbench?.items) {
-          workbench.items = workbench.items.filter(
-            (item) => item.recommendation_id !== recommendationId,
-          );
-        }
-        if (recommendationType === "parameter_upgrade" && workbench) {
-          workbench.release_candidates = workbench.release_candidates || { items: [] };
-          workbench.release_candidates.items = [
-            {
-              family: approved.family,
-              timeframe: approved.timeframe,
-              recommendation_id: recommendationId,
-              headline: "已批准，待发布",
-              decision_summary: "这组参数已经批准，下一步可以运行 Gate 或创建发布。",
-              created_at: approved.approved_at || approved.created_at,
-              actions: [
-                { label: "运行 Gate", ui_action: "rdp-run-gate", value: recommendationId, enabled: true },
-                { label: "创建发布", ui_action: "rdp-create-release", value: recommendationId, enabled: true },
-              ],
-            },
-            ...(workbench.release_candidates.items || []).filter(
-              (item) => item.recommendation_id !== recommendationId,
-            ),
-          ];
-        }
-        if (typeof renderShell === "function") renderShell();
-      }
     } catch (error) {
       setFlash(state, "danger", error instanceof Error ? error.message : String(error));
       renderBanners();
@@ -353,8 +397,17 @@ export function createRdpActionHandlers({
     if (!ensureNotBusy()) return;
     const finishAction = beginAction(null, "正在创建发布…");
     try {
+      const tokenPayload = await requestJson("/rdp/operator-tokens", {
+        method: "POST",
+        body: { action: "apply" },
+      });
+      const applyToken = tokenPayload?.token;
+      if (!applyToken) {
+        throw new Error("参数应用令牌签发失败，请刷新后重试。");
+      }
       const result = await requestJson("/rdp/releases/create", {
         method: "POST",
+        headers: { "X-Rdp-Apply-Token": applyToken },
         body: {
           recommendation_id: recommendationId,
           actor: "operator",
@@ -390,10 +443,19 @@ export function createRdpActionHandlers({
       // 响应、三种结果：成功 / integrity 阻断 / 部分失败（approve 已落但 gate/apply
       // 未通过）。
       const windowHours = defaultObservationWindowHours();
+      const tokenPayload = await requestJson("/rdp/operator-tokens", {
+        method: "POST",
+        body: { action: "apply" },
+      });
+      const applyToken = tokenPayload?.token;
+      if (!applyToken) {
+        throw new Error("参数应用令牌签发失败，请刷新后重试。");
+      }
       const result = await requestJson(
         `/rdp/recommendations/${encodeURIComponent(recommendationId)}/approve-and-release`,
         {
           method: "POST",
+          headers: { "X-Rdp-Apply-Token": applyToken },
           body: {
             actor: "operator",
             approval_notes: "UI 审批并发布",

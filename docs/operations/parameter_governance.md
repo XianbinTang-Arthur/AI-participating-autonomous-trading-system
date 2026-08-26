@@ -65,7 +65,7 @@ Recommendation 聚合 parameter set 与跨阶段证据，常见动作：
 - 主交易 health/recovery/reconciliation 可接受；
 - 发布后 runtime provenance 验证。
 
-直接 `/rdp/parameters/apply` 需要 `action=apply` 的短时 HMAC token；直接 rollback 需要 `action=rollback` token。组合 release/approve-and-release 当前仅要求 write access + integrity/gate，没有额外 token，属于现行安全策略差异。
+`/rdp/parameters/apply`、`/rdp/releases/create` 与 `/rdp/recommendations/{id}/approve-and-release` 在实际执行 apply 时都需要 `action=apply` 的短时 HMAC token；直接 rollback 需要 `action=rollback` token。组合端点的 token 校验在 approve/release 写入之前执行，`skip_apply=true` 除外。
 
 自动 `release_cycle` 当前 disabled 且禁止入队。
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -31,6 +32,10 @@ from aats.data_platform.governance._db_util import try_governance_db
 log = logging.getLogger(__name__)
 
 _WORKFLOW_CONFIG_DIR = "configs/rdp_workflows"
+_PIPELINE_RESULT_PREFIX = "RDP_PIPELINE_RESULT_JSON="
+_EXCEPTION_LINE_RE = re.compile(
+    r"(?P<summary>[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception):\s+.+)$",
+)
 
 
 def _make_run_id() -> str:
@@ -49,6 +54,92 @@ def _missing_success_markers(text: str, markers: list[str]) -> list[str]:
     if not markers:
         return []
     return [marker for marker in markers if marker not in text]
+
+
+def _extract_json_marker(text: str, prefix: str) -> dict[str, Any] | None:
+    for line in reversed((text or "").splitlines()):
+        stripped = line.strip()
+        if not stripped.startswith(prefix):
+            continue
+        try:
+            payload = json.loads(stripped[len(prefix):])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+    return None
+
+
+def _first_traceback_summary(text: str) -> str | None:
+    """提取首个 traceback 的终止异常行，避免后续成功日志掩盖根因。"""
+    in_traceback = False
+    for line in (text or "").splitlines():
+        if line.startswith("Traceback (most recent call last)"):
+            in_traceback = True
+            continue
+        if not in_traceback:
+            continue
+        match = _EXCEPTION_LINE_RE.search(line.strip())
+        if match:
+            return match.group("summary")[:400]
+    return None
+
+
+def _classify_task_failure(*, status: str, exit_code: int | None, output: str) -> str:
+    """将失败归类为可重试基础设施故障、确定性代码错误或业务/数据阻断。"""
+    if status == "timeout" or exit_code == -1:
+        return "transient_infrastructure"
+
+    lowered = (output or "").lower()
+    deterministic_markers = (
+        "typeerror:",
+        "valueerror:",
+        "keyerror:",
+        "assertionerror",
+        "syntaxerror:",
+        "modulenotfounderror:",
+        "missing success markers",
+    )
+    if status == "error" or any(marker in lowered for marker in deterministic_markers):
+        return "deterministic_code_or_contract"
+
+    transient_markers = (
+        "connection refused",
+        "could not connect",
+        "connection reset",
+        "temporary failure",
+        "temporarily unavailable",
+        "connectionerror",
+        "getaddrinfo failed",
+        "server closed the connection unexpectedly",
+        "name or service not known",
+        "too many requests",
+        "http 429",
+        "http 502",
+        "http 503",
+        "http 504",
+        "operationalerror",
+        '"status":"timeout"',
+        "timed out",
+        "超时",
+    )
+    if any(marker in lowered for marker in transient_markers):
+        return "transient_infrastructure"
+
+    if "traceback (most recent call last)" in lowered:
+        return "deterministic_code_or_contract"
+
+    business_markers = (
+        "insufficient_data",
+        "insufficient market data",
+        "not_ready",
+        "not ready",
+        "gate blocked",
+        "blocked by gate",
+        "validation failed",
+    )
+    if any(marker in lowered for marker in business_markers):
+        return "business_or_data_block"
+    return "unknown_non_retryable"
 
 
 # ── 配置加载 ──────────────────────────────────────────────────────
@@ -90,6 +181,15 @@ def describe_manual_trigger_availability(
     button must not advertise "运行完整 RDP" when the configured full pipeline is
     frozen and would be skipped.
     """
+    from aats.data_platform.governance.rdp_task_db import ENQUEUE_BLOCKED_WORKFLOWS
+
+    if workflow_name in ENQUEUE_BLOCKED_WORKFLOWS:
+        return {
+            "enabled": False,
+            "disabled_reason": f"{workflow_name} 当前处于 golden-path freeze，禁止人工触发。",
+            "enabled_task_names": [],
+            "blocked_by_freeze": True,
+        }
     try:
         config = load_workflow_config(project_root, workflow_name)
     except FileNotFoundError:
@@ -227,21 +327,55 @@ def _run_task(
         result["stdout_tail"] = stdout_tail or None
         result["stderr_tail"] = stderr_tail or None
         result["output_tail"] = combined_tail or None
+        pipeline_result = _extract_json_marker(combined_output, _PIPELINE_RESULT_PREFIX)
+        if pipeline_result is not None:
+            result["pipeline_result"] = pipeline_result
         if proc.returncode != 0:
-            # 取最后 500 字符的 stderr
-            result["error"] = (proc.stderr or "")[-500:].strip()
+            first_failure = (pipeline_result or {}).get("first_failure")
+            if isinstance(first_failure, dict):
+                phase = str(first_failure.get("phase_label") or first_failure.get("phase") or "研究阶段")
+                nested_status = str(first_failure.get("status") or "failed")
+                nested_exit = first_failure.get("exit_code")
+                nested_error = str(first_failure.get("error") or "").strip()
+                if not nested_error:
+                    nested_error = _first_traceback_summary(combined_output) or ""
+                result["error"] = (
+                    f"{phase} {nested_status}（退出码 {nested_exit}）：{nested_error}"
+                    if nested_error
+                    else f"{phase} {nested_status}（退出码 {nested_exit}）"
+                )[:500]
+            else:
+                result["error"] = stderr_tail or stdout_tail or f"process exited with code {proc.returncode}"
+            result["failure_class"] = _classify_task_failure(
+                status=str(result["status"]),
+                exit_code=proc.returncode,
+                output=combined_output,
+            )
         elif success_markers:
             missing_markers = _missing_success_markers(combined_output, success_markers)
             if missing_markers:
                 result["status"] = "failed"
                 result["error"] = "missing success markers: " + ", ".join(missing_markers)
                 result["missing_success_markers"] = missing_markers
+                result["failure_class"] = "deterministic_code_or_contract"
+        if (
+            proc.returncode == 0
+            and result["status"] == "success"
+            and (pipeline_result or {}).get("status") == "succeeded_with_warnings"
+        ):
+            result["status"] = "success_with_warnings"
+            result["warning_summary"] = str(
+                (pipeline_result or {}).get("warning_summary")
+                or "研究管线部分阶段仅部分成功",
+            )[:500]
     except subprocess.TimeoutExpired:
         result["status"] = "timeout"
         result["error"] = f"超时 ({timeout}s)"
+        result["failure_class"] = "transient_infrastructure"
     except Exception as exc:
         result["status"] = "error"
         result["error"] = str(exc)[:500]
+        result["failure_class"] = "deterministic_code_or_contract"
 
     result["finished_at"] = datetime.now(timezone.utc).isoformat()
     return result
@@ -289,6 +423,7 @@ def run_workflow(
     succeeded = 0
     failed = 0
     failed_but_allowed = 0
+    succeeded_with_warnings = 0
     skipped = 0
 
     for task_index, task in enumerate(tasks, start=1):
@@ -312,8 +447,11 @@ def run_workflow(
         if observer is not None:
             observer.step_finished(task_result, task_index)
 
-        if task_result["status"] == "success" or task_result["status"] == "dry_run":
+        if task_result["status"] in ("success", "dry_run"):
             succeeded += 1
+        elif task_result["status"] == "success_with_warnings":
+            succeeded += 1
+            succeeded_with_warnings += 1
         elif task_result["status"] in ("failed", "timeout", "error"):
             if task_result.get("allow_failure"):
                 # allow_failure=true 的 task 失败视为 degraded 而非硬失败：
@@ -326,7 +464,7 @@ def run_workflow(
                 failed += 1
                 if stop_on_failure:
                     # 后续任务标记为 skipped
-                    remaining = tasks[tasks.index(task) + 1:]
+                    remaining = tasks[task_index:]
                     for remaining_index, rt in enumerate(
                         remaining,
                         start=task_index + 1,
@@ -348,17 +486,42 @@ def run_workflow(
     report["succeeded"] = succeeded
     report["failed"] = failed
     report["failed_but_allowed"] = failed_but_allowed
+    report["succeeded_with_warnings"] = succeeded_with_warnings
     report["skipped"] = skipped
 
-    if failed == 0 and failed_but_allowed == 0:
+    if failed == 0 and failed_but_allowed == 0 and succeeded_with_warnings == 0:
         report["overall_status"] = "success"
-    elif failed == 0 and failed_but_allowed > 0:
+    elif failed == 0:
         # 所有失败都是 allow_failure task，视为 degraded 但不是硬失败
         report["overall_status"] = "degraded"
     elif succeeded > 0:
         report["overall_status"] = "partial"
     else:
         report["overall_status"] = "failed"
+
+    first_issue = next(
+        (
+            item
+            for item in report["tasks"]
+            if item.get("status")
+            in ("failed", "timeout", "error", "success_with_warnings")
+        ),
+        None,
+    )
+    if first_issue is not None:
+        report["failure_class"] = first_issue.get("failure_class")
+        report["error_summary"] = (
+            first_issue.get("error")
+            or first_issue.get("warning_summary")
+            or f"{first_issue.get('name', 'workflow task')} 未完全成功"
+        )
+        report["first_failure"] = {
+            "task": first_issue.get("name"),
+            "status": first_issue.get("status"),
+            "exit_code": first_issue.get("exit_code"),
+            "error": first_issue.get("error") or first_issue.get("warning_summary"),
+            "failure_class": first_issue.get("failure_class"),
+        }
 
     # 保存执行报告
     _save_run_report(project_root, report)

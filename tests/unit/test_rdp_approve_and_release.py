@@ -25,10 +25,17 @@ from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from aats.api.rdp_apply_token import emit_token
 from aats.api.rdp_routes import rdp_router
+
+
+@pytest.fixture(autouse=True)
+def _set_apply_token_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RDP_APPLY_TOKEN_SECRET", "approve-release-unit-test-secret")
 
 
 def _build_runtime() -> SimpleNamespace:
@@ -48,6 +55,10 @@ def _build_app() -> FastAPI:
     app.include_router(rdp_router)
     app.state.runtime = _build_runtime()
     return app
+
+
+def _apply_headers(actor: str = "operator") -> dict[str, str]:
+    return {"X-Rdp-Apply-Token": emit_token(actor=actor, action="apply")}
 
 
 def _draft_rec(rec_id: str = "rec_draft") -> dict:
@@ -163,7 +174,7 @@ def test_approve_and_release_happy_path(tmp_path: pathlib.Path) -> None:
     }
 
     with _patch_stack(tmp_path, release_result=fake_release):
-        client = TestClient(app)
+        client = TestClient(app, headers=_apply_headers())
         response = client.post(
             "/rdp/recommendations/rec_happy/approve-and-release",
             json={
@@ -203,7 +214,7 @@ def test_approve_and_release_integrity_blocked_does_not_mutate(
         tmp_path,
         integrity_block="Step2 快照不完整：candle_stats 缺失",
     ):
-        client = TestClient(app)
+        client = TestClient(app, headers=_apply_headers())
         response = client.post(
             "/rdp/recommendations/rec_integrity/approve-and-release",
             json={"actor": "operator"},
@@ -231,7 +242,7 @@ def test_approve_and_release_missing_recommendation_404(
     _write_rec_registry(tmp_path, [_draft_rec("rec_other")])
 
     with _patch_stack(tmp_path):
-        client = TestClient(app)
+        client = TestClient(app, headers=_apply_headers())
         response = client.post(
             "/rdp/recommendations/rec_missing/approve-and-release",
             json={"actor": "operator"},
@@ -251,7 +262,7 @@ def test_approve_and_release_wrong_status_409(tmp_path: pathlib.Path) -> None:
     _write_rec_registry(tmp_path, [_approved_rec("rec_already_approved")])
 
     with _patch_stack(tmp_path):
-        client = TestClient(app)
+        client = TestClient(app, headers=_apply_headers())
         response = client.post(
             "/rdp/recommendations/rec_already_approved/approve-and-release",
             json={"actor": "operator"},
@@ -276,7 +287,7 @@ def test_approve_and_release_cas_race_maps_to_409(
     _write_rec_registry(tmp_path, [_draft_rec("rec_cas_race")])
 
     with _patch_stack(tmp_path, db_cas_conflict=True):
-        client = TestClient(app)
+        client = TestClient(app, headers=_apply_headers())
         response = client.post(
             "/rdp/recommendations/rec_cas_race/approve-and-release",
             json={"actor": "operator"},
@@ -313,7 +324,7 @@ def test_approve_and_release_gate_blocks_keeps_approval(
     }
 
     with _patch_stack(tmp_path, release_result=fake_release):
-        client = TestClient(app)
+        client = TestClient(app, headers=_apply_headers())
         response = client.post(
             "/rdp/recommendations/rec_gate_block/approve-and-release",
             json={"actor": "operator"},
@@ -355,7 +366,7 @@ def test_approve_and_release_apply_failure_keeps_approval(
     }
 
     with _patch_stack(tmp_path, release_result=fake_release):
-        client = TestClient(app)
+        client = TestClient(app, headers=_apply_headers())
         response = client.post(
             "/rdp/recommendations/rec_apply_fail/approve-and-release",
             json={"actor": "operator"},
@@ -395,7 +406,7 @@ def test_approve_and_release_skip_apply_creates_release_without_applying(
         "aats.data_platform.production_workflow.release_registry.create_parameter_release",
         fake_create_release,
     ):
-        client = TestClient(app)
+        client = TestClient(app, headers=_apply_headers())
         response = client.post(
             "/rdp/recommendations/rec_skip_apply/approve-and-release",
             json={"actor": "operator", "skip_apply": True},
@@ -432,7 +443,7 @@ def test_approve_and_release_skip_gate_forwarded(tmp_path: pathlib.Path) -> None
         "aats.data_platform.production_workflow.release_registry.create_parameter_release",
         fake_create_release,
     ):
-        client = TestClient(app)
+        client = TestClient(app, headers=_apply_headers())
         response = client.post(
             "/rdp/recommendations/rec_skip_gate/approve-and-release",
             json={"actor": "operator", "skip_gate": True},
@@ -465,7 +476,7 @@ def test_approve_and_release_observation_window_forwarded(
         "aats.data_platform.production_workflow.release_registry.create_parameter_release",
         fake_create_release,
     ):
-        client = TestClient(app)
+        client = TestClient(app, headers=_apply_headers())
         response = client.post(
             "/rdp/recommendations/rec_obs_window/approve-and-release",
             json={"actor": "operator", "observation_window_hours": 48},
@@ -525,7 +536,7 @@ def test_approve_and_release_binds_actor_to_session_when_auth_enabled(
         "aats.data_platform.production_workflow.release_registry.create_parameter_release",
         _capture_release,
     ):
-        client = TestClient(app)
+        client = TestClient(app, headers=_apply_headers("alice"))
         response = client.post(
             "/rdp/recommendations/rec_actor_bind/approve-and-release",
             json={"actor": "mallory"},  # 尝试劫持
@@ -565,7 +576,7 @@ def test_approve_and_release_integrity_check_runs_before_approve(
             "aats.data_platform.decision_system.recommendation_registry._db_update_rec_status",
             db_update_spy,
         ))
-        client = TestClient(app)
+        client = TestClient(app, headers=_apply_headers())
         response = client.post(
             "/rdp/recommendations/rec_order_check/approve-and-release",
             json={"actor": "operator"},

@@ -1,137 +1,100 @@
-# RDP UI 速查 —— 5 分钟上手
+# RDP Workspace V3 UI 速查
 
-> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+> 文档状态：现行 UI 操作入口
+> 最后核对：2026-08-25（起始代码基线 `70f1a581`，V3 实现位于同一待提交工作树）
+> 运行边界：仅适用于 `derivatives` 本地模拟环境 `http://127.0.0.1:8001/ui/rdp`；本文不证明容器、数据、候选或参数的当前现场状态
 
-> 文档状态：现行 UI 速查。最后核对：2026-08-24（起始 HEAD `00b6df0` + 未提交 Phase 3F 覆盖层）。当前只使用 `derivatives` 模拟入口 `http://127.0.0.1:8001`；旧 `https://127.0.0.1:8011` live 路径已被标准部署入口禁用。
+## 1. 页面解决什么问题
 
+RDP Workspace V3 把运行、队列、研究证据、治理审阅、发布候选、观察和调优收敛到一份 `rdp.workspace.v3` 快照。页面只回答三件事：
 
-> 目标: 打开 `http://127.0.0.1:8001/ui/rdp` 后，不用查文档就知道该看什么、该点什么。
-> 深入 SOP 请看 [rdp_operator_workflow.md](./rdp_operator_workflow.md) 和 [operator_checklist.md](./operator_checklist.md)。
+1. 当前处于哪个研究生命周期阶段；
+2. 现在可以执行什么，以及为什么需要等待或被阻断；
+3. 是否存在完整、已批准且门禁通过的模拟参数候选。
 
----
+页面不会把“最新”“高置信度”或“回测收益最高”单独等同于可发布。没有合格候选时，正确结果是“无合格候选”，不应用任何参数。
 
-## 1. RDP 在做什么?
+## 2. 页面结构
 
-后台 scheduler 只运行 8 个 enabled workflow；`decision_cycle` 和 `release_cycle` 当前禁用，后者还禁止入队。研究与建议生成不是所有时刻都“自动一直跑”。
-**建议不会自动生效**, 必须 operator 在 UI 上点一下才会影响实盘。
-
-每条建议绑定一个 `(family, timeframe)` 组合, 例如 `DIRECTIONAL / 1H`。
-建议有五种类型:
-
-| 类型 | 含义 | 影响实盘? |
-|------|------|----------|
-| **parameter_upgrade** | 换一组新参数 | ✅ **会改实盘**, 审批要慎重 |
-| **keep_active** | 维持现状 | ❌ 不改 |
-| **lower_priority** | 降低此策略优先级 | ❌ 不直接改参数 |
-| **pause** | 暂停此策略交易 | ✅ **会停止此 combo 下单** |
-| **require_review** | 数据异常需人工看 | ❌ 只是标记 |
-
----
-
-## 2. 屏幕四个区块 —— 自上而下看
-
-```
-┌─────────────────────────────────────────────────┐
-│ ① Hero 顶带:  待审批N 观察中M 阻断K 队列L       │ ← 一眼看整体
-├─────────────────────────────┬───────────────────┤
-│ ② 当前阻断(红色, 有才显示)   │                   │
-│ ③ 当前待处理(待审批卡)       │  ⑤ 右侧运行态栏   │
-│ ④ 待发布候选(已批准待发卡)   │  (服务健康/Gate) │
-│ ⑥ 观察与回滚                 │                   │
-└─────────────────────────────┴───────────────────┘
+```text
+研究运营控制面
+  ├─ 环境、RDP 健康、执行槽、队列、当前阶段、建议下一步
+  ├─ 数据准备 → 研究与回放 → 治理审阅 → Gate 与发布 → 模拟观察 → 运行参数
+  ├─ 快速动作：刷新数据 / 运行完整 RDP / 治理检查
+  ├─ 运行与执行队列 | 研究证据与治理审阅
+  └─ 发布候选 | 观察与回滚 | 研究调优
 ```
 
-### 各区块看什么
+- 顶部状态不是盈利证明，只是当前治理/运行投影。
+- 生命周期的“证据 N 项”表示已发现的证据数量，不表示证据必然合格。
+- “运行完整 RDP”会立即创建逻辑 Run；执行槽忙时 Run 合法进入队列。
+- 队列位次按 daemon 的真实领取规则投影：人工恢复、人工触发、重试、定时任务；处于重试冷却期的任务不会冒充可立即执行。
+- 当前只保留一个研究执行槽，以保护共享 artifact、checkpoint 和数据库连接预算。
 
-- **② 当前阻断** — 红色告警。不处理这些, 后续审批都会被挡。先清它。
-- **③ 当前待处理** — `draft` 状态的建议, 等你决策。**主战场**。
-- **④ 待发布候选** — 已审批(approved)但还没 apply 到实盘的。下一步是 Gate + release。
-- **⑥ 观察与回滚** — 已 apply 的 release 在观察窗内(默认 24h), daemon 自动评估效果, 期间你也可以手动跑观察 / 触发回滚。
-- **⑤ 运行态栏** — RDP daemon 健康, 最近一次 Gate / apply 结果。出问题这里先变色。
+## 3. 标准操作顺序
 
----
+1. 先确认环境显示“模拟环境”，不要把本页用于 live 状态证明。
+2. 查看 RDP 健康和后台执行器心跳；心跳异常时不要反复创建 Run。
+3. 查看生命周期中第一个“需要处理”或“已阻断”的阶段。
+4. 如数据证据不足，执行“刷新数据”；如需要重建完整证据链，执行“运行完整 RDP”。
+5. 创建后记录 Run ID，并在“运行与执行队列”查看：
+   - `等待执行`：已成功持久化，等待执行槽或后台执行器领取；
+   - `运行中`：查看当前步骤、进度和心跳；
+   - `部分成功/成功（有警告）`：仍需人工处理，不视为完整成功；
+   - `失败`：先打开详情确认首个失败步骤，修复后再重试。
+6. 在“研究证据与治理审阅”检查完整性、原因摘要和证据链；证据阻断时批准按钮必须禁用。
+7. 参数候选获批后先运行门禁。只有门禁通过且治理历史新鲜时，“创建发布”才可用。
+8. 模拟发布后进入观察窗口；出现“建议回滚”时先复核效果证据，再决定是否发起受保护的回滚。
 
-## 3. 按钮速查 —— 点下去会发生什么
+## 4. 关键按钮与实际效果
 
-### 审批类 (在 ③ 待处理卡上)
+| 按钮 | 当前写接口 | 实际语义 |
+| --- | --- | --- |
+| 刷新数据 / 运行完整 RDP / 治理检查 | `POST /rdp/v2/runs` | 使用幂等键立即创建逻辑 Run；不等待脚本跑完 |
+| 查看详情 | `GET /rdp/v2/runs/{run_id}` | 查看 attempt、step、event 和错误摘要 |
+| 取消 | `POST /rdp/v2/runs/{run_id}/cancel` | 协作式取消；不能保证正在执行的子进程瞬时退出 |
+| 修复后重试 | `POST /rdp/v2/runs/{run_id}/retry` | 重新检查当前 workflow 能力后创建新 attempt |
+| 批准 / 拒绝建议 | recommendation 写接口 | 只改变治理结论；批准本身不应用参数 |
+| 运行 Gate | `POST /rdp/gates/run` | 运行发布前门禁；阻断结果不能继续创建发布 |
+| 创建发布 | `POST /rdp/releases/create` | 先取得 session-bound 短时 apply token，再执行受控模拟发布 |
+| 运行观察 | `POST /rdp/observations/run` | 评估指定 release 的观察窗口 |
+| 发起回滚 | `POST /rdp/parameters/rollback` | 使用独立 rollback token 回到合法上一版参数 |
 
-| 按钮 | 走的 API | 点完之后 |
-|------|---------|--------|
-| **批准参数候选** | `POST /rdp/recommendations/{id}/approve` | rec 变 approved, 出现在 ④ 待发布候选; **不改实盘** |
-| **同意保持当前** | 同上 | rec 变 approved, 这轮不创建新发布; **不改实盘** |
-| **同意降优先级** / **同意暂停** | 同上 | rec 变 approved, 治理侧记录; **pause 会停止此 combo 下单** |
-| **退回 / 拒绝** | `POST /rdp/recommendations/{id}/reject` | rec 变 rejected, 卡片消失 |
-| **批准并发布** | `POST /rdp/recommendations/{id}/approve-and-release` | **一键跑完 approve + Gate + release + apply**, 实盘立刻变参数, 进观察窗 |
+## 5. “排队”为什么不是按钮失效
 
-### 发布类 (在 ④ 待发布候选卡上)
+点击运行后，API 在治理数据库提交成功便返回 Run ID。真正执行由 RDP daemon 领取；以下任一条件会产生等待：
 
-| 按钮 | 走的 API | 点完之后 |
-|------|---------|--------|
-| **运行 Gate** | `POST /rdp/gates/run` | 跑预检(波动率/完整性阈值), 失败会说明阻断原因 |
-| **创建发布** | `POST /rdp/releases/create` | 建 release 记录 + apply 到实盘; **会改实盘** |
+- 唯一执行槽已有 Run；
+- retry 尚处于 `earliest_start_at` 冷却窗口；
+- daemon 心跳不新鲜；
+- Run 已就绪，正在等待下一个轮询周期。
 
-### 观察 / 回滚 (在 ⑥ 观察与回滚卡上)
+页面必须同时显示队列位次和上述原因。若没有 Run ID，才应判断为创建失败；有 Run ID 且状态为“等待执行”代表按钮已经生效。
 
-| 按钮 | 走的 API | 点完之后 |
-|------|---------|--------|
-| **运行观察** | `POST /rdp/observations/run` | 在观察窗内评估此 release 效果 |
-| **执行回滚** | `POST /rdp/parameters/rollback` | **实盘参数回到上一版**; 需二次确认 |
+## 6. 发布和应用硬纪律
 
-### 调优 (⑥ 附近的 tuning 卡, 可能隐藏)
+1. `release_cycle` 仍然 disabled 且禁止入队，页面重构没有解除它。
+2. “批准”与“应用”是两步；应用仍需要权限、短时 token、参数映射、Gate、rollback target 和审计。
+3. 发布历史来自副本或标记 stale 时，运行观察和回滚按钮必须失败关闭。
+4. `partially_succeeded` 和 `succeeded_with_warnings` 都需要处理，不应显示为完整闭环。
+5. 当前部署只验证 derivatives 模拟栈；任何 `ok=true` 都不能被写成 live 资金已生效。
+6. 操作完成后核对 workspace、Run 详情、active parameter provenance、release history 和 observation；不要只看顶部绿色状态。
 
-| 按钮 | 作用 |
-|------|------|
-| **批准调优提案** | research 侧的默认值 override 生效 |
-| **拒绝调优提案** | 不采纳 |
+## 7. 常见问题
 
----
+| 现象 | 判断与处理 |
+| --- | --- |
+| 页面显示“正在生成 RDP Workspace V3” | 单一快照正在组装；等待自动刷新，长期不恢复再检查 governance DB 和 RDP 接口 |
+| Run 长时间等待且提示后台执行器心跳异常 | 任务已保存但暂不能被领取；先恢复 daemon，不要重复点击 |
+| Run 失败且完整流水线步骤显示失败 | 打开详情定位首个失败步骤；不要根据最后一行“闭环完成”误判成功 |
+| 有已批准候选但“创建发布”禁用 | 先运行并通过最新 Gate，并确认治理历史不是 stale |
+| 显示“无合格候选” | 正常的安全终止；不得从失败候选中强制挑选一个应用 |
+| 观察卡显示“建议回滚” | 先读观察评估，再执行受 token 保护的回滚，并核对 runtime provenance |
 
-## 4. 典型一天 —— 5 分钟节奏
+## 8. 深入入口
 
-1. 打开 `http://127.0.0.1:8001/ui/rdp`
-2. **看 ① Hero 四个数字**:
-   - 阻断 > 0 → 先去 ② 看阻断, 处理完再审批
-   - 待审批 > 0 → 去 ③ 逐个审批
-   - 观察中 > 0 → 去 ⑥ 看是否触发回滚建议
-3. **审批流**: 在 ③ 每张卡上, 根据 recommendation_type 决定:
-   - `parameter_upgrade` + 置信度高 + 数据无阻断 → 点 **批准并发布** (一键进入实盘)
-   - `parameter_upgrade` 但想分步看 → 先 **批准参数候选** → 去 ④ 跑 **运行 Gate** → 通过再 **创建发布**
-   - `keep_active` / `lower_priority` / `pause` → 点对应的"同意..."按钮, 确认即可
-   - 置信度低 / 数据存疑 → 点 **退回 / 拒绝**
-4. **观察期**: 已发布的进 ⑥ 等 24h, daemon 自动评估。触发 rollback 建议时手动决定是否 **执行回滚**。
-5. 看 ⑤ 运行态栏, 全绿关掉 tab。
-
----
-
-## 5. 常见提示怎么办
-
-| 顶部横幅 | 含义 | 怎么办 |
-|---------|------|--------|
-| `Step2 数据完整性未通过` / `integrity_blocked=true` | research 侧快照缺数据 | 去 ⑤ 看是否有"刷新数据"workflow, 触发 `data_maintenance`; 或等 daemon 自己补 |
-| `Pre-apply gate 阻断 (blocked_by_gate)` | 发布前预检不通过 | 看阻断原因(通常是波动率/数据完整性阈值), 可等更多数据再试 |
-| `审批已落库但 apply 失败` | approve 成功但进实盘失败 | 去 ④ 看对应 release 的 apply_result, 手动 **创建发布** 重试 |
-| `409 / cas_race / 被并发改写` | 另一个 operator 抢先操作了 | 刷新页面, 看最新状态 |
-| `Internal Server Error` (红色 danger 横幅 60s TTL) | 后端 bug | 截图 + 记下时间, 报给开发者; **不要**一直重试 |
-| `卡片消失, 没出现下一条` | 此 combo 下 DB 里**没有**下一条 pending | 正常。等 research 下一轮产出。不是 bug |
-
----
-
-## 6. 几条硬纪律
-
-1. **parameter_upgrade 审批一定要看置信度 + 数据完整性**, 二者任一不达标就退回。置信度低的参数升级进实盘的风险高于"维持现状"。
-2. **"批准并发布"是原子操作**, 一旦点下 Gate 和 apply 都会串行跑完。适合高置信度 + 无阻断的场景。不确定就分步(批准参数候选 → 跑 Gate → 创建发布)。
-3. **回滚只撤参数, 不撤 release 记录**。回滚后那条 release 在审计里仍然存在, 标记 `rolled_back`。
-4. **操作后别立即第二次点**, 后端有 CAS 保护但前端 8s flash 覆盖时你可能误以为失败。等刷新完成再判断。
-5. **dashboard 默认 2 分钟 polling**, 按按钮触发的操作会立刻 manual refresh 一次。观察窗口内状态变化可能要等下一轮 polling 才能看到。
-
----
-
-## 7. 深入阅读 (按需)
-
-- **每日/每周巡检清单**: [operator_checklist.md](./operator_checklist.md)
-- **完整 SOP (含 API 调用示例)**: [rdp_operator_workflow.md](./rdp_operator_workflow.md)
-- **参数 apply/rollback 细节**: [parameter_apply_and_rollback.md](./parameter_apply_and_rollback.md)
-- **治理语义**: [parameter_governance.md](./parameter_governance.md)
-- **周期性复盘流程**: [periodic_review_workflow.md](./periodic_review_workflow.md)
-- **生产参数变更 runbook**: [production_parameter_change_runbook.md](./production_parameter_change_runbook.md)
-- **RDP 可靠性 runbook**: [rdp_reliability_runbook.md](./rdp_reliability_runbook.md)
+- [RDP Operator 标准流程](rdp_operator_workflow.md)
+- [RDP 可靠性 Runbook](rdp_reliability_runbook.md)
+- [参数应用与回滚](parameter_apply_and_rollback.md)
+- [RDP Platform V3 架构设计](../design/rdp_platform_v3_architecture_2026_08_25.md)
+- [RDP 代码模块参考](../rdp/module_reference.md)

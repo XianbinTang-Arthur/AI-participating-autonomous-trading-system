@@ -14,7 +14,7 @@
 - recommendation 不会因为 approved 自动生效；只有 release/apply 成功才改变 active set。
 - `POST /rdp/parameters/apply` 和 `POST /rdp/parameters/rollback` 同时要求 Operator write access 与 action-bound `X-Rdp-Apply-Token`。
 - token actor 在启用认证时必须等于当前 session identity，且 token 受 HMAC、action 和 TTL 约束。
-- `POST /rdp/releases/create` 与 `POST /rdp/recommendations/{id}/approve-and-release` 当前只要求 write access + Step2 integrity gate，**没有额外要求 apply token**；这是代码中的真实策略差异，不得在 runbook 中误写为“所有 apply 路径都需要 token”。如果要统一安全策略，应先修改代码和测试。
+- `POST /rdp/releases/create` 与 `POST /rdp/recommendations/{id}/approve-and-release` 在 `skip_apply=false` 时同样要求 `action=apply` 的短时 token；token 校验发生在 release/approve 写入之前。`skip_apply=true` 只创建治理记录，不要求 apply token。
 - `release_cycle` 自动调度已禁用且禁止任务入队。
 
 ## 2. 变更前置条件
@@ -56,10 +56,10 @@ Body 使用 `recommendation_id`。Gate 返回 block 时停止；不得通过 `sk
 | 路径 | 认证 | Token | 行为 |
 | --- | --- | --- | --- |
 | `POST /rdp/parameters/apply` | write access | `action=apply` 必需 | 将已批准 recommendation 应用为 active set |
-| `POST /rdp/releases/create` | write access | 当前不要求 | gate + release + apply；支持 observation window |
-| `POST /rdp/recommendations/{id}/approve-and-release` | write access | 当前不要求 | approve + gate + release + apply 组合入口 |
+| `POST /rdp/releases/create` | write access | `action=apply`（`skip_apply=false`） | gate + release + apply；支持 observation window |
+| `POST /rdp/recommendations/{id}/approve-and-release` | write access | `action=apply`（`skip_apply=false`） | approve + gate + release + apply 组合入口 |
 
-运维默认使用 UI 暴露的受控组合入口；如果直接调用 `/parameters/apply`，先由同一 Operator session 申请 token：
+UI 会在 apply、release 或 approve-and-release 前由当前 Operator session 自动申请 token。若直接调用任一会执行 apply 的端点，先申请 token：
 
 ```text
 POST /rdp/operator-tokens

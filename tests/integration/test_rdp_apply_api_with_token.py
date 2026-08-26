@@ -132,6 +132,54 @@ def test_apply_without_token_returns_403() -> None:
     assert detail["action"] == "apply"
 
 
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        (
+            "/rdp/releases/create",
+            {"recommendation_id": "rec_release_missing_token", "actor": "operator"},
+        ),
+        (
+            "/rdp/recommendations/rec_combined_missing_token/approve-and-release",
+            {"actor": "operator"},
+        ),
+    ],
+)
+def test_composite_apply_endpoints_without_token_return_403(
+    path: str,
+    payload: dict[str, str],
+) -> None:
+    """所有可能写入 active parameter set 的 API 都必须走 apply token。"""
+    client = TestClient(_build_app(auth_enabled=False))
+    response = client.post(path, json=payload)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == {
+        "code": "missing_apply_token",
+        "action": "apply",
+    }
+
+
+def test_composite_release_without_apply_does_not_require_token() -> None:
+    """skip_apply=True 只建治理记录，不应要求参数应用令牌。"""
+    app = _build_app(auth_enabled=False)
+    with patch(
+        "aats.api.rdp_routes._step2_integrity_blocking_reason",
+        return_value="test integrity stop",
+    ):
+        response = TestClient(app).post(
+            "/rdp/releases/create",
+            json={
+                "recommendation_id": "rec_skip_apply_without_token",
+                "actor": "operator",
+                "skip_apply": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["integrity_blocked"] is True
+
+
 # ── Case 2 ─────────────────────────────────────────────────────────────────
 
 

@@ -6,7 +6,7 @@
 
 - RDP 写 research/governance 数据库，对主交易数据库保持只读。
 - 主交易 runtime active parameter 只从 `governance.active_parameter_sets` 加载。
-- 参数变更只能通过认证后的 RDP API 和 gate；直接 apply/rollback 还要求短时 token。组合 release 端点当前不要求 token，属于需要明确知晓的现行策略差异。旧直写脚本已禁用。
+- 参数变更只能通过认证后的 RDP API 和 gate；所有会执行 apply 的直接或组合入口都要求短时 `action=apply` token，rollback 要求独立的 `action=rollback` token。旧直写脚本已禁用。
 - `release_cycle` 当前禁用且禁止入队；不要通过手工改任务表绕过。
 - 标准 `aats-rdp-daemon` 随部署启动，不需要在宿主机另起 nohup 进程。
 - 不在终端、文档、工单或聊天中显示 `.env.*` 内容、连接串、token 或交易所凭证。
@@ -60,7 +60,7 @@
 | `decision_cycle` | 周日 10:00 | 否 | 仅保留定义 |
 | `release_cycle` | 每小时 :00 | 否 | 冻结，禁止入队 |
 
-首次调度 bootstrap 固定为 `data_maintenance → research_cycle`，之后才进入常规 slot 评估。
+首次调度 bootstrap 固定为 `data_maintenance → research_cycle`，之后才进入常规 slot 评估。当前各 workflow 使用滚动窗口/水位推进，不接受历史 slot 参数；因此多个漏执行 slot 会合并为一次“截至最新到期 slot”的任务。若同 workflow 已有 active task，本轮不会推进 scheduler 水位，待下轮再次评估。
 
 ## 4. 手工触发 Workflow
 
@@ -78,8 +78,8 @@
 - 同一 workflow 最多一个 active task；
 - 并发触发通过数据库 partial unique index 和原子 `INSERT ... ON CONFLICT` 收敛；
 - daemon 通过 `FOR UPDATE SKIP LOCKED` 领取；
-- 延迟重试必须等 `earliest_start_at`；
-- daemon 重启遗留的 running 任务会以 exit `-3` 标记 failed。
+- 只有分类为 `transient_infrastructure` 的失败才自动重试一次，且必须等待 `earliest_start_at`；确定性代码错误、数据/业务门禁和未知错误保持终态；
+- orphan recovery 只接管心跳超过 30 秒未更新的 running 任务，以 exit `-3` 标记 failed；并行 daemon 启动不会把仍有心跳的任务误判为 orphan。
 
 ## 5. 研究脚本
 
@@ -113,7 +113,7 @@
 - pre-apply gate 允许；
 - 主交易 health/recovery/reconciliation 可接受；
 - actor、release id、observation plan、rollback target 齐全；
-- 若选择 `/parameters/apply`，具有 `action=apply` 的短时 `X-Rdp-Apply-Token`；组合 release 入口当前只要求 write access + integrity/gate。
+- 当前 Operator session 签发的短时 `X-Rdp-Apply-Token`；直接 apply 以及 `skip_apply=false` 的组合 release 入口都要求 `action=apply` token。
 
 ### 6.2 当前写入口
 
@@ -124,13 +124,13 @@
 | 替代 recommendation | `POST /rdp/recommendations/{id}/supersede` |
 | Gate | `POST /rdp/gates/run` |
 | 获取 Operator token | `POST /rdp/operator-tokens` |
-| 创建 release + apply | `POST /rdp/releases/create`（当前不要求 apply token） |
+| 创建 release + apply | `POST /rdp/releases/create` + `action=apply` token |
 | 单独 apply | `POST /rdp/parameters/apply` |
 | 观察 | `POST /rdp/observations/run` |
 | 回滚评估 | `POST /rdp/rollback-recommendation/evaluate` |
 | 执行回滚 | `POST /rdp/parameters/rollback` |
 
-`/parameters/apply` 与 `/parameters/rollback` 的 token 属于敏感短期凭证，不写入 shell history、文档或工单。完整 payload 契约以 `/openapi.json` 为准。
+apply/release/rollback 的 token 属于敏感短期凭证，不写入 shell history、文档或工单。完整 payload 契约以 `/openapi.json` 为准。
 
 以下脚本已禁用，运行会退出 2：
 
@@ -164,14 +164,14 @@
 
 - 查看 task status 的 started_at/log tail；
 - 检查 daemon 是否仍有 heartbeat；
-- daemon 已重启时，确认 orphan recovery 是否把旧任务标为 failed/-3；
-- 只通过标准 retry 路径补跑，保留原失败记录。
+- daemon 已重启时，确认超过 30 秒无心跳的 orphan 是否被标为 failed/-3；仍有新鲜心跳的任务不得被恢复逻辑覆盖；
+- 只通过标准 retry 路径补跑可重试故障，保留原失败记录。
 
 ### 7.3 Workflow 失败
 
 1. 保存 workflow、task id、exit code、log tail 和输入版本；
 2. 判断是输入质量、数据库、OKX、timeout、schema 还是代码错误；
-3. 修复原因后使用 retry manager/Operator 任务入口补跑；
+3. 临时基础设施故障可通过标准 retry 路径补跑；确定性代码错误、数据质量或业务门禁失败必须先修复根因，再由 Operator 明确重新触发；
 4. 验证新任务与旧失败记录可关联；
 5. 不通过重复直接执行脚本掩盖队列状态。
 
