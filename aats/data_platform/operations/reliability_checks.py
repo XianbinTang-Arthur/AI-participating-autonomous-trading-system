@@ -267,6 +267,48 @@ def check_active_parameters(root: Path) -> ReliabilityCheckResult:
         )
 
 
+def check_data_governance_monitoring(root: Path) -> ReliabilityCheckResult:
+    """Promote the bounded data-governance monitor into the hourly alert cycle."""
+
+    from aats.api.rdp_data_governance import build_data_governance_snapshot
+
+    snapshot = build_data_governance_snapshot(root)
+    monitoring = snapshot.get("monitoring") or {}
+    status = str(monitoring.get("status") or "unknown")
+    alert_count = int(monitoring.get("alert_count") or 0)
+    if snapshot.get("status") != "ready" or status == "unknown":
+        return ReliabilityCheckResult(
+            name="rdp_data_governance_monitoring",
+            category="data",
+            passed=False,
+            severity="critical",
+            detail="data governance snapshot or monitoring evidence unavailable",
+        )
+    if status == "critical":
+        return ReliabilityCheckResult(
+            name="rdp_data_governance_monitoring",
+            category="data",
+            passed=False,
+            severity="critical",
+            detail=f"data governance has {alert_count} active alert(s)",
+        )
+    if status == "warning":
+        return ReliabilityCheckResult(
+            name="rdp_data_governance_monitoring",
+            category="data",
+            passed=False,
+            severity="warning",
+            detail=f"data governance has {alert_count} warning(s)",
+        )
+    return ReliabilityCheckResult(
+        name="rdp_data_governance_monitoring",
+        category="data",
+        passed=True,
+        severity="info",
+        detail="data governance monitoring has no active alerts",
+    )
+
+
 # ── 默认检查列表 ──────────────────────────────────────────────
 
 DEFAULT_RELIABILITY_CHECKS: list[Callable[[Path], ReliabilityCheckResult]] = [
@@ -277,6 +319,7 @@ DEFAULT_RELIABILITY_CHECKS: list[Callable[[Path], ReliabilityCheckResult]] = [
     check_open_failures,
     check_release_history_exists,
     check_active_parameters,
+    check_data_governance_monitoring,
 ]
 
 

@@ -78,6 +78,8 @@ def mark_orphaned_ingest_runs(
     run_type: str,
     dataset_domain: str,
     instrument_type: str | None = None,
+    symbol: str | None = None,
+    timeframe: str | None = None,
     trigger_mode: str | None = None,
     reason: str,
 ) -> int:
@@ -107,6 +109,14 @@ def mark_orphaned_ingest_runs(
                     CAST(:trigger_mode AS TEXT) IS NULL
                     OR trigger_mode = CAST(:trigger_mode AS TEXT)
                   )
+              AND (
+                    CAST(:symbol AS TEXT) IS NULL
+                    OR symbol = CAST(:symbol AS TEXT)
+                  )
+              AND (
+                    CAST(:timeframe AS TEXT) IS NULL
+                    OR timeframe = CAST(:timeframe AS TEXT)
+                  )
         """),
         dict(
             now=now,
@@ -114,6 +124,8 @@ def mark_orphaned_ingest_runs(
             run_type=run_type,
             domain=dataset_domain,
             instrument_type=instrument_type,
+            symbol=symbol,
+            timeframe=timeframe,
             trigger_mode=trigger_mode,
         ),
     )

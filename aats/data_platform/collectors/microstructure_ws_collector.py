@@ -3,7 +3,7 @@
 Subscribes to the six public channels that feed the P1-D Phase 1A Bronze /
 staging tables:
 
-  - ``trades-all``        → bronze.market_trades
+  - ``trades``            → bronze.market_trades (public, no VIP requirement)
   - ``bbo-tbt``           → bronze.market_orderbook_bbo (client-side 1 Hz sampled)
   - ``books5``            → bronze.market_orderbook_books5 (client-side 2 Hz sampled)
   - ``open-interest``     → staging.market_oi_funding_ticks (tick_type='oi')
@@ -23,7 +23,7 @@ Rate-limiting strategy (appendix E #5 of the implementation design):
   ``_min_bbo_interval`` throttle.
 * ``books5`` pushes every 100 ms; we sample at 2 Hz (every 500 ms).
 
-Unsampled ``trades-all`` / open-interest / funding-rate / mark-price messages
+Unsampled ``trades`` / open-interest / funding-rate / mark-price messages
 are persisted verbatim.
 
 Buffering (§6.6):
@@ -49,7 +49,7 @@ import json
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -60,6 +60,14 @@ from sqlalchemy.orm import Session
 from aats.bootstrap.metrics import MetricsRegistry
 from aats.bootstrap.settings import AATSSettings
 from aats.data_platform.db import get_session
+from aats.data_platform.data_governance.continuity import (
+    ContinuityEvent,
+    record_continuity_events,
+)
+from aats.data_platform.data_governance.gaps import (
+    prospective_drop_gap,
+    record_data_gaps,
+)
 from aats.data_platform.jobs.run_registry import (
     create_ingest_run,
     finish_ingest_run,
@@ -207,9 +215,9 @@ class OiFundingMarkRow:
 
     The discriminator is ``tick_type ∈ {'oi','funding','mark'}`` — each
     parser populates only the fields relevant to its channel; others stay
-    ``None`` (NULL in Postgres). The BIGSERIAL ``id`` is assigned by the DB
-    on insert, and the collector does not carry an ``ingest_run_id`` for
-    this table (Stage 1 design — see the schema in §6.4).
+    ``None`` (NULL in Postgres). The BIGSERIAL ``id`` is assigned by the DB;
+    ``ingest_run_id``、本地接收时间、连接代次和 sidecar sequence 由 writer
+    在持久化时附加，不伪装成交易所原始字段。
     """
 
     ts: datetime
@@ -309,16 +317,51 @@ def _exchange_sequence_id(entry: dict[str, Any]) -> str | None:
     return str(value)
 
 
+def _continuity_scopes(
+    table: str,
+    rows: Iterable[Any],
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Return only the channel/symbol scopes represented by one DB batch."""
+
+    materialized = tuple(rows)
+    if table == "staging.market_oi_funding_ticks":
+        channel_by_tick_type = {
+            "oi": _CHANNEL_OI,
+            "funding": _CHANNEL_FUNDING,
+            "mark": _CHANNEL_MARK,
+        }
+        grouped: dict[str, list[str]] = {}
+        for row in materialized:
+            channel = channel_by_tick_type.get(str(row.tick_type))
+            if channel is None:
+                raise ValueError("continuity_tick_type_invalid")
+            grouped.setdefault(channel, []).append(str(row.symbol))
+        return tuple(
+            (channel, tuple(dict.fromkeys(symbols)))
+            for channel, symbols in sorted(grouped.items())
+        )
+    channel_by_table = {
+        "bronze.market_trades": _CHANNEL_TRADES,
+        "bronze.market_orderbook_bbo": _CHANNEL_BBO,
+        "bronze.market_orderbook_books5": _CHANNEL_BOOKS5,
+    }
+    try:
+        channel = channel_by_table[table]
+    except KeyError as exc:
+        raise ValueError("continuity_table_not_allowlisted") from exc
+    return ((channel, tuple(dict.fromkeys(str(row.symbol) for row in materialized))),)
+
+
 # ---------------------------------------------------------------------------
 # Parsers — pure functions, one per channel family
 # ---------------------------------------------------------------------------
 
 def parse_trades_message(message: dict[str, Any]) -> list[TradeRow]:
-    """Parse one OKX ``trades-all`` push into 0..N :class:`TradeRow`.
+    """Parse one OKX public ``trades`` push into 0..N :class:`TradeRow`.
 
     OKX payload shape (per docs)::
 
-        {"arg": {"channel": "trades-all", "instId": "BTC-USDT-SWAP"},
+        {"arg": {"channel": "trades", "instId": "BTC-USDT-SWAP"},
          "data": [
             {"instId": "BTC-USDT-SWAP", "tradeId": "130639474",
              "px": "95000.1", "sz": "0.01",
@@ -1038,16 +1081,20 @@ class MicrostructureBronzeBuffer:
         if not rows_list:
             return False
         async with self._lock:
-            if len(self._rows) + len(rows_list) > _BUFFER_HARD_CAP:
-                # Make room by dropping oldest half first.
-                drop_n = _BUFFER_HARD_CAP // 2
+            self._rows.extend(rows_list)
+            if len(self._rows) > _BUFFER_HARD_CAP:
+                # Drop at least half the cap, and always enough to restore the
+                # hard bound even for an adversarial oversized input batch.
+                drop_n = max(
+                    _BUFFER_HARD_CAP // 2,
+                    len(self._rows) - _BUFFER_HARD_CAP,
+                )
                 del self._rows[:drop_n]
                 self._rows_dropped_total += drop_n  # B-H1 fix
                 log.critical(
                     "microstructure buffer hard-cap hit on %s: dropped %d oldest rows",
                     self._table, drop_n,
                 )
-            self._rows.extend(rows_list)
             return len(self._rows) >= self._flush_max_rows
 
     async def drain(self) -> list[Any]:
@@ -1155,6 +1202,9 @@ class MicrostructureCollector:
         # 2026-04-20 code review Issue 5b fix: 区分 initial connect vs reconnect
         # 给 P1-D dashboard 的 microstructure_ws_reconnect_total counter 用.
         self._seen_initial_connect: bool = False
+        self._connection_generation: int = 0
+        self._continuity_pending: list[ContinuityEvent] = []
+        self._continuity_message_buckets: dict[tuple[str, str], datetime] = {}
 
     @property
     def client(self) -> MicrostructureWSClient:
@@ -1169,6 +1219,140 @@ class MicrostructureCollector:
     def _metric_inc(self, name: str, value: int = 1) -> None:
         if self._metrics is not None:
             self._metrics.increment(name, value)
+
+    def _record_continuity(
+        self,
+        event_type: str,
+        *,
+        channels: Iterable[str],
+        symbols: Iterable[str] | None = None,
+        event_ts: datetime | None = None,
+        event_key: str = "",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """Queue continuity evidence and flush it when the DB is reachable."""
+
+        if self._ingest_run_id is None:
+            return
+        timestamp = event_ts or utc_now()
+        selected_symbols = tuple(dict.fromkeys(symbols or self._symbols))
+        selected_channels = tuple(dict.fromkeys(channels))
+        for symbol in selected_symbols:
+            for channel in selected_channels:
+                self._continuity_pending.append(
+                    ContinuityEvent(
+                        collector="aats-microstructure-collector",
+                        channel=channel,
+                        symbol=symbol,
+                        connection_generation=self._connection_generation,
+                        event_type=event_type,
+                        event_ts=timestamp,
+                        event_key=event_key,
+                        local_received_ts=timestamp,
+                        ingest_run_id=self._ingest_run_id,
+                        details=details,
+                    )
+                )
+        if len(self._continuity_pending) > 10_000:
+            overflow = len(self._continuity_pending) - 9_000
+            self._continuity_pending = self._continuity_pending[-9_000:]
+            for symbol in selected_symbols:
+                for channel in selected_channels:
+                    self._continuity_pending.append(
+                        ContinuityEvent(
+                            collector="aats-microstructure-collector",
+                            channel=channel,
+                            symbol=symbol,
+                            connection_generation=self._connection_generation,
+                            event_type="DROP",
+                            event_ts=timestamp,
+                            event_key="continuity_queue_overflow",
+                            local_received_ts=timestamp,
+                            ingest_run_id=self._ingest_run_id,
+                            details={
+                                "reason": "continuity_queue_overflow",
+                                "dropped_evidence_events": overflow,
+                            },
+                        )
+                    )
+        pending = tuple(self._continuity_pending)
+        try:
+            with get_session() as session:
+                record_continuity_events(session, pending)
+        except (SQLAlchemyError, OSError):
+            log.warning(
+                "continuity ledger unavailable; queued_events=%d",
+                len(self._continuity_pending),
+            )
+            return
+        self._continuity_pending.clear()
+
+        gap_events = tuple(event for event in pending if event.event_type == "DROP")
+        if not gap_events:
+            return
+        dataset_by_channel = {
+            _CHANNEL_TRADES: "bronze.market_trades",
+            _CHANNEL_BBO: "bronze.market_orderbook_bbo",
+            _CHANNEL_BOOKS5: "bronze.market_orderbook_books5",
+            _CHANNEL_OI: "staging.market_oi_funding_ticks",
+            _CHANNEL_FUNDING: "staging.market_oi_funding_ticks",
+            _CHANNEL_MARK: "staging.market_oi_funding_ticks",
+        }
+        try:
+            with get_session() as session:
+                record_data_gaps(
+                    session,
+                    (
+                        prospective_drop_gap(
+                            dataset_name=dataset_by_channel[event.channel],
+                            symbol=event.symbol,
+                            channel=event.channel,
+                            event_ts=event.event_ts,
+                            reason_code=str(
+                                (event.details or {}).get("reason")
+                                or "collector_drop"
+                            ),
+                            details=dict(event.details or {}),
+                        )
+                        for event in gap_events
+                    ),
+                )
+        except (SQLAlchemyError, OSError, RuntimeError):
+            self._continuity_pending.extend(gap_events)
+            log.warning(
+                "continuity gap ledger unavailable; queued_gap_events=%d",
+                len(gap_events),
+            )
+
+    async def _add_buffered_rows(
+        self,
+        buffer: MicrostructureBronzeBuffer,
+        rows: Iterable[Any],
+    ) -> bool:
+        """Add rows and record a gap immediately if the hard cap evicts facts."""
+
+        materialized = tuple(rows)
+        if not materialized:
+            return False
+        dropped_before = buffer.rows_dropped_total
+        should_flush = await buffer.add_many(materialized)
+        dropped = buffer.rows_dropped_total - dropped_before
+        if dropped > 0:
+            timestamp = utc_now()
+            for channel, symbols in _continuity_scopes(buffer.table, materialized):
+                self._record_continuity(
+                    "DROP",
+                    channels=(channel,),
+                    symbols=symbols,
+                    event_ts=timestamp,
+                    event_key=f"buffer_hard_cap:{buffer.table}:{timestamp.isoformat()}",
+                    details={
+                        "table": buffer.table,
+                        "dropped_rows": dropped,
+                        "reason": "buffer_hard_cap",
+                    },
+                )
+        return should_flush
 
     # -- Status --------------------------------------------------------------
 
@@ -1202,28 +1386,56 @@ class MicrostructureCollector:
         channel = _arg_channel(message)
         if not channel:
             return
+        observed_symbols: tuple[str, ...] = ()
         try:
             if channel == _CHANNEL_TRADES:
                 rows = parse_trades_message(message)
-                if rows and await self._buf_trades.add_many(rows):
+                observed_symbols = tuple(dict.fromkeys(row.symbol for row in rows))
+                if await self._add_buffered_rows(self._buf_trades, rows):
                     await self._flush_trades(reason="max_rows")
             elif channel == _CHANNEL_BBO:
                 rows = parse_bbo_message(message)
+                observed_symbols = tuple(dict.fromkeys(row.symbol for row in rows))
                 sampled = self._throttle_bbo(rows)
                 sampled = self._assign_payload_sequences(_CHANNEL_BBO, sampled)
-                if sampled and await self._buf_bbo.add_many(sampled):
+                if await self._add_buffered_rows(self._buf_bbo, sampled):
                     await self._flush_bbo(reason="max_rows")
             elif channel == _CHANNEL_BOOKS5:
                 rows = parse_books5_message(message)
+                observed_symbols = tuple(dict.fromkeys(row.symbol for row in rows))
                 sampled = self._throttle_books5(rows)
                 sampled = self._assign_payload_sequences(_CHANNEL_BOOKS5, sampled)
-                if sampled and await self._buf_books5.add_many(sampled):
+                if await self._add_buffered_rows(self._buf_books5, sampled):
                     await self._flush_books5(reason="max_rows")
             elif channel in (_CHANNEL_OI, _CHANNEL_FUNDING, _CHANNEL_MARK):
                 rows = parse_oi_funding_mark_message(message)
-                if rows and await self._buf_oif.add_many(rows):
+                observed_symbols = tuple(dict.fromkeys(row.symbol for row in rows))
+                if await self._add_buffered_rows(self._buf_oif, rows):
                     await self._flush_oif(reason="max_rows")
             # else: control / unknown channel — ignore
+            if self._connection_generation > 0 and observed_symbols:
+                received = utc_now()
+                bucket = datetime.fromtimestamp(
+                    int(received.timestamp()) // 15 * 15,
+                    tz=timezone.utc,
+                )
+                new_symbols = tuple(
+                    symbol
+                    for symbol in observed_symbols
+                    if self._continuity_message_buckets.get((channel, symbol))
+                    != bucket
+                )
+                if new_symbols:
+                    for symbol in new_symbols:
+                        self._continuity_message_buckets[(channel, symbol)] = bucket
+                    self._record_continuity(
+                        "MESSAGE",
+                        channels=(channel,),
+                        symbols=new_symbols,
+                        event_ts=received,
+                        event_key=f"15s_market_data_bucket:{bucket.isoformat()}",
+                        details={"evidence_kind": "market_data"},
+                    )
         except Exception:       # noqa: BLE001 — defence in depth, per channel
             log.exception("microstructure message dispatch failed (channel=%s)", channel)
 
@@ -1354,6 +1566,18 @@ class MicrostructureCollector:
                 written, len(to_write), buffer.table, reason,
                 self._written_counts[buffer.table],
             )
+            for channel, symbols in _continuity_scopes(buffer.table, to_write):
+                self._record_continuity(
+                    "FLUSH",
+                    channels=(channel,),
+                    symbols=symbols,
+                    details={
+                        "table": buffer.table,
+                        "attempted": len(to_write),
+                        "written": int(written),
+                        "reason": reason,
+                    },
+                )
             return FlushResult(attempted=len(to_write), written=int(written), reason=reason)
         except (SQLAlchemyError, OSError, ValueError) as exc:
             # Narrow catch: DB/connectivity issues or sidecar evidence-contract
@@ -1364,12 +1588,29 @@ class MicrostructureCollector:
             # B-H1 fix (2026-04-20 code review): track errors to derive
             # ingest_run status at shutdown instead of hardcoded "succeeded".
             self._flush_errors_count += 1
+            for channel, symbols in _continuity_scopes(buffer.table, to_write):
+                self._record_continuity(
+                    "DROP",
+                    channels=(channel,),
+                    symbols=symbols,
+                    details={
+                        "table": buffer.table,
+                        "dropped_rows": len(to_write),
+                        "reason": "flush_failed",
+                        "error_type": type(exc).__name__,
+                        "gap_start": min(row.ts for row in to_write).isoformat(),
+                        "gap_end": (
+                            max(row.ts for row in to_write)
+                            + timedelta(milliseconds=1)
+                        ).isoformat(),
+                    },
+                )
             log.exception("%s flush failed; %d rows dropped", buffer.table, len(to_write))
             return FlushResult(
                 attempted=len(to_write),
                 written=0,
                 reason=reason,
-                error=f"{type(exc).__name__}: {exc}",
+                error=type(exc).__name__,
             )
 
     async def _flush_trades(self, *, reason: str) -> FlushResult:
@@ -1437,12 +1678,27 @@ class MicrostructureCollector:
                 status = self._client.connection_status(_CONNECTION)
                 now_connected = bool(status.get("connected", False))
                 if not last_connected and now_connected:
+                    self._connection_generation += 1
+                    self._continuity_message_buckets.clear()
                     if self._seen_initial_connect:
                         # 已经经过 initial connect, 这是一次 reconnect
                         self._metric_inc("microstructure_ws_reconnect_total")
                         log.info("microstructure WS reconnected (counter +1)")
+                        self._record_continuity(
+                            "RECONNECT",
+                            channels=_SUBSCRIBE_CHANNELS,
+                        )
                     else:
                         self._seen_initial_connect = True
+                        self._record_continuity(
+                            "CONNECT",
+                            channels=_SUBSCRIBE_CHANNELS,
+                        )
+                elif last_connected and not now_connected:
+                    self._record_continuity(
+                        "DISCONNECT",
+                        channels=_SUBSCRIBE_CHANNELS,
+                    )
                 last_connected = now_connected
             except asyncio.CancelledError:
                 return
@@ -1509,6 +1765,7 @@ class MicrostructureCollector:
                     run_type="rolling",
                     dataset_domain="microstructure",
                     instrument_type="SWAP",
+                    timeframe="microstructure-ws",
                     trigger_mode="daemon",
                     reason=(
                         "orphaned_by_microstructure_daemon_startup:"
@@ -1520,6 +1777,7 @@ class MicrostructureCollector:
                     run_type="rolling",
                     dataset_domain="microstructure",
                     instrument_type="SWAP",
+                    timeframe="microstructure-ws",
                     trigger_mode="daemon",
                 )
             self._metric_inc("microstructure_ws_connect_total")
@@ -1570,6 +1828,15 @@ class MicrostructureCollector:
                     + self._buf_bbo.rows_dropped_total
                     + self._buf_books5.rows_dropped_total
                     + self._buf_oif.rows_dropped_total
+                )
+                self._record_continuity(
+                    "SHUTDOWN",
+                    channels=_SUBSCRIBE_CHANNELS,
+                    details={
+                        "written_rows": total_written,
+                        "flush_errors": self._flush_errors_count,
+                        "dropped_rows": total_dropped,
+                    },
                 )
                 if total_written == 0 and self._flush_errors_count > 0:
                     derived_status = "failed"

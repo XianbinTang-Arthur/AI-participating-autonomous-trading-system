@@ -135,7 +135,11 @@ def verify_lock_coverage() -> tuple[int, int]:
         "setuptools",
         "wheel",
     }
-    ci_expected = expected_direct_dependencies("test", "lint") | {"greenlet"}
+    ci_expected = expected_direct_dependencies(
+        "test",
+        "lint",
+        "postgres-integration",
+    ) | {"greenlet"}
 
     for label, expected, locked in (
         ("runtime", runtime_expected, set(runtime)),

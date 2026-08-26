@@ -30,10 +30,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -78,25 +80,44 @@ def _parse_api_candle(item: list[str], symbol: str) -> dict[str, Any] | None:
         return None
     try:
         ts = datetime.fromtimestamp(int(item[0]) / 1000, tz=timezone.utc)
-    except (ValueError, OSError):
+        open_px = Decimal(item[1])
+        high_px = Decimal(item[2])
+        low_px = Decimal(item[3])
+        close_px = Decimal(item[4])
+        vol = Decimal(item[5]) if item[5] else None
+        vol_ccy = Decimal(item[6]) if item[6] else None
+        vol_quote = Decimal(item[7]) if item[7] else None
+    except (InvalidOperation, TypeError, ValueError, OSError):
         return None
-    try:
-        return {
-            "symbol": symbol.upper(),
-            "ts": ts,
-            "open": Decimal(item[1]),
-            "high": Decimal(item[2]),
-            "low": Decimal(item[3]),
-            "close": Decimal(item[4]),
-            "vol": Decimal(item[5]) if item[5] else None,
-            "vol_ccy": Decimal(item[6]) if item[6] else None,
-            "vol_quote": Decimal(item[7]) if item[7] else None,
-            "confirm": item[8] in ("1", "true", "True"),
-            "raw_symbol": symbol,
-            "raw_ts": item[0],
-        }
-    except (InvalidOperation, IndexError):
+
+    prices = (open_px, high_px, low_px, close_px)
+    volumes = (vol, vol_ccy, vol_quote)
+    if any(not value.is_finite() or value <= 0 for value in prices):
         return None
+    if high_px < max(open_px, low_px, close_px) or low_px > min(
+        open_px, high_px, close_px
+    ):
+        return None
+    if any(value is not None and (not value.is_finite() or value < 0) for value in volumes):
+        return None
+
+    confirmation = str(item[8]).strip().lower()
+    if confirmation not in {"0", "1", "false", "true"}:
+        return None
+    return {
+        "symbol": symbol.upper(),
+        "ts": ts,
+        "open": open_px,
+        "high": high_px,
+        "low": low_px,
+        "close": close_px,
+        "vol": vol,
+        "vol_ccy": vol_ccy,
+        "vol_quote": vol_quote,
+        "confirm": confirmation in {"1", "true"},
+        "raw_symbol": symbol,
+        "raw_ts": item[0],
+    }
 
 
 def _fetch_candles_page(
@@ -106,7 +127,7 @@ def _fetch_candles_page(
     timeframe: str,
     after_ms: int | None = None,
     timeout: float = 15.0,
-) -> list[list[str]]:
+) -> tuple[list[list[str]], bytes]:
     """调用 OKX history-candles API 获取一页数据.
 
     OKX 语义:
@@ -122,31 +143,111 @@ def _fetch_candles_page(
         params["after"] = str(after_ms)
 
     url = f"{base_url}/api/v5/market/history-candles"
-    resp = client.get(url, params=params, timeout=timeout)
-    resp.raise_for_status()
-    body = resp.json()
-    if body.get("code") != "0":
-        raise RuntimeError(f"OKX API 错误: {body.get('msg', body)}")
-    return body.get("data", [])
+    backoff = 1.0
+    for attempt in range(6):
+        try:
+            resp = client.get(url, params=params, timeout=timeout)
+            body = resp.json()
+        except Exception as exc:
+            if attempt == 5:
+                raise RuntimeError(f"okx_candle_request_failed:{type(exc).__name__}") from exc
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 30.0)
+            continue
+        code = str(body.get("code", "")) if isinstance(body, dict) else ""
+        if resp.status_code == 200 and code == "0":
+            data = body.get("data")
+            if not isinstance(data, list):
+                raise RuntimeError("okx_candle_data_not_list")
+            raw = (json.dumps(body, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            return data, raw
+        if resp.status_code == 429 or resp.status_code >= 500 or code == "50011":
+            if attempt == 5:
+                raise RuntimeError(
+                    f"okx_candle_retry_exhausted:http={resp.status_code}:code={code}"
+                )
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 30.0)
+            continue
+        raise RuntimeError(f"okx_candle_request_rejected:http={resp.status_code}:code={code}")
+    raise AssertionError("unreachable")
 
 
-def _query_existing_range(session: "Session", symbol: str, timeframe: str) -> tuple[datetime | None, datetime | None]:
+def _split_page_result(value: Any) -> tuple[list[list[str]], bytes | None]:
+    """Accept the historic list-only seam while the real client returns evidence bytes."""
+
+    if isinstance(value, tuple) and len(value) == 2:
+        rows, raw = value
+        if not isinstance(rows, list) or not isinstance(raw, bytes):
+            raise RuntimeError("okx_candle_page_result_invalid")
+        return rows, raw
+    if isinstance(value, list):
+        return value, None
+    raise RuntimeError("okx_candle_page_result_invalid")
+
+
+def _aligned_floor(value: datetime, delta: timedelta) -> datetime:
+    seconds = int(delta.total_seconds())
+    epoch = int(value.timestamp())
+    return datetime.fromtimestamp(epoch - (epoch % seconds), tz=timezone.utc)
+
+
+def _aligned_ceil(value: datetime, delta: timedelta) -> datetime:
+    floor = _aligned_floor(value, delta)
+    return floor if floor == value else floor + delta
+
+
+def _candle_gap_ranges(
+    observed: set[datetime],
+    *,
+    start: datetime,
+    end: datetime,
+    delta: timedelta,
+) -> list[dict[str, str]]:
+    """Compress missing confirmed candle opens into half-open UTC ranges."""
+
+    gaps: list[dict[str, str]] = []
+    cursor = _aligned_ceil(start, delta)
+    gap_start: datetime | None = None
+    while cursor < end:
+        if cursor not in observed and gap_start is None:
+            gap_start = cursor
+        elif cursor in observed and gap_start is not None:
+            gaps.append(
+                {
+                    "gap_start": gap_start.isoformat(),
+                    "gap_end": cursor.isoformat(),
+                    "reason": "confirmed_candle_missing",
+                }
+            )
+            gap_start = None
+        cursor += delta
+    if gap_start is not None:
+        gaps.append(
+            {
+                "gap_start": gap_start.isoformat(),
+                "gap_end": end.isoformat(),
+                "reason": "confirmed_candle_missing",
+            }
+        )
+    return gaps
+
+
+def _query_existing_range(
+    session: "Session", symbol: str, timeframe: str
+) -> tuple[datetime | None, datetime | None]:
     """查询数据库中 silver 层已有数据的时间范围."""
     from sqlalchemy import text
 
     from aats.data_platform.models import candle_table_name
 
     table = candle_table_name("silver", symbol, timeframe)
-    try:
-        row = session.execute(
-            text(f"SELECT min(ts), max(ts) FROM {table} WHERE symbol = :sym"),
-            {"sym": symbol.upper()},
-        ).fetchone()
-        if row and row[0] is not None:
-            return row[0], row[1]
-    except Exception as e:
-        log.warning("查询 %s 失败（表可能不存在）: %s", table, e)
-        session.rollback()
+    row = session.execute(
+        text(f"SELECT min(ts), max(ts) FROM {table} WHERE symbol = :sym"),
+        {"sym": symbol.upper()},
+    ).fetchone()
+    if row and row[0] is not None:
+        return row[0], row[1]
     return None, None
 
 
@@ -229,6 +330,7 @@ def deep_backfill_one(
     merge_every_n_pages: int = 50,
     refresh_existing: bool = False,
     refresh_end: datetime | None = None,
+    raw_archive_dir: Path | None = None,
 ) -> dict[str, Any]:
     """对单个 symbol+timeframe 执行深度回填.
 
@@ -265,6 +367,11 @@ def deep_backfill_one(
     from aats.data_platform.db import get_session
 
     settings = get_settings()
+    if not dry_run:
+        if raw_archive_dir is None:
+            raise ValueError("raw_archive_dir is required for an applied backfill")
+        if not raw_archive_dir.expanduser().is_absolute():
+            raise ValueError("raw_archive_dir must be absolute")
     if target_start.tzinfo is None or target_start.utcoffset() is None:
         raise ValueError("target_start must be timezone-aware")
     if refresh_existing:
@@ -280,6 +387,7 @@ def deep_backfill_one(
         "target_start": target_start.isoformat(),
         "pages_fetched": 0,
         "rows_fetched": 0,
+        "unique_rows_observed": 0,
         "rows_written_staging": 0,
         "rows_merged_bronze": 0,
         "rows_merged_silver": 0,
@@ -291,6 +399,10 @@ def deep_backfill_one(
         "api_exhausted": False,
         "mode": "refresh_existing" if refresh_existing else "backfill_missing_history",
         "refresh_end": refresh_end.isoformat() if refresh_end is not None else None,
+        "raw_partition_sha256": [],
+        "gaps": [],
+        "coverage_ratio": 0.0,
+        "bundle": None,
     }
 
     # 1. 查询已有数据范围
@@ -330,10 +442,24 @@ def deep_backfill_one(
     else:
         page_from_ms = _ts_ms(datetime.now(timezone.utc))
 
+    delta = _TF_DELTA[timeframe]
+    coverage_end = (
+        refresh_end
+        if refresh_existing
+        else existing_min or _aligned_floor(_ms_to_dt(page_from_ms), delta)
+    )
+    coverage_start = _aligned_ceil(target_start, delta)
+    if coverage_end <= coverage_start:
+        raise ValueError("requested candle coverage window is empty")
+
     target_ms = _ts_ms(target_start)
     all_rows: list[dict[str, Any]] = []
     page = 0
     consecutive_empty = 0
+    seen_cursors: set[int] = set()
+    observed: set[datetime] = set()
+    fetch_error: Exception | None = None
+    completed = False
 
     if dry_run:
         log.info("[DRY RUN] 不会写入数据库")
@@ -348,28 +474,52 @@ def deep_backfill_one(
     # 3. 分页拉取
     with httpx.Client() as client:
         while page < MAX_PAGES_HARD_LIMIT:
+            if page_from_ms in seen_cursors:
+                fetch_error = RuntimeError("okx_candle_pagination_stalled")
+                break
+            seen_cursors.add(page_from_ms)
             try:
-                raw_data = _fetch_candles_page(
-                    client, base_url, symbol, timeframe,
-                    after_ms=page_from_ms,
-                    timeout=timeout,
+                raw_data, raw_response = _split_page_result(
+                    _fetch_candles_page(
+                        client,
+                        base_url,
+                        symbol,
+                        timeframe,
+                        after_ms=page_from_ms,
+                        timeout=timeout,
+                    )
                 )
             except Exception as e:
                 log.error("API 请求失败 (page=%d): %s", page, e)
                 if page == 0:
                     raise
-                # 非首页失败，保存已有数据
-                log.warning("停止拉取，保存已获取的 %d 行数据", len(all_rows))
+                log.warning("停止拉取并保存检查点；本次操作最终仍会失败关闭")
+                fetch_error = e
                 break
 
             page += 1
             stats["pages_fetched"] = page
+            if raw_response is not None and raw_archive_dir is not None:
+                from aats.data_platform.collectors.backfill.official_history_importers import (
+                    archive_raw_response_page,
+                )
+
+                token = "".join(ch if ch.isalnum() else "_" for ch in symbol.upper())
+                digest = archive_raw_response_page(
+                    raw_archive_dir,
+                    f"candle_{token}_{timeframe}_{page:06d}_{page_from_ms}.json",
+                    raw_response,
+                )
+                stats["raw_partition_sha256"].append(digest)
+            elif not dry_run:
+                raise RuntimeError("raw_response_evidence_missing")
 
             if not raw_data:
                 consecutive_empty += 1
                 if consecutive_empty >= 3:
                     log.info("连续 %d 页无数据，API 数据已耗尽", consecutive_empty)
                     stats["api_exhausted"] = True
+                    completed = True
                     break
                 time.sleep(rate_limit_sleep)
                 continue
@@ -378,26 +528,32 @@ def deep_backfill_one(
 
             # 解析数据
             page_rows = []
+            parsed_page: list[dict[str, Any]] = []
             for item in raw_data:
                 parsed = _parse_api_candle(item, symbol)
+                if parsed is None:
+                    fetch_error = RuntimeError("okx_candle_row_invalid")
+                    break
+                parsed_page.append(parsed)
+            if fetch_error is not None:
+                break
+
+            for parsed in parsed_page:
                 # Historical repair/backfill must never promote an open candle.
                 # The rolling collector owns provisional current-bar updates.
-                if parsed and parsed["confirm"] and (
-                    not refresh_existing
-                    or (
-                        target_start <= parsed["ts"]
-                        and refresh_end is not None
-                        and parsed["ts"] < refresh_end
-                    )
+                if (
+                    parsed["confirm"]
+                    and coverage_start <= parsed["ts"] < coverage_end
                 ):
                     page_rows.append(parsed)
+                    observed.add(parsed["ts"])
 
             all_rows.extend(page_rows)
             stats["rows_fetched"] += len(page_rows)
 
             # 获取本页最早时间戳
-            oldest_ts_in_page = min(int(d[0]) for d in raw_data)
-            oldest_dt = _ms_to_dt(oldest_ts_in_page)
+            oldest_dt = min(parsed["ts"] for parsed in parsed_page)
+            oldest_ts_in_page = _ts_ms(oldest_dt)
 
             # 进度报告
             if page % 10 == 0:
@@ -413,6 +569,7 @@ def deep_backfill_one(
                     "[%s %s] 已到达目标时间 %s (page=%d)",
                     symbol, timeframe, target_start.strftime("%Y-%m-%d"), page,
                 )
+                completed = True
                 break
 
             # 检查返回数据不足一页（已到 API 数据尽头）
@@ -423,6 +580,7 @@ def deep_backfill_one(
                     oldest_dt.strftime("%Y-%m-%d %H:%M"),
                 )
                 stats["api_exhausted"] = True
+                completed = True
                 break
 
             # 下一页的起始点
@@ -438,14 +596,30 @@ def deep_backfill_one(
 
             time.sleep(rate_limit_sleep)
 
+    if not completed and fetch_error is None:
+        fetch_error = RuntimeError("okx_candle_max_pages_exceeded")
+
+    expected_samples = int((coverage_end - coverage_start) / delta)
+    stats["unique_rows_observed"] = len(observed)
+    stats["gaps"] = _candle_gap_ranges(
+        observed,
+        start=coverage_start,
+        end=coverage_end,
+        delta=delta,
+    )
+    stats["coverage_ratio"] = (
+        min(1.0, len(observed) / expected_samples) if expected_samples else 0.0
+    )
+
     if dry_run:
+        if fetch_error is not None:
+            raise RuntimeError("candle_backfill_dry_run_failed") from fetch_error
         # 仅报告统计
         if all_rows:
             min_ts = min(r["ts"] for r in all_rows)
             max_ts = max(r["ts"] for r in all_rows)
             stats["new_min_ts"] = min_ts.isoformat()
             stats["new_max_ts"] = max_ts.isoformat()
-            stats["rows_fetched"] = len(all_rows)
         log.info(
             "[DRY RUN] [%s %s] 共 %d 页, %d 行, 范围 %s ~ %s",
             symbol, timeframe,
@@ -460,6 +634,26 @@ def deep_backfill_one(
     if all_rows:
         _flush_and_merge(all_rows, symbol, timeframe, dataset_version, settings, stats)
 
+    if fetch_error is not None:
+        raise RuntimeError("candle_backfill_partial_failure_checkpointed") from fetch_error
+
+    if stats["pages_fetched"] and not stats["raw_partition_sha256"]:
+        raise RuntimeError("candle_backfill_raw_archive_empty")
+
+    if stats["raw_partition_sha256"]:
+        stats["bundle"] = _persist_candle_bundle(
+            settings=settings,
+            symbol=symbol,
+            timeframe=timeframe,
+            coverage_start=coverage_start,
+            coverage_end=coverage_end,
+            dataset_version=dataset_version,
+            row_count=stats["unique_rows_observed"],
+            raw_hashes=stats["raw_partition_sha256"],
+            gaps=stats["gaps"],
+            coverage_ratio=stats["coverage_ratio"],
+        )
+
     # 5. 重建 Gold
     if build_gold and stats["rows_merged_silver"] > 0:
         log.info("[%s %s] 开始重建 Gold replay bars...", symbol, timeframe)
@@ -469,6 +663,7 @@ def deep_backfill_one(
             log.info("[%s %s] Gold 重建完成", symbol, timeframe)
         except Exception as e:
             log.error("[%s %s] Gold 重建失败: %s", symbol, timeframe, e)
+            raise RuntimeError("candle_gold_rebuild_failed") from e
 
     log.info(
         "[%s %s] 回填完成: %d 页, staging=%d, bronze=%d, silver=%d",
@@ -479,6 +674,90 @@ def deep_backfill_one(
         stats["rows_merged_silver"],
     )
     return stats
+
+
+def _persist_candle_bundle(
+    *,
+    settings: Any,
+    symbol: str,
+    timeframe: str,
+    coverage_start: datetime,
+    coverage_end: datetime,
+    dataset_version: str,
+    row_count: int,
+    raw_hashes: list[str],
+    gaps: list[dict[str, str]],
+    coverage_ratio: float,
+) -> dict[str, Any]:
+    from aats.data_platform.collectors.backfill.official_history_importers import (
+        register_official_source,
+    )
+    from aats.data_platform.data_governance.coverage import git_commit
+    from aats.data_platform.data_governance.gaps import official_backfill_gap, record_data_gaps
+    from aats.data_platform.data_governance.registry import (
+        import_source_record,
+        persist_historical_bundle,
+    )
+    from aats.data_platform.db import get_session
+
+    root = Path(__file__).resolve().parent.parent
+    source_key = f"okx-rest:history-candles:{timeframe}:v5"
+    with get_session(settings) as session:
+        source_id = register_official_source(
+            session,
+            source_key=source_key,
+            source_kind="okx_rest",
+            source_locator="/api/v5/market/history-candles",
+            timestamp_semantics="confirmed candle opening time in milliseconds",
+        )
+        source = import_source_record(
+            source_key=source_key,
+            source_kind="okx_rest",
+            provider="OKX",
+            source_locator="/api/v5/market/history-candles",
+            coverage_start=coverage_start,
+            coverage_end=coverage_end,
+            timestamp_semantics="confirmed candle opening time in milliseconds",
+            schema_version="okx-v5",
+            dataset_version=dataset_version,
+            transform_version="confirmed-candle-backfill-v2",
+            git_commit=git_commit(str(root)),
+            raw_partition_sha256=raw_hashes,
+            row_count=row_count,
+            gaps=gaps,
+        )
+        record_data_gaps(
+            session,
+            [
+                official_backfill_gap(
+                    source_id=source_id,
+                    dataset_name=f"silver.candles_{timeframe}",
+                    symbol=symbol.upper(),
+                    channel=f"history-candles:{timeframe}",
+                    gap_start=datetime.fromisoformat(item["gap_start"]),
+                    gap_end=datetime.fromisoformat(item["gap_end"]),
+                    reason_code=item["reason"],
+                    evidence=item,
+                )
+                for item in gaps
+            ],
+        )
+        bundle_id, report = persist_historical_bundle(
+            session,
+            source_id=source_id,
+            source=source,
+            symbol=symbol.upper(),
+            role="candles",
+            purpose="ohlcv_research",
+            coverage_ratio=coverage_ratio,
+            causal_time_check=True,
+        )
+    return {
+        "bundle_id": bundle_id,
+        "eligible": report.eligible,
+        "reason_codes": list(report.reason_codes),
+        "evidence_fingerprint": report.evidence_fingerprint,
+    }
 
 
 def _flush_and_merge(
@@ -526,8 +805,8 @@ def _flush_and_merge(
             symbol=symbol.upper(),
             timeframe=timeframe,
         )
-
-        try:
+    try:
+        with get_session(settings) as session:
             # 写 staging
             written = _write_staging_batch(
                 session, symbol, timeframe, rows, run_id, dataset_version,
@@ -566,10 +845,21 @@ def _flush_and_merge(
                 max_ts.strftime("%Y-%m-%d %H:%M"),
             )
 
-        except Exception as exc:
-            finish_run_item(session, item_id, status="failed", error_message=str(exc))
-            finish_ingest_run(session, run_id, status="failed", error_message=str(exc))
-            raise
+    except Exception as exc:
+        with get_session(settings) as failure_session:
+            finish_run_item(
+                failure_session,
+                item_id,
+                status="failed",
+                error_message=type(exc).__name__,
+            )
+            finish_ingest_run(
+                failure_session,
+                run_id,
+                status="failed",
+                error_message=type(exc).__name__,
+            )
+        raise
 
 
 def _rebuild_gold(symbol: str, timeframe: str, settings: Any) -> None:
@@ -659,6 +949,11 @@ def main() -> None:
         "--merge-every", type=int, default=50,
         help="每拉取多少页做一次 merge (默认: 50)",
     )
+    parser.add_argument(
+        "--raw-archive-dir",
+        type=Path,
+        help="原始 OKX 响应不可变归档的绝对目录；非 dry-run 必填",
+    )
 
     args = parser.parse_args()
 
@@ -679,6 +974,10 @@ def main() -> None:
         parser.error("--refresh-existing 必须同时指定 --refresh-end")
     if not args.refresh_existing and refresh_end is not None:
         parser.error("--refresh-end 只能与 --refresh-existing 同用")
+    if not args.dry_run and args.raw_archive_dir is None:
+        parser.error("非 dry-run 必须指定 --raw-archive-dir")
+    if args.raw_archive_dir is not None and not args.raw_archive_dir.expanduser().is_absolute():
+        parser.error("--raw-archive-dir 必须是绝对路径")
 
     log.info("=" * 60)
     log.info("OKX API 深度回填")
@@ -710,6 +1009,7 @@ def main() -> None:
                 merge_every_n_pages=args.merge_every,
                 refresh_existing=args.refresh_existing,
                 refresh_end=refresh_end,
+                raw_archive_dir=args.raw_archive_dir,
             )
             all_stats.append(result)
         except Exception:

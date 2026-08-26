@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import FastAPI
@@ -203,6 +204,24 @@ def test_workspace_route_maps_database_failure_to_retryable_503() -> None:
     }
 
 
+def test_data_governance_route_maps_settings_failure_to_retryable_503() -> None:
+    app = FastAPI()
+    app.include_router(rdp_workspace_router, prefix="/rdp")
+    app.dependency_overrides[require_read_access] = lambda: object()
+
+    with patch(
+        "aats.api.rdp_workspace_routes.get_rdp_settings",
+        side_effect=RuntimeError("settings unavailable"),
+    ):
+        response = TestClient(app).get("/rdp/v3/data-governance")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "data_governance_unavailable",
+        "retryable": True,
+    }
+
+
 def test_workspace_derives_all_workbench_views_from_one_control_summary() -> None:
     request = object()
     control = {"health": _health(), "tasks": {}}
@@ -220,10 +239,16 @@ def test_workspace_derives_all_workbench_views_from_one_control_summary() -> Non
         patch("aats.api.rdp_workspace.build_rdp_workbench_bundle", return_value=bundle) as build_bundle,
         patch("aats.api.rdp_workspace.build_rdp_runs_panel", return_value={"items": []}),
         patch("aats.api.rdp_workspace._workflow_catalog", return_value=[]),
+        patch(
+            "aats.api.rdp_workspace.build_data_governance_snapshot",
+            return_value={"schema_version": "rdp.data_governance.v1"},
+        ) as build_data_governance,
     ):
-        project_root.return_value = None
+        project_root.return_value = Path(".").resolve()
         payload = rdp_workspace.build_rdp_workspace(request)  # type: ignore[arg-type]
 
     assert payload["schema_version"] == "rdp.workspace.v3"
+    assert payload["data_governance"]["schema_version"] == "rdp.data_governance.v1"
     build_control.assert_called_once_with(request)
     build_bundle.assert_called_once_with(request, control_summary=control)
+    build_data_governance.assert_called_once_with(project_root.return_value)

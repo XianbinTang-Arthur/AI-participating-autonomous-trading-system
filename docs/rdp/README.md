@@ -1,7 +1,7 @@
 # AATS RDP 文档索引
 
 > 文档状态：现行索引  
-> 最后核对：2026-08-26（本轮修复起始 HEAD `51448768`；含未提交 live attribution lineage 修复）
+> 最后核对：2026-08-26（已提交基线 `c1b015ec`；含待提交的历史数据恢复与持续采集加固实现）
 
 ## 当前入口
 
@@ -18,6 +18,8 @@
 - [`../operations/rdp_workflow_calendar.md`](../operations/rdp_workflow_calendar.md)：当前 workflow 日历。
 - [`../task/fs_004_research_selection_holdout_sow_2026_08_25.md`](../task/fs_004_research_selection_holdout_sow_2026_08_25.md)：Research Factory v2 的 train/valid 选择、test 内容封存与仍开放的最终 OOS 边界。
 - [`../task/rdp_live_attribution_lineage_fix_sow_2026_08_26.md`](../task/rdp_live_attribution_lineage_fix_sow_2026_08_26.md)：完整 RDP 默认 live attribution、精确 lineage、schema migration 与 readiness fail-closed 边界。
+- [`../operations/rdp_historical_data_recovery_runbook.md`](../operations/rdp_historical_data_recovery_runbook.md)：当前历史数据审计、raw archive、官方导入、归档、持续采集与 bundle 重建唯一操作入口；
+- [`../task/rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md`](../task/rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md)：历史数据恢复与持续采集加固范围、验收门和未完成现场事项。
 
 ## 深入参考
 

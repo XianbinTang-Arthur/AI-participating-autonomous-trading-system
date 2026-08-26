@@ -11,8 +11,8 @@ def test_runtime_and_ci_locks_are_complete_pinned_and_hashed() -> None:
     runtime = locks.parse_lock(locks.RUNTIME_LOCK)
     ci = locks.parse_lock(locks.CI_LOCK)
 
-    assert len(runtime) == 46
-    assert len(ci) == 33
+    assert len(runtime) == 47
+    assert len(ci) == 41
     for packages in (runtime, ci):
         assert all(version and not version.startswith((">", "<", "~", "!")) for version, _ in packages.values())
         assert all(hashes for _version, hashes in packages.values())
@@ -29,7 +29,11 @@ def test_locks_cover_current_direct_dependencies_and_build_tools() -> None:
 
     assert locks.expected_direct_dependencies("nats", "redis", "otel") <= runtime
     assert {"greenlet", "setuptools", "wheel"} <= runtime
-    assert locks.expected_direct_dependencies("test", "lint") <= ci
+    assert locks.expected_direct_dependencies(
+        "test",
+        "lint",
+        "postgres-integration",
+    ) <= ci
     assert "greenlet" in ci
 
 

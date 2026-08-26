@@ -1,6 +1,6 @@
 # AATS Operations 文档索引
 
-> 文档状态：现行索引。最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；Phase 3A–3W 整改提交候选）。
+> 文档状态：现行索引。最后核对：2026-08-26（已提交基线 `c1b015ec`；含待提交的历史数据恢复与持续采集加固实现）。
 
 本目录同时保存当前操作手册、专题参考和历史运行记录。文件名包含 `runbook`、`checklist` 或 `release`，不代表它仍可用于当前实盘。执行任何状态变更前，先按本页状态选择入口，并按 [`../README.md`](../README.md) 的真实性与时效性规则复核当前 `HEAD`。
 
@@ -25,6 +25,7 @@
 | [`wsl2_sync_workflow.md`](wsl2_sync_workflow.md) | Windows/WSL2 Git 同步 | 只同步 committed state；部署仍走 `scripts/deploy.sh` |
 | [`wsl2_startup_prewarm.md`](wsl2_startup_prewarm.md) | 登录后 WSL2 预热/repair | repair 复用标准部署包装器，不形成第二套部署方式 |
 | [`profit_readiness_runbook.md`](profit_readiness_runbook.md) | 收益证据、v2 研究、L2、holdout、参数代次、故障矩阵与 readiness | 格式 v1 只能证明模拟就绪，不能放行 live |
+| [`rdp_historical_data_recovery_runbook.md`](rdp_historical_data_recovery_runbook.md) | 历史覆盖审计、官方导入、raw/archive、retention、连续性与历史 bundle 重建 | 只允许 research/governance 与 derivatives 模拟栈；不授权 live、真实订单或参数 apply |
 
 部署、TLS、profile、端口和安全停机的最高层操作入口是根目录 [`../../DEPLOYMENT.md`](../../DEPLOYMENT.md)。
 

@@ -12,7 +12,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 try:
-    from testcontainers.postgres import PostgresContainer  # type: ignore[import-not-found]
+    from testcontainers.community.postgres import (  # type: ignore[import-not-found]
+        PostgresContainer,
+    )
 
     _TESTCONTAINERS_AVAILABLE = True
 except ImportError:  # pragma: no cover
@@ -227,6 +229,245 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
             with admin_engine.begin() as connection:
                 connection.execute(text(f'DROP SCHEMA "{schema_name}" CASCADE'))
             admin_engine.dispose()
+
+    def test_stage_18_registry_is_immutable_and_trade_rebuild_is_repeatable(self) -> None:
+        from sqlalchemy import text
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.collectors.backfill.official_history_importers import (
+            register_official_source,
+        )
+        from aats.data_platform.config import ResearchPlatformSettings
+        from aats.data_platform.data_governance.historical_rebuild import (
+            execute_historical_rebuild,
+            plan_historical_rebuild,
+            start_historical_rebuild,
+        )
+        from aats.data_platform.data_governance.registry import (
+            finalize_historical_bundle,
+            import_source_record,
+            persist_historical_bundle,
+            reserve_historical_bundle,
+        )
+        from aats.data_platform.db import apply_rdp_migrations, get_engine
+        from aats.data_platform.jobs.run_registry import create_ingest_run
+
+        settings = ResearchPlatformSettings(
+            database_url=self.container.get_connection_url(driver="psycopg2"),
+            _env_file=None,
+        )
+        report = apply_rdp_migrations(settings)
+        self.assertTrue(report.ok, report.error_message)
+
+        start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        end = start + timedelta(minutes=15)
+        source_key = f"integration-trades-{uuid.uuid4()}"
+        engine = get_engine(settings)
+        with Session(engine) as session, session.begin():
+            source_id = register_official_source(
+                session,
+                source_key=source_key,
+                source_kind="okx_rest",
+                source_locator="/api/v5/market/history-trades",
+                timestamp_semantics="OKX trade ts; [start,end) UTC",
+            )
+            same_source_id = register_official_source(
+                session,
+                source_key=source_key,
+                source_kind="okx_rest",
+                source_locator="/api/v5/market/history-trades",
+                timestamp_semantics="OKX trade ts; [start,end) UTC",
+            )
+            self.assertEqual(source_id, same_source_id)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "official_source_registry_immutable_conflict",
+            ):
+                register_official_source(
+                    session,
+                    source_key=source_key,
+                    source_kind="okx_rest",
+                    source_locator="/api/v5/market/history-trades-changed",
+                    timestamp_semantics="OKX trade ts; [start,end) UTC",
+                )
+
+            source = import_source_record(
+                source_key=source_key,
+                source_kind="okx_rest",
+                provider="OKX",
+                source_locator="/api/v5/market/history-trades",
+                coverage_start=start,
+                coverage_end=end,
+                timestamp_semantics="OKX trade ts; [start,end) UTC",
+                schema_version="okx-v5",
+                dataset_version="integration-v1",
+                transform_version=None,
+                git_commit="a" * 40,
+                raw_partition_sha256=("a" * 64,),
+                row_count=2,
+                gaps=(),
+                retrieved_at=start + timedelta(hours=1),
+            )
+            bundle_id, eligibility = persist_historical_bundle(
+                session,
+                source_id=source_id,
+                source=source,
+                symbol="BTC-USDT-SWAP",
+                role="trades",
+                purpose="trade_flow_research",
+                coverage_ratio=1.0,
+                causal_time_check=True,
+            )
+            self.assertTrue(eligibility.eligible)
+
+            later_retry = import_source_record(
+                source_key=source_key,
+                source_kind="okx_rest",
+                provider="OKX",
+                source_locator="/api/v5/market/history-trades",
+                coverage_start=start,
+                coverage_end=end,
+                timestamp_semantics="OKX trade ts; [start,end) UTC",
+                schema_version="okx-v5",
+                dataset_version="integration-v1",
+                transform_version=None,
+                git_commit="a" * 40,
+                raw_partition_sha256=("a" * 64,),
+                row_count=2,
+                gaps=(),
+                retrieved_at=start + timedelta(hours=2),
+            )
+            retry_bundle_id, _ = persist_historical_bundle(
+                session,
+                source_id=source_id,
+                source=later_retry,
+                symbol="BTC-USDT-SWAP",
+                role="trades",
+                purpose="trade_flow_research",
+                coverage_ratio=1.0,
+                causal_time_check=True,
+            )
+            self.assertEqual(bundle_id, retry_bundle_id)
+
+            reservation_source = import_source_record(
+                source_key=source_key,
+                source_kind="okx_rest",
+                provider="OKX",
+                source_locator="/api/v5/market/history-trades",
+                coverage_start=start,
+                coverage_end=end,
+                timestamp_semantics="OKX trade ts; [start,end) UTC",
+                schema_version="okx-v5",
+                dataset_version="integration-v1",
+                transform_version=None,
+                git_commit="a" * 40,
+                raw_partition_sha256=("c" * 64,),
+                row_count=2,
+                gaps=(),
+                retrieved_at=start + timedelta(hours=3),
+            )
+            reserved_id, reservation_fingerprint = reserve_historical_bundle(
+                session,
+                source_id=source_id,
+                source=reservation_source,
+                symbol="BTC-USDT-SWAP",
+                role="trades",
+                purpose="trade_flow_research",
+            )
+            self.assertIsNotNone(reservation_fingerprint)
+            finalized_id, finalized_report = finalize_historical_bundle(
+                session,
+                bundle_id=reserved_id,
+                reservation_fingerprint=reservation_fingerprint,
+                source_id=source_id,
+                source=reservation_source,
+                symbol="BTC-USDT-SWAP",
+                role="trades",
+                purpose="trade_flow_research",
+                coverage_ratio=1.0,
+                causal_time_check=True,
+            )
+            self.assertEqual(reserved_id, finalized_id)
+            self.assertTrue(finalized_report.eligible)
+
+            ingest_run_id = create_ingest_run(
+                session,
+                run_type="backfill",
+                dataset_domain="microstructure",
+                instrument_type="SWAP",
+                symbol="BTC-USDT-SWAP",
+                trigger_mode="manual",
+            )
+            for index, (side, price, size) in enumerate(
+                (("buy", "100", "2"), ("sell", "102", "1")),
+                start=1,
+            ):
+                session.execute(
+                    text(
+                        """
+                        INSERT INTO staging.official_trade_history (
+                            source_id, symbol, ts, trade_id, px, sz, side,
+                            raw_payload, raw_partition_sha256, ingest_run_id
+                        ) VALUES (
+                            CAST(:source_id AS UUID), 'BTC-USDT-SWAP', :ts,
+                            :trade_id, :price, :size, :side, '{}'::jsonb,
+                            :raw_sha256, CAST(:ingest_run_id AS UUID)
+                        )
+                        """
+                    ),
+                    {
+                        "source_id": source_id,
+                        "ts": start + timedelta(minutes=index),
+                        "trade_id": str(index),
+                        "price": price,
+                        "size": size,
+                        "side": side,
+                        "raw_sha256": "a" * 64,
+                        "ingest_run_id": ingest_run_id,
+                    },
+                )
+
+            plan = plan_historical_rebuild(
+                session,
+                bundle_id=bundle_id,
+                git_commit="a" * 40,
+            )
+            self.assertEqual(start_historical_rebuild(session, plan), "started")
+            rebuilt = execute_historical_rebuild(session, plan)
+            self.assertEqual(rebuilt.rows_read, 2)
+            self.assertEqual(rebuilt.rows_written, 1)
+            self.assertEqual(rebuilt.output_table, "silver.historical_trade_flow_15m")
+            self.assertEqual(len(rebuilt.output_fingerprint), 64)
+            self.assertEqual(
+                start_historical_rebuild(session, plan),
+                "already_succeeded",
+            )
+
+            row = session.execute(
+                text(
+                    "SELECT trade_count, total_size, vwap, "
+                    "trade_flow_imbalance FROM silver.historical_trade_flow_15m "
+                    "WHERE bundle_id = CAST(:bundle_id AS UUID)"
+                ),
+                {"bundle_id": bundle_id},
+            ).one()
+            self.assertEqual(row.trade_count, 2)
+            self.assertEqual(str(row.total_size), "3.000000000000000000")
+            self.assertEqual(str(row.vwap), "100.666666666667")
+            self.assertEqual(str(row.trade_flow_imbalance), "0.333333333333")
+
+            session.execute(
+                text(
+                    "DELETE FROM staging.official_trade_history "
+                    "WHERE source_id = CAST(:source_id AS UUID) AND trade_id = '2'"
+                ),
+                {"source_id": source_id},
+            )
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "historical_bundle_source_row_count_mismatch",
+            ):
+                execute_historical_rebuild(session, plan)
 
 
 if __name__ == "__main__":

@@ -27,10 +27,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -48,9 +50,9 @@ log = logging.getLogger("rdp_deep_backfill_funding")
 
 API_LIMIT = 100  # OKX 每页最多 100 条
 
-# Funding 每 8 小时一次 → 100 条 = 33 天/页
-# 500 页 × 100 条 = 50,000 条 ≈ 45 年（远超需求）
-MAX_PAGES_HARD_LIMIT = 200  # 200 页 ≈ 18 年，足够
+# Funding 的实际结算间隔可能随合约和时段变化，不能用固定 8 小时估算。
+# 硬上限只限制请求/数据体量；实际覆盖范围由 fundingTime 决定。
+MAX_PAGES_HARD_LIMIT = 200
 
 
 def _ts_ms(dt: datetime) -> int:
@@ -70,7 +72,7 @@ def _fetch_funding_page(
     symbol: str,
     after_ms: int | None = None,
     timeout: float = 15.0,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], bytes]:
     """调用 OKX funding-rate-history API 获取一页数据.
 
     OKX 语义:
@@ -85,23 +87,63 @@ def _fetch_funding_page(
         params["after"] = str(after_ms)
 
     url = f"{base_url}/api/v5/public/funding-rate-history"
-    resp = client.get(url, params=params, timeout=timeout)
-    resp.raise_for_status()
-    body = resp.json()
-    if body.get("code") != "0":
-        raise RuntimeError(f"OKX funding API 错误: {body.get('msg', body)}")
-    return body.get("data", [])
+    backoff = 1.0
+    for attempt in range(6):
+        try:
+            resp = client.get(url, params=params, timeout=timeout)
+            body = resp.json()
+        except Exception as exc:
+            if attempt == 5:
+                raise RuntimeError(f"okx_funding_request_failed:{type(exc).__name__}") from exc
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 30.0)
+            continue
+        code = str(body.get("code", "")) if isinstance(body, dict) else ""
+        if resp.status_code == 200 and code == "0":
+            data = body.get("data")
+            if not isinstance(data, list):
+                raise RuntimeError("okx_funding_data_not_list")
+            raw = (json.dumps(body, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            return data, raw
+        if resp.status_code == 429 or resp.status_code >= 500 or code == "50011":
+            if attempt == 5:
+                raise RuntimeError(
+                    f"okx_funding_retry_exhausted:http={resp.status_code}:code={code}"
+                )
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 30.0)
+            continue
+        raise RuntimeError(f"okx_funding_request_rejected:http={resp.status_code}:code={code}")
+    raise AssertionError("unreachable")
+
+
+def _split_page_result(value: Any) -> tuple[list[dict[str, Any]], bytes | None]:
+    if isinstance(value, tuple) and len(value) == 2:
+        rows, raw = value
+        if not isinstance(rows, list) or not isinstance(raw, bytes):
+            raise RuntimeError("okx_funding_page_result_invalid")
+        return rows, raw
+    if isinstance(value, list):
+        return value, None
+    raise RuntimeError("okx_funding_page_result_invalid")
 
 
 def _parse_funding(item: dict[str, Any], symbol: str) -> dict[str, Any] | None:
     """解析单条 OKX API funding 数据."""
     try:
         ts = datetime.fromtimestamp(int(item["fundingTime"]) / 1000, tz=timezone.utc)
-    except (ValueError, KeyError, OSError):
-        return None
-    try:
         rate = Decimal(item["fundingRate"])
-    except (InvalidOperation, KeyError):
+        realized_rate = (
+            Decimal(item["realizedRate"]) if item.get("realizedRate") else None
+        )
+    except (InvalidOperation, KeyError, TypeError, ValueError, OSError):
+        return None
+    if not rate.is_finite() or (
+        realized_rate is not None and not realized_rate.is_finite()
+    ):
+        return None
+    raw_symbol = item.get("instId")
+    if not isinstance(raw_symbol, str) or raw_symbol.upper() != symbol.upper():
         return None
     return {
         "symbol": symbol.upper(),
@@ -110,8 +152,8 @@ def _parse_funding(item: dict[str, Any], symbol: str) -> dict[str, Any] | None:
         "inst_type": item.get("instType"),
         "formula_type": item.get("formulaType"),
         "method": item.get("method"),
-        "realized_rate": Decimal(item["realizedRate"]) if item.get("realizedRate") else None,
-        "raw_symbol": item.get("instId", symbol),
+        "realized_rate": realized_rate,
+        "raw_symbol": raw_symbol,
         "raw_ts": item.get("fundingTime"),
     }
 
@@ -126,16 +168,12 @@ def _query_existing_range(session: "Session", symbol: str) -> tuple[datetime | N
     from aats.data_platform.models import funding_table_name
 
     table = funding_table_name("silver")
-    try:
-        row = session.execute(
-            text(f"SELECT min(ts), max(ts) FROM {table} WHERE symbol = :sym"),
-            {"sym": symbol.upper()},
-        ).fetchone()
-        if row and row[0] is not None:
-            return row[0], row[1]
-    except Exception as e:
-        log.warning("查询 %s 失败（表可能不存在）: %s", table, e)
-        session.rollback()
+    row = session.execute(
+        text(f"SELECT min(ts), max(ts) FROM {table} WHERE symbol = :sym"),
+        {"sym": symbol.upper()},
+    ).fetchone()
+    if row and row[0] is not None:
+        return row[0], row[1]
     return None, None
 
 
@@ -215,6 +253,7 @@ def deep_backfill_funding(
     dataset_version: str = "v1.0",
     dry_run: bool = False,
     merge_every_n_pages: int = 30,
+    raw_archive_dir: Path | None = None,
 ) -> dict[str, Any]:
     """对单个 symbol 执行 funding 深度回填.
 
@@ -239,11 +278,19 @@ def deep_backfill_funding(
     from aats.data_platform.db import get_session
 
     settings = get_settings()
+    if target_start.tzinfo is None or target_start.utcoffset() is None:
+        raise ValueError("target_start must be timezone-aware")
+    if not dry_run:
+        if raw_archive_dir is None:
+            raise ValueError("raw_archive_dir is required for an applied backfill")
+        if not raw_archive_dir.expanduser().is_absolute():
+            raise ValueError("raw_archive_dir must be absolute")
     stats: dict[str, Any] = {
         "symbol": symbol,
         "target_start": target_start.isoformat(),
         "pages_fetched": 0,
         "rows_fetched": 0,
+        "unique_rows_observed": 0,
         "rows_written_staging": 0,
         "rows_merged_bronze": 0,
         "rows_merged_silver": 0,
@@ -252,6 +299,11 @@ def deep_backfill_funding(
         "new_min_ts": None,
         "new_max_ts": None,
         "api_exhausted": False,
+        "raw_partition_sha256": [],
+        "gaps": [],
+        "coverage_ratio": 0.0,
+        "observed_settlement_intervals_seconds": [],
+        "bundle": None,
     }
 
     # 1. 查询已有数据范围
@@ -286,10 +338,19 @@ def deep_backfill_funding(
     else:
         page_from_ms = _ts_ms(datetime.now(timezone.utc))
 
+    coverage_end = existing_min or _ms_to_dt(page_from_ms)
+    if coverage_end <= target_start:
+        return stats
+
     target_ms = _ts_ms(target_start)
     all_rows: list[dict[str, Any]] = []
     page = 0
     consecutive_empty = 0
+    fetch_error: Exception | None = None
+    seen_cursors: set[int] = set()
+    observed: set[datetime] = set()
+    oldest_source_ts: datetime | None = None
+    completed = False
 
     if dry_run:
         log.info("[DRY RUN] 不会写入数据库")
@@ -304,27 +365,51 @@ def deep_backfill_funding(
     # 3. 分页拉取
     with httpx.Client() as client:
         while page < MAX_PAGES_HARD_LIMIT:
+            if page_from_ms in seen_cursors:
+                fetch_error = RuntimeError("okx_funding_pagination_stalled")
+                break
+            seen_cursors.add(page_from_ms)
             try:
-                raw_data = _fetch_funding_page(
-                    client, base_url, symbol,
-                    after_ms=page_from_ms,
-                    timeout=timeout,
+                raw_data, raw_response = _split_page_result(
+                    _fetch_funding_page(
+                        client,
+                        base_url,
+                        symbol,
+                        after_ms=page_from_ms,
+                        timeout=timeout,
+                    )
                 )
             except Exception as e:
                 log.error("API 请求失败 (page=%d): %s", page, e)
                 if page == 0:
                     raise
-                log.warning("停止拉取，保存已获取的 %d 行数据", len(all_rows))
+                log.warning("停止拉取并保存检查点；本次操作最终仍会失败关闭")
+                fetch_error = e
                 break
 
             page += 1
             stats["pages_fetched"] = page
+            if raw_response is not None and raw_archive_dir is not None:
+                from aats.data_platform.collectors.backfill.official_history_importers import (
+                    archive_raw_response_page,
+                )
+
+                token = "".join(ch if ch.isalnum() else "_" for ch in symbol.upper())
+                digest = archive_raw_response_page(
+                    raw_archive_dir,
+                    f"funding_{token}_{page:06d}_{page_from_ms}.json",
+                    raw_response,
+                )
+                stats["raw_partition_sha256"].append(digest)
+            elif not dry_run:
+                raise RuntimeError("raw_response_evidence_missing")
 
             if not raw_data:
                 consecutive_empty += 1
                 if consecutive_empty >= 3:
                     log.info("连续 %d 页无数据，API 数据已耗尽", consecutive_empty)
                     stats["api_exhausted"] = True
+                    completed = True
                     break
                 time.sleep(rate_limit_sleep)
                 continue
@@ -333,16 +418,30 @@ def deep_backfill_funding(
 
             # 解析数据
             page_rows = []
+            parsed_page: list[dict[str, Any]] = []
             for item in raw_data:
                 parsed = _parse_funding(item, symbol)
-                if parsed:
+                if parsed is None:
+                    fetch_error = RuntimeError("okx_funding_row_invalid")
+                    break
+                parsed_page.append(parsed)
+            if fetch_error is not None:
+                break
+
+            for parsed in parsed_page:
+                if target_start <= parsed["ts"] < coverage_end:
                     page_rows.append(parsed)
+                    observed.add(parsed["ts"])
 
             all_rows.extend(page_rows)
+            stats["rows_fetched"] += len(page_rows)
 
             # 获取本页最早时间戳
-            oldest_ts_in_page = min(int(d["fundingTime"]) for d in raw_data)
-            oldest_dt = _ms_to_dt(oldest_ts_in_page)
+            oldest_dt = min(parsed["ts"] for parsed in parsed_page)
+            oldest_ts_in_page = _ts_ms(oldest_dt)
+            oldest_source_ts = (
+                oldest_dt if oldest_source_ts is None else min(oldest_source_ts, oldest_dt)
+            )
 
             # 进度报告
             if page % 5 == 0:
@@ -358,6 +457,7 @@ def deep_backfill_funding(
                     "[%s funding] 已到达目标时间 %s (page=%d)",
                     symbol, target_start.strftime("%Y-%m-%d"), page,
                 )
+                completed = True
                 break
 
             # 检查返回数据不足一页（已到 API 数据尽头）
@@ -368,6 +468,7 @@ def deep_backfill_funding(
                     oldest_dt.strftime("%Y-%m-%d %H:%M"),
                 )
                 stats["api_exhausted"] = True
+                completed = True
                 break
 
             # 下一页的起始点
@@ -381,9 +482,34 @@ def deep_backfill_funding(
 
             time.sleep(rate_limit_sleep)
 
-    stats["rows_fetched"] = stats.get("rows_fetched", 0) + len(all_rows)
+    if not completed and fetch_error is None:
+        fetch_error = RuntimeError("okx_funding_max_pages_exceeded")
+
+    ordered_observed = sorted(observed)
+    stats["unique_rows_observed"] = len(observed)
+    stats["observed_settlement_intervals_seconds"] = sorted(
+        {
+            int((current - previous).total_seconds())
+            for previous, current in zip(ordered_observed, ordered_observed[1:])
+            if current > previous
+        }
+    )
+    reached_target = oldest_source_ts is not None and oldest_source_ts <= target_start
+    if not reached_target:
+        shortfall_end = min(ordered_observed) if ordered_observed else coverage_end
+        if shortfall_end > target_start:
+            stats["gaps"] = [
+                {
+                    "gap_start": target_start.isoformat(),
+                    "gap_end": shortfall_end.isoformat(),
+                    "reason": "official_funding_history_coverage_shortfall",
+                }
+            ]
+    stats["coverage_ratio"] = 1.0 if reached_target and observed else 0.0
 
     if dry_run:
+        if fetch_error is not None:
+            raise RuntimeError("funding_backfill_dry_run_failed") from fetch_error
         if all_rows:
             min_ts = min(r["ts"] for r in all_rows)
             max_ts = max(r["ts"] for r in all_rows)
@@ -403,6 +529,25 @@ def deep_backfill_funding(
     if all_rows:
         _flush_and_merge(all_rows, symbol, dataset_version, settings, stats)
 
+    if fetch_error is not None:
+        raise RuntimeError("funding_backfill_partial_failure_checkpointed") from fetch_error
+
+    if stats["pages_fetched"] and not stats["raw_partition_sha256"]:
+        raise RuntimeError("funding_backfill_raw_archive_empty")
+
+    if stats["raw_partition_sha256"]:
+        stats["bundle"] = _persist_funding_bundle(
+            settings=settings,
+            symbol=symbol,
+            coverage_start=target_start,
+            coverage_end=coverage_end,
+            dataset_version=dataset_version,
+            row_count=stats["unique_rows_observed"],
+            raw_hashes=stats["raw_partition_sha256"],
+            gaps=stats["gaps"],
+            coverage_ratio=stats["coverage_ratio"],
+        )
+
     log.info(
         "[%s funding] 回填完成: %d 页, staging=%d, bronze=%d, silver=%d",
         symbol,
@@ -412,6 +557,89 @@ def deep_backfill_funding(
         stats["rows_merged_silver"],
     )
     return stats
+
+
+def _persist_funding_bundle(
+    *,
+    settings: Any,
+    symbol: str,
+    coverage_start: datetime,
+    coverage_end: datetime,
+    dataset_version: str,
+    row_count: int,
+    raw_hashes: list[str],
+    gaps: list[dict[str, str]],
+    coverage_ratio: float,
+) -> dict[str, Any]:
+    from aats.data_platform.collectors.backfill.official_history_importers import (
+        register_official_source,
+    )
+    from aats.data_platform.data_governance.coverage import git_commit
+    from aats.data_platform.data_governance.gaps import official_backfill_gap, record_data_gaps
+    from aats.data_platform.data_governance.registry import (
+        import_source_record,
+        persist_historical_bundle,
+    )
+    from aats.data_platform.db import get_session
+
+    root = Path(__file__).resolve().parent.parent
+    source_key = "okx-rest:funding-rate-history:v5"
+    with get_session(settings) as session:
+        source_id = register_official_source(
+            session,
+            source_key=source_key,
+            source_kind="okx_rest",
+            source_locator="/api/v5/public/funding-rate-history",
+            timestamp_semantics="exchange funding settlement time in milliseconds",
+        )
+        source = import_source_record(
+            source_key=source_key,
+            source_kind="okx_rest",
+            provider="OKX",
+            source_locator="/api/v5/public/funding-rate-history",
+            coverage_start=coverage_start,
+            coverage_end=coverage_end,
+            timestamp_semantics="exchange funding settlement time in milliseconds",
+            schema_version="okx-v5",
+            dataset_version=dataset_version,
+            transform_version="funding-settlement-backfill-v2",
+            git_commit=git_commit(str(root)),
+            raw_partition_sha256=raw_hashes,
+            row_count=row_count,
+            gaps=gaps,
+        )
+        record_data_gaps(
+            session,
+            [
+                official_backfill_gap(
+                    source_id=source_id,
+                    dataset_name="silver.market_swap_funding",
+                    symbol=symbol.upper(),
+                    channel="funding-rate-history",
+                    gap_start=datetime.fromisoformat(item["gap_start"]),
+                    gap_end=datetime.fromisoformat(item["gap_end"]),
+                    reason_code=item["reason"],
+                    evidence=item,
+                )
+                for item in gaps
+            ],
+        )
+        bundle_id, report = persist_historical_bundle(
+            session,
+            source_id=source_id,
+            source=source,
+            symbol=symbol.upper(),
+            role="funding",
+            purpose="funding_research",
+            coverage_ratio=coverage_ratio,
+            causal_time_check=True,
+        )
+    return {
+        "bundle_id": bundle_id,
+        "eligible": report.eligible,
+        "reason_codes": list(report.reason_codes),
+        "evidence_fingerprint": report.evidence_fingerprint,
+    }
 
 
 def _flush_and_merge(
@@ -452,8 +680,8 @@ def _flush_and_merge(
             instrument_type="swap",
             symbol=symbol.upper(),
         )
-
-        try:
+    try:
+        with get_session(settings) as session:
             written = _write_staging_batch(session, rows, run_id, dataset_version)
             session.flush()
 
@@ -486,10 +714,21 @@ def _flush_and_merge(
                 max_ts.strftime("%Y-%m-%d %H:%M"),
             )
 
-        except Exception as exc:
-            finish_run_item(session, item_id, status="failed", error_message=str(exc))
-            finish_ingest_run(session, run_id, status="failed", error_message=str(exc))
-            raise
+    except Exception as exc:
+        with get_session(settings) as failure_session:
+            finish_run_item(
+                failure_session,
+                item_id,
+                status="failed",
+                error_message=type(exc).__name__,
+            )
+            finish_ingest_run(
+                failure_session,
+                run_id,
+                status="failed",
+                error_message=type(exc).__name__,
+            )
+        raise
 
 
 # ── CLI ────────────────────────────────────────────────────────────────
@@ -538,6 +777,11 @@ def main() -> None:
         "--merge-every", type=int, default=30,
         help="每拉取多少页做一次 merge (默认: 30)",
     )
+    parser.add_argument(
+        "--raw-archive-dir",
+        type=Path,
+        help="原始 OKX 响应不可变归档的绝对目录；非 dry-run 必填",
+    )
 
     args = parser.parse_args()
 
@@ -548,6 +792,10 @@ def main() -> None:
     else:
         parser.error("必须指定 --days 或 --target-start")
         return
+    if not args.dry_run and args.raw_archive_dir is None:
+        parser.error("非 dry-run 必须指定 --raw-archive-dir")
+    if args.raw_archive_dir is not None and not args.raw_archive_dir.expanduser().is_absolute():
+        parser.error("--raw-archive-dir 必须是绝对路径")
 
     log.info("=" * 60)
     log.info("OKX API 深度 funding 回填")
@@ -572,6 +820,7 @@ def main() -> None:
                 rate_limit_sleep=args.rate_limit,
                 dry_run=args.dry_run,
                 merge_every_n_pages=args.merge_every,
+                raw_archive_dir=args.raw_archive_dir,
             )
             all_stats.append(result)
         except Exception as e:

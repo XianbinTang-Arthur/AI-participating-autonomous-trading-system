@@ -2950,6 +2950,65 @@ input::placeholder {
   align-items: start;
 }
 
+.rdp-v3-data-governance {
+  padding: 14px;
+  border: 1px solid var(--border, #253447);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--panel, #0f1822) 94%, transparent);
+}
+
+.rdp-v3-data-governance__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
+.rdp-v3-data-governance__head h3,
+.rdp-v3-data-governance__head p {
+  margin: 4px 0 0;
+}
+
+.rdp-v3-data-governance__head p {
+  color: var(--muted, #91a1b4);
+  font-size: 12px;
+}
+
+.rdp-v3-data-governance__grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.rdp-v3-data-governance__detail {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--border, #253447);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--panel-strong, #111d29) 76%, transparent);
+}
+
+.rdp-v3-data-governance__detail-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+
+.rdp-v3-data-governance__detail-head h4 {
+  margin: 3px 0 0;
+}
+
+.rdp-v3-data-card {
+  padding: 12px;
+}
+
+.rdp-v3-data-card .summary-strip {
+  grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+}
+
 .rdp-v3-card {
   min-width: 0;
 }
@@ -3135,6 +3194,7 @@ input::placeholder {
   }
 
   .rdp-v3-primary-grid,
+  .rdp-v3-data-governance__grid,
   .rdp-v3-three-columns {
     grid-template-columns: 1fr;
   }
@@ -3146,6 +3206,8 @@ input::placeholder {
   }
 
   .rdp-v3-workflow-bar,
+  .rdp-v3-data-governance__head,
+  .rdp-v3-data-governance__detail-head,
   .rdp-v3-run__head,
   .rdp-v3-research-item__head,
   .rdp-v3-release-item__head {

@@ -1,4 +1,5 @@
 .[nats,redis,otel]
 greenlet==3.2.5
+pyarrow==25.0.1
 setuptools>=68
 wheel

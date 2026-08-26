@@ -32,6 +32,7 @@ from aats.data_platform.collectors.microstructure_ws_collector import (
     OiFundingMarkRow,
     TradeRow,
     _BUFFER_HARD_CAP,
+    _continuity_scopes,
 )
 
 
@@ -124,6 +125,31 @@ class TestBufferThreshold(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(await buf.add_many([_make_trade_row(f"T-{i}") for i in range(3)]))
         self.assertTrue(await buf.add_many([_make_trade_row(f"T-{i}") for i in range(3, 6)]))
+
+    async def test_oversized_batch_cannot_exceed_hard_cap(self) -> None:
+        buf = MicrostructureBronzeBuffer(
+            table="bronze.market_trades",
+            flush_max_rows=_BUFFER_HARD_CAP + 1,
+            flush_max_seconds=60.0,
+        )
+        await buf.add_many(
+            [_make_trade_row(f"T-{index}") for index in range(_BUFFER_HARD_CAP + 1000)]
+        )
+
+        self.assertLessEqual(buf.buffered(), _BUFFER_HARD_CAP)
+        self.assertGreater(buf.rows_dropped_total, 0)
+
+
+def test_oif_continuity_scopes_only_include_actual_tick_types() -> None:
+    scopes = _continuity_scopes(
+        "staging.market_oi_funding_ticks",
+        [_make_oif_row("mark"), _make_oif_row("oi")],
+    )
+
+    assert scopes == (
+        ("mark-price", ("BTC-USDT-SWAP",)),
+        ("open-interest", ("BTC-USDT-SWAP",)),
+    )
 
     async def test_drain_returns_rows_and_empties_buffer(self) -> None:
         buf = MicrostructureBronzeBuffer(
@@ -338,8 +364,19 @@ class TestCollectorFlush(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(collector._buf_trades.buffered(), 0)
         self.assertEqual(collector._written_counts["bronze.market_trades"], 3)
         # 验证 SQL 片段
-        self.assertEqual(len(captured.executed), 1)
-        sql, batch = captured.executed[0]
+        raw_writes = [
+            item
+            for item in captured.executed
+            if "INSERT INTO bronze.market_trades" in item[0]
+        ]
+        continuity_writes = [
+            item
+            for item in captured.executed
+            if "INSERT INTO meta.collector_continuity_events" in item[0]
+        ]
+        self.assertEqual(len(raw_writes), 1)
+        self.assertEqual(len(continuity_writes), 1)
+        sql, batch = raw_writes[0]
         self.assertIn("INSERT INTO bronze.market_trades", sql)
         self.assertIn("ON CONFLICT", sql.upper())
         self.assertEqual(len(batch), 3)

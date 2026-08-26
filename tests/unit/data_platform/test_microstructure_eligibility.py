@@ -33,6 +33,30 @@ def _observation(**overrides: object) -> MicrostructureWindowObservation:
         "liquidation_event_count": 0,
         "microstructure_collector_fresh": True,
         "liquidations_collector_fresh": True,
+        "continuity_statuses": {
+            "orderbook": "complete",
+            "trades": "complete",
+            "oi_funding": "complete",
+            "liquidations": "complete",
+        },
+        "connection_generations": {
+            "orderbook": 1,
+            "trades": 1,
+            "oi_funding": 1,
+            "liquidations": 1,
+        },
+        "continuity_drop_counts": {
+            "orderbook": 0,
+            "trades": 0,
+            "oi_funding": 0,
+            "liquidations": 0,
+        },
+        "continuity_fingerprints": {
+            "orderbook": "a" * 64,
+            "trades": "b" * 64,
+            "oi_funding": "c" * 64,
+            "liquidations": "d" * 64,
+        },
         "dataset_versions": {
             "orderbook": "silver-v1",
             "trades": "silver-v1",
@@ -119,6 +143,37 @@ def test_fatal_quality_flags_and_lineage_mismatch_fail_closed() -> None:
     assert "dataset_version_mismatch" in report.reason_codes
     assert "fatal_quality_flag:orderbook:stale_source" in report.reason_codes
     assert "fatal_quality_flag:liquidations:liquidation_no_data" not in report.reason_codes
+
+
+def test_continuity_unknown_drop_or_missing_generation_fails_closed() -> None:
+    report = evaluate_microstructure_window(
+        _observation(
+            continuity_statuses={
+                "orderbook": "known_gap",
+                "trades": "complete",
+                "oi_funding": "complete",
+                "liquidations": "unknown",
+            },
+            connection_generations={
+                "orderbook": 1,
+                "trades": None,
+                "oi_funding": 1,
+                "liquidations": 1,
+            },
+            continuity_drop_counts={
+                "orderbook": 1,
+                "trades": 0,
+                "oi_funding": 0,
+                "liquidations": 0,
+            },
+        )
+    )
+
+    assert report.eligible_for_research is False
+    assert "continuity_not_complete:orderbook:known_gap" in report.reason_codes
+    assert "continuity_not_complete:liquidations:unknown" in report.reason_codes
+    assert "continuity_drop_observed:orderbook" in report.reason_codes
+    assert "connection_generation_missing:trades" in report.reason_codes
 
 
 def test_fingerprint_is_stable_and_excludes_evaluation_clock() -> None:

@@ -1,4 +1,4 @@
-import { primaryStatusPanel, summaryStrip } from "../components.js";
+import { primaryStatusPanel, responsiveTable, summaryStrip, surfaceCard } from "../components.js";
 import { escapeHtml } from "../formatters.js";
 import {
   renderAction,
@@ -99,6 +99,133 @@ function renderWorkflowActions(workflows = [], canAdmin = false) {
   `;
 }
 
+function governanceStatusLabel(value) {
+  return value === "available" || value === "ready" ? "证据可用" : "状态未知";
+}
+
+function renderDataGovernance(dataGovernance = {}) {
+  const coverage = dataGovernance.coverage || {};
+  const imports = dataGovernance.historical_imports || {};
+  const live = dataGovernance.live_collection || {};
+  const archives = dataGovernance.archives || {};
+  const eligibility = dataGovernance.eligibility || {};
+  const rebuilds = dataGovernance.rebuilds || {};
+  const monitoring = dataGovernance.monitoring || {};
+  const summary = coverage.summary || {};
+  const recovery = Array.isArray(coverage.recovery_matrix)
+    ? coverage.recovery_matrix.slice(0, 8)
+    : [];
+  const cards = [
+    {
+      title: "数据覆盖",
+      kicker: governanceStatusLabel(coverage.status),
+      copy: coverage.next_action || "等待覆盖快照。",
+      metrics: [
+        { label: "表", value: String(coverage.table_count || 0), tone: "neutral" },
+        { label: "已观测", value: String(summary.observed || 0), tone: "positive" },
+        { label: "质量异常", value: String(summary.observed_with_quality_issues || 0), tone: summary.observed_with_quality_issues ? "warning" : "neutral" },
+        { label: "缺失", value: String(summary.missing || 0), tone: summary.missing ? "danger" : "neutral" },
+      ],
+    },
+    {
+      title: "历史导入",
+      kicker: governanceStatusLabel(imports.status),
+      copy: imports.next_action || "等待导入证据。",
+      metrics: [
+        { label: "最近运行", value: String(imports.total_recent || 0), tone: "info" },
+      ],
+    },
+    {
+      title: "实时采集",
+      kicker: governanceStatusLabel(live.status),
+      copy: live.next_action || "等待连续性证据。",
+      metrics: [
+        { label: "频道", value: String(live.channel_count || 0), tone: "info" },
+        { label: "丢弃", value: String(live.drop_count || 0), tone: live.drop_count ? "danger" : "neutral" },
+      ],
+    },
+    {
+      title: "不可变归档",
+      kicker: governanceStatusLabel(archives.status),
+      copy: archives.next_action || "等待归档证据。",
+      metrics: [
+        { label: "分区", value: String(archives.partition_count || 0), tone: "info" },
+        { label: "阻断", value: String(archives.blocked_count || 0), tone: archives.blocked_count ? "danger" : "neutral" },
+      ],
+    },
+    {
+      title: "质量资格",
+      kicker: governanceStatusLabel(eligibility.status),
+      copy: eligibility.next_action || "等待 bundle 资格证据。",
+      metrics: [
+        { label: "Bundle", value: String(eligibility.bundle_count || 0), tone: "info" },
+      ],
+    },
+    {
+      title: "确定性重建",
+      kicker: governanceStatusLabel(rebuilds.status),
+      copy: rebuilds.next_action || "等待重建证据。",
+      metrics: [
+        { label: "最近运行", value: String(rebuilds.total_recent || 0), tone: "info" },
+      ],
+    },
+    {
+      title: "监控告警",
+      kicker: monitoring.status === "healthy" ? "当前无告警" : (monitoring.status === "critical" ? "需要立即处理" : "需要关注"),
+      copy: monitoring.next_action || "等待监控证据。",
+      metrics: [
+        { label: "告警", value: String(monitoring.alert_count || 0), tone: monitoring.alert_count ? "warning" : "positive" },
+        { label: "严重", value: String(monitoring.critical_count || 0), tone: monitoring.critical_count ? "danger" : "neutral" },
+      ],
+    },
+  ];
+  return `
+    <section class="rdp-v3-data-governance" data-panel-key="rdpWorkspace" aria-label="RDP 数据治理">
+      <div class="rdp-v3-data-governance__head">
+        <div>
+          <span class="rdp-v3-eyebrow">数据治理</span>
+          <h3>来源、覆盖、连续性与重建</h3>
+          <p>页面只读取预聚合快照；未知、缺失、有效零和失败保持不同状态。</p>
+        </div>
+        ${statusPill(
+          dataGovernance.status === "ready" ? "治理快照可用" : "数据证据不完整",
+          dataGovernance.status === "ready" ? "positive" : "warning",
+        )}
+      </div>
+      <div class="rdp-v3-data-governance__grid">
+        ${cards.map((card) => surfaceCard({
+          title: card.title,
+          kicker: card.kicker,
+          copy: card.copy,
+          classes: "rdp-v3-card rdp-v3-data-card",
+          panelKey: "rdpWorkspace",
+          content: summaryStrip(card.metrics),
+        })).join("")}
+      </div>
+      <div class="rdp-v3-data-governance__detail">
+        <div class="rdp-v3-data-governance__detail-head">
+          <div>
+            <span class="rdp-v3-eyebrow">恢复矩阵</span>
+            <h4>真实缺口与下一步</h4>
+          </div>
+          <span class="table-meta">最多展示 8 项；完整证据保存在不可变覆盖快照</span>
+        </div>
+        ${responsiveTable(
+          ["数据集", "状态", "恢复分类", "优先级", "下一步"],
+          recovery.map((item) => [
+            `<strong>${escapeHtml(item.dataset || "未知数据集")}</strong>`,
+            statusPill(item.observed_status || "unknown", statusTone(item.observed_status)),
+            escapeHtml(item.classification || "尚未分类"),
+            escapeHtml(item.priority || "—"),
+            `<span class="meta-copy">${escapeHtml(item.next_action || "等待审计")}</span>`,
+          ]),
+          "当前快照没有待恢复的数据项。",
+        )}
+      </div>
+    </section>
+  `;
+}
+
 export function renderRdpControlPanelV3({ workspace = {}, canAdmin = false } = {}) {
   const schemaVersion = String(workspace.schema_version || "");
   if (schemaVersion && schemaVersion !== "rdp.workspace.v3") {
@@ -108,6 +235,7 @@ export function renderRdpControlPanelV3({ workspace = {}, canAdmin = false } = {
     <div class="rdp-v3-shell">
       ${renderHero(workspace, canAdmin)}
       ${renderLifecycle(workspace.lifecycle || {})}
+      ${renderDataGovernance(workspace.data_governance || {})}
       ${renderWorkflowActions(workspace.workflows || [], canAdmin)}
       <div class="rdp-v3-primary-grid">
         ${renderRuns(workspace.execution || {}, canAdmin)}

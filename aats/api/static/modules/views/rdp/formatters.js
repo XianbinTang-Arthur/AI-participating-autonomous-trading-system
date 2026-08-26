@@ -62,8 +62,8 @@ const SELECTION_LABELS = {
 
 export function statusTone(status) {
   const value = String(status || "").toLowerCase();
-  if (["blocked", "failed", "error", "rollback_required", "rollback_recommended"].includes(value)) return "danger";
-  if (["degraded", "warn", "warning", "queued", "action_required", "partially_succeeded", "succeeded_with_warnings"].includes(value)) return "warning";
+  if (["blocked", "failed", "error", "audit_failed", "missing", "known_gap", "rollback_required", "rollback_recommended"].includes(value)) return "danger";
+  if (["degraded", "warn", "warning", "collector_unknown", "observed_with_quality_issues", "queued", "action_required", "partially_succeeded", "succeeded_with_warnings"].includes(value)) return "warning";
   if (["healthy", "complete", "completed", "pass", "succeeded", "success", "done"].includes(value)) return "positive";
   if (["running", "observing", "busy", "starting", "cancellation_requested"].includes(value)) return "info";
   return "neutral";

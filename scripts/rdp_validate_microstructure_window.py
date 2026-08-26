@@ -10,6 +10,7 @@ standard deployment workflow.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -29,6 +30,9 @@ from aats.data_platform.quality.microstructure_eligibility import (  # noqa: E40
     MicrostructureEligibilityPolicy,
     MicrostructureWindowObservation,
     evaluate_microstructure_window,
+)
+from aats.data_platform.data_governance.continuity import (  # noqa: E402
+    classify_continuity_window,
 )
 
 
@@ -121,6 +125,7 @@ def _row_to_observation(
     row: Mapping[str, Any],
     *,
     collector_freshness: Mapping[str, bool],
+    continuity: Mapping[str, Mapping[str, Any]],
 ) -> MicrostructureWindowObservation:
     start = row["ts"]
     return MicrostructureWindowObservation(
@@ -140,6 +145,22 @@ def _row_to_observation(
         liquidations_collector_fresh=collector_freshness.get(
             "aats-liquidations-daemon", False
         ),
+        continuity_statuses={
+            name: str(value["status"])
+            for name, value in continuity.items()
+        },
+        connection_generations={
+            name: value["connection_generation"]
+            for name, value in continuity.items()
+        },
+        continuity_drop_counts={
+            name: int(value["drop_count"])
+            for name, value in continuity.items()
+        },
+        continuity_fingerprints={
+            name: str(value["fingerprint"])
+            for name, value in continuity.items()
+        },
         dataset_versions={
             "orderbook": row["orderbook_dataset_version"],
             "trades": row["trades_dataset_version"],
@@ -159,6 +180,66 @@ def _row_to_observation(
             "liquidations": row["liquidations_quality_flags"] or (),
         },
     )
+
+
+def _load_continuity(connection, row: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    start = row["ts"]
+    end = start + timedelta(minutes=15)
+    symbol = str(row["symbol"])
+    channels = {
+        "orderbook": (
+            ("aats-microstructure-collector", "bbo-tbt"),
+            ("aats-microstructure-collector", "books5"),
+        ),
+        "trades": (("aats-microstructure-collector", "trades"),),
+        "oi_funding": (
+            ("aats-microstructure-collector", "open-interest"),
+            ("aats-microstructure-collector", "funding-rate"),
+            ("aats-microstructure-collector", "mark-price"),
+        ),
+        "liquidations": (
+            ("aats-liquidations-daemon", "liquidation-orders"),
+        ),
+    }
+    output: dict[str, dict[str, Any]] = {}
+    for dataset, bindings in channels.items():
+        reports = [
+            classify_continuity_window(
+                connection,
+                collector=collector,
+                channel=channel,
+                symbol=symbol,
+                window_start=start,
+                window_end=end,
+                require_flush=(dataset != "liquidations"),
+            )
+            for collector, channel in bindings
+        ]
+        statuses = {report.status for report in reports}
+        status = (
+            "complete"
+            if statuses == {"complete"}
+            else ("known_gap" if "known_gap" in statuses else "unknown")
+        )
+        generations = {
+            generation
+            for report in reports
+            for generation in report.generations
+        }
+        fingerprints = sorted(report.fingerprint for report in reports)
+        output[dataset] = {
+            "status": status,
+            "connection_generation": (
+                next(iter(generations)) if len(generations) == 1 else None
+            ),
+            "drop_count": sum(
+                report.event_counts.get("DROP", 0) for report in reports
+            ),
+            "fingerprint": hashlib.sha256(
+                "|".join(fingerprints).encode()
+            ).hexdigest(),
+        }
+    return output
 
 
 def _write_new_report(path: pathlib.Path, payload: Mapping[str, Any]) -> None:
@@ -213,6 +294,11 @@ def main() -> int:
                         "window_start": window_start,
                     },
                 ).mappings().first()
+                continuity = (
+                    _load_continuity(connection, row)
+                    if row is not None
+                    else None
+                )
         finally:
             engine.dispose()
         if row is None:
@@ -220,6 +306,7 @@ def main() -> int:
         observation = _row_to_observation(
             row,
             collector_freshness=collector_freshness,
+            continuity=continuity or {},
         )
         policy = MicrostructureEligibilityPolicy(
             min_bbo_samples=args.min_bbo_samples,

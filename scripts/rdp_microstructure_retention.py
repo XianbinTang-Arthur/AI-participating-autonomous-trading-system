@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P1-D Phase 1A — Microstructure Bronze/Staging retention housekeeping.
+"""Archive-gated microstructure Bronze/Staging retention housekeeping.
 
 参考:
     docs/design/p1d_phase1a_implementation_design_2026_04_20.md §6.x
@@ -12,8 +12,9 @@
     bronze.market_orderbook_books5     -> 14 days
     staging.market_oi_funding_ticks    -> 7  days
 
-默认 dry-run (只 SELECT COUNT); 实际删除需要 --apply --confirm 双层保护,
-风格对齐 scripts/maintenance/backfill_event_store_archive.py。
+默认 dry-run (只 SELECT COUNT)。实际删除需要 --apply --confirm 双层保护，
+并在同一事务内先验证所有目标表的全部到期 UTC 日分区。任何分区缺少唯一的
+DELETE_ELIGIBLE 归档，或 manifest/SHA-256/行数不一致，全部删除都会回滚为零。
 
 Exit codes
 ==========
@@ -138,15 +139,108 @@ def _count_rows_before_cutoff(session, table: str, cutoff: datetime) -> int:
         return int(row[0])
 
 
-def _delete_rows_before_cutoff(session, table: str, cutoff: datetime) -> int:
-    """DELETE FROM <table> WHERE ts < :cutoff, 返回 rowcount."""
+def _preflight_archived_partitions(
+    session, table: str, cutoff: datetime
+) -> list[tuple[object, object]]:
+    """Lock and verify every expired UTC-day partition without deleting rows."""
     from sqlalchemy import text
 
-    result = session.execute(
-        text(f"DELETE FROM {table} WHERE ts < :cutoff"),
-        {"cutoff": cutoff},
+    from aats.data_platform.data_governance.archive import (
+        ArchiveScope,
+        verify_archive_artifact,
     )
-    return int(result.rowcount or 0)
+
+    cutoff_day = cutoff.replace(hour=0, minute=0, second=0, microsecond=0)
+    session.execute(text(f"LOCK TABLE {table} IN SHARE ROW EXCLUSIVE MODE"))
+    expired = session.execute(
+        text(
+            f"SELECT symbol, date_trunc('day', ts) AS coverage_start, "
+            f"date_trunc('day', ts) + interval '1 day' AS coverage_end, "
+            f"COUNT(*) AS row_count FROM {table} WHERE ts < :cutoff "
+            f"GROUP BY symbol, coverage_start ORDER BY coverage_start, symbol"
+        ),
+        {"cutoff": cutoff_day},
+    ).mappings().all()
+    evidence: list[tuple[object, object]] = []
+    for partition in expired:
+        archives = session.execute(
+            text(
+                "SELECT partition_id, source_id, storage_path, sha256, row_count "
+                "FROM meta.archive_partitions "
+                "WHERE dataset_name = :dataset_name AND symbol = :symbol "
+                "AND coverage_start = :start AND coverage_end = :end "
+                "AND state = 'DELETE_ELIGIBLE' FOR UPDATE"
+            ),
+            {
+                "dataset_name": table,
+                "symbol": partition["symbol"],
+                "start": partition["coverage_start"],
+                "end": partition["coverage_end"],
+            },
+        ).mappings().all()
+        if len(archives) != 1:
+            raise RuntimeError(
+                "archive_evidence_missing_or_overlapping:"
+                f"{table}:{partition['symbol']}:"
+                f"{partition['coverage_start']}"
+            )
+        archive = archives[0]
+        source_rows = int(partition["row_count"])
+        if int(archive["row_count"]) != source_rows:
+            raise RuntimeError("archive_source_row_count_mismatch")
+        verify_archive_artifact(
+            Path(str(archive["storage_path"])),
+            expected_sha256=str(archive["sha256"]),
+            expected_rows=source_rows,
+            expected_scope=ArchiveScope(
+                source_id=str(archive["source_id"]),
+                dataset_name=table,
+                table=table,
+                symbol=str(partition["symbol"]),
+                coverage_start=partition["coverage_start"],
+                coverage_end=partition["coverage_end"],
+            ),
+        )
+        evidence.append((partition, archive))
+
+    return evidence
+
+
+def _delete_preflighted_partitions(
+    session, table: str, evidence: list[tuple[object, object]]
+) -> int:
+    """Delete only the exact partitions returned by the completed preflight."""
+    from sqlalchemy import text
+
+    deleted_total = 0
+    for partition, archive in evidence:
+        result = session.execute(
+            text(
+                f"DELETE FROM {table} WHERE symbol = :symbol "
+                "AND ts >= :start AND ts < :end"
+            ),
+            {
+                "symbol": partition["symbol"],
+                "start": partition["coverage_start"],
+                "end": partition["coverage_end"],
+            },
+        )
+        deleted = int(result.rowcount or 0)
+        if deleted != int(partition["row_count"]):
+            raise RuntimeError("retention_delete_row_count_mismatch")
+        state_result = session.execute(
+            text(
+                "UPDATE meta.archive_partitions SET state = 'DELETED', "
+                "deleted_at = NOW(), updated_at = NOW() "
+                "WHERE partition_id = :partition_id "
+                "AND state = 'DELETE_ELIGIBLE'"
+            ),
+            {"partition_id": archive["partition_id"]},
+        )
+        if int(state_result.rowcount or 0) != 1:
+            raise RuntimeError("archive_deleted_state_transition_conflict")
+        deleted_total += deleted
+    return deleted_total
 
 
 def _run_dry_run(
@@ -155,13 +249,21 @@ def _run_dry_run(
 ) -> RunSummary:
     summary = RunSummary(mode="dry_run", started_at=now.isoformat())
     for table, days in RETENTION_PLAN.items():
-        cutoff = now - timedelta(days=days)
+        cutoff = (now - timedelta(days=days)).replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
         try:
             with session_factory() as session:
                 n = _count_rows_before_cutoff(session, table, cutoff)
         except Exception as exc:
+            error_type = type(exc).__name__
             log.error(
-                "[retention] dry-run COUNT failed for %s: %r", table, exc,
+                "[retention] dry-run COUNT failed for %s: %s",
+                table,
+                error_type,
             )
             summary.tables.append(
                 TableResult(
@@ -169,7 +271,7 @@ def _run_dry_run(
                     retention_days=days,
                     cutoff_ts=cutoff.isoformat(),
                     mode="error",
-                    error=repr(exc),
+                    error=error_type,
                 )
             )
             continue
@@ -194,34 +296,56 @@ def _run_apply(
     now: datetime,
 ) -> RunSummary:
     summary = RunSummary(mode="applied", started_at=now.isoformat())
-    for table, days in RETENTION_PLAN.items():
-        cutoff = now - timedelta(days=days)
-        try:
-            with session_factory() as session:
-                deleted = _delete_rows_before_cutoff(session, table, cutoff)
-        except Exception as exc:
-            log.error(
-                "[retention] apply DELETE failed for %s: %r", table, exc,
-            )
+    cutoffs = {
+        table: (now - timedelta(days=days)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        for table, days in RETENTION_PLAN.items()
+    }
+    try:
+        with session_factory() as session:
+            preflight = {
+                table: _preflight_archived_partitions(session, table, cutoffs[table])
+                for table in RETENTION_PLAN
+            }
+            deleted_by_table = {
+                table: _delete_preflighted_partitions(
+                    session, table, preflight[table]
+                )
+                for table in RETENTION_PLAN
+            }
+    except Exception as exc:
+        error_type = type(exc).__name__
+        log.error(
+            "[retention] global preflight/delete failed; rolling back: %s",
+            error_type,
+        )
+        for table, days in RETENTION_PLAN.items():
             summary.tables.append(
                 TableResult(
                     table=table,
                     retention_days=days,
-                    cutoff_ts=cutoff.isoformat(),
+                    cutoff_ts=cutoffs[table].isoformat(),
                     mode="error",
-                    error=repr(exc),
+                    error=error_type,
                 )
             )
-            continue
+        return summary
+
+    for table, days in RETENTION_PLAN.items():
+        deleted = deleted_by_table[table]
         log.info(
             "[retention] applied %s retention=%dd cutoff=%s deleted_rows=%d",
-            table, days, cutoff.isoformat(), deleted,
+            table,
+            days,
+            cutoffs[table].isoformat(),
+            deleted,
         )
         summary.tables.append(
             TableResult(
                 table=table,
                 retention_days=days,
-                cutoff_ts=cutoff.isoformat(),
+                cutoff_ts=cutoffs[table].isoformat(),
                 mode="applied",
                 row_count=deleted,
             )

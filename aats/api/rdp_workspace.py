@@ -20,6 +20,7 @@ from aats.api.rdp_control_summary import (
     build_rdp_workbench_bundle,
 )
 from aats.api.rdp_v2 import build_rdp_runs_panel
+from aats.api.rdp_data_governance import build_data_governance_snapshot
 from aats.data_platform.operations.workflow_dispatcher import (
     describe_manual_trigger_availability,
 )
@@ -555,6 +556,7 @@ def build_rdp_workspace(request: Request, *, run_limit: int = 20) -> dict[str, A
     lifecycle = _lifecycle_projection(control, overview, workbench, alerts, execution)
     release = _release_projection(control, workbench)
     next_action = _next_action(overview, lifecycle, execution, release)
+    data_governance = build_data_governance_snapshot(root)
     return {
         "schema_version": RDP_WORKSPACE_SCHEMA_VERSION,
         "generated_at": utc_now().isoformat(),
@@ -564,6 +566,7 @@ def build_rdp_workspace(request: Request, *, run_limit: int = 20) -> dict[str, A
         "next_action": next_action,
         "execution": execution,
         "workflows": workflows,
+        "data_governance": data_governance,
         "research": {
             "overview": overview,
             "items": _as_items(workbench.get("items")),

@@ -12,8 +12,10 @@ ROOT = Path(__file__).resolve().parents[3]
 def test_rdp_run_observability_migration_is_registered_after_stage_16() -> None:
     stage_16 = "batch_b_16_profit_readiness_governance"
     stage_17 = "batch_b_17_rdp_run_observability"
-    assert BATCH_B_STAGES[-1] == stage_17
     assert BATCH_B_STAGES.index(stage_17) == BATCH_B_STAGES.index(stage_16) + 1
+    assert BATCH_B_STAGES.index("batch_b_18_data_governance") == (
+        BATCH_B_STAGES.index(stage_17) + 1
+    )
 
 
 def test_rdp_run_observability_orm_contract() -> None:
@@ -46,6 +48,20 @@ def test_rdp_run_observability_orm_contract() -> None:
         "heartbeat_at",
         "cancel_requested_at",
     } <= set(queue.c.keys())
+
+
+def test_parameter_activation_terminal_constraint_references_a_real_column() -> None:
+    operations = RdpBase.metadata.tables[
+        "governance.parameter_activation_operations"
+    ]
+    assert "terminal_at" in operations.c
+    terminal_constraints = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in operations.constraints
+        if getattr(constraint, "sqltext", None) is not None
+        and constraint.name == "ck_parameter_activation_terminal_shape"
+    }
+    assert "terminal_at" in terminal_constraints["ck_parameter_activation_terminal_shape"]
 
 
 def test_rdp_run_observability_migration_and_rollback_cover_all_objects() -> None:

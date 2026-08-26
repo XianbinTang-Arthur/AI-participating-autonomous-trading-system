@@ -11,7 +11,8 @@
 - Feature A — basis_z: z-score of (perp_close - spot_close)/spot_close, 24h rolling window.
 - Feature B — funding_z: z-score of funding anomaly vs rolling 7d mean/std (forward-fill
   8h funding series to per-15m index, no look-ahead: uses last *resolved* funding rate).
-- Feature C (bonus) — minutes_to_next_funding: remaining minutes to next 8h settlement.
+- Feature C (bonus) — minutes_to_next_funding: remaining minutes to the next
+  observed settlement; no fixed funding interval is assumed.
 
 回归方法 (对齐 validate_h4_short_leg_fix / fast_impulse_selection_regression)
 ---------------------------------------------------------------
@@ -26,7 +27,7 @@ Sign regime
 ----------
 - basis_z 正负: |basis_z| > 0.5 切两个 regime 各自回归
 - funding_z 正负: 同上
-- minutes_to_next_funding 分桶: 0-60 / 60-240 / 240-480 min
+- minutes_to_next_funding 分桶: 0-60 / 60-240 / >240 min
 
 成本假设
 --------
@@ -149,6 +150,7 @@ class Row:
     swap_close: float
     spot_close: float | None = None
     funding_rate: float | None = None        # last *resolved* funding (no look-ahead)
+    funding_source_ts: datetime | None = None
     next_settle_ts: datetime | None = None   # next upcoming settlement ts
 
 
@@ -179,8 +181,10 @@ def build_aligned_rows(
         # funding: bisect_right finds first > ts; we want last <= ts
         pos = bisect.bisect_right(funding_ts, ts)
         last_rate: float | None = None
+        last_funding_ts: datetime | None = None
         if pos > 0:
             last_rate = funding_sorted[pos - 1][1]
+            last_funding_ts = funding_sorted[pos - 1][0]
         next_settle: datetime | None = None
         if pos < len(funding_ts):
             next_settle = funding_ts[pos]
@@ -189,6 +193,7 @@ def build_aligned_rows(
             swap_close=float(r.close),
             spot_close=spot_c,
             funding_rate=last_rate,
+            funding_source_ts=last_funding_ts,
             next_settle_ts=next_settle,
         ))
     return out
@@ -245,14 +250,12 @@ BARS_PER_HORIZON = {
     "1h": 4,
     "4h": 16,
 }
-FUNDING_PER_7D = 3 * 7  # 3 funding/day * 7 days = 21 samples
-
-
 def compute_features(rows: list[Row]) -> list[FeatureRow]:
     """Compute basis + funding features.
 
     basis uses 96-bar (24h at 15m) rolling z-score.
-    funding uses 21-funding-point (7d at 8h) rolling z-score via dedupe.
+    funding uses the actual prior 7-day settlement events, regardless of the
+    exchange's interval for that instrument and period.
 
     Realized returns computed after (forward-looking y), never used as feature.
     """
@@ -265,26 +268,38 @@ def compute_features(rows: list[Row]) -> list[FeatureRow]:
             basis_vals.append(None)
     basis_mean, basis_std = rolling_stats(basis_vals, window=96)
 
-    # funding z: we need rolling stats over funding *events* not per-bar (else
-    # each bar within an 8h window sees the same anomaly/z).
-    # Approach: build unique funding timeline, compute rolling stats, then
-    # forward-fill to each bar.
+    # Funding z uses distinct settlement timestamps rather than rate changes:
+    # two consecutive settlements may legitimately have the same rate.
     seen_rates: list[tuple[datetime, float]] = []
-    seen_set = set()
+    seen_set: set[datetime] = set()
     for r in rows:
-        if r.funding_rate is None:
+        if r.funding_rate is None or r.funding_source_ts is None:
             continue
-        # find the funding ts (last resolved) for this bar: approximate by
-        # indexing into funding_sorted mapping — but we already aligned, so we
-        # can't recover ts easily from Row. Trick: dedupe by (funding_rate, i_chunk)
-        # where the rate *changed* vs previous bar. That gives us ordered unique rates.
-        if not seen_rates or seen_rates[-1][1] != r.funding_rate:
-            seen_rates.append((r.ts, r.funding_rate))
-            seen_set.add(r.ts)
-    # Now rolling stats over seen_rates sequence
-    rate_vals = [v for _, v in seen_rates]
+        if r.funding_source_ts not in seen_set:
+            seen_rates.append((r.funding_source_ts, r.funding_rate))
+            seen_set.add(r.funding_source_ts)
+    seen_rates.sort(key=lambda item: item[0])
     rate_ts = [t for t, _ in seen_rates]
-    rate_mean, rate_std = rolling_stats(rate_vals, window=FUNDING_PER_7D)
+    rate_vals = [v for _, v in seen_rates]
+    rate_mean: list[float | None] = []
+    rate_std: list[float | None] = []
+    seven_days = timedelta(days=7)
+    for index, event_ts in enumerate(rate_ts):
+        window_values = [
+            value
+            for timestamp, value in seen_rates[: index + 1]
+            if event_ts - seven_days < timestamp <= event_ts
+        ]
+        if len(window_values) < 3:
+            rate_mean.append(None)
+            rate_std.append(None)
+            continue
+        mean = sum(window_values) / len(window_values)
+        variance = sum((value - mean) ** 2 for value in window_values) / (
+            len(window_values) - 1
+        )
+        rate_mean.append(mean)
+        rate_std.append(math.sqrt(variance))
 
     # map funding_rate -> (anomaly, z) via the most-recent-rate-change ts
     # for each bar, bisect rate_ts for position
@@ -896,7 +911,7 @@ def write_markdown(
     lines.append("")
     lines.append("- 对齐 fast_impulse / H4 validate 回归方法: OLS 1-var, train/test 70/30, 时间顺序.")
     lines.append("- basis z-score 用 96 bar (24h at 15m) 因果滚动窗.")
-    lines.append("- funding z-score 用 21 events (7d at 8h) 因果滚动窗, 按 funding 事件序列计算后映射回 bar.")
+    lines.append("- funding z-score 使用实际结算时间上的 7 日因果滚动窗，不假定固定 8 小时间隔。")
     lines.append("- **没有 look-ahead**: 每个 bar 只用 ≤ 该 bar ts 的数据.")
     lines.append("- **没有扣除 cost**: 主矩阵是 raw realized_return (net PnL 见 q80/q90 表).")
     lines.append("- 样本 33 天 ~3000 行, 统计功效有限 — ± 0.005 R² 置信区间约 ±0.003.")

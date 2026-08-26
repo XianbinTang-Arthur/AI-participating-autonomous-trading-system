@@ -1,20 +1,23 @@
 # 收益可信度整改验收矩阵
 
 > 文档状态：现行测试说明
-> 最后核对：2026-08-25（实现 `2c798eab13dedd6c65287d64ae46499d98492ce2`；模拟部署 generation `2c798eab13de-20260825T205326Z-1584-9530`）
+> 最后核对：2026-08-26（已提交基线 `c1b015ec`；历史数据治理实现待本轮提交与模拟部署复验；旧 generation 仅作历史证据）
 > 边界：本文定义可执行验收，不把未运行的项目标记为通过。
 
 | 层级 | 验收项 | 通过条件 | 失败/未知处理 |
 | --- | --- | --- | --- |
 | 静态 | Ruff | `ruff check aats/` 无错误 | 修复后重跑 |
 | 单元 | 全量 unit | 全部通过，无 warning 契约回退 | 停止部署 |
-| Schema | Batch B stage 16 | forward/rollback、表、唯一键、CHECK 与 registry 一致 | 停止 RDP writer |
+| Schema | Batch B stage 18 / 98 张 ORM 表 | forward/rollback、ledger checksum、表、唯一键、CHECK 与 registry 一致 | 停止 RDP writer |
 | 配置 | derivatives Compose | 公共采集器存在、不加载 live env、七个应用容器 required | 停止部署 |
 | 配置 | canary | validator 通过、`deployable=false`、deploy 入口无注册 | 视为安全回退失败 |
 | 研究 | 历史审计 | 所有旧候选 `capital_eligible=false` | 禁止引用旧结果 |
 | 研究 | v2 dry-run | 源 SHA/协议通过，零 DB/holdout/参数写 | 修复计划或源漂移 |
 | 研究 | 新假设预注册 | 运行前固定完整试验族、经济机制、失效条件、Factor DSL、窗口和三类成本 | 拒绝事后登记或删除失败计划 |
 | 数据 | collector/eligibility | heartbeat、Silver 最新行和窗口门禁现场通过 | `UNKNOWN`/NO-GO |
+| 数据 | coverage/provenance | 只读覆盖 artifact 不可覆盖，source/raw checksum/gap/bundle 可追溯且冲突失败关闭 | 停止导入与重建 |
+| 数据 | archive-before-delete | 分区 Parquet、manifest、行数和 SHA-256 验证成功；任一分区异常时整次删除 0 行 | 停止 retention |
+| 数据 | historical bundle | historical eligibility 不伪造 live heartbeat；同输入重建 fingerprint 确定；proxy/第三方边界正确 | 保持 ineligible/UNKNOWN |
 | 数据 | Factor 输入完整性 | 每个引用字段在全窗及 train/valid/test 均不超过预注册缺失率；不静默填零 | 计算收益前失败关闭 |
 | 研究 | 跨运行时 Factor 签名 | 同一 DSL 在 Windows/部署容器与支持的 Python 版本产生相同 signature | 停止登记，不能扩增 trial family |
 | 统计 | 完整 campaign | 全计划计数、重复假设折叠，不使用 test，walk-forward/bootstrap/Holm/DSR 全通过 | candidate 不合格；禁止打开 holdout |
@@ -30,6 +33,8 @@
 | 就绪 | readiness v1 | simulation facts 全 PASS；production/trading 仍 false | 不上线 |
 
 ## 当前现场验收快照（非持续状态证明）
+
+2026-08-26 已恢复 WSL2 规定路径 `~/aats-venv`，Python/uv 与 Linux hash lock 安装成功，并新增可重复 bootstrap。该修复只消除了历史环境阻断；本轮新代码仍必须在提交后重新执行 WSL2/PostgreSQL 集成和标准 derivatives 部署，不能沿用下方旧 generation 代替。
 
 下列结论只对应 2026-08-25 最终提交和 deployment generation
 `2c798eab13de-20260825T205326Z-1584-9530`；它们不是持续状态证明：

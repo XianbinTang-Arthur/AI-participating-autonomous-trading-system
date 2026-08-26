@@ -5,8 +5,8 @@
     - 默认 (无 --apply/--dry-run) 走 dry-run (exit 2)
     - RETENTION_PLAN 严格 = 设计文档策略 (30/14/14/7)
     - dry-run 对 4 张表各调用一次 COUNT 并产出 summary
-    - apply 对 4 张表各调用一次 DELETE, 汇总 deleted rows
-    - data_maintenance.json 里有对应 task, command 指向脚本且带 --apply --confirm
+    - apply 先全局 preflight，任一归档异常时 DELETE 调用数为零
+    - data_maintenance.json 中 archive 是 retention 不可绕过的前置硬门
 
 不触真实 Postgres: session/execute 全部 monkeypatch 成 fake。
 """
@@ -43,9 +43,10 @@ def _load_module():
 
 
 class _FakeResult:
-    def __init__(self, *, n: int = 0, rowcount: int = 0):
+    def __init__(self, *, n: int = 0, rowcount: int = 0, rows=None):
         self._n = n
         self.rowcount = rowcount
+        self._rows = rows or []
 
     def fetchone(self):
         class _Row:
@@ -57,6 +58,12 @@ class _FakeResult:
                     return self.n
                 raise IndexError(idx)
         return _Row(self._n)
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self._rows
 
 
 class _FakeSession:
@@ -168,22 +175,115 @@ class TestApplyPath(unittest.TestCase):
         self.mod = _load_module()
 
     def test_apply_confirm_runs_delete_and_exits_0(self) -> None:
-        fake = _FakeSession(rowcount_per_delete=42)
+        fake = _FakeSession()
         with mock.patch.object(
             self.mod,
             "_build_session_factory",
             return_value=_session_factory_stub(fake),
-        ):
+        ), mock.patch.object(
+            self.mod,
+            "_preflight_archived_partitions",
+            return_value=[],
+        ) as preflight, mock.patch.object(
+            self.mod,
+            "_delete_preflighted_partitions",
+            return_value=42,
+        ) as delete:
             rc = self.mod.main(["--apply", "--confirm"])
         self.assertEqual(rc, 0)
-        deletes = [e for e in fake.executions if "DELETE" in e[0].upper()]
-        self.assertEqual(len(deletes), 4)
-        # 每条 DELETE 应针对 retention plan 中的一张表
-        for table in self.mod.RETENTION_PLAN:
-            self.assertTrue(
-                any(table in sql for sql, _ in deletes),
-                f"expected DELETE for {table}, got {deletes!r}",
+        self.assertEqual(preflight.call_count, 4)
+        self.assertEqual(delete.call_count, 4)
+
+    def test_any_preflight_failure_prevents_all_deletes(self) -> None:
+        fake = _FakeSession()
+        preflight_results = [[], RuntimeError("archive_checksum_mismatch")]
+        with mock.patch.object(
+            self.mod,
+            "_preflight_archived_partitions",
+            side_effect=preflight_results,
+        ), mock.patch.object(
+            self.mod,
+            "_delete_preflighted_partitions",
+        ) as delete:
+            summary = self.mod._run_apply(
+                _session_factory_stub(fake),
+                datetime(2026, 4, 23, 12, 0, tzinfo=timezone.utc),
             )
+
+        self.assertEqual(delete.call_count, 0)
+        self.assertEqual(len(summary.tables), 4)
+        self.assertTrue(all(item.row_count == 0 for item in summary.tables))
+        self.assertTrue(all(item.mode == "error" for item in summary.tables))
+
+    def test_missing_archive_evidence_raises_before_delete(self) -> None:
+        day = datetime(2026, 4, 1, tzinfo=timezone.utc)
+
+        class _MissingEvidenceSession(_FakeSession):
+            def execute(self, stmt, params=None):
+                sql = str(stmt)
+                self.executions.append((sql, params or {}))
+                if "GROUP BY symbol" in sql:
+                    return _FakeResult(
+                        rows=[{
+                            "symbol": "BTC-USDT-SWAP",
+                            "coverage_start": day,
+                            "coverage_end": day.replace(day=2),
+                            "row_count": 10,
+                        }]
+                    )
+                if "FROM meta.archive_partitions" in sql:
+                    return _FakeResult(rows=[])
+                return _FakeResult()
+
+        fake = _MissingEvidenceSession()
+        with self.assertRaisesRegex(RuntimeError, "archive_evidence_missing"):
+            self.mod._preflight_archived_partitions(
+                fake,
+                "bronze.market_trades",
+                datetime(2026, 4, 3, tzinfo=timezone.utc),
+            )
+        self.assertFalse(any("DELETE FROM" in sql for sql, _ in fake.executions))
+
+    def test_delete_requires_archive_terminal_state_transition(self) -> None:
+        day = datetime(2026, 4, 1, tzinfo=timezone.utc)
+
+        class _StateConflictSession(_FakeSession):
+            def execute(self, stmt, params=None):
+                sql = str(stmt)
+                self.executions.append((sql, params or {}))
+                if sql.lstrip().upper().startswith("DELETE"):
+                    return _FakeResult(rowcount=7)
+                if "UPDATE meta.archive_partitions" in sql:
+                    return _FakeResult(rowcount=0)
+                return _FakeResult()
+
+        fake = _StateConflictSession()
+        evidence = [
+            (
+                {
+                    "symbol": "BTC-USDT-SWAP",
+                    "coverage_start": day,
+                    "coverage_end": day.replace(day=2),
+                    "row_count": 7,
+                },
+                {"partition_id": "00000000-0000-0000-0000-000000000001"},
+            )
+        ]
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "archive_deleted_state_transition_conflict",
+        ):
+            self.mod._delete_preflighted_partitions(
+                fake,
+                "bronze.market_trades",
+                evidence,
+            )
+
+    def test_archive_evidence_row_is_locked_during_preflight(self) -> None:
+        source = Path(__file__).resolve().parents[3] / "scripts/rdp_microstructure_retention.py"
+        text_value = source.read_text(encoding="utf-8")
+
+        self.assertIn("AND state = 'DELETE_ELIGIBLE' FOR UPDATE", text_value)
 
 
 class TestWorkflowConfigWired(unittest.TestCase):
@@ -192,7 +292,9 @@ class TestWorkflowConfigWired(unittest.TestCase):
         config = json.loads(raw)
         self.assertEqual(config["workflow"], "data_maintenance")
         tasks = config["tasks"]
+        archive = [t for t in tasks if t["name"] == "microstructure_archive"]
         retention = [t for t in tasks if t["name"] == "microstructure_retention"]
+        self.assertEqual(len(archive), 1)
         self.assertEqual(
             len(retention), 1,
             "exactly one microstructure_retention task expected",
@@ -203,8 +305,10 @@ class TestWorkflowConfigWired(unittest.TestCase):
         )
         self.assertIn("--apply", task["command"])
         self.assertIn("--confirm", task["command"])
-        self.assertTrue(task.get("allow_failure") is True)
+        self.assertTrue(task.get("allow_failure") is False)
         self.assertTrue(task.get("enabled") is True)
+        self.assertTrue(archive[0].get("allow_failure") is False)
+        self.assertLess(tasks.index(archive[0]), tasks.index(task))
 
 
 if __name__ == "__main__":

@@ -82,6 +82,62 @@ console.log(JSON.stringify({
     assert '"actions":true' in output
 
 
+def test_rdp_data_governance_renders_bounded_truthful_snapshot() -> None:
+    output = _node(
+        """
+import { renderRdpControlPanelV3 } from './aats/api/static/modules/views/rdp-control-panel.js';
+
+const html = renderRdpControlPanelV3({
+  workspace: {
+    schema_version: 'rdp.workspace.v3',
+    health: {},
+    lifecycle: { stages: [] },
+    research: { overview: {}, items: [], alerts: {} },
+    release: { candidates: [], active_parameters: {} },
+    tuning: { proposals: [] },
+    execution: {},
+    workflows: [],
+    data_governance: {
+      status: 'unknown',
+      coverage: {
+        status: 'unknown',
+        next_action: '运行只读数据覆盖审计',
+        recovery_matrix: [{
+          dataset: 'staging.raw_liquidations',
+          observed_status: 'collector_unknown',
+          classification: 'prospective_only',
+          priority: 'P0',
+          next_action: '等待真实连续采集',
+        }],
+      },
+      historical_imports: { status: 'available', total_recent: 2 },
+      live_collection: { status: 'available', channel_count: 3, drop_count: 1 },
+      archives: { status: 'available', partition_count: 4, blocked_count: 1 },
+      eligibility: { status: 'available', bundle_count: 1 },
+      rebuilds: { status: 'available', total_recent: 1 },
+    },
+  },
+});
+
+console.log(JSON.stringify({
+  headings: ['数据覆盖', '历史导入', '实时采集', '不可变归档', '质量资格', '确定性重建', '监控告警']
+    .every((value) => html.includes(value)),
+  unknownIsTruthful: html.includes('数据证据不完整') && html.includes('运行只读数据覆盖审计'),
+  dropVisible: html.includes('丢弃') && html.includes('>1<'),
+  recoveryTruth: html.includes('staging.raw_liquidations')
+    && html.includes('prospective_only')
+    && html.includes('等待真实连续采集'),
+  noLiveAction: !html.includes('应用参数') && !html.includes('启动实盘'),
+}));
+"""
+    )
+    assert '"headings":true' in output
+    assert '"unknownIsTruthful":true' in output
+    assert '"dropVisible":true' in output
+    assert '"recoveryTruth":true' in output
+    assert '"noLiveAction":true' in output
+
+
 def test_rdp_trigger_uses_v2_and_reuses_one_idempotency_key() -> None:
     output = _node(
         """

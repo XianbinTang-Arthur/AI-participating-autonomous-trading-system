@@ -87,7 +87,42 @@ def immutable_json_write(
             handle.flush()
             os.fsync(handle.fileno())
         os.link(temporary, path)
+        _fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
     path.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
     return digest
+
+
+def immutable_bytes_write(data: bytes, path: pathlib.Path) -> str:
+    """Atomically publish immutable bytes and return their SHA-256 digest."""
+
+    import hashlib
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(data).hexdigest()
+    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+    path.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    return digest
+
+
+def _fsync_directory(path: pathlib.Path) -> None:
+    """Persist directory-entry publication on POSIX filesystems."""
+
+    if os.name == "nt":
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)

@@ -29,6 +29,7 @@ dist/
 .pytest_cache/
 .pytest_workspace_tmp/
 /.pytest_tmp/
+/.codex-tmp-*/
 /.pytest-basetemp-*/
 /audit/full_system_*/pytest-*/
 .mypy_cache/

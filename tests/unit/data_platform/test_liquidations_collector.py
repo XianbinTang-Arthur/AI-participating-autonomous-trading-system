@@ -245,6 +245,7 @@ class TestWriteLiquidationBatch(unittest.TestCase):
         self.assertEqual(batch[0]["source_scope"], "fixed_trading_scope")
         # raw_payload must be serialized JSON for CAST(:raw_payload AS JSONB)
         self.assertEqual(json.loads(batch[0]["raw_payload"]), {"foo": "bar"})
+        self.assertEqual(len(batch[0]["raw_payload_hash"]), 64)
 
     def test_empty_rows_noop(self) -> None:
         session = _CapturingSession()
@@ -298,13 +299,25 @@ class TestCollectorBufferFlush(unittest.IsolatedAsyncioTestCase):
                 flush_max_rows=2,
                 flush_max_seconds=60.0,
             )
+            collector._ingest_run_id = "00000000-0000-0000-0000-000000000001"
             # Two messages of 1 row each — second one should trigger flush.
             await collector._handle_message(_SAMPLE_PUSH)
             self.assertEqual(captured.executed, [])
             self.assertEqual(len(collector._buffer), 1)
             await collector._handle_message(_SAMPLE_PUSH)
-            self.assertEqual(len(captured.executed), 1)
-            _sql, batch = captured.executed[0]
+            raw_writes = [
+                item
+                for item in captured.executed
+                if "INSERT INTO staging.raw_liquidations" in item[0]
+            ]
+            continuity_writes = [
+                item
+                for item in captured.executed
+                if "INSERT INTO meta.collector_continuity_events" in item[0]
+            ]
+            self.assertEqual(len(raw_writes), 1)
+            self.assertEqual(len(continuity_writes), 1)
+            _sql, batch = raw_writes[0]
             self.assertEqual(len(batch), 2)
             self.assertEqual(collector._buffer, [])
             today = datetime.now(tz=timezone.utc).date().isoformat()
@@ -326,6 +339,7 @@ class TestCollectorBufferFlush(unittest.IsolatedAsyncioTestCase):
                 flush_max_rows=1000,
                 flush_max_seconds=0.05,
             )
+            collector._ingest_run_id = "00000000-0000-0000-0000-000000000002"
             await collector._handle_message(_SAMPLE_PUSH)
             self.assertEqual(captured.executed, [])
             flush_task = asyncio.create_task(collector._periodic_flush())
@@ -334,8 +348,19 @@ class TestCollectorBufferFlush(unittest.IsolatedAsyncioTestCase):
             # shutdown across consumer and flush loops.
             collector.client.stop_event.set()
             await asyncio.wait_for(flush_task, timeout=1.0)
-            self.assertEqual(len(captured.executed), 1)
-            _sql, batch = captured.executed[0]
+            raw_writes = [
+                item
+                for item in captured.executed
+                if "INSERT INTO staging.raw_liquidations" in item[0]
+            ]
+            continuity_writes = [
+                item
+                for item in captured.executed
+                if "INSERT INTO meta.collector_continuity_events" in item[0]
+            ]
+            self.assertEqual(len(raw_writes), 1)
+            self.assertEqual(len(continuity_writes), 1)
+            _sql, batch = raw_writes[0]
             self.assertEqual(len(batch), 1)
 
     async def test_flush_runs_db_io_outside_lock(self) -> None:

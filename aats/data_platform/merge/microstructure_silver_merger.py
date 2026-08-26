@@ -93,9 +93,9 @@ _WHALE_SIZE_FALLBACK = Decimal("2.0")
 #: 本 Silver ETL 产出的 dataset_version (与既有 candles/funding Silver 独立)
 DEFAULT_DATASET_VERSION = "p1d_microstructure_v1.0"
 
-#: Funding 状态按 received_at 回退时的最大 carry window。OKX funding rate
-#: 通常 8h 一个有效周期;12h 给采集抖动留余量, 同时避免 collector 断链后无限
-#: 复用陈旧 funding 状态。
+#: Funding 状态按 received_at 回退时的最大运营安全窗口。该上限不是交易所
+#: 结算频率假设；实际间隔必须使用事件携带的 next_funding_time / funding time。
+#: 超出 12h 一律视为陈旧，避免 collector 断链后无限复用旧状态。
 _FUNDING_STATE_CARRY_WINDOW = timedelta(hours=12)
 
 

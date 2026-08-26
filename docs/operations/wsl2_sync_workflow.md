@@ -57,6 +57,21 @@ native ext4 上（脚本默认目标为 WSL 用户的 `$HOME/aats`）运行这�
 - **`git fetch + git merge --ff-only`**：拒绝 non-fast-forward，避免覆盖 WSL2 端可能存在的本地修改
 - **不主动 push 到任何远端**：纯本地两端同步，不污染 origin
 
+### 2.4 标准 Python 环境
+
+WSL2 内的集成测试和运维脚本使用固定路径 `~/aats-venv`，不得用 Ubuntu
+系统 Python 临时替代。首次建立或该路径缺失时，在 WSL native checkout 中运行：
+
+```bash
+cd ~/aats
+bash scripts/bootstrap_wsl2_venv.sh
+~/aats-venv/bin/python scripts/verify_dependency_locks.py
+```
+
+脚本固定并校验 `uv` 下载包的 SHA-256，安装项目约定的 Python 3.12，按 Linux
+x86_64 哈希锁安装 runtime/CI 依赖，再验证关键导入。已有目录若不是有效环境，或
+Python patch 版本不符，脚本会拒绝覆盖；应先人工核对并将旧目录移走，而不是直接删除。
+
 ---
 
 ## 3. 标准日常流程

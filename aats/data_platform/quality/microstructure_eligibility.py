@@ -145,6 +145,10 @@ class MicrostructureWindowObservation:
     liquidation_event_count: int
     microstructure_collector_fresh: bool
     liquidations_collector_fresh: bool
+    continuity_statuses: Mapping[str, str]
+    connection_generations: Mapping[str, int | None]
+    continuity_drop_counts: Mapping[str, int]
+    continuity_fingerprints: Mapping[str, str | None]
     dataset_versions: Mapping[str, str | None]
     ingest_run_ids: Mapping[str, str | None]
     quality_flags: Mapping[str, Sequence[str]]
@@ -169,6 +173,66 @@ class MicrostructureWindowObservation:
         object.__setattr__(self, "symbol", symbol)
         object.__setattr__(self, "window_start", start)
         object.__setattr__(self, "window_end", end)
+        object.__setattr__(
+            self,
+            "continuity_statuses",
+            _normalise_string_map(
+                self.continuity_statuses,
+                field_name="continuity_statuses",
+            ),
+        )
+        invalid_statuses = sorted(
+            name
+            for name, value in self.continuity_statuses.items()
+            if value not in {"complete", "known_gap", "unknown"}
+        )
+        if invalid_statuses:
+            raise ValueError(f"continuity_status_invalid:{invalid_statuses}")
+        unexpected_generations = sorted(
+            set(self.connection_generations) - set(_REQUIRED_DATASETS)
+        )
+        if unexpected_generations:
+            raise ValueError(
+                "connection_generations_unexpected_keys:"
+                f"{unexpected_generations}"
+            )
+        object.__setattr__(
+            self,
+            "connection_generations",
+            {
+                name: (
+                    int(self.connection_generations[name])
+                    if self.connection_generations.get(name) is not None
+                    else None
+                )
+                for name in _REQUIRED_DATASETS
+            },
+        )
+        unexpected_drops = sorted(
+            set(self.continuity_drop_counts) - set(_REQUIRED_DATASETS)
+        )
+        if unexpected_drops:
+            raise ValueError(
+                f"continuity_drop_counts_unexpected_keys:{unexpected_drops}"
+            )
+        object.__setattr__(
+            self,
+            "continuity_drop_counts",
+            {
+                name: int(self.continuity_drop_counts.get(name, 0))
+                for name in _REQUIRED_DATASETS
+            },
+        )
+        if any(value < 0 for value in self.continuity_drop_counts.values()):
+            raise ValueError("continuity_drop_count_must_be_non_negative")
+        object.__setattr__(
+            self,
+            "continuity_fingerprints",
+            _normalise_string_map(
+                self.continuity_fingerprints,
+                field_name="continuity_fingerprints",
+            ),
+        )
         object.__setattr__(
             self,
             "dataset_versions",
@@ -281,6 +345,17 @@ def evaluate_microstructure_window(
         reasons.add("microstructure_collector_not_fresh")
     if not observation.liquidations_collector_fresh:
         reasons.add("liquidations_collector_not_fresh")
+
+    for dataset_name in _REQUIRED_DATASETS:
+        status = observation.continuity_statuses[dataset_name]
+        if status != "complete":
+            reasons.add(f"continuity_not_complete:{dataset_name}:{status}")
+        if observation.connection_generations[dataset_name] is None:
+            reasons.add(f"connection_generation_missing:{dataset_name}")
+        if observation.continuity_drop_counts[dataset_name] > 0:
+            reasons.add(f"continuity_drop_observed:{dataset_name}")
+        if not observation.continuity_fingerprints[dataset_name]:
+            reasons.add(f"continuity_fingerprint_missing:{dataset_name}")
 
     dataset_versions = observation.dataset_versions
     missing_versions = sorted(name for name, value in dataset_versions.items() if not value)

@@ -26,12 +26,20 @@
       "allow_failure": true
     },
     {
+      "name": "microstructure_archive",
+      "description": "将到期的 live 微观结构原始事实按 UTC 日写入不可变 Parquet，并校验 manifest、SHA-256 与源行数。归档失败必须阻断 retention。",
+      "command": "python scripts/rdp_archive_microstructure.py --archive-root /app/artifacts/data_archive --apply --confirm",
+      "timeout_seconds": 1800,
+      "enabled": true,
+      "allow_failure": false
+    },
+    {
       "name": "microstructure_retention",
-      "description": "Microstructure Bronze/Staging retention housekeeping: bronze.market_trades 30d, bronze.market_orderbook_bbo/books5 14d, staging.market_oi_funding_ticks 7d。housekeeping 软故障不阻塞主链 (allow_failure=true)。",
+      "description": "仅删除已完成不可变 Parquet 校验且状态为 DELETE_ELIGIBLE 的 UTC 日分区；任一 manifest、SHA-256、范围或行数异常时删除 0 行并硬失败。",
       "command": "python scripts/rdp_microstructure_retention.py --apply --confirm",
       "timeout_seconds": 600,
       "enabled": true,
-      "allow_failure": true
+      "allow_failure": false
     }
   ]
 }

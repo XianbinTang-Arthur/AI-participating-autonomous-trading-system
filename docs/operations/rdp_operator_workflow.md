@@ -96,6 +96,7 @@ UI 会自动从当前 session 申请短时 token；直接调用 API 时必须显
 | Active set 与预期不符 | 停止发布，查 DB active set/history/release/runtime provenance |
 | DB active loader 失败 | runtime 已退化到 profile 参数；恢复数据库，不能靠 JSON fallback |
 | Phase 3 显示 zero exact alignment / unattributable lineage | 先确认标准部署已应用 root migration、新 intent 已写入 timeframe/bar/parameter/generation/snapshot lineage；旧记录不猜测回填。历史市场数据覆盖度另行处理 |
+| 数据治理显示覆盖缺口、collector unknown 或归档积压 | 查看 `GET /rdp/v3/data-governance` 的只读快照，并按 [`rdp_historical_data_recovery_runbook.md`](rdp_historical_data_recovery_runbook.md) 分类为官方回填、确定性重建、只能重新采集或不可恢复；不得伪造 gap/heartbeat |
 | Run queued | 看 `eligible_at`、trigger kind、当前执行槽和 daemon heartbeat；不要把合法等待写成 DB 故障 |
 | Run running 无 heartbeat | daemon 只回收超过 30 秒无 task heartbeat 的 running attempt；旧 attempt 应变 failed/-3，Run 错误码为 `worker_orphan_recovered`，新鲜心跳不得被另一 daemon 误杀 |
 | Run 失败后未自动排队 | 先看 failure class；只有 `transient_infrastructure` 会自动重试一次，其余需要修复根因后由 `POST /rdp/v2/runs/{run_id}/retry` 人工重试 |

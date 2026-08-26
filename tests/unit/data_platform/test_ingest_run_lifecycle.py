@@ -28,6 +28,7 @@ def test_mark_orphaned_ingest_runs_closes_only_matching_running_runs() -> None:
         run_type="rolling",
         dataset_domain="microstructure",
         instrument_type="SWAP",
+        timeframe="microstructure-ws",
         trigger_mode="daemon",
         reason="orphaned_by_test",
     )
@@ -39,9 +40,11 @@ def test_mark_orphaned_ingest_runs_closes_only_matching_running_runs() -> None:
     assert "dataset_domain = :domain" in session.sql
     assert "trigger_mode = CAST(:trigger_mode AS TEXT)" in session.sql
     assert "instrument_type = CAST(:instrument_type AS TEXT)" in session.sql
+    assert "timeframe = CAST(:timeframe AS TEXT)" in session.sql
     assert session.params is not None
     assert session.params["run_type"] == "rolling"
     assert session.params["domain"] == "microstructure"
     assert session.params["instrument_type"] == "SWAP"
+    assert session.params["timeframe"] == "microstructure-ws"
     assert session.params["trigger_mode"] == "daemon"
     assert session.params["reason"] == "orphaned_by_test"

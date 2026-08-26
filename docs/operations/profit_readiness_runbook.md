@@ -1,11 +1,12 @@
 # 收益证据与模拟交易就绪运行手册
 
 > 文档状态：现行操作说明
-> 最后核对：2026-08-25（静态实现 `2c798eab13dedd6c65287d64ae46499d98492ce2`；模拟部署 generation `2c798eab13de-20260825T205326Z-1584-9530`）
+> 最后核对：2026-08-26（已提交基线 `c1b015ec`；历史数据治理实现待本轮提交与模拟部署复验；2026-08-25 模拟证据保留为历史快照）
 > 适用范围：`derivatives` 本地模拟栈、RDP 研究库、Research Factory 研究产物
 > 禁止范围：真实资金、live profile、真实订单、手工绕过部署入口
 
 本手册把“容器启动”“采到数据”“候选通过”“模拟成交可信”和“允许实盘”拆成不同结论。
+历史数据新增独立的 source、raw checksum、gap、bundle、historical eligibility 和 rebuild fingerprint 证据链；详见 [`rdp_historical_data_recovery_runbook.md`](rdp_historical_data_recovery_runbook.md)。历史 bundle 不能伪造 live collector heartbeat，mark-price bar proxy 不能满足 tick 门禁，公共强平零事件只有在同窗 continuity 健康且没有 drop/disconnect 时才是有效零。
 任何一步缺失、失败、过期、`UNKNOWN` 或 `DEGRADED`，都不能向后推导。格式 v1 最多产生
 `simulation_ready=true`，`production_ready` 与 `trading_ready` 固定为 `false`。
 
@@ -227,7 +228,7 @@ Decimal/lot 量化尾差；更大差额仍为硬 `FAIL`，这不改变运行时�
 
 ## 7. 参数生效
 
-Batch B stage 16 创建 operation 和 runtime ACK 表。每个预期 role 必须对同一 generation 和
+Batch B stage 16 创建 operation 和 runtime ACK 表；stage 18 另行创建历史数据治理元数据与隔离的历史 Silver 表。每个预期 role 必须对同一 generation 和
 payload SHA-256 完成 prepare；execution authority 开始 commit 后，还需 commit 与 readback，
 读回 parameter set ID 必须等于目标。stale generation、payload mismatch、拒绝、超时或部分
 readback 均不能成功。

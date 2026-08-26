@@ -1,7 +1,7 @@
 """RDP (Research Data Platform) SQLAlchemy ORM 模型。
 
 替代 migrations/research/*.sql，通过 RdpBase.metadata.create_all() 自动建表。
-84 张表分布在 7 个 PostgreSQL schema：meta / staging / bronze / silver /
+96 张表分布在 7 个 PostgreSQL schema：meta / staging / bronze / silver /
 gold / research / governance。
 
 设计决策：
@@ -46,7 +46,7 @@ class RdpBase(DeclarativeBase):
 
 
 # =====================================================================
-# META Schema — 6 张表
+# META Schema — 12 张表
 # =====================================================================
 
 class DatasetManifestModel(RdpBase):
@@ -433,9 +433,9 @@ for _inst in _INST_TYPES:
 class RawLiquidationsModel(RdpBase):
     """staging.raw_liquidations — OKX liquidation-orders WebSocket 原始流落库。
 
-    承载 OKX public `liquidation-orders` 频道推送的每条 details 行。OKX REST
-    `/api/v5/public/liquidation-orders` 仅保留 7 天历史，本表是 data lake 侧
-    长期积累的唯一来源，供未来 baseline contrarian 反转信号回填使用。
+    承载 OKX public `liquidation-orders` 频道推送的每条 details 行。官方当前
+    没有可重建遗漏事件的公共 REST 历史接口；本表只能证明 AATS 实际观测到的
+    窗口，启动前或中断期间保持 unknown / awaiting_live_collection。
 
     Natural key 是 (inst_id, ts, side, bk_px, sz) —— OKX 重连 / 广播重发时
     会看到相同事件，靠 UNIQUE 约束 + ON CONFLICT DO NOTHING 做 DB 级幂等。
@@ -454,6 +454,12 @@ class RawLiquidationsModel(RdpBase):
             "source_scope IN ('fixed_trading_scope','broad_market_context')",
             name="chk_raw_liq_source_scope",
         ),
+        CheckConstraint(
+            "raw_payload_hash IS NULL OR "
+            "(length(raw_payload_hash) = 64 "
+            "AND raw_payload_hash = lower(raw_payload_hash))",
+            name="chk_raw_liq_payload_hash",
+        ),
         {"schema": "staging"},
     )
 
@@ -468,6 +474,7 @@ class RawLiquidationsModel(RdpBase):
     bk_loss = Column(Numeric(28, 10))
     ccy = Column(Text)
     raw_payload = Column(JSONB, nullable=False)
+    raw_payload_hash = Column(String(64))
     source_scope = Column(
         Text,
         nullable=False,
@@ -479,13 +486,13 @@ class RawLiquidationsModel(RdpBase):
 # =====================================================================
 # BRONZE / STAGING — P1-D Phase 1A microstructure 表 (§6)
 # =====================================================================
-# 4 张表供 OKX `trades-all` / `bbo-tbt` / `books5` / open-interest-funding-mark
+# 4 张表供 OKX `trades` / `bbo-tbt` / `books5` / open-interest-funding-mark
 # 三大 WS 频道落库。参考 docs/design/p1d_phase1a_implementation_design_2026_04_20.md。
 # 实际 DDL 由 migrations/batch_b_05_microstructure.sql 承载,ORM 仅供 create_all
 # 兜底 + 单元测试 + 程序化读写。
 
 class BronzeMarketTradesModel(RdpBase):
-    """bronze.market_trades — OKX trades-all WS 频道落库。
+    """bronze.market_trades — OKX public trades WS 频道落库。
 
     OKX `tradeId` 是全局唯一递增整数;重连重发靠 (symbol, ts, trade_id) 复合
     主键 + INSERT ... ON CONFLICT DO NOTHING 做 DB 级幂等。同一 ts 可能有多笔
@@ -1136,6 +1143,320 @@ class BronzeMarketMarkPriceCandles1mModel(RdpBase):
     )
 
 
+class StagingOfficialTradeHistoryModel(RdpBase):
+    """官方 REST/bulk 历史逐笔成交，来源与 live capture 不混列。"""
+
+    __tablename__ = "official_trade_history"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "source_id", "symbol", "ts", "trade_id",
+            name="pk_stg_official_trade_history",
+        ),
+        Index("idx_stg_official_trade_history_sym_ts", "symbol", "ts"),
+        Index("idx_stg_official_trade_history_sha", "raw_partition_sha256"),
+        CheckConstraint("side IN ('buy','sell')", name="chk_stg_official_trade_side"),
+        CheckConstraint("px > 0 AND sz > 0", name="chk_stg_official_trade_values"),
+        CheckConstraint(
+            "length(raw_partition_sha256) = 64 "
+            "AND raw_partition_sha256 = lower(raw_partition_sha256)",
+            name="chk_stg_official_trade_sha",
+        ),
+        {"schema": "staging"},
+    )
+
+    source_id = Column(UUID(as_uuid=False), ForeignKey("meta.data_source_registry.source_id"), nullable=False)
+    symbol = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    trade_id = Column(Text, nullable=False)
+    px = Column(Numeric(20, 10), nullable=False)
+    sz = Column(Numeric(28, 10), nullable=False)
+    side = Column(Text, nullable=False)
+    source_order_type = Column(Text)
+    raw_payload = Column(JSONB, nullable=False)
+    raw_partition_sha256 = Column(String(64), nullable=False)
+    ingest_run_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("meta.ingest_runs.ingest_run_id"),
+        nullable=False,
+    )
+    received_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class StagingOfficialL2HistoryModel(RdpBase):
+    """官方高分辨率 L2 原始 snapshot/update 事件。"""
+
+    __tablename__ = "official_l2_history"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id", "symbol", "ts", "source_row_hash",
+            name="uq_stg_official_l2_row",
+        ),
+        Index("idx_stg_official_l2_sym_ts", "symbol", "ts"),
+        Index("idx_stg_official_l2_sequence", "symbol", "sequence_id"),
+        CheckConstraint("action IN ('snapshot','update')", name="chk_stg_official_l2_action"),
+        CheckConstraint(
+            "length(source_row_hash) = 64 "
+            "AND source_row_hash = lower(source_row_hash)",
+            name="chk_stg_official_l2_row_hash",
+        ),
+        CheckConstraint(
+            "length(raw_partition_sha256) = 64 "
+            "AND raw_partition_sha256 = lower(raw_partition_sha256)",
+            name="chk_stg_official_l2_sha",
+        ),
+        {"schema": "staging"},
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    source_id = Column(UUID(as_uuid=False), ForeignKey("meta.data_source_registry.source_id"), nullable=False)
+    symbol = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    sequence_id = Column(BigInteger)
+    previous_sequence_id = Column(BigInteger)
+    action = Column(Text, nullable=False)
+    bids = Column(JSONB, nullable=False)
+    asks = Column(JSONB, nullable=False)
+    checksum = Column(Text)
+    source_row_hash = Column(String(64), nullable=False)
+    raw_partition_sha256 = Column(String(64), nullable=False)
+    ingest_run_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("meta.ingest_runs.ingest_run_id"),
+        nullable=False,
+    )
+    received_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class BronzeHistoricalOrderbookBbo1hzModel(RdpBase):
+    """okx_bulk L2 因果重采样的 1 Hz BBO；不能证明 live capture。"""
+
+    __tablename__ = "historical_orderbook_bbo_1hz"
+    __table_args__ = (
+        PrimaryKeyConstraint("bundle_id", "symbol", "ts", name="pk_brz_hist_bbo_1hz"),
+        Index("idx_brz_hist_bbo_1hz_sym_ts", "symbol", "ts"),
+        CheckConstraint("source_state_ts <= ts", name="chk_brz_hist_bbo_no_future"),
+        CheckConstraint("staleness_ms >= 0", name="chk_brz_hist_bbo_staleness"),
+        CheckConstraint(
+            "bid_px > 0 AND bid_sz > 0 AND ask_px > bid_px AND ask_sz > 0",
+            name="chk_brz_hist_bbo_values",
+        ),
+        CheckConstraint(
+            "source_label = 'okx_bulk_l2_resampled'",
+            name="chk_brz_hist_bbo_source_label",
+        ),
+        {"schema": "bronze"},
+    )
+
+    bundle_id = Column(UUID(as_uuid=False), ForeignKey("meta.dataset_bundles.bundle_id"), nullable=False)
+    symbol = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    source_state_ts = Column(DateTime(timezone=True), nullable=False)
+    staleness_ms = Column(Integer, nullable=False)
+    bid_px = Column(Numeric(20, 10), nullable=False)
+    bid_sz = Column(Numeric(28, 10), nullable=False)
+    ask_px = Column(Numeric(20, 10), nullable=False)
+    ask_sz = Column(Numeric(28, 10), nullable=False)
+    source_label = Column(Text, nullable=False, server_default=text("'okx_bulk_l2_resampled'"))
+    transform_version = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class BronzeHistoricalOrderbookBooks5_2hzModel(RdpBase):
+    """okx_bulk L2 因果重采样的 2 Hz books5 JSON payload。"""
+
+    __tablename__ = "historical_orderbook_books5_2hz"
+    __table_args__ = (
+        PrimaryKeyConstraint("bundle_id", "symbol", "ts", name="pk_brz_hist_books5_2hz"),
+        Index("idx_brz_hist_books5_2hz_sym_ts", "symbol", "ts"),
+        CheckConstraint("source_state_ts <= ts", name="chk_brz_hist_books5_no_future"),
+        CheckConstraint("staleness_ms >= 0", name="chk_brz_hist_books5_staleness"),
+        CheckConstraint(
+            "source_label = 'okx_bulk_l2_resampled'",
+            name="chk_brz_hist_books5_source_label",
+        ),
+        {"schema": "bronze"},
+    )
+
+    bundle_id = Column(UUID(as_uuid=False), ForeignKey("meta.dataset_bundles.bundle_id"), nullable=False)
+    symbol = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    source_state_ts = Column(DateTime(timezone=True), nullable=False)
+    staleness_ms = Column(Integer, nullable=False)
+    bids = Column(JSONB, nullable=False)
+    asks = Column(JSONB, nullable=False)
+    source_label = Column(Text, nullable=False, server_default=text("'okx_bulk_l2_resampled'"))
+    transform_version = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+def _make_mark_proxy_model(timeframe: str) -> type:
+    table_name = f"market_mark_price_candles_{timeframe}"
+    attrs: dict[str, object] = {
+        "__tablename__": table_name,
+        "__table_args__": (
+            PrimaryKeyConstraint("source_id", "symbol", "ts", name=f"pk_brz_mark_proxy_{timeframe}"),
+            Index(f"idx_brz_mark_proxy_{timeframe}_sym_ts", "symbol", "ts"),
+            CheckConstraint(
+                "length(raw_partition_sha256) = 64 "
+                "AND raw_partition_sha256 = lower(raw_partition_sha256)",
+                name=f"chk_brz_mark_proxy_{timeframe}_sha",
+            ),
+            CheckConstraint(
+                "open > 0 AND high > 0 AND low > 0 AND close > 0 "
+                "AND high >= open AND high >= close AND high >= low "
+                "AND low <= open AND low <= close",
+                name=f"chk_brz_mark_proxy_{timeframe}_ohlc",
+            ),
+            CheckConstraint(
+                "confirm IS TRUE",
+                name=f"chk_brz_mark_proxy_{timeframe}_confirmed",
+            ),
+            CheckConstraint(
+                "source_label = 'bar_proxy'",
+                name=f"chk_brz_mark_proxy_{timeframe}_source_label",
+            ),
+            {"schema": "bronze"},
+        ),
+        "source_id": Column(UUID(as_uuid=False), ForeignKey("meta.data_source_registry.source_id"), nullable=False),
+        "symbol": Column(Text, nullable=False),
+        "ts": Column(DateTime(timezone=True), nullable=False),
+        "open": Column(Numeric(20, 10), nullable=False),
+        "high": Column(Numeric(20, 10), nullable=False),
+        "low": Column(Numeric(20, 10), nullable=False),
+        "close": Column(Numeric(20, 10), nullable=False),
+        "confirm": Column(Boolean, nullable=False),
+        "source_label": Column(Text, nullable=False, server_default=text("'bar_proxy'")),
+        "raw_partition_sha256": Column(String(64), nullable=False),
+        "ingest_run_id": Column(
+            UUID(as_uuid=False),
+            ForeignKey("meta.ingest_runs.ingest_run_id"),
+            nullable=False,
+        ),
+        "received_at": Column(DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    }
+    model = type(f"BronzeMarketMarkPriceCandles{timeframe}ProxyModel", (RdpBase,), attrs)
+    _data_layer_models[f"bronze.{table_name}"] = model
+    return model
+
+
+BronzeMarketMarkPriceCandles15mProxyModel = _make_mark_proxy_model("15m")
+BronzeMarketMarkPriceCandles1hProxyModel = _make_mark_proxy_model("1h")
+
+
+class SilverHistoricalOrderbookMetrics15mModel(RdpBase):
+    """Bundle-scoped historical L2 metrics; never presented as live capture."""
+
+    __tablename__ = "historical_orderbook_metrics_15m"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "bundle_id",
+            "symbol",
+            "ts",
+            name="pk_slv_hist_orderbook_metrics_15m",
+        ),
+        Index("idx_slv_hist_orderbook_metrics_sym_ts", "symbol", "ts"),
+        CheckConstraint(
+            "bbo_samples_n > 0 AND books5_samples_n >= 0",
+            name="chk_slv_hist_orderbook_counts",
+        ),
+        CheckConstraint(
+            "max_staleness_ms >= 0",
+            name="chk_slv_hist_orderbook_staleness",
+        ),
+        CheckConstraint(
+            "mid_price_mean > 0 AND spread_bps_mean >= 0 "
+            "AND top_imbalance_mean >= -1 AND top_imbalance_mean <= 1",
+            name="chk_slv_hist_orderbook_values",
+        ),
+        CheckConstraint(
+            "source_max_ts >= ts",
+            name="chk_slv_hist_orderbook_source_time",
+        ),
+        CheckConstraint(
+            "length(output_fingerprint) = 64 "
+            "AND output_fingerprint = lower(output_fingerprint)",
+            name="chk_slv_hist_orderbook_fingerprint",
+        ),
+        {"schema": "silver"},
+    )
+
+    bundle_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("meta.dataset_bundles.bundle_id"),
+        nullable=False,
+    )
+    symbol = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    bbo_samples_n = Column(Integer, nullable=False)
+    books5_samples_n = Column(Integer, nullable=False)
+    mid_price_mean = Column(Numeric(28, 12), nullable=False)
+    spread_bps_mean = Column(Numeric(28, 12), nullable=False)
+    top_imbalance_mean = Column(Numeric(28, 12), nullable=False)
+    max_staleness_ms = Column(Integer, nullable=False)
+    source_max_ts = Column(DateTime(timezone=True), nullable=False)
+    transform_version = Column(Text, nullable=False)
+    output_fingerprint = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class SilverHistoricalTradeFlow15mModel(RdpBase):
+    """Source-aware historical trade-flow metrics scoped by dataset bundle."""
+
+    __tablename__ = "historical_trade_flow_15m"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "bundle_id",
+            "symbol",
+            "ts",
+            name="pk_slv_hist_trade_flow_15m",
+        ),
+        Index("idx_slv_hist_trade_flow_sym_ts", "symbol", "ts"),
+        CheckConstraint(
+            "trade_count > 0 AND buy_count >= 0 AND sell_count >= 0 "
+            "AND trade_count = buy_count + sell_count",
+            name="chk_slv_hist_trade_counts",
+        ),
+        CheckConstraint(
+            "total_size > 0 AND buy_size >= 0 AND sell_size >= 0 "
+            "AND total_size = buy_size + sell_size AND vwap > 0 "
+            "AND trade_flow_imbalance >= -1 AND trade_flow_imbalance <= 1",
+            name="chk_slv_hist_trade_values",
+        ),
+        CheckConstraint(
+            "source_max_ts >= ts",
+            name="chk_slv_hist_trade_source_time",
+        ),
+        CheckConstraint(
+            "length(output_fingerprint) = 64 "
+            "AND output_fingerprint = lower(output_fingerprint)",
+            name="chk_slv_hist_trade_fingerprint",
+        ),
+        {"schema": "silver"},
+    )
+
+    bundle_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("meta.dataset_bundles.bundle_id"),
+        nullable=False,
+    )
+    symbol = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    trade_count = Column(Integer, nullable=False)
+    buy_count = Column(Integer, nullable=False)
+    sell_count = Column(Integer, nullable=False)
+    total_size = Column(Numeric(38, 18), nullable=False)
+    buy_size = Column(Numeric(38, 18), nullable=False)
+    sell_size = Column(Numeric(38, 18), nullable=False)
+    vwap = Column(Numeric(28, 12), nullable=False)
+    trade_flow_imbalance = Column(Numeric(28, 12), nullable=False)
+    source_max_ts = Column(DateTime(timezone=True), nullable=False)
+    transform_version = Column(Text, nullable=False)
+    output_fingerprint = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
 class BronzeMarketLongShortRatio5mModel(RdpBase):
     """bronze.market_long_short_ratio_5m — OKX REST long-short-account-ratio 回填.
 
@@ -1592,6 +1913,301 @@ class ParameterActivationOperationModel(RdpBase):
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     terminal_at = Column(DateTime(timezone=True))
+
+
+class DataSourceRegistryModel(RdpBase):
+    """不可混淆的数据来源登记。"""
+
+    __tablename__ = "data_source_registry"
+    __table_args__ = (
+        UniqueConstraint("source_key", name="uq_data_source_registry_key"),
+        Index("idx_data_source_registry_kind_provider", "source_kind", "provider"),
+        CheckConstraint(
+            "source_kind IN ('aats_ws_capture','okx_rest','okx_bulk','third_party','derived','proxy')",
+            name="chk_data_source_registry_kind",
+        ),
+        CheckConstraint(
+            "truth_tier IN ('authoritative_external','local_observation','derived','proxy','external_unverified')",
+            name="chk_data_source_registry_truth_tier",
+        ),
+        CheckConstraint(
+            "(source_kind = 'aats_ws_capture' AND truth_tier = 'local_observation') OR "
+            "(source_kind IN ('okx_rest','okx_bulk') AND "
+            "truth_tier = 'authoritative_external') OR "
+            "(source_kind = 'third_party' AND truth_tier = 'external_unverified') OR "
+            "(source_kind = 'derived' AND truth_tier = 'derived') OR "
+            "(source_kind = 'proxy' AND truth_tier = 'proxy')",
+            name="chk_data_source_registry_kind_truth",
+        ),
+        {"schema": "meta"},
+    )
+
+    source_id = Column(UUID(as_uuid=False), primary_key=True, server_default=text("gen_random_uuid()"))
+    source_key = Column(Text, nullable=False)
+    source_kind = Column(Text, nullable=False)
+    provider = Column(Text, nullable=False)
+    source_locator = Column(Text, nullable=False)
+    schema_version = Column(Text, nullable=False)
+    timestamp_semantics = Column(Text, nullable=False)
+    truth_tier = Column(Text, nullable=False)
+    license_usage_note = Column(Text, nullable=False)
+    source_metadata = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class ArchivePartitionModel(RdpBase):
+    """热数据删除前的不可变归档分区与状态机。"""
+
+    __tablename__ = "archive_partitions"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id", "dataset_name", "symbol", "coverage_start", "coverage_end",
+            name="uq_archive_partition_scope",
+        ),
+        Index("idx_archive_partition_state", "state", "coverage_end"),
+        Index("idx_archive_partition_dataset", "dataset_name", "symbol", "coverage_start"),
+        CheckConstraint("coverage_end > coverage_start", name="chk_archive_partition_range"),
+        CheckConstraint("row_count >= 0", name="chk_archive_partition_row_count"),
+        CheckConstraint(
+            "sha256 IS NULL OR "
+            "(length(sha256) = 64 AND sha256 = lower(sha256))",
+            name="chk_archive_partition_sha",
+        ),
+        CheckConstraint(
+            "state IN ('DISCOVERED','ARCHIVING','VERIFIED','DELETE_ELIGIBLE','DELETED','FAILED')",
+            name="chk_archive_partition_state",
+        ),
+        CheckConstraint(
+            "(state IN ('DISCOVERED','ARCHIVING') AND verified_at IS NULL "
+            "AND deleted_at IS NULL) OR "
+            "(state = 'FAILED' AND error_message IS NOT NULL "
+            "AND deleted_at IS NULL) OR "
+            "(state IN ('VERIFIED','DELETE_ELIGIBLE') AND sha256 IS NOT NULL "
+            "AND row_count > 0 AND verified_at IS NOT NULL "
+            "AND deleted_at IS NULL AND error_message IS NULL) OR "
+            "(state = 'DELETED' AND sha256 IS NOT NULL AND row_count > 0 "
+            "AND verified_at IS NOT NULL AND deleted_at IS NOT NULL "
+            "AND error_message IS NULL)",
+            name="chk_archive_partition_state_shape",
+        ),
+        CheckConstraint("storage_format = 'parquet'", name="chk_archive_partition_format"),
+        {"schema": "meta"},
+    )
+
+    partition_id = Column(UUID(as_uuid=False), primary_key=True, server_default=text("gen_random_uuid()"))
+    source_id = Column(UUID(as_uuid=False), ForeignKey("meta.data_source_registry.source_id"), nullable=False)
+    dataset_name = Column(Text, nullable=False)
+    symbol = Column(Text, nullable=False)
+    coverage_start = Column(DateTime(timezone=True), nullable=False)
+    coverage_end = Column(DateTime(timezone=True), nullable=False)
+    storage_format = Column(Text, nullable=False, server_default=text("'parquet'"))
+    storage_path = Column(Text, nullable=False)
+    sha256 = Column(String(64))
+    row_count = Column(BigInteger, nullable=False, server_default=text("0"))
+    min_event_ts = Column(DateTime(timezone=True))
+    max_event_ts = Column(DateTime(timezone=True))
+    min_sequence = Column(BigInteger)
+    max_sequence = Column(BigInteger)
+    gap_manifest = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    manifest_payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    state = Column(Text, nullable=False, server_default=text("'DISCOVERED'"))
+    verified_at = Column(DateTime(timezone=True))
+    deleted_at = Column(DateTime(timezone=True))
+    error_message = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class DataGapRecordModel(RdpBase):
+    """可审计的数据缺口分类，不允许把未知状态包装成有效零。"""
+
+    __tablename__ = "data_gap_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "dataset_name", "symbol", "channel", "gap_start", "gap_end", "reason_code",
+            name="uq_data_gap_scope_reason",
+        ),
+        Index("idx_data_gap_status", "status", "gap_start"),
+        Index("idx_data_gap_dataset", "dataset_name", "symbol", "gap_start"),
+        CheckConstraint("gap_end > gap_start", name="chk_data_gap_range"),
+        CheckConstraint(
+            "classification IN ('deterministic_rebuild','official_backfill','third_party_candidate','prospective_only','cannot_recover')",
+            name="chk_data_gap_classification",
+        ),
+        CheckConstraint(
+            "status IN ('OPEN','CLASSIFIED','BACKFILLED','REBUILT','AWAITING_LIVE_COLLECTION','CANNOT_RECOVER','THIRD_PARTY_ONLY')",
+            name="chk_data_gap_status",
+        ),
+        CheckConstraint(
+            "status IN ('OPEN','CLASSIFIED') OR "
+            "(classification = 'deterministic_rebuild' AND status = 'REBUILT') OR "
+            "(classification = 'official_backfill' AND status = 'BACKFILLED') OR "
+            "(classification = 'third_party_candidate' AND status = 'THIRD_PARTY_ONLY') OR "
+            "(classification = 'prospective_only' AND status = 'AWAITING_LIVE_COLLECTION') OR "
+            "(classification = 'cannot_recover' AND status = 'CANNOT_RECOVER')",
+            name="chk_data_gap_status_classification",
+        ),
+        CheckConstraint(
+            "(status IN ('BACKFILLED','REBUILT','CANNOT_RECOVER','THIRD_PARTY_ONLY') "
+            "AND resolved_at IS NOT NULL) OR "
+            "(status NOT IN ('BACKFILLED','REBUILT','CANNOT_RECOVER','THIRD_PARTY_ONLY') "
+            "AND resolved_at IS NULL)",
+            name="chk_data_gap_resolution_shape",
+        ),
+        {"schema": "meta"},
+    )
+
+    gap_id = Column(UUID(as_uuid=False), primary_key=True, server_default=text("gen_random_uuid()"))
+    source_id = Column(UUID(as_uuid=False), ForeignKey("meta.data_source_registry.source_id"))
+    dataset_name = Column(Text, nullable=False)
+    symbol = Column(Text, nullable=False)
+    channel = Column(Text, nullable=False, server_default=text("''"))
+    gap_start = Column(DateTime(timezone=True), nullable=False)
+    gap_end = Column(DateTime(timezone=True), nullable=False)
+    classification = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, server_default=text("'OPEN'"))
+    reason_code = Column(Text, nullable=False)
+    evidence = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    detected_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    resolved_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class DatasetBundleModel(RdpBase):
+    """一次研究所用来源集合；组合 bundle 不伪造公共 ingest run。"""
+
+    __tablename__ = "dataset_bundles"
+    __table_args__ = (
+        UniqueConstraint("bundle_key", name="uq_dataset_bundle_key"),
+        UniqueConstraint("fingerprint", name="uq_dataset_bundle_fingerprint"),
+        Index("idx_dataset_bundle_mode_status", "eligibility_mode", "status"),
+        CheckConstraint("coverage_end > coverage_start", name="chk_dataset_bundle_range"),
+        CheckConstraint(
+            "length(fingerprint) = 64 AND fingerprint = lower(fingerprint)",
+            name="chk_dataset_bundle_fingerprint",
+        ),
+        CheckConstraint(
+            "eligibility_mode IN ('historical_research','live_capture')",
+            name="chk_dataset_bundle_mode",
+        ),
+        CheckConstraint("status IN ('BUILDING','ELIGIBLE','INELIGIBLE','SUPERSEDED')", name="chk_dataset_bundle_status"),
+        {"schema": "meta"},
+    )
+
+    bundle_id = Column(UUID(as_uuid=False), primary_key=True, server_default=text("gen_random_uuid()"))
+    bundle_key = Column(Text, nullable=False)
+    dataset_version = Column(Text, nullable=False)
+    purpose = Column(Text, nullable=False)
+    eligibility_mode = Column(Text, nullable=False)
+    component_sources = Column(JSONB, nullable=False)
+    fingerprint = Column(String(64), nullable=False)
+    coverage_start = Column(DateTime(timezone=True), nullable=False)
+    coverage_end = Column(DateTime(timezone=True), nullable=False)
+    status = Column(Text, nullable=False, server_default=text("'BUILDING'"))
+    eligibility_report = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class DataRebuildRunModel(RdpBase):
+    """Silver/Gold/artifact 的确定性重建记录。"""
+
+    __tablename__ = "data_rebuild_runs"
+    __table_args__ = (
+        UniqueConstraint("operation_key", name="uq_data_rebuild_operation"),
+        Index("idx_data_rebuild_status", "status", "created_at"),
+        CheckConstraint("status IN ('PLANNED','RUNNING','SUCCEEDED','FAILED','CANCELLED')", name="chk_data_rebuild_status"),
+        CheckConstraint("rows_read >= 0 AND rows_written >= 0", name="chk_data_rebuild_counts"),
+        CheckConstraint(
+            "length(input_fingerprint) = 64 "
+            "AND input_fingerprint = lower(input_fingerprint) "
+            "AND (output_fingerprint IS NULL OR "
+            "(length(output_fingerprint) = 64 "
+            "AND output_fingerprint = lower(output_fingerprint)))",
+            name="chk_data_rebuild_hashes",
+        ),
+        CheckConstraint(
+            "git_commit = lower(git_commit) AND "
+            "length(git_commit) IN (40, 64)",
+            name="chk_data_rebuild_git_commit",
+        ),
+        CheckConstraint(
+            "(status = 'PLANNED' AND started_at IS NULL AND ended_at IS NULL "
+            "AND output_fingerprint IS NULL AND error_message IS NULL) OR "
+            "(status = 'RUNNING' AND started_at IS NOT NULL AND ended_at IS NULL "
+            "AND output_fingerprint IS NULL AND error_message IS NULL) OR "
+            "(status = 'SUCCEEDED' AND started_at IS NOT NULL "
+            "AND ended_at IS NOT NULL AND output_fingerprint IS NOT NULL "
+            "AND error_message IS NULL) OR "
+            "(status = 'FAILED' AND started_at IS NOT NULL "
+            "AND ended_at IS NOT NULL AND output_fingerprint IS NULL "
+            "AND error_message IS NOT NULL) OR "
+            "(status = 'CANCELLED' AND ended_at IS NOT NULL "
+            "AND output_fingerprint IS NULL)",
+            name="chk_data_rebuild_state_shape",
+        ),
+        {"schema": "meta"},
+    )
+
+    rebuild_run_id = Column(UUID(as_uuid=False), primary_key=True, server_default=text("gen_random_uuid()"))
+    operation_key = Column(Text, nullable=False)
+    bundle_id = Column(UUID(as_uuid=False), ForeignKey("meta.dataset_bundles.bundle_id"), nullable=False)
+    transform_version = Column(Text, nullable=False)
+    git_commit = Column(String(64), nullable=False)
+    rebuild_scope = Column(JSONB, nullable=False)
+    input_fingerprint = Column(String(64), nullable=False)
+    output_fingerprint = Column(String(64))
+    status = Column(Text, nullable=False, server_default=text("'PLANNED'"))
+    rows_read = Column(BigInteger, nullable=False, server_default=text("0"))
+    rows_written = Column(BigInteger, nullable=False, server_default=text("0"))
+    started_at = Column(DateTime(timezone=True))
+    ended_at = Column(DateTime(timezone=True))
+    error_message = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class CollectorContinuityEventModel(RdpBase):
+    """按连接代次持久化采集器连续性事件。"""
+
+    __tablename__ = "collector_continuity_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "collector", "channel", "symbol", "ingest_run_id",
+            "connection_generation", "event_type", "event_ts", "event_key",
+            name="uq_collector_continuity_event",
+        ),
+        Index("idx_collector_continuity_window", "collector", "channel", "symbol", "event_ts"),
+        Index("idx_collector_continuity_generation", "collector", "connection_generation"),
+        CheckConstraint("connection_generation >= 0", name="chk_collector_generation"),
+        CheckConstraint(
+            "event_type IN ('CONNECT','DISCONNECT','RECONNECT','MESSAGE','FLUSH','DROP','SHUTDOWN','CLOCK_SKEW')",
+            name="chk_collector_continuity_type",
+        ),
+        {"schema": "meta"},
+    )
+
+    continuity_event_id = Column(UUID(as_uuid=False), primary_key=True, server_default=text("gen_random_uuid()"))
+    collector = Column(Text, nullable=False)
+    channel = Column(Text, nullable=False)
+    symbol = Column(Text, nullable=False)
+    connection_generation = Column(Integer, nullable=False)
+    event_type = Column(Text, nullable=False)
+    event_ts = Column(DateTime(timezone=True), nullable=False)
+    event_key = Column(Text, nullable=False, server_default=text("''"))
+    exchange_event_ts = Column(DateTime(timezone=True))
+    local_received_ts = Column(DateTime(timezone=True))
+    sample_ts = Column(DateTime(timezone=True))
+    payload_sequence = Column(BigInteger)
+    ingest_run_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("meta.ingest_runs.ingest_run_id"),
+        nullable=False,
+    )
+    details = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 
 class ParameterRuntimeAckModel(RdpBase):
@@ -2229,7 +2845,7 @@ class DecisionEvidenceBundleModel(RdpBase):
 # =====================================================================
 
 def create_rdp_schema(engine: object) -> None:
-    """创建 RDP 的全部 7 个 PostgreSQL schema + 81 张表。
+    """创建 RDP 的全部 7 个 PostgreSQL schema + 96 张表。
 
     替代 migrations/research/*.sql 迁移文件。幂等——已存在的 schema/表不会
     被破坏（CREATE SCHEMA IF NOT EXISTS + create_all 的 checkfirst=True）。

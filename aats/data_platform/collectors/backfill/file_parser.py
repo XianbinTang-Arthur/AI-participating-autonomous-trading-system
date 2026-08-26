@@ -196,6 +196,8 @@ def parse_funding_csv_rows(reader: csv.reader, symbol_hint: str) -> list[Funding
             symbol=symbol_hint.upper(),
             ts=ts,
             funding_rate=rate,
+            method="settled_file",
+            realized_rate=rate,
             raw_symbol=raw_sym or symbol_hint,
             raw_ts=raw_ts,
         ))

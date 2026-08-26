@@ -1,6 +1,6 @@
 # RDP 代码模块参考
 
-> 最后核对：2026-08-25（起始代码基线 `70f1a581`，含本轮 RDP 业务逻辑整改工作区）。本页按当前目录和运行入口组织，不再沿用早期“少量 Phase 文件清单”。RDP 总览见 [`aats/data_platform/README.md`](../../aats/data_platform/README.md)。
+> 最后核对：2026-08-26（已提交基线 `c1b015ec`，含待提交的历史数据恢复与持续采集加固实现）。本页按当前目录和运行入口组织，不再沿用早期“少量 Phase 文件清单”。RDP 总览见 [`aats/data_platform/README.md`](../../aats/data_platform/README.md)。
 
 ## 1. 根模块
 
@@ -8,18 +8,18 @@
 | --- | --- |
 | `config.py` | `ResearchPlatformSettings`；读取 `RDP_DATABASE_URL`、live 只读库、采集和 artifact 配置；容器中可复用 `AATS_ACTIVE_PARAMETER_DB_URL` |
 | `db.py` | Engine/Session、迁移入口和数据库生命周期 |
-| `rdp_models.py` | `RdpBase` 的 84 张 ORM 表，覆盖 staging/bronze/silver/gold/meta/research/governance |
+| `rdp_models.py` | `RdpBase` 的 98 张 ORM 表，覆盖 staging/bronze/silver/gold/meta/research/governance；Batch B stage 18 增加来源、归档、缺口、连续性、bundle 与历史重建事实 |
 | `models.py` | 采集、replay 等轻量领域数据结构和表名解析 |
 | `live_query_adapter.py` | 主交易数据库只读查询适配层 |
 | `orderbook_diff_payload_contract.py` | orderbook diff payload 契约 |
 
 ## 2. 目录总览
 
-当前 `aats/data_platform/` 有 215 个 Python 文件。目录职责如下；数量用于发现明显漏扫，不是公共 API 保证。
+当前 `aats/data_platform/` 有 225 个 Python 文件。目录职责如下；数量用于发现明显漏扫，不是公共 API 保证。
 
 | 目录 | Python 文件数 | 职责 |
 | --- | ---: | --- |
-| `collectors/` | 12 | 历史 ZIP、OKX REST rolling、funding/candles/history 采集 |
+| `collectors/` | 13 | 历史 ZIP、OKX REST rolling、funding/candles/history、官方 trade/L2/mark 历史导入与 live collector |
 | `normalize/` | 3 | 时间与输入标准化 |
 | `validate/` | 4 | Candle/funding 质量检查和报告 |
 | `merge/` | 5 | staging→bronze→silver、microstructure Silver 合并 |
@@ -27,15 +27,16 @@
 | `jobs/` | 4 | checkpoint、run registry、gap repair |
 | `replay/` | 26 | replay core、strategy adapters、diagnostics、scan、reports |
 | `attribution/` | 6 | live/replay 对齐、瀑布归因、聚合、报告 |
-| `execution_realism/` | 7 | fill feasibility、slippage、cost、market alignment |
+| `execution_realism/` | 9 | fill feasibility、slippage、cost、market alignment |
 | `decision_system/` | 8 | evidence、candidate、decision、readiness、recommendation registry |
 | `governance/` | 29 | 参数/推荐/active set、Run/Attempt/Step/Event、任务队列、调度状态、snapshot、tuning 与 apply saga |
+| `data_governance/` | 9 | provenance、coverage、gap、continuity、不可变归档、双准入、bundle registry 与历史 Silver 重建 |
 | `production_workflow/` | 9 | gate、release、observation、rollback policy |
 | `operations/` | 16 | dispatcher、Run observer、scheduler、failure/retry、reliability、daemon health、tuning review |
 | `metrics/` | 9 | 指标、baseline、release effectiveness、periodic review、backlog |
 | `live_facts/` | 4 | live 事实只读访问和模型 |
 | `research/` | 3 | profile research job 与结果 |
-| `research_factory/` | 42 | 证据契约、实验、verdict、治理 review、dry-run/manual apply design |
+| `research_factory/` | 49 | 证据契约、实验、verdict、治理 review、dry-run/manual apply design |
 | `migrations/` | 3 | RDP schema 版本化迁移 |
 | `gates/` | 2 | gate 相关共享能力 |
 | `runtime/` | 2 | RDP runtime 辅助能力 |

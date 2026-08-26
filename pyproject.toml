@@ -15,6 +15,7 @@ dependencies = [
   "pydantic>=2.7",
   "pydantic-settings>=2.2",
   "psycopg[binary]>=3.2",
+  "pyarrow==25.0.1",
   "pyyaml>=6.0",
   "sqlalchemy>=2.0",
   "uvicorn>=0.30",
@@ -30,6 +31,12 @@ test = [
 ]
 lint = [
   "ruff==0.15.8",
+]
+# Isolated PostgreSQL contract tests. These dependencies are part of the
+# hash-locked CI/WSL2 test environment, never the runtime image.
+postgres-integration = [
+  "psycopg2-binary>=2.9,<3",
+  "testcontainers[postgres]>=4.14,<5",
 ]
 # Stage 4 多进程切片化重构使用：HybridEventBus 的关键 topic 走 NATS JetStream。
 # 仅在 AATS_EVENT_BUS_BACKEND=hybrid|nats 时需要安装；in_memory backend 不依赖。
@@ -82,6 +89,10 @@ markers = [
 [tool.ruff.lint.per-file-ignores]
 "scripts/_verify_governance_db.py" = ["E402"]
 "scripts/rdp_build_artifact_index.py" = ["E402"]
+"scripts/rdp_archive_microstructure.py" = ["E402"]
+"scripts/rdp_audit_data_coverage.py" = ["E402"]
+"scripts/rdp_import_official_history.py" = ["E402"]
+"scripts/rdp_rebuild_historical_bundle.py" = ["E402"]
 "scripts/rdp_evaluate_promotion_readiness.py" = ["E402"]
 "scripts/rdp_freeze_parameter_set.py" = ["E402"]
 "scripts/rdp_list_active_rounds.py" = ["E402"]

@@ -1,6 +1,6 @@
 # RDP 平台运行手册
 
-> 最后核对：2026-08-24（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；未提交 Phase 3E–3F 整改工作区）。本手册面向当前 task-daemon、数据库队列和 10 个 workflow；早期仅含 4 个 workflow、JSON active parameter fallback 或直写 CLI 的说明均已失效。当前标准入口只允许模拟 profile。
+> 最后核对：2026-08-26（已提交基线 `c1b015ec`；含待提交的历史数据恢复与持续采集加固实现）。本手册面向当前 task-daemon、数据库队列和 10 个 workflow；早期仅含 4 个 workflow、JSON active parameter fallback 或直写 CLI 的说明均已失效。当前标准入口只允许模拟 profile。
 
 ## 1. 运行边界
 
@@ -91,9 +91,13 @@
 .\.venv\Scripts\python.exe scripts\rdp_detect_gaps.py
 ```
 
-`rdp_init_db.py` 是受控显式迁移入口，执行 ORM baseline、完整 Batch B ledger/checksum chain 和最终只读校验；不要按旧的 48/78 表清单或仅按 81 张 ORM 表存在验收。`--ensure-schema` 为旧 CLI 名，在 daily ingest/replay 等业务 runner 中已收紧为只读 validate-only，不再执行 DDL。Live 部署不手工运行本节命令，只通过根 `scripts/deploy.sh` 的一次性综合 schema job。
+`rdp_init_db.py` 是受控显式迁移入口，执行 ORM baseline、完整 Batch B ledger/checksum chain 和最终只读校验；当前 ORM 为 98 张表，历史数据治理迁移是 Batch B stage 18。不要按旧的 48/78/81/84 表清单验收。`--ensure-schema` 为旧 CLI 名，在 daily ingest/replay 等业务 runner 中已收紧为只读 validate-only，不再执行 DDL。Live 部署不手工运行本节命令，只通过根 `scripts/deploy.sh` 的一次性综合 schema job。
 
-### 5.2 Replay 与研究
+### 5.2 历史数据治理
+
+历史覆盖审计、不可变归档、官方 trade/L2/mark 导入、archive-before-delete、collector continuity、历史资格和 bundle 重建统一使用 [`rdp_historical_data_recovery_runbook.md`](rdp_historical_data_recovery_runbook.md)。覆盖 artifact 只证明审计时点的数据库事实；UI 中“治理快照可用”不等于覆盖完整、候选合格或可以实盘。
+
+### 5.3 Replay 与研究
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\rdp_run_replay.py --help
