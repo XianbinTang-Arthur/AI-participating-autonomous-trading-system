@@ -47,7 +47,7 @@ _REQUIRED_ROLES: Mapping[str, frozenset[str]] = {
 
 @dataclass(frozen=True)
 class HistoricalEligibilityPolicy:
-    policy_version: str = "historical-research-v1"
+    policy_version: str = "historical-research-v2"
     minimum_coverage_ratio: float = 0.995
     allow_proxy_roles: tuple[str, ...] = ("mark_price_bar",)
     allow_third_party: bool = False
@@ -106,8 +106,6 @@ def evaluate_historical_bundle(
             reasons.add(f"causal_time_check_failed:{key}")
         if component.gap_manifest.get("unclassified_gap_count", 0):
             reasons.add(f"unclassified_gaps:{key}")
-        if component.gap_manifest.get("gap_count", 0):
-            reasons.add(f"known_gaps:{key}")
         if component.source_kind == SourceKind.THIRD_PARTY and not selected.allow_third_party:
             reasons.add(f"third_party_source_disallowed:{key}")
         if component.source_kind == SourceKind.PROXY and role not in selected.allow_proxy_roles:

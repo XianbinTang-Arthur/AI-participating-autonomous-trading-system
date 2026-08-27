@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from scripts.rdp_import_official_history import (
+    _deduplicate_gaps,
     _is_one_second_sample,
+    _l2_samples_are_causal,
     _safe_error_code,
     main,
 )
@@ -104,6 +108,34 @@ def test_l2_half_second_samples_downsample_exactly_from_source_aligned_start() -
     assert _is_one_second_sample(
         _safe_time("2026-08-20T00:00:01.003+00:00"), start
     )
+
+
+def test_l2_causal_check_is_independent_from_classified_coverage_gap() -> None:
+    sample = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    rows = [
+        SimpleNamespace(
+            ts=sample,
+            source_state_ts=sample - timedelta(milliseconds=125),
+            staleness_ms=125,
+        )
+    ]
+
+    assert _l2_samples_are_causal(rows, source_rows_read=1)
+    rows[0].source_state_ts = sample + timedelta(milliseconds=1)
+    rows[0].staleness_ms = -1
+    assert not _l2_samples_are_causal(rows, source_rows_read=1)
+
+
+def test_l2_gap_provenance_deduplicates_derived_bbo_subset() -> None:
+    gap = {
+        "sample_ts": "2026-08-20T00:00:00+00:00",
+        "gap_start": "2026-08-20T00:00:00+00:00",
+        "gap_end": "2026-08-20T00:00:00.500000+00:00",
+        "reason": "state_unavailable",
+        "missing_samples": 1,
+    }
+
+    assert _deduplicate_gaps((gap,), (dict(gap),)) == (gap,)
 
 
 def _safe_time(value: str):

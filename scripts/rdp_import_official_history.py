@@ -15,6 +15,7 @@ import httpx
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SAFE_ERROR_CODE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_:=-]{0,159}$")
+_L2_TRANSFORM_VERSION = "okx-bulk-l2-causal-resample-v2"
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
@@ -268,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
                     source_key=source_key,
                     source_locator=source_locator,
                     timestamp_semantics=timestamp_semantics,
-                    transform_version="okx-bulk-l2-causal-resample-v1",
+                    transform_version=_L2_TRANSFORM_VERSION,
                 )
                 bundle_id, reservation_fingerprint = reserve_historical_bundle(
                     session,
@@ -318,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
                     bundle_id=bundle_id,
                     bbo_rows=bbo,
                     books5_rows=books5,
-                    transform_version="okx-bulk-l2-causal-resample-v1",
+                    transform_version=_L2_TRANSFORM_VERSION,
                 )
                 bbo_sample_count = len(bbo)
                 books5_sample_count = len(books5)
@@ -332,13 +333,17 @@ def main(argv: list[str] | None = None) -> int:
                         "books5_gaps": books5_gaps,
                     },
                 }
-                combined_gaps = tuple(stats.gaps) + tuple(bbo_gaps) + tuple(books5_gaps)
+                # BBO is a strict subset of the 2 Hz books5 samples. Recording both
+                # gap lists in source provenance counts the same unavailable source
+                # state twice, so retain the raw-import gaps plus the finest sampled
+                # gap evidence only. The BBO-specific view remains in the result.
+                combined_gaps = _deduplicate_gaps(stats.gaps, books5_gaps)
                 source = _source_record(
                     stats,
                     source_key=source_key,
                     source_locator=source_locator,
                     timestamp_semantics=timestamp_semantics,
-                    transform_version="okx-bulk-l2-causal-resample-v1",
+                    transform_version=_L2_TRANSFORM_VERSION,
                     gaps=combined_gaps,
                 )
                 expected_bbo = int((args.end - args.start).total_seconds())
@@ -346,6 +351,10 @@ def main(argv: list[str] | None = None) -> int:
                 coverage_ratio = min(
                     bbo_sample_count / expected_bbo if expected_bbo else 0.0,
                     books5_sample_count / expected_books5 if expected_books5 else 0.0,
+                )
+                causal_time_check = _l2_samples_are_causal(
+                    books5,
+                    source_rows_read=stats.rows_read,
                 )
                 if reservation_fingerprint is None:
                     bundle_id, eligibility = persist_historical_bundle(
@@ -356,7 +365,7 @@ def main(argv: list[str] | None = None) -> int:
                         role="l2_event_history",
                         purpose="l2_replay",
                         coverage_ratio=coverage_ratio,
-                        causal_time_check=not combined_gaps,
+                        causal_time_check=causal_time_check,
                     )
                 else:
                     bundle_id, eligibility = finalize_historical_bundle(
@@ -369,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
                         role="l2_event_history",
                         purpose="l2_replay",
                         coverage_ratio=coverage_ratio,
-                        causal_time_check=not combined_gaps,
+                        causal_time_check=causal_time_check,
                     )
                 result["bundle"] = _bundle_result(bundle_id, eligibility)
 
@@ -449,6 +458,41 @@ def _safe_error_code(exc: Exception) -> str:
 def _is_one_second_sample(sample: datetime, start: datetime) -> bool:
     delta = sample - start
     return delta.days >= 0 and delta.microseconds == 0
+
+
+def _l2_samples_are_causal(rows, *, source_rows_read: int) -> bool:
+    """Prove every emitted sample uses only an already-observed source state."""
+
+    if source_rows_read <= 0 or not rows:
+        return False
+    return all(
+        row.source_state_ts <= row.ts
+        and row.staleness_ms
+        == int((row.ts - row.source_state_ts).total_seconds() * 1_000)
+        for row in rows
+    )
+
+
+def _deduplicate_gaps(*groups) -> tuple[dict[str, object], ...]:
+    """Preserve gap order while removing duplicate evidence records."""
+
+    unique: list[dict[str, object]] = []
+    fingerprints: set[str] = set()
+    for group in groups:
+        for item in group:
+            normalized = dict(item)
+            fingerprint = json.dumps(
+                normalized,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+                default=str,
+            )
+            if fingerprint in fingerprints:
+                continue
+            fingerprints.add(fingerprint)
+            unique.append(normalized)
+    return tuple(unique)
 
 
 def _source_record(

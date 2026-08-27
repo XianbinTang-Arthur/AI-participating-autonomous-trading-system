@@ -71,7 +71,7 @@ def test_l2_bundle_is_eligible_only_with_complete_causal_evidence() -> None:
     assert "dataset_bundles.fingerprint = EXCLUDED.fingerprint" in session.sql
 
 
-def test_known_gap_and_low_coverage_make_bundle_ineligible() -> None:
+def test_classified_gap_relies_on_coverage_and_causality_gates() -> None:
     session = _Session()
     source = _source(
         gaps=(
@@ -95,9 +95,40 @@ def test_known_gap_and_low_coverage_make_bundle_ineligible() -> None:
     )
 
     assert report.eligible is False
-    assert "known_gaps:okx-bulk:l2:v1" in report.reason_codes
+    assert "known_gaps:okx-bulk:l2:v1" not in report.reason_codes
     assert "coverage_ratio_below_minimum:okx-bulk:l2:v1" in report.reason_codes
+    assert "causal_time_check_failed:okx-bulk:l2:v1" in report.reason_codes
     assert session.params["status"] == "INELIGIBLE"
+
+
+def test_classified_boundary_gap_is_eligible_above_coverage_floor() -> None:
+    session = _Session()
+    source = _source(
+        gaps=(
+            {
+                "reason": "state_unavailable",
+                "gap_start": START.isoformat(),
+                "gap_end": (START + timedelta(milliseconds=500)).isoformat(),
+                "missing_samples": 1,
+            },
+        )
+    )
+
+    _, report = persist_historical_bundle(
+        session,
+        source_id="00000000-0000-0000-0000-000000000001",
+        source=source,
+        symbol="BTC-USDT-SWAP",
+        role="l2_event_history",
+        purpose="l2_replay",
+        coverage_ratio=0.99999,
+        causal_time_check=True,
+    )
+
+    assert report.eligible is True
+    assert report.policy.policy_version == "historical-research-v2"
+    assert report.reason_codes == ()
+    assert session.params["status"] == "ELIGIBLE"
 
 
 def test_building_reservation_is_finalized_with_derived_gap_evidence() -> None:

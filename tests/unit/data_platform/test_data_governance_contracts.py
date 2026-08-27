@@ -121,6 +121,38 @@ def test_historical_bundle_passes_without_fake_live_heartbeat() -> None:
     assert report.reason_codes == ()
 
 
+def test_historical_bundle_fails_closed_on_unclassified_gap() -> None:
+    source = DataSourceRecord(
+        **{
+            **_source().__dict__,
+            "gap_manifest": {
+                **_source().gap_manifest,
+                "gap_count": 1,
+                "unclassified_gap_count": 1,
+            },
+        }
+    )
+    bundle = DatasetBundleContract(
+        "l2-day-unclassified-gap",
+        "v1",
+        "l2_replay",
+        "historical_research",
+        source.coverage_start,
+        source.coverage_end,
+        [source],
+    )
+
+    report = evaluate_historical_bundle(
+        bundle,
+        component_roles={source.source_key: "l2_event_history"},
+        coverage_ratios={source.source_key: 1.0},
+        causal_time_checks={source.source_key: True},
+    )
+
+    assert report.eligible is False
+    assert report.reason_codes == (f"unclassified_gaps:{source.source_key}",)
+
+
 def test_proxy_cannot_satisfy_tick_role_and_missing_causality_fails_closed() -> None:
     source = _source("okx-rest:mark-price", kind=SourceKind.PROXY)
     bundle = DatasetBundleContract(
