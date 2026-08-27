@@ -1,8 +1,8 @@
 # RDP 历史数据恢复与持续采集运行手册
 
 > 文档状态：现行操作说明
-> 最后核对：2026-08-26（实现基线 `2b0eef957bde`；本基线尚待下文标准部署复验，上一已核验 derivatives generation 为 `314adc6e8f17-20260826T193656Z-763-10457`）
-> 核对范围：当前代码、迁移、CLI、单元契约及本次受控 derivatives 模拟部署；数据库覆盖、磁盘容量、网络和 collector 连续性会漂移，执行时必须重新验证
+> 最后核对：2026-08-27（当前代码基线 `main@6dd75ab01381f5372e9a60117b83ed21079c5103`，尚未部署；上一已核验 derivatives generation 为 `314adc6e8f17-20260826T193656Z-763-10457`）
+> 核对范围：当前代码、迁移、CLI、单元契约、上一受控 derivatives 模拟部署及本轮只读运行快照；数据库覆盖、磁盘容量、网络和 collector 连续性会漂移，执行时必须重新验证
 > 安全边界：只允许 RDP research/governance 数据库与 `derivatives` 模拟栈；禁止 live profile、真实订单和参数 apply
 
 本手册是历史数据恢复、raw archive、持续采集、retention 和历史 bundle 重建的当前操作入口。任务背景保留在 [`../task/rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md`](../task/rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md)，但执行时以本页和当前代码为准。
@@ -244,6 +244,22 @@ Operator 的 RDP Workspace 展示“数据覆盖、历史导入、实时采集�
 请求路径只读最新覆盖 artifact 与 bounded meta 聚合，不扫描 raw tick 表。页面中的“治理快照可用”只表示快照传输与 schema 可读，不表示数据完整、候选盈利或 production-ready。
 
 hourly reliability cycle 会把治理快照不可用、collector 陈旧/drop、开放 gap、归档失败/积压、重建失败、低磁盘和 ineligible bundle 提升为 current alert。任何 critical 告警都必须先处理。
+
+截至 2026-08-27，旧 continuity 投影存在已确认的语义缺陷：它把按 `instType=SWAP` 订阅的稀疏
+`liquidation-orders` 返回结果按每个 `instId` 当成 120 秒流式订阅，并在按字母分组后只读取前
+100 项。2026-08-27 18:45:01.547284+08 对 WSL2 `aats_research` 的一次只读聚合得到 302 个近
+24 小时 observed group，其中 292 个 age 超过 120 秒、5 个包含 DROP、DROP event 共 10 个；
+`dropped_row_count` 本轮未独立验证。另一个已锚定的 reliability run
+`run_20260827_101511_d7eebe` 在 18:15:11--18:15:16+08 报告 95 个 active alert 并降级。
+这些数值在各自时点后即会漂移；292 是陈旧 group，不是 DROP 数，95 是旧算法截断后的监控
+伪影，不等于 95 个当前采集故障。它也不能反向证明系统健康，因为已有 observed group 超出
+24 小时后会从旧投影消失，而从未注册/ACK 的 expected subscription 从一开始就不可见。
+
+在 [`../task/rdp_continuity_monitoring_correctness_p1_sow_2026_08_27.md`](../task/rdp_continuity_monitoring_correctness_p1_sow_2026_08_27.md)
+完成 LF-B 审批和切换前，操作员不得仅因该 95 数值重启 collector、清除告警或放宽研究资格。
+必须分别核对 daemon/container 当前状态、微观结构各实际订阅的最新业务观测、强平连接帧、最新
+lifecycle、DROP 与未解决 gap；任何一项无法证明时保持 `unknown/NO-GO`。旧值、算法版本和切换
+时间必须保留审计，不能通过 UI 特判隐藏。
 
 ## 10. 分级扩展与容量门
 

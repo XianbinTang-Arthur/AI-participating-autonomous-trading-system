@@ -41,6 +41,11 @@
 
 ## 2026-08-26 RDP 数据治理实施记录
 
+- [`rdp_continuity_monitoring_correctness_p1_sow_2026_08_27.md`](rdp_continuity_monitoring_correctness_p1_sow_2026_08_27.md)：
+  RDP 连续性监控与研究资格 LF-B 设计；拟引入 typed subscription catalog、default/registered/ACK
+  三方对账、活动模型、current lifecycle、桶/序列完整性及 DROP/gap 一致性。当前状态为
+  `BLOCKED_PENDING_HUMAN_LF_B_APPROVAL`；旧投影的 95 条告警是不可静默的监控伪影，不代表
+  95 个真实当前故障，也不能作为采集健康或研究准入证据。
 - [`rdp_derivatives_contract_arithmetic_p0_sow_2026_08_27.md`](rdp_derivatives_contract_arithmetic_p0_sow_2026_08_27.md)：
   现行 LF-A/P0 实施任务书；统一 spot/linear/inverse 的张数、base quantity、quote notional、
   fee 与 PnL 语义，绑定版本化 instrument contract，并使旧错误产物失格后重建。P0-A 代码切片
