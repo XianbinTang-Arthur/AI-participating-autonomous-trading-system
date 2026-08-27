@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, DecimalException
 from typing import Any
 
 from aats.bootstrap.logging import get_logger, log_event
 from aats.bootstrap.settings import AATSSettings
+from aats.domain.instrument_contract import (
+    InstrumentContractError,
+    instrument_contract_from_metadata,
+)
 from aats.schemas.common import utc_now
 from aats.schemas.exchange import (
     ExchangeAccountSnapshot,
@@ -174,8 +178,18 @@ class OKXAccountService:
                     )
                 balance_payload = _gather_results_1[0] if not isinstance(_gather_results_1[0], Exception) else {}
                 instruments_payload = _gather_results_1[1] if not isinstance(_gather_results_1[1], Exception) else {}
+                if (
+                    self.settings.trading_product_type == "derivatives"
+                    and isinstance(_gather_results_1[1], Exception)
+                ):
+                    raise RuntimeError("okx_instrument_metadata_refresh_failed") from _gather_results_1[1]
                 instruments = self._parse_instruments(instruments_payload)
                 instrument_map = {instrument.symbol: instrument for instrument in instruments}
+                if self.settings.trading_product_type == "derivatives":
+                    self._validate_tracked_instrument_contracts(
+                        tracked_symbols=tracked_symbols,
+                        instrument_map=instrument_map,
+                    )
                 _gather_results_2 = await asyncio.gather(
                     asyncio.gather(*[
                         self.client.get_open_orders(symbol=symbol)
@@ -1630,10 +1644,20 @@ class OKXAccountService:
                     symbol=str(row.get("instId")),
                     base_currency=base_currency,
                     quote_currency=quote_currency,
-                    lot_size=to_decimal(row.get("lotSz", "0.00000001")),
-                    tick_size=to_decimal(row.get("tickSz", "0.00000001")),
-                    min_size=to_decimal(row.get("minSz", row.get("lotSz", "0"))),
-                    contract_value=to_decimal(contract_value_raw if contract_value_raw not in {None, ""} else "1"),
+                    lot_size=OKXAccountService._required_instrument_decimal(row, "lotSz"),
+                    tick_size=OKXAccountService._required_instrument_decimal(row, "tickSz"),
+                    min_size=OKXAccountService._required_instrument_decimal(row, "minSz"),
+                    contract_value=(
+                        to_decimal(contract_value_raw)
+                        if contract_value_raw not in {None, ""}
+                        else None
+                    ),
+                    contract_multiplier=(
+                        to_decimal(row.get("ctMult"))
+                        if row.get("ctMult") not in {None, ""}
+                        else None
+                    ),
+                    contract_type=OKXAccountService._text_value(row, "ctType"),
                     instrument_type=OKXAccountService._text_value(row, "instType"),
                     instrument_family=OKXAccountService._text_value(row, "instFamily"),
                     underlying=OKXAccountService._text_value(row, "uly"),
@@ -1664,12 +1688,29 @@ class OKXAccountService:
         )
 
     @staticmethod
+    def _validate_tracked_instrument_contracts(
+        *,
+        tracked_symbols: tuple[str, ...],
+        instrument_map: dict[str, InstrumentMetadata],
+    ) -> None:
+        for symbol in tracked_symbols:
+            if infer_okx_derivatives_inst_type(symbol) not in {"SWAP", "FUTURES"}:
+                continue
+            instrument = instrument_map.get(symbol)
+            if instrument is None:
+                raise InstrumentContractError("derivative_instrument_metadata_required")
+            contract = instrument_contract_from_metadata(instrument)
+            if contract.contract_type == "inverse":
+                raise InstrumentContractError("inverse_execution_quantity_unsupported")
+
+    @staticmethod
     def _instrument_currencies(row: dict[str, Any]) -> tuple[str, str]:
         base_currency = str(row.get("baseCcy") or "").strip()
         quote_currency = str(row.get("quoteCcy") or "").strip()
         underlying = str(row.get("uly") or "").strip()
         settle_currency = str(row.get("settleCcy") or "").strip()
         contract_value_currency = str(row.get("ctValCcy") or "").strip()
+        contract_type = str(row.get("ctType") or "").strip().lower()
         instrument_id = str(row.get("instId") or "").strip()
 
         if underlying and "-" in underlying:
@@ -1680,11 +1721,6 @@ class OKXAccountService:
                 if not quote_currency:
                     quote_currency = underlying_parts[1]
 
-        if not base_currency and contract_value_currency:
-            base_currency = contract_value_currency
-        if not quote_currency and settle_currency:
-            quote_currency = settle_currency
-
         if instrument_id and "-" in instrument_id:
             symbol_parts = instrument_id.split("-")
             if len(symbol_parts) >= 2:
@@ -1692,6 +1728,17 @@ class OKXAccountService:
                     base_currency = symbol_parts[0]
                 if not quote_currency:
                     quote_currency = symbol_parts[1]
+
+        if contract_type == "inverse":
+            if not base_currency and settle_currency:
+                base_currency = settle_currency
+            if not quote_currency and contract_value_currency:
+                quote_currency = contract_value_currency
+        else:
+            if not base_currency and contract_value_currency:
+                base_currency = contract_value_currency
+            if not quote_currency and settle_currency:
+                quote_currency = settle_currency
 
         return base_currency, quote_currency
 
@@ -1998,6 +2045,19 @@ class OKXAccountService:
                 continue
             return to_decimal(value)
         return None
+
+    @staticmethod
+    def _required_instrument_decimal(row: dict[str, Any], key: str) -> Decimal:
+        value = row.get(key)
+        if value in {None, ""}:
+            raise InstrumentContractError(f"instrument_trading_rule_required:{key}")
+        try:
+            resolved = to_decimal(value)
+        except (DecimalException, TypeError, ValueError) as exc:
+            raise InstrumentContractError(f"instrument_trading_rule_invalid:{key}") from exc
+        if not resolved.is_finite() or resolved <= 0:
+            raise InstrumentContractError(f"instrument_trading_rule_invalid:{key}")
+        return resolved
 
     @staticmethod
     def _text_value(row: dict[str, Any], *keys: str) -> str | None:

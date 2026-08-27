@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
-from aats.schemas.exchange import ExchangeFill
+from aats.schemas.exchange import ExchangeFill, InstrumentMetadata
 from aats.schemas.execution import FillEvent, OrderIntent
 from aats.services.execution_engine.okx_adapter import OKXExecutionAdapter
 
@@ -53,14 +53,30 @@ class _FakeOrderStateRepo:
         self.last_raw_payload = raw_payload
 
 
-class _FakeInstrumentMetadata:
-    instrument_type = "SWAP"
-    contract_value = Decimal("0.01")
+def _linear_btc_usdt_swap_metadata() -> InstrumentMetadata:
+    return InstrumentMetadata(
+        instrument_id="BTC-USDT-SWAP",
+        symbol="BTC-USDT-SWAP",
+        base_currency="BTC",
+        quote_currency="USDT",
+        lot_size=Decimal("0.01"),
+        tick_size=Decimal("0.1"),
+        min_size=Decimal("0.01"),
+        contract_value=Decimal("0.01"),
+        contract_multiplier=Decimal("1"),
+        contract_type="linear",
+        instrument_type="SWAP",
+        settle_currency="USDT",
+        contract_value_currency="BTC",
+        state="live",
+    )
 
 
 class _FakeAccountService:
-    def instrument_metadata(self, symbol: str):
-        return _FakeInstrumentMetadata()
+    def instrument_metadata(self, symbol: str) -> InstrumentMetadata:
+        if symbol != "BTC-USDT-SWAP":
+            raise AssertionError(f"unexpected instrument metadata request: {symbol}")
+        return _linear_btc_usdt_swap_metadata()
 
 
 class TestExecutionStyleInRawPayload(unittest.TestCase):

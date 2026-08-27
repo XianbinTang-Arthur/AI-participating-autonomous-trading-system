@@ -5,6 +5,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
+from aats.domain.instrument_contract import InstrumentContractError
 from aats.schemas.common import utc_now
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance
 from aats.services.execution_engine.okx_account import OKXAccountService, datetime_from_ms
@@ -115,6 +116,8 @@ class _FakeDerivativesOKXClient(_FakeOKXClient):
                     "settleCcy": "USDT",
                     "ctValCcy": "BTC",
                     "ctVal": "0.01",
+                    "ctMult": "1",
+                    "ctType": "linear",
                     "lotSz": "0.01",
                     "tickSz": "0.1",
                     "minSz": "0.01",
@@ -180,6 +183,15 @@ class _FakeIncompatibleDerivativesClient(_FakeDerivativesOKXClient):
         return {"code": "0", "data": [{"acctLv": "1", "posMode": ""}]}
 
 
+class _FakeFlatMissingInstrumentDerivativesClient(_FakeDerivativesOKXClient):
+    async def get_instruments(self):
+        return {"code": "0", "data": []}
+
+    async def get_positions(self):
+        self.get_positions_called = True
+        return {"code": "0", "data": []}
+
+
 class _FakeFuturesDerivativesClient(_FakeDerivativesOKXClient):
     async def get_instruments(self):
         return {
@@ -195,6 +207,8 @@ class _FakeFuturesDerivativesClient(_FakeDerivativesOKXClient):
                     "settleCcy": "USDT",
                     "ctValCcy": "BTC",
                     "ctVal": "0.01",
+                    "ctMult": "1",
+                    "ctType": "linear",
                     "lotSz": "1",
                     "tickSz": "0.1",
                     "minSz": "1",
@@ -256,12 +270,15 @@ class _FakeMultiPositionDerivativesClient(_FakeDerivativesOKXClient):
             "data": [
                 {
                     "instId": "BTC-USDT-SWAP",
+                    "instType": "SWAP",
                     "baseCcy": "",
                     "quoteCcy": "",
                     "uly": "BTC-USDT",
                     "settleCcy": "USDT",
                     "ctValCcy": "BTC",
                     "ctVal": "0.01",
+                    "ctMult": "1",
+                    "ctType": "linear",
                     "lotSz": "0.01",
                     "tickSz": "0.1",
                     "minSz": "0.01",
@@ -269,12 +286,15 @@ class _FakeMultiPositionDerivativesClient(_FakeDerivativesOKXClient):
                 },
                 {
                     "instId": "ETH-USDT-SWAP",
+                    "instType": "SWAP",
                     "baseCcy": "",
                     "quoteCcy": "",
                     "uly": "ETH-USDT",
                     "settleCcy": "USDT",
                     "ctValCcy": "ETH",
                     "ctVal": "0.1",
+                    "ctMult": "1",
+                    "ctType": "linear",
                     "lotSz": "0.1",
                     "tickSz": "0.01",
                     "minSz": "0.1",
@@ -323,6 +343,8 @@ class _FakeSmartArbitrageMarginClient(_FakeDerivativesOKXClient):
                     "settleCcy": "USDT",
                     "ctValCcy": "BTC",
                     "ctVal": "0.01",
+                    "ctMult": "1",
+                    "ctType": "linear",
                     "lotSz": "0.01",
                     "tickSz": "0.1",
                     "minSz": "0.01",
@@ -371,7 +393,7 @@ class _FakeSmartArbitrageMarginClient(_FakeDerivativesOKXClient):
         }
 
 
-class _FakeNestedRiskPayloadDerivativesClient(_FakeDerivativesOKXClient):
+class _FakeNestedRiskPayloadDerivativesClient(_FakeMultiPositionDerivativesClient):
     async def get_account_position_risk(self):
         return {
             "code": "0",
@@ -740,6 +762,8 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(instrument.base_currency, "BTC")
         self.assertEqual(instrument.quote_currency, "USDT")
         self.assertEqual(instrument.contract_value, Decimal("0.01"))
+        self.assertEqual(instrument.contract_multiplier, Decimal("1"))
+        self.assertEqual(instrument.contract_type, "linear")
         self.assertEqual(instrument.instrument_type, "SWAP")
         self.assertEqual(instrument.instrument_family, "BTC-USDT")
         self.assertEqual(instrument.underlying, "BTC-USDT")
@@ -841,6 +865,31 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.risk_snapshot.margin_ratio, Decimal("100"))
         self.assertEqual(len(snapshot.system_status_items), 0)
         self.assertEqual(client.trade_fee_calls[0]["underlying"], "BTC-USDT")
+
+    async def test_flat_derivatives_account_never_becomes_ready_without_instrument_metadata(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "trading_product_type": "derivatives",
+                "default_symbol": "BTC-USDT-SWAP",
+            }
+        )
+        service = OKXAccountService(
+            settings=settings,
+            client=_FakeFlatMissingInstrumentDerivativesClient(),
+        )
+
+        with self.assertRaisesRegex(
+            InstrumentContractError,
+            "derivative_instrument_metadata_required",
+        ):
+            await service.refresh(force=True)
+
+        self.assertFalse(service.status()["ready"])
 
     async def test_refresh_collects_open_orders_and_fills_for_all_allowed_symbols(self) -> None:
         settings = AATSSettings.model_validate(

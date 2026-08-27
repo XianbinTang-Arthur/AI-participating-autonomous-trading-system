@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
@@ -786,7 +786,11 @@ def make_derivatives_account_service(
                     tick_size=Decimal("0.1"),
                     min_size=Decimal("1"),
                     contract_value=Decimal("0.01"),
+                    contract_multiplier=Decimal("1"),
+                    contract_type="linear",
+                    instrument_type="SWAP",
                     settle_currency="USDT",
+                    contract_value_currency="BTC",
                     state="live",
                 )
             ],
@@ -1542,7 +1546,12 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
                 lot_size=0.01,
                 tick_size=0.1,
                 min_size=0.01,
-                contract_value=0.01,
+                contract_value=Decimal("0.01"),
+                contract_multiplier=Decimal("1"),
+                contract_type="linear",
+                instrument_type="SWAP",
+                settle_currency="USDT",
+                contract_value_currency="BTC",
                 state="live",
             ),
         )
@@ -1556,6 +1565,100 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(payload["clOrdId"]), 32)
         self.assertNotIn("_", payload["clOrdId"])
         self.assertNotEqual(payload["clOrdId"], f"cl{intent.idempotency_key}".replace("_", "")[:32])
+
+    def test_derivatives_payload_rejects_incomplete_contract_metadata(self) -> None:
+        instrument = InstrumentMetadata(
+            instrument_id="BTC-USDT-SWAP",
+            symbol="BTC-USDT-SWAP",
+            base_currency="BTC",
+            quote_currency="USDT",
+            lot_size=Decimal("0.01"),
+            tick_size=Decimal("0.1"),
+            min_size=Decimal("0.01"),
+            contract_value=Decimal("0.01"),
+            contract_multiplier=None,
+            contract_type="linear",
+            instrument_type="SWAP",
+            settle_currency="USDT",
+            contract_value_currency="BTC",
+            state="live",
+        )
+
+        with self.assertRaisesRegex(ValueError, "derivative_instrument_metadata_required"):
+            OKXOrderPayloadBuilder().build(
+                intent=make_derivatives_intent(quantity=Decimal("0.03")),
+                instrument=instrument,
+            )
+
+    def test_derivatives_size_price_and_rendering_ignore_global_decimal_context(self) -> None:
+        instrument = InstrumentMetadata(
+            instrument_id="BTC-USDT-SWAP",
+            symbol="BTC-USDT-SWAP",
+            base_currency="BTC",
+            quote_currency="USDT",
+            lot_size=Decimal("0.1"),
+            tick_size=Decimal("0.01"),
+            min_size=Decimal("0.1"),
+            contract_value=Decimal("0.01"),
+            contract_multiplier=Decimal("1"),
+            contract_type="linear",
+            instrument_type="SWAP",
+            settle_currency="USDT",
+            contract_value_currency="BTC",
+            state="live",
+        )
+        intent = make_derivatives_intent(
+            quantity=Decimal("0.0129"),
+            order_type="limit",
+            limit_price=Decimal("12345.67"),
+            execution_style="maker",
+        )
+        builder = OKXOrderPayloadBuilder()
+
+        with localcontext() as context:
+            context.prec = 2
+            low_precision = builder.build(intent=intent, instrument=instrument)
+        with localcontext() as context:
+            context.prec = 28
+            high_precision = builder.build(intent=intent, instrument=instrument)
+
+        self.assertEqual(low_precision, high_precision)
+        self.assertEqual(low_precision["sz"], "1.2")
+        self.assertEqual(low_precision["px"], "12345.67")
+
+    async def test_submit_blocks_incomplete_contract_metadata_without_fabricated_size(self) -> None:
+        settings = make_settings(
+            {
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+            }
+        )
+        account_service = make_derivatives_account_service()
+        invalid_instrument = account_service._snapshot.instruments[0].model_copy(
+            update={"contract_multiplier": None},
+        )
+        account_service._snapshot = account_service._snapshot.model_copy(
+            update={"instruments": [invalid_instrument]},
+        )
+        client = FakeOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=account_service,  # type: ignore[arg-type]
+            mode_controller=RuntimeModeController(settings=settings, kill_switch=KillSwitch()),
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: Decimal("68000"),
+        )
+
+        state, fills = await adapter.submit(make_derivatives_intent())
+
+        self.assertEqual(state.status, "BLOCKED")
+        self.assertEqual(state.execution_error, "derivative_instrument_metadata_required")
+        self.assertNotIn("sz", state.submission_payload)
+        self.assertEqual(fills, [])
+        self.assertEqual(client.place_order_calls, [])
 
     def test_okx_client_order_id_is_stable_for_non_ascii_idempotency_keys(self) -> None:
         intent = make_intent().model_copy(update={"idempotency_key": "套利-测试-01"})
@@ -1722,7 +1825,12 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
                         lot_size=0.01,
                         tick_size=0.1,
                         min_size=0.01,
-                        contract_value=0.01,
+                        contract_value=Decimal("0.01"),
+                        contract_multiplier=Decimal("1"),
+                        contract_type="linear",
+                        instrument_type="SWAP",
+                        settle_currency="USDT",
+                        contract_value_currency="BTC",
                         state="live",
                     )
                 ],
@@ -1805,7 +1913,12 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
                         lot_size=0.01,
                         tick_size=0.1,
                         min_size=0.01,
-                        contract_value=0.01,
+                        contract_value=Decimal("0.01"),
+                        contract_multiplier=Decimal("1"),
+                        contract_type="linear",
+                        instrument_type="SWAP",
+                        settle_currency="USDT",
+                        contract_value_currency="BTC",
                         state="live",
                     )
                 ],
@@ -1900,7 +2013,12 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
                         lot_size=0.01,
                         tick_size=0.1,
                         min_size=0.01,
-                        contract_value=0.01,
+                        contract_value=Decimal("0.01"),
+                        contract_multiplier=Decimal("1"),
+                        contract_type="linear",
+                        instrument_type="SWAP",
+                        settle_currency="USDT",
+                        contract_value_currency="BTC",
                         state="live",
                     )
                 ],
@@ -1983,7 +2101,12 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
                         lot_size=0.01,
                         tick_size=0.1,
                         min_size=0.01,
-                        contract_value=0.01,
+                        contract_value=Decimal("0.01"),
+                        contract_multiplier=Decimal("1"),
+                        contract_type="linear",
+                        instrument_type="SWAP",
+                        settle_currency="USDT",
+                        contract_value_currency="BTC",
                         max_leverage=Decimal("5"),
                         state="live",
                     )
@@ -2061,7 +2184,12 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
                         lot_size=0.01,
                         tick_size=0.1,
                         min_size=0.01,
-                        contract_value=0.01,
+                        contract_value=Decimal("0.01"),
+                        contract_multiplier=Decimal("1"),
+                        contract_type="linear",
+                        instrument_type="SWAP",
+                        settle_currency="USDT",
+                        contract_value_currency="BTC",
                         max_leverage=Decimal("5"),
                         state="live",
                     )
@@ -2152,7 +2280,12 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
                         lot_size=0.01,
                         tick_size=0.1,
                         min_size=0.01,
-                        contract_value=0.01,
+                        contract_value=Decimal("0.01"),
+                        contract_multiplier=Decimal("1"),
+                        contract_type="linear",
+                        instrument_type="SWAP",
+                        settle_currency="USDT",
+                        contract_value_currency="BTC",
                         max_leverage=Decimal("5"),
                         state="live",
                     )
@@ -2244,7 +2377,12 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
                         lot_size=0.01,
                         tick_size=0.1,
                         min_size=0.01,
-                        contract_value=0.01,
+                        contract_value=Decimal("0.01"),
+                        contract_multiplier=Decimal("1"),
+                        contract_type="linear",
+                        instrument_type="SWAP",
+                        settle_currency="USDT",
+                        contract_value_currency="BTC",
                         max_leverage=Decimal("5"),
                         state="live",
                     )
@@ -2326,7 +2464,12 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
                         lot_size=0.01,
                         tick_size=0.1,
                         min_size=0.01,
-                        contract_value=0.01,
+                        contract_value=Decimal("0.01"),
+                        contract_multiplier=Decimal("1"),
+                        contract_type="linear",
+                        instrument_type="SWAP",
+                        settle_currency="USDT",
+                        contract_value_currency="BTC",
                         max_leverage=Decimal("3"),
                         state="live",
                     )
@@ -2432,7 +2575,12 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
                         lot_size=0.01,
                         tick_size=0.1,
                         min_size=0.01,
-                        contract_value=0.01,
+                        contract_value=Decimal("0.01"),
+                        contract_multiplier=Decimal("1"),
+                        contract_type="linear",
+                        instrument_type="SWAP",
+                        settle_currency="USDT",
+                        contract_value_currency="BTC",
                         state="live",
                     )
                 ],

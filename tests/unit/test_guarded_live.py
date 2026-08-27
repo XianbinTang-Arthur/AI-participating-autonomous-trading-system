@@ -99,16 +99,22 @@ class FakeAccountService:
         parts = [part for part in symbol.split("-") if part]
         base_currency = parts[0] if len(parts) >= 1 else "BTC"
         quote_currency = parts[1] if len(parts) >= 2 else "USDT"
+        is_derivative = symbol.endswith("-SWAP")
         return InstrumentMetadata(
             instrument_id=symbol,
             symbol=symbol,
-            base_currency=base_currency if not symbol.endswith("-SWAP") else "",
-            quote_currency=quote_currency if not symbol.endswith("-SWAP") else "",
-            lot_size=Decimal("0.0001") if not symbol.endswith("-SWAP") else Decimal("0.01"),
+            base_currency=base_currency if not is_derivative else "",
+            quote_currency=quote_currency if not is_derivative else "",
+            lot_size=Decimal("0.0001") if not is_derivative else Decimal("0.01"),
             tick_size=Decimal("0.1"),
-            min_size=Decimal("0.0001") if not symbol.endswith("-SWAP") else Decimal("0.01"),
+            min_size=Decimal("0.0001") if not is_derivative else Decimal("0.01"),
+            contract_value=Decimal("0.01") if is_derivative else None,
+            contract_multiplier=Decimal("1") if is_derivative else None,
+            contract_type="linear" if is_derivative else None,
+            instrument_type="SWAP" if is_derivative else "SPOT",
             instrument_family=f"{base_currency}-{quote_currency}" if len(parts) >= 2 else None,
-            settle_currency=quote_currency if symbol.endswith("-SWAP") else quote_currency,
+            settle_currency=quote_currency,
+            contract_value_currency=base_currency if is_derivative else None,
             state="live",
         )
 
@@ -877,6 +883,12 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
                 lot_size=0.01,
                 tick_size=0.1,
                 min_size=0.01,
+                contract_value=Decimal("0.01"),
+                contract_multiplier=Decimal("1"),
+                contract_type="linear",
+                instrument_type="SWAP",
+                settle_currency="USDT",
+                contract_value_currency="BTC",
                 state="live",
             )
         ]

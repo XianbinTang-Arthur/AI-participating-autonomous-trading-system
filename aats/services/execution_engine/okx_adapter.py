@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from aats.bootstrap.settings import AATSSettings
+from aats.domain.instrument_contract import InstrumentContractError
 from aats.schemas.common import new_id, utc_now
 from aats.schemas.execution import (
     FillEvent,
@@ -39,7 +40,7 @@ from aats.services.execution_engine.quantity_rules import (
     quantized_internal_quantity,
     round_down_to_step,
 )
-from aats.services.execution_engine.okx_rest import OKXRESTClient, OKXRequestError, infer_okx_derivatives_inst_type
+from aats.services.execution_engine.okx_rest import OKXRESTClient, OKXRequestError
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.kill_switch import KillSwitchSubmissionBlocked
 from aats.services.governance_engine.mode import RuntimeModeController
@@ -77,6 +78,21 @@ class OKXOrderPayloadBuilder:
             payload.update(self._build_spot_payload(intent=intent))
         return payload
 
+    def build_audit_payload_without_quantity(
+        self,
+        *,
+        intent: OrderIntent,
+        instrument: InstrumentMetadata,
+    ) -> dict[str, str]:
+        """Build non-submittable audit context when quantity cannot be trusted."""
+
+        payload = self._identity_payload(intent=intent, instrument=instrument)
+        if intent.product_type == "derivatives":
+            payload.update(self._build_derivatives_payload(intent=intent))
+        else:
+            payload.update(self._build_spot_payload(intent=intent))
+        return payload
+
     def _base_payload(
         self,
         *,
@@ -89,18 +105,26 @@ class OKXOrderPayloadBuilder:
             instrument=instrument,
             validate=validate,
         )
-        payload = {
-            "instId": instrument.instrument_id,
-            "tdMode": intent.td_mode or ("cash" if intent.product_type == "spot" else intent.margin_mode),
-            "side": intent.side,
-            "ordType": self._order_type(intent),
-            "sz": self._render_decimal(quantity),
-            "clOrdId": self._client_order_id(intent),
-        }
+        payload = self._identity_payload(intent=intent, instrument=instrument)
+        payload["sz"] = self._render_decimal(quantity)
         if intent.order_type == "limit" and intent.limit_price is not None:
             limit_price = self._round_down(value=intent.limit_price, step=instrument.tick_size)
             payload["px"] = self._render_decimal(limit_price)
         return payload
+
+    def _identity_payload(
+        self,
+        *,
+        intent: OrderIntent,
+        instrument: InstrumentMetadata,
+    ) -> dict[str, str]:
+        return {
+            "instId": instrument.instrument_id,
+            "tdMode": intent.td_mode or ("cash" if intent.product_type == "spot" else intent.margin_mode),
+            "side": intent.side,
+            "ordType": self._order_type(intent),
+            "clOrdId": self._client_order_id(intent),
+        }
 
     def _build_derivatives_payload(self, *, intent: OrderIntent) -> dict[str, str]:
         payload = {
@@ -188,7 +212,10 @@ class OKXOrderPayloadBuilder:
 
     @staticmethod
     def _render_decimal(value: Decimal) -> str:
-        rendered = format(value.normalize(), "f")
+        value = to_decimal(value)
+        if not value.is_finite():
+            raise InstrumentContractError("decimal_render_invalid")
+        rendered = format(value, "f")
         return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
 
 
@@ -299,6 +326,16 @@ class OKXExecutionAdapter(ExchangeAdapter):
         intent = self._normalize_intent_for_account_snapshot(intent=intent, snapshot=snapshot)
         try:
             payload = self.payload_builder.build(intent=intent, instrument=instrument)
+        except InstrumentContractError as exc:
+            reason = str(exc) or "instrument_contract_invalid"
+            payload = self.payload_builder.build_audit_payload_without_quantity(
+                intent=intent,
+                instrument=instrument,
+            )
+            self._last_submission_payload = dict(payload)
+            self._last_error = reason
+            self._log_blocked_submit(intent=intent, reason=reason)
+            return self._blocked_state(intent=intent, payload=payload, reason=reason), []
         except ValueError as exc:
             reason = str(exc) or "okx_payload_build_rejected"
             payload = self.payload_builder.build(intent=intent, instrument=instrument, validate=False)
@@ -2103,18 +2140,13 @@ class OKXExecutionAdapter(ExchangeAdapter):
         instrument: InstrumentMetadata | None,
         product_type: str,
     ) -> Decimal:
-        instrument_type = str(getattr(instrument, "instrument_type", "") or "").upper()
-        inferred_inst_type = infer_okx_derivatives_inst_type(symbol)
-        if (
-            product_type != "derivatives"
-            or instrument is None
-            or (instrument_type not in {"SWAP", "FUTURES"} and inferred_inst_type not in {"SWAP", "FUTURES"})
-        ):
+        if product_type != "derivatives":
             return quantity
-        contract_value = max(instrument.contract_value, Decimal("0"))
-        if contract_value <= 0:
-            return quantity
-        return quantity * contract_value
+        return internal_quantity_from_exchange(
+            symbol=symbol,
+            quantity=quantity,
+            instrument=instrument,
+        )
 
     @staticmethod
     def _select_exchange_fills(

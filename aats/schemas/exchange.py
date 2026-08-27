@@ -117,7 +117,9 @@ class InstrumentMetadata(SchemaBase):
     lot_size: Decimal
     tick_size: Decimal
     min_size: Decimal
-    contract_value: Decimal = Decimal("1")
+    contract_value: Decimal | None = None
+    contract_multiplier: Decimal | None = None
+    contract_type: str | None = None
     instrument_type: str | None = None
     instrument_family: str | None = None
     underlying: str | None = None

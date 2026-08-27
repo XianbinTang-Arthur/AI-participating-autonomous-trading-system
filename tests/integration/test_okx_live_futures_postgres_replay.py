@@ -107,6 +107,8 @@ class TestOKXLiveFuturesPostgresReplay(unittest.IsolatedAsyncioTestCase):
                                     "settleCcy": "USDT",
                                     "ctValCcy": "BTC",
                                     "ctVal": "0.01",
+                                    "ctMult": "1",
+                                    "ctType": "linear",
                                     "lotSz": "1",
                                     "tickSz": "0.1",
                                     "minSz": "1",
