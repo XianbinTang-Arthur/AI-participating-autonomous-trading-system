@@ -5,7 +5,7 @@
 覆盖面:
     * 顶层 key 齐全, 且无 verdict/go/no-go/pass/fail 文案
     * OOS 时间中点切分, train/test 两段 + UTC 边界
-    * cross_window 至少 3 片, 每片含 ir/hit_rate/fills/max_drawdown_bps
+    * cross_window 只细分 OOS test, 至少 3 片且覆盖闭合
     * cost_adjusted 5 个字段从 diagnostics 正确聚合
     * regime_slice.vol 低/高波 bucket, ir + fills
     * 空 curve / 空 diagnostics 不抛异常
@@ -17,22 +17,39 @@ from __future__ import annotations
 import json
 import re
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from aats.data_platform.replay.backtest.cost_validator import (
     CostDiagnostic,
-    CostValidationSummary,
+    CostValidator,
 )
 from aats.data_platform.replay.backtest.equity_builder import (
     BacktestSummary,
     EquityPoint,
+    recompute_equity_curve_metrics,
 )
-from aats.data_platform.replay.backtest.evidence_scorecard import build_scorecard
+from aats.data_platform.replay.backtest.fill_simulator import (
+    FillRequest,
+    FillSimulator,
+)
+from aats.data_platform.replay.backtest.evidence_scorecard import (
+    SCORECARD_FILL_MODEL_VERSION,
+    SCORECARD_RESOLVED_PARAMETER_KEYS,
+    build_scorecard,
+)
 from aats.data_platform.replay.backtest.harness import (
     BacktestConfig,
     BacktestResult,
+    ExecutionTimingRecord,
 )
+from aats.data_platform.replay.backtest.position_tracker import (
+    Fill,
+    PositionTracker,
+)
+from aats.data_platform.replay.core.replay_context import ReplayParameterOverrides
+from tests.unit.replay_contract_fixtures import LINEAR_SWAP_CONTRACT, SPOT_CONTRACT
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +60,29 @@ from aats.data_platform.replay.backtest.harness import (
 _BASE_TS = datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc)
 _BASE_MS = int(_BASE_TS.timestamp() * 1000)
 _HOUR_MS = 60 * 60 * 1000
+_TOP_LEVEL_KEYS = {
+    "artifact_kind",
+    "artifact_schema_version",
+    "meta",
+    "oos",
+    "cross_window",
+    "cost_adjusted",
+    "regime_slice",
+}
+# Scorecard fixtures deliberately preserve arbitrary synthetic PnL paths.
+# Give that synthetic venue an explicit fine tick instead of emitting marks
+# that contradict its declared InstrumentContract.
+_SCORECARD_SPOT_CONTRACT = replace(
+    SPOT_CONTRACT,
+    tick_size=Decimal("1E-27"),
+)
+
+
+def test_scorecard_v2_freezes_fill_and_parameter_schema() -> None:
+    assert SCORECARD_FILL_MODEL_VERSION == "ohlcv_participation_cap_contract_v3"
+    assert SCORECARD_RESOLVED_PARAMETER_KEYS == frozenset(
+        ReplayParameterOverrides.__dataclass_fields__
+    )
 
 
 def _mk_point(index: int, equity: str) -> EquityPoint:
@@ -52,6 +92,9 @@ def _mk_point(index: int, equity: str) -> EquityPoint:
         cumulative_pnl=Decimal(equity),
         drawdown_bps=Decimal("0"),
         daily_return_bps=Decimal("0"),
+        settlement_currency=_SCORECARD_SPOT_CONTRACT.settle_currency,
+        instrument_symbol=_SCORECARD_SPOT_CONTRACT.symbol,
+        instrument_contract_fingerprint=_SCORECARD_SPOT_CONTRACT.fingerprint,
     )
 
 
@@ -83,27 +126,281 @@ def _mk_result(
     config: BacktestConfig | None = None,
     window_hours: int = 24,
 ) -> BacktestResult:
-    cfg = config or BacktestConfig(ioc_slippage_bps=1.0, assumed_cost_bps=6.0)
-    start_ts = _BASE_TS
-    end_ts = _BASE_TS + timedelta(hours=window_hours)
+    cfg = config or BacktestConfig(
+        ioc_slippage_bps=0.0,
+        spot_buy_fee_asset="quote",
+    )
+    if cfg.spot_buy_fee_asset is None:
+        cfg = replace(cfg, spot_buy_fee_asset="quote")
+    if cfg.instrument_contract is None:
+        cfg = replace(
+            cfg,
+            symbol=_SCORECARD_SPOT_CONTRACT.symbol,
+            instrument_contract=_SCORECARD_SPOT_CONTRACT,
+        )
+    if not diagnostics and any(point.equity != 0 for point in curve):
+        expected_fee = (
+            cfg.maker_fee_bps
+            if cfg.order_type == "post_only"
+            else cfg.taker_fee_bps
+        )
+        expected_slippage = (
+            0.0 if cfg.order_type == "post_only" else cfg.ioc_slippage_bps
+        )
+        expected_cost = expected_fee + expected_slippage
+        diagnostics = (
+            _mk_diagnostic(
+                0,
+                assumed_cost=expected_cost,
+                actual_cost=expected_cost,
+                assumed_net=0.0,
+            ),
+        )
+    if diagnostics and len(diagnostics) >= len(curve):
+        raise ValueError("complete fixture needs one later bar per fill")
+
+    expected_metrics, expected_sharpe = recompute_equity_curve_metrics(
+        curve,
+        instrument_contract=cfg.instrument_contract,
+    )
+    curve = tuple(
+        replace(
+            point,
+            drawdown_bps=expected_drawdown,
+            daily_return_bps=expected_daily,
+        )
+        for point, (expected_drawdown, expected_daily) in zip(
+            curve,
+            expected_metrics,
+            strict=True,
+        )
+    )
+
+    point_times = tuple(
+        _BASE_TS + timedelta(milliseconds=point.ts_ms - _BASE_MS)
+        for point in curve
+    )
+    start_ts = point_times[0] - timedelta(hours=1) if point_times else _BASE_TS
+    end_ts = max(
+        _BASE_TS + timedelta(hours=window_hours),
+        point_times[-1] if point_times else _BASE_TS + timedelta(hours=1),
+    )
+
+    validator = CostValidator()
+    resolved_diagnostics: list[CostDiagnostic] = []
+    timeline: list[ExecutionTimingRecord] = []
+    for index, point_ts in enumerate(point_times):
+        observation_ts = point_ts - timedelta(hours=1)
+        if index < len(diagnostics):
+            source = diagnostics[index]
+            next_event_ts = point_times[index + 1] - timedelta(hours=1)
+            resolution_ts = (
+                next_event_ts + timedelta(hours=1)
+                if cfg.order_type == "post_only"
+                else next_event_ts
+            )
+            price_source = (
+                "next_bar_close"
+                if cfg.order_type == "post_only"
+                else "next_bar_open"
+            )
+            liquidity_source = (
+                "next_bar_volume"
+                if cfg.order_type == "post_only"
+                else "observation_bar_volume"
+            )
+            decision_id = f"{observation_ts.isoformat()}_open"
+            reference_price = Decimal("10000")
+            liquidity_reference_quantity = Decimal("1000")
+            simulated = FillSimulator(
+                instrument_contract=cfg.instrument_contract,
+                maker_fee_bps=cfg.maker_fee_bps,
+                taker_fee_bps=cfg.taker_fee_bps,
+                ioc_slippage_bps=cfg.ioc_slippage_bps,
+                max_volume_participation=cfg.max_volume_participation,
+                spot_buy_fee_asset=cfg.spot_buy_fee_asset,
+            ).simulate(
+                FillRequest(
+                    order_id=decision_id,
+                    side="buy",
+                    order_type=cfg.order_type,
+                    target_qty=Decimal("1"),
+                    submitted_at_ts=int(point_ts.timestamp() * 1000),
+                ),
+                reference_price,
+                liquidity_reference_quantity,
+            )
+            if simulated.filled_qty == 0:
+                raise ValueError("complete fixture expected deterministic fill")
+            resolved_diagnostics.append(
+                validator.record(
+                    decision_id=decision_id,
+                    assumed_cost_bps=source.assumed_cost_bps,
+                    actual_cost_bps=source.actual_cost_bps,
+                    assumed_net_edge_bps=source.assumed_net_edge_bps,
+                    notes=source.notes,
+                    actual_fee_bps=simulated.fee_bps,
+                    actual_slippage_bps=simulated.slippage_bps,
+                    resolved_at_ts_ms=int(resolution_ts.timestamp() * 1000),
+                    fill_ts_ms=int(resolution_ts.timestamp() * 1000),
+                    equity_attribution_ts_ms=curve[index + 1].ts_ms,
+                    filled_exchange_quantity=simulated.filled_qty,
+                    average_fill_price=simulated.avg_fill_price,
+                    actual_fee_notional=simulated.fee_notional,
+                    fee_currency=simulated.fee_currency,
+                    fee_asset=simulated.fee_asset,
+                    fee_asset_quantity=simulated.fee_asset_quantity,
+                )
+            )
+            timeline.append(
+                ExecutionTimingRecord(
+                    decision_id=decision_id,
+                    action="open",
+                    observation_bar_start_ts=observation_ts,
+                    observation_completed_at_ts=point_ts,
+                    decision_ts=point_ts,
+                    submitted_at_ts=point_ts,
+                    next_tradable_event_ts=next_event_ts,
+                    resolved_at_ts=resolution_ts,
+                    fill_ts=resolution_ts,
+                    status="filled",
+                    price_source=price_source,
+                    liquidity_source=liquidity_source,
+                    fill_side="buy",
+                    decision_intent_exchange_quantity=Decimal("1"),
+                    requested_exchange_quantity=Decimal("1"),
+                    liquidity_reference_quantity=liquidity_reference_quantity,
+                    max_volume_participation=cfg.max_volume_participation,
+                    reference_price=reference_price,
+                )
+            )
+        else:
+            timeline.append(
+                ExecutionTimingRecord(
+                    decision_id=f"{observation_ts.isoformat()}_hold",
+                    action="hold",
+                    observation_bar_start_ts=observation_ts,
+                    observation_completed_at_ts=point_ts,
+                    decision_ts=point_ts,
+                    submitted_at_ts=None,
+                    next_tradable_event_ts=None,
+                    resolved_at_ts=point_ts,
+                    fill_ts=None,
+                    status="no_order",
+                    price_source=None,
+                )
+            )
+    diagnostics_by_equity_ts = {
+        diagnostic.equity_attribution_ts_ms: diagnostic
+        for diagnostic in resolved_diagnostics
+    }
+    timeline_by_decision = {
+        record.decision_id: index for index, record in enumerate(timeline)
+    }
+    tracker = PositionTracker(cfg.instrument_contract)
+    curve_with_fee_ledger: list[EquityPoint] = []
+    for point in curve:
+        attributed = diagnostics_by_equity_ts.get(point.ts_ms)
+        if attributed is not None:
+            assert attributed.filled_exchange_quantity is not None
+            assert attributed.average_fill_price is not None
+            assert attributed.actual_fee_notional is not None
+            assert attributed.fee_currency is not None
+            assert attributed.fill_ts_ms is not None
+            snapshot = tracker.apply_fill(
+                Fill(
+                    side="buy",
+                    filled_qty=attributed.filled_exchange_quantity,
+                    avg_fill_price=attributed.average_fill_price,
+                    fee_notional=attributed.actual_fee_notional,
+                    fee_currency=attributed.fee_currency,
+                    instrument_symbol=cfg.instrument_contract.symbol,
+                    instrument_contract_fingerprint=(
+                        cfg.instrument_contract.fingerprint
+                    ),
+                    ts_ms=attributed.fill_ts_ms,
+                    fee_asset=attributed.fee_asset,
+                    fee_asset_quantity=attributed.fee_asset_quantity,
+                )
+            )
+            timing_index = timeline_by_decision[attributed.decision_id]
+            timeline[timing_index] = replace(
+                timeline[timing_index],
+                post_fill_position_quantity=snapshot.net_qty.copy_abs(),
+            )
+        current = tracker.snapshot
+        if current.net_qty == 0:
+            if point.equity != 0:
+                raise ValueError("flat complete fixture equity must be zero")
+            mark_price = Decimal("10000")
+        else:
+            mark_price = cfg.instrument_contract.add_settlement_amounts(
+                current.avg_entry_price,
+                cfg.instrument_contract.add_settlement_amounts(
+                    point.equity,
+                    current.accumulated_fees,
+                    current.realized_pnl.copy_negate(),
+                )
+                / current.net_qty,
+            )
+        current = tracker.mark_to_market(mark_price, point.ts_ms)
+        curve_with_fee_ledger.append(
+            replace(
+                point,
+                realized_pnl=current.realized_pnl,
+                unrealized_pnl=current.unrealized_pnl,
+                net_qty=current.net_qty,
+                avg_entry_price=current.avg_entry_price,
+                mark_price=current.last_mark_price,
+                fill_count=current.fill_count,
+                accumulated_fees=current.accumulated_fees,
+            )
+        )
+    curve = tuple(curve_with_fee_ledger)
     summary = BacktestSummary(
         bar_count=len(curve),
-        fill_count=len(diagnostics),
+        fill_count=len(resolved_diagnostics),
         start_ts_ms=curve[0].ts_ms if curve else 0,
         end_ts_ms=curve[-1].ts_ms if curve else 0,
         final_equity=curve[-1].equity if curve else Decimal("0"),
         cumulative_pnl=curve[-1].equity if curve else Decimal("0"),
+        max_drawdown_bps=(
+            max(point.drawdown_bps for point in curve)
+            if curve
+            else Decimal("0")
+        ),
+        sharpe_ratio=expected_sharpe,
+        fee_total=cfg.instrument_contract.add_settlement_amounts(
+            *(
+                diagnostic.actual_fee_notional
+                for diagnostic in resolved_diagnostics
+                if diagnostic.actual_fee_notional is not None
+            )
+        ),
+        settlement_currency=cfg.instrument_contract.settle_currency,
+        instrument_symbol=cfg.instrument_contract.symbol,
+        instrument_contract_fingerprint=cfg.instrument_contract.fingerprint,
     )
     return BacktestResult(
         config=cfg,
+        resolved_parameters=replace(
+            ReplayParameterOverrides.for_family(cfg.family),
+            strategy_short_bias_enabled=False,
+        ),
+        adapter_identity=(
+            "aats.data_platform.replay.adapters.independent_adapter."
+            "IndependentReplayAdapter"
+        ),
+        adapter_algorithm_version="independent-replay/v2",
         summary=summary,
-        cost_summary=CostValidationSummary(total_decisions=len(diagnostics)),
+        cost_summary=validator.summary(),
         equity_curve=curve,
         decisions_count=len(curve),
-        fills_count=len(diagnostics),
+        fills_count=len(resolved_diagnostics),
         start_ts=start_ts,
         end_ts=end_ts,
-        cost_diagnostics=diagnostics,
+        cost_diagnostics=tuple(resolved_diagnostics),
+        execution_timeline=tuple(timeline),
     )
 
 
@@ -134,16 +431,25 @@ class TestScorecardShape(unittest.TestCase):
         sc = self._build_standard()
         self.assertEqual(
             set(sc.keys()),
-            {"meta", "oos", "cross_window", "cost_adjusted", "regime_slice"},
+            _TOP_LEVEL_KEYS,
+        )
+        self.assertEqual(sc["artifact_kind"], "backtest_evidence_scorecard")
+        self.assertEqual(
+            sc["artifact_schema_version"],
+            "backtest-evidence-scorecard/v2",
         )
 
     def test_meta_includes_symbol_and_window(self) -> None:
         sc = self._build_standard()
         meta = sc["meta"]
-        self.assertEqual(meta["symbol"], "BTC-USDT-SWAP")
+        self.assertEqual(meta["symbol"], "BTC-USDT")
         self.assertEqual(meta["timeframe"], "1h")
         self.assertEqual(meta["execution_model_version"], "next_bar_event_v2")
-        self.assertEqual(meta["fill_model_version"], "ohlcv_participation_cap_v2")
+        self.assertEqual(
+            meta["fill_model_version"],
+            "ohlcv_participation_cap_contract_v3",
+        )
+        self.assertEqual(meta["spot_buy_fee_asset"], "quote")
         self.assertEqual(meta["market_data_granularity"], "ohlcv")
         self.assertEqual(
             meta["execution_realism_limitations"],
@@ -157,26 +463,74 @@ class TestScorecardShape(unittest.TestCase):
         )
         self.assertEqual(meta["total_bars"], 8)
         self.assertEqual(meta["total_fills"], 4)
-        # UTC ISO boundaries
+        self.assertEqual(meta["cadence_gap_count"], 0)
+        self.assertEqual(
+            meta["risk_metric_policy_id"],
+            "calendar-365.25-bar-pnl-increment/v1",
+        )
         self.assertTrue(meta["start_ts"].endswith("+00:00"))
         self.assertTrue(meta["end_ts"].endswith("+00:00"))
         self.assertEqual(meta["generated_at"], "2026-04-23T00:00:00+00:00")
 
-    def test_no_verdict_fields_or_text(self) -> None:
-        """整份 scorecard 不得含 go / no-go / pass / fail / verdict / archive。"""
-        sc = self._build_standard()
-        blob = json.dumps(sc).lower()
-        forbidden = ["verdict", "go/no-go", "no_go", "pass", "fail", "archive"]
-        for token in forbidden:
-            self.assertNotIn(
-                token,
-                blob,
-                f"verdict-style token {token!r} must not appear in scorecard",
-            )
-        # 也不得出现裸 "go" (完整 word)
-        self.assertNotRegex(
-            blob, r"\bgo\b", "bare verdict word 'go' must not appear"
+    def test_derivative_scorecard_remains_fail_closed_without_verified_lineage(self) -> None:
+        result = _mk_result(
+            curve=(),
+            diagnostics=(),
+            config=BacktestConfig(
+                instrument_contract=LINEAR_SWAP_CONTRACT,
+            ),
         )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "legacy_derivative_replay_contract_lineage_required",
+        ):
+            build_scorecard(result)
+
+    def test_result_contract_identity_mismatch_is_rejected(self) -> None:
+        result = _mk_result(curve=(_mk_point(0, "0"),), diagnostics=())
+        bad_summary = replace(result.summary, instrument_symbol="ETH-USDT")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "backtest_summary_instrument_symbol_mismatch",
+        ):
+            build_scorecard(replace(result, summary=bad_summary))
+
+    def test_scorecard_rejects_falsy_non_mapping_parameter_extra(self) -> None:
+        result = _mk_result(curve=(), diagnostics=())
+        for invalid in (None, [], ""):
+            params = replace(result.resolved_parameters)
+            object.__setattr__(params, "extra", invalid)
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError,
+                "backtest_resolved_parameters_extra_must_be_empty",
+            ):
+                build_scorecard(replace(result, resolved_parameters=params))
+
+    def test_no_verdict_fields_or_text(self) -> None:
+        """整份 scorecard 不得含自动 gate 字段或完整裁决值。"""
+        sc = self._build_standard()
+        forbidden = {"verdict", "go", "nogo", "pass", "fail", "archive"}
+
+        def walk(value: object) -> None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    normalized = "".join(
+                        char for char in str(key).lower() if char.isalnum()
+                    )
+                    self.assertNotIn(normalized, forbidden)
+                    walk(child)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child)
+            elif isinstance(value, str):
+                normalized = "".join(
+                    char for char in value.lower() if char.isalnum()
+                )
+                self.assertNotIn(normalized, forbidden)
+
+        walk(sc)
 
     def test_scorecard_is_json_serializable(self) -> None:
         sc = self._build_standard()
@@ -186,7 +540,7 @@ class TestScorecardShape(unittest.TestCase):
         reloaded = json.loads(dumped)
         self.assertEqual(
             set(reloaded.keys()),
-            {"meta", "oos", "cross_window", "cost_adjusted", "regime_slice"},
+            _TOP_LEVEL_KEYS,
         )
 
 
@@ -368,6 +722,45 @@ class TestScorecardCrossWindow(unittest.TestCase):
             self.assertGreaterEqual(starts[i], starts[i - 1])
             self.assertGreaterEqual(ends[i], ends[i - 1])
 
+    def test_cross_window_partitions_only_oos_test(self) -> None:
+        curve = tuple(_mk_point(i, str(i)) for i in range(18))
+        diagnostics = tuple(_mk_diagnostic(i) for i in range(17))
+        result = _mk_result(
+            curve=curve,
+            diagnostics=diagnostics,
+            window_hours=18,
+        )
+        sc = build_scorecard(result)
+
+        test = sc["oos"]["test"]
+        windows = sc["cross_window"]
+        self.assertEqual(windows[0]["start"], test["start"])
+        self.assertEqual(windows[-1]["end"], test["end"])
+        self.assertEqual(sum(slot["fills"] for slot in windows), test["fills"])
+        # Return 按终点归属，每个 test return 必须且只能进入一个窗口。
+        self.assertEqual(
+            sum(slot["sample_n"] for slot in windows),
+            test["sample_n"],
+        )
+        self.assertGreater(windows[0]["start"], sc["oos"]["train"]["start"])
+
+    def test_cross_window_keeps_loss_at_oos_and_slice_boundary(self) -> None:
+        values = ["0", "0", "0", *("-1000" for _ in range(7))]
+        curve = tuple(_mk_point(i, value) for i, value in enumerate(values))
+        result = _mk_result(curve=curve, diagnostics=(), window_hours=10)
+
+        sc = build_scorecard(
+            result,
+            split_ts=_BASE_TS + timedelta(hours=3),
+        )
+
+        self.assertLess(sc["oos"]["test"]["ir"], 0)
+        self.assertGreater(sc["cross_window"][0]["max_drawdown_bps"], 0)
+        self.assertEqual(
+            sum(slot["sample_n"] for slot in sc["cross_window"]),
+            sc["oos"]["test"]["sample_n"],
+        )
+
     def test_cross_window_sample_n_present_and_nonneg(self) -> None:
         """v0.2 模板对齐: 每个 cross_window slot 必须含整数 sample_n >= 0。"""
         curve = tuple(_mk_point(i, str(i)) for i in range(9))
@@ -384,8 +777,8 @@ class TestScorecardCrossWindow(unittest.TestCase):
 
     def test_cross_window_with_drawdown(self) -> None:
         """明显回撤段 -> max_drawdown_bps > 0。"""
-        # 人造三段: 升 / 降 / 升
-        values = ["0", "100", "200", "300", "100", "50", "80", "160", "240"]
+        # 回撤必须发生在 OOS test 的同一个 cross-window 子段内。
+        values = ["0", "100", "200", "300", "100", "200", "50", "160", "240"]
         curve = tuple(_mk_point(i, v) for i, v in enumerate(values))
         result = _mk_result(curve=curve, diagnostics=(), window_hours=9)
         sc = build_scorecard(result)
@@ -406,9 +799,9 @@ class TestScorecardCostAdjusted(unittest.TestCase):
         # assumed_cost 6.0, actual 5.0 -> diff -1.0, actual_net = 10 - (-1) = 11
         diagnostics = tuple(
             _mk_diagnostic(i, assumed_cost=6.0, actual_cost=5.0, assumed_net=10.0)
-            for i in range(4)
+            for i in range(3)
         )
-        config = BacktestConfig(ioc_slippage_bps=1.5, assumed_cost_bps=6.0)
+        config = BacktestConfig(taker_fee_bps=3.5, ioc_slippage_bps=1.5)
         result = _mk_result(curve=curve, diagnostics=diagnostics, config=config)
         sc = build_scorecard(result)
         ca = sc["cost_adjusted"]
@@ -426,10 +819,10 @@ class TestScorecardCostAdjusted(unittest.TestCase):
                 "sensitivity",
             },
         )
-        self.assertAlmostEqual(ca["fee_bps"], 5.0, places=6)
+        self.assertAlmostEqual(ca["fee_bps"], 3.5, places=6)
         self.assertAlmostEqual(ca["slip_bps"], 1.5, places=6)
-        # exec_buffer = assumed_cost(6) - fee(5) - slip(1.5) = -0.5
-        self.assertAlmostEqual(ca["exec_buffer_bps"], -0.5, places=6)
+        # exec_buffer = assumed_cost(6) - fee(3.5) - slip(1.5) = 1.0
+        self.assertAlmostEqual(ca["exec_buffer_bps"], 1.0, places=6)
         # realized_edge = assumed_net(10) + assumed_cost(6) = 16
         self.assertAlmostEqual(ca["realized_edge_bps"], 16.0, places=6)
         # net_edge = actual_net (10 - (-1)) = 11
@@ -450,15 +843,17 @@ class TestScorecardCostAdjusted(unittest.TestCase):
     def test_slip_bps_ioc_uses_config_value(self) -> None:
         curve = tuple(_mk_point(i, str(i)) for i in range(3))
         config = BacktestConfig(
-            order_type="ioc", ioc_slippage_bps=1.5, assumed_cost_bps=6.0
+            order_type="ioc",
+            taker_fee_bps=3.5,
+            ioc_slippage_bps=1.5,
         )
         diagnostics = (_mk_diagnostic(0, assumed_cost=6.0, actual_cost=5.0),)
         result = _mk_result(curve=curve, diagnostics=diagnostics, config=config)
         sc = build_scorecard(result)
         self.assertAlmostEqual(sc["cost_adjusted"]["slip_bps"], 1.5, places=6)
-        # exec_buffer = assumed_cost(6) - fee(5) - slip(1.5) = -0.5
+        # v2 显式分项: actual_cost(5) = fee(3.5) + slip(1.5)。
         self.assertAlmostEqual(
-            sc["cost_adjusted"]["exec_buffer_bps"], -0.5, places=6
+            sc["cost_adjusted"]["exec_buffer_bps"], 1.0, places=6
         )
 
     def test_slip_bps_post_only_is_zero(self) -> None:
@@ -466,8 +861,8 @@ class TestScorecardCostAdjusted(unittest.TestCase):
         curve = tuple(_mk_point(i, str(i)) for i in range(3))
         config = BacktestConfig(
             order_type="post_only",
+            maker_fee_bps=5.0,
             ioc_slippage_bps=1.5,  # present in config but must not leak
-            assumed_cost_bps=6.0,
         )
         diagnostics = (_mk_diagnostic(0, assumed_cost=6.0, actual_cost=5.0),)
         result = _mk_result(curve=curve, diagnostics=diagnostics, config=config)
@@ -483,8 +878,8 @@ class TestScorecardCostAdjusted(unittest.TestCase):
         curve = tuple(_mk_point(i, str(i)) for i in range(3))
         config = BacktestConfig(
             order_type="bounded_limit",
+            taker_fee_bps=3.5,
             ioc_slippage_bps=1.5,
-            assumed_cost_bps=6.0,
         )
         diagnostics = (_mk_diagnostic(0, assumed_cost=6.0, actual_cost=5.0),)
         result = _mk_result(curve=curve, diagnostics=diagnostics, config=config)
@@ -506,8 +901,8 @@ class TestScorecardCostAdjusted(unittest.TestCase):
         )
         config = BacktestConfig(
             order_type="ioc",
-            ioc_slippage_bps=99.0,
-            assumed_cost_bps=8.0,
+            taker_fee_bps=4.75,
+            ioc_slippage_bps=1.5,
         )
         result = _mk_result(
             curve=curve,
@@ -548,7 +943,7 @@ _COST_FIELDS = {
 class TestScorecardCostAdjustedSplit(unittest.TestCase):
     def test_cost_adjusted_train_test_fields_present(self) -> None:
         curve = tuple(_mk_point(i, str(i)) for i in range(6))
-        diagnostics = tuple(_mk_diagnostic(i) for i in range(6))
+        diagnostics = tuple(_mk_diagnostic(i) for i in range(5))
         result = _mk_result(curve=curve, diagnostics=diagnostics)
         sc = build_scorecard(result)
         ca = sc["cost_adjusted"]
@@ -566,20 +961,20 @@ class TestScorecardCostAdjustedSplit(unittest.TestCase):
             for i in range(3)
         )
         test_diags = tuple(
-            _mk_diagnostic(i, assumed_cost=10.0, actual_cost=7.0, assumed_net=20.0)
+            _mk_diagnostic(i, assumed_cost=10.0, actual_cost=2.0, assumed_net=20.0)
             for i in range(4, 8)
         )
         diagnostics = train_diags + test_diags
-        config = BacktestConfig(ioc_slippage_bps=1.0, assumed_cost_bps=6.0)
+        config = BacktestConfig(taker_fee_bps=1.0, ioc_slippage_bps=1.0)
         result = _mk_result(curve=curve, diagnostics=diagnostics, config=config)
         split = _BASE_TS + timedelta(hours=4)
         sc = build_scorecard(result, split_ts=split)
         ca = sc["cost_adjusted"]
-        # train: fee == 2.0, realized == assumed_net(8) + assumed_cost(4) = 12
-        self.assertAlmostEqual(ca["train"]["fee_bps"], 2.0, places=6)
+        # v2 显式分项: actual_cost(2) = fee(1) + slip(1)。
+        self.assertAlmostEqual(ca["train"]["fee_bps"], 1.0, places=6)
         self.assertAlmostEqual(ca["train"]["realized_edge_bps"], 12.0, places=6)
-        # test: fee == 7.0, realized == assumed_net(20) + assumed_cost(10) = 30
-        self.assertAlmostEqual(ca["test"]["fee_bps"], 7.0, places=6)
+        # v2 同一运行必须绑定同一配置费率；两侧用 assumed edge 区分。
+        self.assertAlmostEqual(ca["test"]["fee_bps"], 1.0, places=6)
         self.assertAlmostEqual(ca["test"]["realized_edge_bps"], 30.0, places=6)
         # slip_bps 遵循 order_type 规则, 与全局一致
         self.assertEqual(ca["train"]["slip_bps"], ca["slip_bps"])
@@ -588,7 +983,7 @@ class TestScorecardCostAdjustedSplit(unittest.TestCase):
     def test_cost_adjusted_time_midpoint_fallback_generates_both_sides(self) -> None:
         """无 split_ts: 回退到 curve time-midpoint, train/test 仍可生成。"""
         curve = tuple(_mk_point(i, str(i)) for i in range(8))
-        diagnostics = tuple(_mk_diagnostic(i) for i in range(8))
+        diagnostics = tuple(_mk_diagnostic(i) for i in range(7))
         result = _mk_result(curve=curve, diagnostics=diagnostics)
         sc = build_scorecard(result)
         ca = sc["cost_adjusted"]
@@ -601,7 +996,7 @@ class TestScorecardCostAdjustedSplit(unittest.TestCase):
         # 也就是说两侧 fee 必须至少一个非零 (因为所有 diag 都走了常量 cost)
         self.assertTrue(ca["train"]["fee_bps"] > 0 or ca["test"]["fee_bps"] > 0)
         # 两侧 fee 的加权平均 (按落入两侧的比例) 应等于 overall fee
-        # 构造上所有 diag 的 actual_cost_bps 都是 5.0, 故两侧 fee 必都是 5.0 (当非空)
+        # 构造上 actual_cost=5、fee=5、实际 slip=0。
         for side in ("train", "test"):
             if ca[side]["fee_bps"] != 0.0:
                 self.assertAlmostEqual(ca[side]["fee_bps"], 5.0, places=6)
@@ -609,13 +1004,13 @@ class TestScorecardCostAdjustedSplit(unittest.TestCase):
     def test_cost_adjusted_split_aligned_with_oos_split(self) -> None:
         """train/test 的划分规则必须与 oos 的 split_ts 对齐。"""
         curve = tuple(_mk_point(i, str(i)) for i in range(10))
-        diagnostics = tuple(_mk_diagnostic(i) for i in range(10))
+        diagnostics = tuple(_mk_diagnostic(i) for i in range(9))
         result = _mk_result(curve=curve, diagnostics=diagnostics)
         # 显式路径
         split = _BASE_TS + timedelta(hours=3)
         sc = build_scorecard(result, split_ts=split)
         self.assertEqual(sc["oos"]["split_method"], "explicit")
-        # OOS fills 加和必须等于 cost_adjusted 两侧 diag 能被解析的总数 (这里 = 10)
+        # OOS fills 加和必须等于 cost_adjusted 两侧 diag 能被解析的总数。
         self.assertEqual(
             sc["oos"]["train"]["fills"] + sc["oos"]["test"]["fills"],
             len(diagnostics),
@@ -641,22 +1036,22 @@ class TestScorecardCostAdjustedSplit(unittest.TestCase):
         curve = tuple(_mk_point(i, str(i)) for i in range(4))
         diagnostics = tuple(
             _mk_diagnostic(i, assumed_cost=6.0, actual_cost=5.0, assumed_net=10.0)
-            for i in range(4)
+            for i in range(3)
         )
-        config = BacktestConfig(ioc_slippage_bps=1.5, assumed_cost_bps=6.0)
+        config = BacktestConfig(taker_fee_bps=3.5, ioc_slippage_bps=1.5)
         result = _mk_result(curve=curve, diagnostics=diagnostics, config=config)
         sc = build_scorecard(result)
         # 顶层 schema 未变
         self.assertEqual(
             set(sc.keys()),
-            {"meta", "oos", "cross_window", "cost_adjusted", "regime_slice"},
+            _TOP_LEVEL_KEYS,
         )
         ca = sc["cost_adjusted"]
         # overall 5 字段与改造前语义一致
         self.assertAlmostEqual(ca["realized_edge_bps"], 16.0, places=6)
-        self.assertAlmostEqual(ca["fee_bps"], 5.0, places=6)
+        self.assertAlmostEqual(ca["fee_bps"], 3.5, places=6)
         self.assertAlmostEqual(ca["slip_bps"], 1.5, places=6)
-        self.assertAlmostEqual(ca["exec_buffer_bps"], -0.5, places=6)
+        self.assertAlmostEqual(ca["exec_buffer_bps"], 1.0, places=6)
         self.assertAlmostEqual(ca["net_edge_bps"], 11.0, places=6)
 
 
@@ -676,9 +1071,9 @@ class TestScorecardCostAdjustedSensitivity(unittest.TestCase):
         curve = tuple(_mk_point(i, str(i)) for i in range(4))
         diagnostics = tuple(
             _mk_diagnostic(i, assumed_cost=6.0, actual_cost=5.0, assumed_net=10.0)
-            for i in range(4)
+            for i in range(3)
         )
-        config = BacktestConfig(ioc_slippage_bps=1.5, assumed_cost_bps=6.0)
+        config = BacktestConfig(taker_fee_bps=3.5, ioc_slippage_bps=1.5)
         result = _mk_result(curve=curve, diagnostics=diagnostics, config=config)
         sc = build_scorecard(result)
         sens = sc["cost_adjusted"]["sensitivity"]
@@ -687,24 +1082,52 @@ class TestScorecardCostAdjustedSensitivity(unittest.TestCase):
             self.assertEqual(set(sens[side].keys()), _SENSITIVITY_FIELDS)
 
     def test_sensitivity_formulas_match_manual_derivation(self) -> None:
-        """overall bucket: fee=5, slip=1.5, realized=16, exec_buf=-0.5."""
+        """overall bucket: fee=3.5, slip=1.5, realized=16, exec_buf=1."""
         curve = tuple(_mk_point(i, str(i)) for i in range(4))
         diagnostics = tuple(
             _mk_diagnostic(i, assumed_cost=6.0, actual_cost=5.0, assumed_net=10.0)
-            for i in range(4)
+            for i in range(3)
         )
-        config = BacktestConfig(ioc_slippage_bps=1.5, assumed_cost_bps=6.0)
+        config = BacktestConfig(taker_fee_bps=3.5, ioc_slippage_bps=1.5)
         result = _mk_result(curve=curve, diagnostics=diagnostics, config=config)
         sc = build_scorecard(result)
         overall_sens = sc["cost_adjusted"]["sensitivity"]["overall"]
-        # fee_up_20pct = 16 - (5*1.2) - 1.5 - (-0.5) = 9.0
+        # fee_up_20pct = 16 - (3.5*1.2) - 1.5 - 1 = 9.3
         self.assertAlmostEqual(
-            overall_sens["net_edge_fee_up_20pct_bps"], 9.0, places=6
+            overall_sens["net_edge_fee_up_20pct_bps"], 9.3, places=6
         )
-        # slip_plus_0_5bps = 16 - 5 - (1.5 + 0.5) - (-0.5) = 9.5
+        # slip_plus_0_5bps = 16 - 3.5 - (1.5 + 0.5) - 1 = 9.5
         self.assertAlmostEqual(
             overall_sens["net_edge_slip_plus_0_5bps_bps"], 9.5, places=6
         )
+
+    def test_negative_maker_rebate_shock_is_adverse(self) -> None:
+        diagnostic = CostDiagnostic(
+            decision_id=_BASE_TS.isoformat(),
+            assumed_cost_bps=-2.0,
+            actual_cost_bps=-2.0,
+            cost_diff_bps=0.0,
+            assumed_net_edge_bps=12.0,
+            actual_net_edge_bps=12.0,
+            edge_flipped_negative=False,
+            actual_fee_bps=-2.0,
+            actual_slippage_bps=0.0,
+        )
+        result = _mk_result(
+            curve=(_mk_point(0, "0"), _mk_point(1, "1")),
+            diagnostics=(diagnostic,),
+            config=BacktestConfig(
+                order_type="post_only",
+                maker_fee_bps=-2.0,
+            ),
+        )
+        scorecard = build_scorecard(result)
+        shocked = scorecard["cost_adjusted"]["sensitivity"]["overall"][
+            "net_edge_fee_up_20pct_bps"
+        ]
+
+        self.assertAlmostEqual(shocked, 11.6, places=6)
+        self.assertLess(shocked, scorecard["cost_adjusted"]["net_edge_bps"])
 
     def test_sensitivity_train_test_formulas_independent(self) -> None:
         """train 和 test 两侧的 sensitivity 都基于本侧 bucket 数值。"""
@@ -714,34 +1137,34 @@ class TestScorecardCostAdjustedSensitivity(unittest.TestCase):
             for i in range(3)
         )
         test_diags = tuple(
-            _mk_diagnostic(i, assumed_cost=10.0, actual_cost=7.0, assumed_net=20.0)
+            _mk_diagnostic(i, assumed_cost=10.0, actual_cost=2.0, assumed_net=20.0)
             for i in range(4, 8)
         )
         diagnostics = train_diags + test_diags
-        config = BacktestConfig(ioc_slippage_bps=1.0, assumed_cost_bps=6.0)
+        config = BacktestConfig(taker_fee_bps=1.0, ioc_slippage_bps=1.0)
         result = _mk_result(curve=curve, diagnostics=diagnostics, config=config)
         split = _BASE_TS + timedelta(hours=4)
         sc = build_scorecard(result, split_ts=split)
         sens = sc["cost_adjusted"]["sensitivity"]
         ca = sc["cost_adjusted"]
 
-        # train: realized=12, fee=2, slip=1, exec_buf = 4 - 2 - 1 = 1
-        # fee_up_20pct = 12 - 2.4 - 1 - 1 = 7.6
-        # slip_plus_0_5bps = 12 - 2 - 1.5 - 1 = 7.5
-        self.assertAlmostEqual(ca["train"]["exec_buffer_bps"], 1.0, places=6)
+        # train: realized=12, fee=1, slip=1, exec_buf = 4 - 1 - 1 = 2
+        # fee_up_20pct = 12 - 1.2 - 1 - 2 = 7.8
+        # slip_plus_0_5bps = 12 - 1 - 1.5 - 2 = 7.5
+        self.assertAlmostEqual(ca["train"]["exec_buffer_bps"], 2.0, places=6)
         self.assertAlmostEqual(
-            sens["train"]["net_edge_fee_up_20pct_bps"], 7.6, places=6
+            sens["train"]["net_edge_fee_up_20pct_bps"], 7.8, places=6
         )
         self.assertAlmostEqual(
             sens["train"]["net_edge_slip_plus_0_5bps_bps"], 7.5, places=6
         )
 
-        # test: realized=30, fee=7, slip=1, exec_buf = 10 - 7 - 1 = 2
-        # fee_up_20pct = 30 - 8.4 - 1 - 2 = 18.6
-        # slip_plus_0_5bps = 30 - 7 - 1.5 - 2 = 19.5
-        self.assertAlmostEqual(ca["test"]["exec_buffer_bps"], 2.0, places=6)
+        # test: realized=30, fee=1, slip=1, exec_buf = 10 - 1 - 1 = 8
+        # fee_up_20pct = 30 - 1.2 - 1 - 8 = 19.8
+        # slip_plus_0_5bps = 30 - 1 - 1.5 - 8 = 19.5
+        self.assertAlmostEqual(ca["test"]["exec_buffer_bps"], 8.0, places=6)
         self.assertAlmostEqual(
-            sens["test"]["net_edge_fee_up_20pct_bps"], 18.6, places=6
+            sens["test"]["net_edge_fee_up_20pct_bps"], 19.8, places=6
         )
         self.assertAlmostEqual(
             sens["test"]["net_edge_slip_plus_0_5bps_bps"], 19.5, places=6
@@ -763,9 +1186,9 @@ class TestScorecardCostAdjustedSensitivity(unittest.TestCase):
         curve = tuple(_mk_point(i, str(i)) for i in range(4))
         diagnostics = tuple(
             _mk_diagnostic(i, assumed_cost=6.0, actual_cost=5.0, assumed_net=10.0)
-            for i in range(4)
+            for i in range(3)
         )
-        config = BacktestConfig(ioc_slippage_bps=1.5, assumed_cost_bps=6.0)
+        config = BacktestConfig(taker_fee_bps=3.5, ioc_slippage_bps=1.5)
         result = _mk_result(curve=curve, diagnostics=diagnostics, config=config)
         far_future = _BASE_TS + timedelta(days=30)
         sc = build_scorecard(result, split_ts=far_future)
@@ -782,12 +1205,12 @@ class TestScorecardCostAdjustedSensitivity(unittest.TestCase):
 
     def test_sensitivity_does_not_change_top_level_schema(self) -> None:
         curve = tuple(_mk_point(i, str(i)) for i in range(4))
-        diagnostics = tuple(_mk_diagnostic(i) for i in range(4))
+        diagnostics = tuple(_mk_diagnostic(i) for i in range(3))
         result = _mk_result(curve=curve, diagnostics=diagnostics)
         sc = build_scorecard(result)
         self.assertEqual(
             set(sc.keys()),
-            {"meta", "oos", "cross_window", "cost_adjusted", "regime_slice"},
+            _TOP_LEVEL_KEYS,
         )
         # 旧的 overall / train / test 5 字段仍然原样存在
         for side in ("train", "test"):
@@ -869,7 +1292,7 @@ class TestScorecardEdgeCases(unittest.TestCase):
             self.assertEqual(slot["max_drawdown_bps"], 0.0)
 
     def test_constant_equity_produces_zero_ir(self) -> None:
-        curve = tuple(_mk_point(i, "100") for i in range(8))
+        curve = tuple(_mk_point(i, "0") for i in range(8))
         result = _mk_result(curve=curve, diagnostics=())
         sc = build_scorecard(result)
         self.assertEqual(sc["oos"]["train"]["ir"], 0.0)
@@ -878,6 +1301,64 @@ class TestScorecardEdgeCases(unittest.TestCase):
             self.assertEqual(slot["ir"], 0.0)
         self.assertEqual(sc["regime_slice"]["vol"]["low"]["ir"], 0.0)
         self.assertEqual(sc["regime_slice"]["vol"]["high"]["ir"], 0.0)
+
+    def test_explicit_fill_attribution_must_be_complete_and_reconcilable(
+        self,
+    ) -> None:
+        curve = tuple(_mk_point(i, str(i)) for i in range(3))
+        valid = _mk_result(curve=curve, diagnostics=(_mk_diagnostic(0),))
+        baseline = valid.cost_diagnostics[0]
+        cases = (
+            (
+                replace(
+                    baseline,
+                    equity_attribution_ts_ms=None,
+                ),
+                1,
+                "scorecard_fill_attribution_incomplete",
+            ),
+            (
+                replace(
+                    baseline,
+                    equity_attribution_ts_ms=curve[0].ts_ms,
+                ),
+                1,
+                "scorecard_fill_attribution_missing_equity_interval",
+            ),
+        )
+        for diagnostic, fills_count, reason in cases:
+            with self.subTest(reason=reason):
+                result = replace(
+                    valid,
+                    cost_diagnostics=(diagnostic,),
+                    fills_count=fills_count,
+                )
+                result = replace(
+                    result,
+                    summary=replace(result.summary, fill_count=fills_count),
+                )
+                with self.assertRaisesRegex(ValueError, reason):
+                    build_scorecard(result)
+
+    def test_v2_scorecard_rejects_legacy_fill_without_diagnostic(self) -> None:
+        curve = tuple(_mk_point(i, str(i)) for i in range(3))
+        valid = _mk_result(curve=curve, diagnostics=(_mk_diagnostic(0),))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "scorecard_fill_diagnostic_count_mismatch",
+        ):
+            build_scorecard(replace(valid, cost_diagnostics=()))
+
+    def test_v2_scorecard_requires_complete_execution_timeline(self) -> None:
+        curve = tuple(_mk_point(i, str(i)) for i in range(3))
+        valid = _mk_result(curve=curve, diagnostics=(_mk_diagnostic(0),))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "backtest_execution_timeline_count_mismatch",
+        ):
+            build_scorecard(replace(valid, execution_timeline=()))
 
     def test_single_bar_curve_does_not_crash(self) -> None:
         curve = (_mk_point(0, "0"),)
@@ -914,7 +1395,7 @@ class TestScorecardAnnualizedMetrics(unittest.TestCase):
         sc = build_scorecard(result)
         self.assertEqual(
             set(sc.keys()),
-            {"meta", "oos", "cross_window", "cost_adjusted", "regime_slice"},
+            _TOP_LEVEL_KEYS,
         )
 
     def test_monotone_rising_ir_annualized_ge_ir(self) -> None:
@@ -932,7 +1413,7 @@ class TestScorecardAnnualizedMetrics(unittest.TestCase):
                 self.assertGreaterEqual(slot["sharpe_ratio"], slot["ir"])
 
     def test_constant_equity_annualized_metrics_are_zero(self) -> None:
-        curve = tuple(_mk_point(i, "100") for i in range(8))
+        curve = tuple(_mk_point(i, "0") for i in range(8))
         result = _mk_result(curve=curve, diagnostics=())
         sc = build_scorecard(result)
         for side in ("train", "test"):
@@ -993,6 +1474,47 @@ class TestScorecardNumericFinite(unittest.TestCase):
             r"^2026-04-23T12:34:56\+00:00$",
             sc["meta"]["generated_at"],
         ))
+
+    def test_external_scorecard_timestamps_must_be_explicit_utc(self) -> None:
+        result = _mk_result(
+            curve=(_mk_point(0, "0"), _mk_point(1, "1")),
+            diagnostics=(),
+        )
+        invalid_times = (
+            datetime(2026, 4, 23, 12, 34, 56),
+            datetime(
+                2026,
+                4,
+                23,
+                12,
+                34,
+                56,
+                tzinfo=timezone(timedelta(hours=8)),
+            ),
+        )
+        for field_name in ("generated_at", "split_ts"):
+            for invalid in invalid_times:
+                with self.subTest(field_name=field_name, invalid=invalid):
+                    kwargs = {field_name: invalid}
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        f"scorecard_{field_name}_must_be_utc",
+                    ):
+                        build_scorecard(result, **kwargs)
+
+    def test_huge_finite_decimal_curve_fails_before_nan_artifact(self) -> None:
+        curve = (
+            _mk_point(0, "0"),
+            _mk_point(1, "1e500"),
+            _mk_point(2, "2e500"),
+        )
+        result = _mk_result(curve=curve, diagnostics=())
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "backtest_equity_net_fee_identity_mismatch",
+        ):
+            build_scorecard(result)
 
 
 if __name__ == "__main__":

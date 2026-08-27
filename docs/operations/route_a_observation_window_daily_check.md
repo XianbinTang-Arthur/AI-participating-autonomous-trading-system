@@ -253,6 +253,8 @@ artifacts/route_a_observation_window/
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
+| `artifact_kind` | string | 固定为 `route_a_observation_window_summary`；消费者必须精确匹配。 |
+| `artifact_schema_version` | string | 固定为 `route-a-observation-window/v1`；旧版无版本 JSON 仅可留档，不得直接进入 Route-A bundle。 |
 | `generated_at` | ISO8601 UTC | 脚本开始时间 (= log header 的 `CHECK_TS`) |
 | `window_start` | ISO8601 UTC | 观察窗起点 (当前 = `2026-04-22T00:00:00Z`) |
 | `window_target` | ISO8601 UTC | 观察窗终点 (当前 = `2026-04-29T00:00:00Z`) |
@@ -266,6 +268,8 @@ artifacts/route_a_observation_window/
 
 ```json
 {
+  "artifact_kind": "route_a_observation_window_summary",
+  "artifact_schema_version": "route-a-observation-window/v1",
   "generated_at": "2026-04-24T14:02:11Z",
   "window_start": "2026-04-22T00:00:00Z",
   "window_target": "2026-04-29T00:00:00Z",
@@ -280,7 +284,9 @@ artifacts/route_a_observation_window/
 }
 ```
 
-`AATS_SKIP_DAILY_CHECK_JSON=true` 可关闭 JSON 落盘 (例如手跑调试时不想覆盖当日 automation 要看的 JSON)。写失败只记 WARN log, **不影响 check 通过/失败判定** (JSON 是额外 artifact, log 和 exit code 仍是 source-of-truth).
+`AATS_SKIP_DAILY_CHECK_JSON=true` 可关闭 JSON 落盘 (例如手跑调试时不想覆盖当日 automation 要看的 JSON)。JSON 先写同目录 staging 文件，再原子替换当日快照，避免消费者读到半个文件。写失败只记 WARN log, **不影响 check 通过/失败判定** (JSON 是额外 artifact, log 和 exit code 仍是 source-of-truth).
+
+单个 `route-a-observation-window/v1` JSON 只是一日检查快照，不能独立证明完整 7 天自然时间已经连续通过。`route-a-evidence-bundle/v2` 因此固定写入 `artifact_set_complete=false` 与 `observation_completion_status=incomplete_single_snapshot`；只有未来受审计的逐日 ledger/index 能把窗口内所有快照、重置历史与日志 digest 闭合后，才可重新定义“观察窗完成”产物。不得通过复制最后一日快照或修改 `generated_at/window_target` 冒充 7 天证据。
 
 观察窗结束后, 整批日志 (含 reset 前 2026-04-20 ~ 2026-04-22 的 FAIL 归档) commit 到 `docs/research/route_a_phase0/observation_window_logs/` 作为 evidence 提案的一部分 (Silver 稳定性的**第一手证据**, reset 轨迹保留以供审计)。
 

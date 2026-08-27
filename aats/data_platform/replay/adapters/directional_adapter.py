@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from datetime import datetime
 from decimal import Decimal
 
 from aats.data_platform.replay.adapters.base_adapter import BaseReplayAdapter
@@ -58,6 +59,46 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
     def family_name(self) -> str:
         return "directional"
 
+    @property
+    def algorithm_version(self) -> str:
+        return "directional-replay/v2"
+
+    @property
+    def accepted_parameter_keys(self) -> frozenset[str]:
+        return frozenset(
+            {
+                "min_confirm_ticks",
+                "score_stability_threshold",
+                "min_safe_net_edge_bps",
+                "signal_edge_scale_bps",
+                "directional_trend_weight",
+                "directional_return_clamp_bps",
+                "entry_threshold",
+                "close_threshold",
+                "short_entry_threshold",
+                "short_close_threshold",
+                "strategy_short_bias_enabled",
+                "min_hold_seconds",
+                "rebalance_cooldown_seconds",
+                "max_thesis_age_seconds",
+                "de_risk_net_edge_bps",
+                "failed_thesis_net_edge_bps",
+                "catastrophic_failed_thesis_buffer_bps",
+                "expected_slippage_buffer_bps",
+                "expected_execution_buffer_bps",
+                "max_acceptable_cost_bps",
+                "min_score_drawdown_bps",
+                "noise_buffer_bps",
+                "cost_config",
+                "taker_fee_bps",
+                "slippage_bps",
+                "maker_fee_bps",
+                "execution_style",
+                "passive_bias",
+                "maker_taker_bias",
+            }
+        )
+
     def reset_state(self) -> ReplayState:
         self._close_history.clear()
         self._score_history.clear()
@@ -72,7 +113,10 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
         self._close_history.append(close_f)
 
         # 计算分数
-        long_score, short_score = self._compute_scores()
+        long_score, raw_short_score = self._compute_scores()
+        short_score = (
+            raw_short_score if params.strategy_short_bias_enabled else 0.0
+        )
         dominant_leg = "long" if long_score >= short_score else "short"
         dominant_score = max(long_score, short_score)
         self._score_history.append(dominant_score)
@@ -109,9 +153,11 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
         ) and edge["cost"] <= params.max_acceptable_cost_bps
 
         # 状态机（注意: _advance_state 可能 append blocking_reasons — 副作用传参）
+        prior_position_qty = state.position_qty.copy_abs()
         action, new_state, close_reason = self._advance_state(
             state=state,
             bar=bar,
+            decision_ts=ctx.decision_ts,
             params=params,
             dominant_leg=dominant_leg,
             dominant_score=dominant_score,
@@ -127,7 +173,7 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
             delta_qty = Decimal("1")
         elif action == "close":
             target_qty = Decimal("0")
-            delta_qty = Decimal("-1")
+            delta_qty = prior_position_qty.copy_negate()
 
         return ReplayDecision(
             ts=bar.ts,
@@ -143,6 +189,7 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
             signal_edge_proxy_bps=round(signal_edge_proxy_bps, 4),
             funding_adjustment_bps=round(funding_adjustment_bps, 4),
             cost_bps=round(cost_bps, 4),
+            cost_bps_is_explicit=True,
             noise_buffer_bps=round(edge["noise_buffer"], 4),
             expected_net_edge_bps=round(expected_net_edge_bps, 4),
             target_position_qty=target_qty,
@@ -279,6 +326,7 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
         *,
         state: ReplayState,
         bar: ReplayBar,
+        decision_ts: datetime,
         params: ReplayParameterOverrides,
         dominant_leg: str,
         dominant_score: float,
@@ -301,7 +349,11 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
             # min_hold_seconds 保护
             held_seconds = 0.0
             if state.entry_ts is not None:
-                held_seconds = (bar.ts - state.entry_ts).total_seconds()
+                held_seconds = (decision_ts - state.entry_ts).total_seconds()
+                if held_seconds < 0.0:
+                    raise ValueError(
+                        "replay entry timestamp cannot follow decision time"
+                    )
 
             # 灾难性 failed_thesis 判定（whipsaw 防护）
             # 只有当 net_edge 深度跌破 failed_thesis 阈值（跨越 catastrophic buffer）
@@ -345,13 +397,19 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
                 state.position_side = "flat"
                 state.entry_price = None
                 state.entry_ts = None
-                state.last_close_ts = bar.ts
+                state.last_close_ts = decision_ts
                 return "close", "flat", close_reason
             return "hold", "holding", ""
 
         # rebalance_cooldown 保护
         if state.last_close_ts is not None:
-            cooldown_elapsed = (bar.ts - state.last_close_ts).total_seconds()
+            cooldown_elapsed = (
+                decision_ts - state.last_close_ts
+            ).total_seconds()
+            if cooldown_elapsed < 0.0:
+                raise ValueError(
+                    "replay close timestamp cannot follow decision time"
+                )
             if cooldown_elapsed < params.rebalance_cooldown_seconds:
                 if dominant_score >= entry_thresh:
                     blocking_reasons.append("rebalance_cooldown")
@@ -362,7 +420,7 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
             state.position_side = dominant_leg  # type: ignore[assignment]
             state.position_qty = Decimal("1")
             state.entry_price = bar.close
-            state.entry_ts = bar.ts
+            state.entry_ts = decision_ts
             return "open", "probing", ""
 
         if dominant_score >= entry_thresh:

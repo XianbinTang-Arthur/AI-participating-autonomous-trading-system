@@ -486,8 +486,13 @@ if [[ "${AATS_SKIP_DAILY_CHECK_JSON:-false}" != "true" ]]; then
     _json_dir="artifacts/route_a_observation_window"
     mkdir -p "$_json_dir" 2>/dev/null || true
     _json_file="${_json_dir}/${CHECK_DATE}.json"
-    {
+    _json_tmp=$(mktemp "${_json_dir}/.${CHECK_DATE}.json.staging.XXXXXX" 2>/dev/null || true)
+    if [[ -z "$_json_tmp" ]]; then
+        log "  (warn: JSON summary staging 文件创建失败, 不影响 check 结果)"
+    elif {
         printf '{'
+        printf '"artifact_kind":"route_a_observation_window_summary",'
+        printf '"artifact_schema_version":"route-a-observation-window/v1",'
         printf '"generated_at":"%s",' "$CHECK_TS"
         printf '"window_start":"%s",' "$WINDOW_START_UTC"
         printf '"window_target":"%s",' "$WINDOW_TARGET_UTC"
@@ -504,7 +509,15 @@ if [[ "${AATS_SKIP_DAILY_CHECK_JSON:-false}" != "true" ]]; then
         done
         printf ']}'
         printf '\n'
-    } >"$_json_file" 2>/dev/null || log "  (warn: JSON summary 写入失败, 不影响 check 结果)"
+    } >"$_json_tmp" 2>/dev/null; then
+        if ! mv -f -- "$_json_tmp" "$_json_file" 2>/dev/null; then
+            rm -f -- "$_json_tmp" 2>/dev/null || true
+            log "  (warn: JSON summary 原子发布失败, 不影响 check 结果)"
+        fi
+    else
+        rm -f -- "$_json_tmp" 2>/dev/null || true
+        log "  (warn: JSON summary 写入失败, 不影响 check 结果)"
+    fi
 fi
 
 case "$EXIT_CODE" in

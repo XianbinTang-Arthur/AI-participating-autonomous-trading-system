@@ -29,6 +29,9 @@ Cost Validator 做的事就是把**一个 decision 与其后续因果 fill**配�
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
+
+from aats.data_platform.replay.backtest.numeric import finite_float
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +54,15 @@ class CostDiagnostic:
         notes: 调试/审计备注。
         actual_fee_bps: 可选实际手续费分项；历史调用方可省略。
         actual_slippage_bps: 可选实际滑点分项；历史调用方可省略。
+        resolved_at_ts_ms: 订单解析完成的 UTC epoch 毫秒；旧产物可为空。
+        fill_ts_ms: 实际成交事件的 UTC epoch 毫秒；旧产物可为空。
+        equity_attribution_ts_ms: 该成交首次进入 equity curve 的点位时间；
+            IOC/open-event 成交通常晚于 fill_ts 一个 bar close，旧产物可为空。
+        filled_exchange_quantity / average_fill_price / actual_fee_notional:
+            versioned artifact 用于在显式 InstrumentContract 下独立重算手续费。
+        fee_currency: ``actual_fee_notional`` 的结算币种。
+        fee_asset / fee_asset_quantity: 实际扣费资产与有符号数量；可与
+            ``fee_currency`` 不同，用于重建 SPOT base-fee 库存变化。
     """
 
     decision_id: str
@@ -63,6 +75,35 @@ class CostDiagnostic:
     notes: str = ""
     actual_fee_bps: float | None = None
     actual_slippage_bps: float | None = None
+    # Keep new fields at the end so existing positional construction remains
+    # source-compatible with historical tests and artifact readers.
+    resolved_at_ts_ms: int | None = None
+    fill_ts_ms: int | None = None
+    equity_attribution_ts_ms: int | None = None
+    filled_exchange_quantity: Decimal | None = None
+    average_fill_price: Decimal | None = None
+    actual_fee_notional: Decimal | None = None
+    fee_currency: str | None = None
+    fee_asset: str | None = None
+    fee_asset_quantity: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        # Preserve existing constructor compatibility while ensuring the
+        # versioned JSON/fingerprint spelling of every zero-valued float is
+        # unique.  Other type/finite/identity checks remain in the strict
+        # artifact validator so legacy diagnostic readers keep their boundary.
+        for field_name in (
+            "assumed_cost_bps",
+            "actual_cost_bps",
+            "cost_diff_bps",
+            "assumed_net_edge_bps",
+            "actual_net_edge_bps",
+            "actual_fee_bps",
+            "actual_slippage_bps",
+        ):
+            value = getattr(self, field_name)
+            if type(value) is float and value == 0.0:
+                object.__setattr__(self, field_name, 0.0)
 
 
 @dataclass(frozen=True)
@@ -81,6 +122,17 @@ class CostValidationSummary:
     stable_sign_count: int = 0                 # 无翻转
     p50_cost_diff_bps: float = 0.0
     p95_cost_diff_bps: float = 0.0
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "avg_cost_diff_bps",
+            "max_cost_diff_bps",
+            "p50_cost_diff_bps",
+            "p95_cost_diff_bps",
+        ):
+            value = getattr(self, field_name)
+            if type(value) is float and value == 0.0:
+                object.__setattr__(self, field_name, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +176,15 @@ class CostValidator:
         notes: str = "",
         actual_fee_bps: float | None = None,
         actual_slippage_bps: float | None = None,
+        resolved_at_ts_ms: int | None = None,
+        fill_ts_ms: int | None = None,
+        equity_attribution_ts_ms: int | None = None,
+        filled_exchange_quantity: Decimal | None = None,
+        average_fill_price: Decimal | None = None,
+        actual_fee_notional: Decimal | None = None,
+        fee_currency: str | None = None,
+        fee_asset: str | None = None,
+        fee_asset_quantity: Decimal | None = None,
     ) -> CostDiagnostic:
         """记录一次 decision-vs-fill 对比。
 
@@ -135,28 +196,91 @@ class CostValidator:
 
         返回构造好的 ``CostDiagnostic``，并在内部追加。
         """
-        cost_diff_bps = float(actual_cost_bps) - float(assumed_cost_bps)
-        actual_net_edge_bps = float(assumed_net_edge_bps) - cost_diff_bps
-        edge_flipped_negative = (
-            float(assumed_net_edge_bps) > 0.0 and actual_net_edge_bps <= 0.0
+        assumed_cost = finite_float(
+            assumed_cost_bps,
+            reason="cost_diagnostic_non_finite",
         )
+        actual_cost = finite_float(
+            actual_cost_bps,
+            reason="cost_diagnostic_non_finite",
+        )
+        assumed_edge = finite_float(
+            assumed_net_edge_bps,
+            reason="cost_diagnostic_non_finite",
+        )
+        cost_diff_bps = finite_float(
+            actual_cost - assumed_cost,
+            reason="cost_diagnostic_non_finite",
+        )
+        actual_net_edge_bps = finite_float(
+            assumed_edge - cost_diff_bps,
+            reason="cost_diagnostic_non_finite",
+        )
+        edge_flipped_negative = (
+            assumed_edge > 0.0 and actual_net_edge_bps <= 0.0
+        )
+
+        resolved_ms = _optional_epoch_ms(
+            resolved_at_ts_ms,
+            field_name="resolved_at_ts_ms",
+        )
+        fill_ms = _optional_epoch_ms(fill_ts_ms, field_name="fill_ts_ms")
+        attribution_ms = _optional_epoch_ms(
+            equity_attribution_ts_ms,
+            field_name="equity_attribution_ts_ms",
+        )
+        if (
+            fill_ms is not None
+            and attribution_ms is not None
+            and attribution_ms < fill_ms
+        ):
+            raise ValueError("equity_attribution_precedes_fill")
 
         diag = CostDiagnostic(
             decision_id=decision_id,
-            assumed_cost_bps=float(assumed_cost_bps),
-            actual_cost_bps=float(actual_cost_bps),
+            assumed_cost_bps=assumed_cost,
+            actual_cost_bps=actual_cost,
             cost_diff_bps=cost_diff_bps,
-            assumed_net_edge_bps=float(assumed_net_edge_bps),
+            assumed_net_edge_bps=assumed_edge,
             actual_net_edge_bps=actual_net_edge_bps,
             edge_flipped_negative=edge_flipped_negative,
             notes=notes,
             actual_fee_bps=(
-                None if actual_fee_bps is None else float(actual_fee_bps)
+                None
+                if actual_fee_bps is None
+                else finite_float(
+                    actual_fee_bps,
+                    reason="cost_diagnostic_non_finite",
+                )
             ),
             actual_slippage_bps=(
                 None
                 if actual_slippage_bps is None
-                else float(actual_slippage_bps)
+                else finite_float(
+                    actual_slippage_bps,
+                    reason="cost_diagnostic_non_finite",
+                )
+            ),
+            resolved_at_ts_ms=resolved_ms,
+            fill_ts_ms=fill_ms,
+            equity_attribution_ts_ms=attribution_ms,
+            filled_exchange_quantity=_optional_finite_decimal(
+                filled_exchange_quantity,
+                field_name="filled_exchange_quantity",
+            ),
+            average_fill_price=_optional_finite_decimal(
+                average_fill_price,
+                field_name="average_fill_price",
+            ),
+            actual_fee_notional=_optional_finite_decimal(
+                actual_fee_notional,
+                field_name="actual_fee_notional",
+            ),
+            fee_currency=fee_currency,
+            fee_asset=fee_asset,
+            fee_asset_quantity=_optional_finite_decimal(
+                fee_asset_quantity,
+                field_name="fee_asset_quantity",
             ),
         )
         self._diagnostics.append(diag)
@@ -173,7 +297,10 @@ class CostValidator:
         diffs = [d.cost_diff_bps for d in self._diagnostics]
         n = len(diffs)
 
-        avg = sum(diffs) / n
+        avg = finite_float(
+            sum(diffs) / n,
+            reason="cost_summary_non_finite",
+        )
 
         # max_cost_diff_bps：绝对值最大，保留原 sign
         max_abs_diff = max(diffs, key=lambda v: abs(v))
@@ -214,6 +341,28 @@ class CostValidator:
     def diagnostics(self) -> tuple[CostDiagnostic, ...]:
         """已记录所有 diagnostics（不可变 tuple）。"""
         return tuple(self._diagnostics)
+
+
+def _optional_epoch_ms(value: int | None, *, field_name: str) -> int | None:
+    """Validate one optional integer epoch timestamp without float coercion."""
+
+    if value is None:
+        return None
+    if type(value) is not int:
+        raise ValueError(f"{field_name}_must_be_integer")
+    return value
+
+
+def _optional_finite_decimal(
+    value: Decimal | None,
+    *,
+    field_name: str,
+) -> Decimal | None:
+    if value is None:
+        return None
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise ValueError(f"{field_name}_must_be_finite_decimal")
+    return value
 
 
 __all__ = [

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal, localcontext
 
 import pytest
@@ -11,6 +12,10 @@ from aats.domain.instrument_contract import (
 )
 from aats.schemas.exchange import InstrumentMetadata
 from aats.services.execution_engine.okx_account import OKXAccountService
+from tests.unit.replay_contract_fixtures import (
+    INVERSE_SWAP_CONTRACT,
+    SPOT_CONTRACT,
+)
 
 
 def _instrument(
@@ -105,6 +110,71 @@ def test_inverse_contract_golden_quantity_notional_and_pnl() -> None:
         "0.000081967213114754098360655737704918032786885245901700"
     )
     assert contract.settlement_pnl_currency == "BTC"
+
+
+def test_linear_and_inverse_settlement_fee_use_the_contract_currency() -> None:
+    linear = instrument_contract_from_metadata(
+        _instrument(
+            symbol="BTC-USDT-SWAP",
+            base="BTC",
+            quote="USDT",
+            settle="USDT",
+            contract_type="linear",
+            contract_value="0.01",
+            contract_value_currency="BTC",
+        )
+    )
+    inverse = instrument_contract_from_metadata(
+        _instrument(
+            symbol="BTC-USD-SWAP",
+            base="BTC",
+            quote="USD",
+            settle="BTC",
+            contract_type="inverse",
+            contract_value="100",
+            contract_value_currency="USD",
+            lot_size="1",
+        )
+    )
+
+    assert linear.settlement_notional(
+        Decimal("1"),
+        price=Decimal("50000"),
+    ) == Decimal("500.00")
+    assert linear.settlement_fee(
+        Decimal("1"),
+        price=Decimal("50000"),
+        fee_bps=Decimal("5"),
+    ) == Decimal("0.25000")
+    assert inverse.settlement_notional(
+        Decimal("3"),
+        price=Decimal("60000"),
+    ) == Decimal("0.005")
+    assert inverse.settlement_fee(
+        Decimal("3"),
+        price=Decimal("60000"),
+        fee_bps=Decimal("5"),
+    ) == Decimal("0.0000025")
+
+
+def test_settlement_fee_preserves_negative_maker_rebate() -> None:
+    contract = instrument_contract_from_metadata(
+        _instrument(
+            symbol="BTC-USDT-SWAP",
+            base="BTC",
+            quote="USDT",
+            settle="USDT",
+            contract_type="linear",
+            contract_value="0.01",
+            contract_value_currency="BTC",
+        )
+    )
+
+    assert contract.settlement_fee(
+        Decimal("2"),
+        price=Decimal("50000"),
+        fee_bps=Decimal("-2"),
+    ) == Decimal("-0.20000")
 
 
 def test_spot_contract_uses_base_quantity_and_quote_pnl() -> None:
@@ -575,3 +645,115 @@ def test_face_value_underflow_is_mapped_to_stable_domain_error() -> None:
         match="contract_face_value_invalid",
     ):
         _ = contract.face_value
+
+
+def test_spot_contract_rejects_non_unit_face_metadata() -> None:
+    for field_name in ("contract_value", "contract_multiplier"):
+        with pytest.raises(
+            InstrumentContractError,
+            match="spot_contract_face_value_must_be_one",
+        ):
+            replace(SPOT_CONTRACT, **{field_name: Decimal("2")})
+
+
+def test_contract_fingerprint_canonicalizes_equivalent_decimal_spellings() -> None:
+    equivalent = replace(
+        SPOT_CONTRACT,
+        contract_value=Decimal("1.0"),
+        contract_multiplier=Decimal("1.00"),
+        lot_size=Decimal("0.00010"),
+        min_size=Decimal("0.000100"),
+        tick_size=Decimal("0.10"),
+    )
+
+    assert equivalent == SPOT_CONTRACT
+    assert equivalent.fingerprint == SPOT_CONTRACT.fingerprint
+
+
+def test_fillable_quantity_applies_lot_and_min_size_deterministically() -> None:
+    with localcontext() as ctx:
+        ctx.prec = 8
+        low_precision = INVERSE_SWAP_CONTRACT.fillable_exchange_quantity(
+            Decimal("5"),
+            available_quantity=Decimal("123.456789"),
+            max_participation=Decimal("0.01"),
+        )
+    with localcontext() as ctx:
+        ctx.prec = 50
+        high_precision = INVERSE_SWAP_CONTRACT.fillable_exchange_quantity(
+            Decimal("5"),
+            available_quantity=Decimal("123.456789"),
+            max_participation=Decimal("0.01"),
+        )
+
+    assert low_precision == high_precision == Decimal("1")
+    assert INVERSE_SWAP_CONTRACT.fillable_exchange_quantity(
+        Decimal("5"),
+        available_quantity=Decimal("50"),
+        max_participation=Decimal("0.01"),
+    ) == Decimal("0")
+
+
+def test_discrete_quantity_arithmetic_does_not_round_across_lot_boundary() -> None:
+    whole_unit_contract = replace(
+        SPOT_CONTRACT,
+        lot_size=Decimal("1"),
+        min_size=Decimal("1"),
+        tick_size=Decimal("1"),
+    )
+    just_below_one = Decimal("0." + "9" * 80)
+    just_above_one = Decimal("1." + "0" * 79 + "1")
+
+    assert whole_unit_contract.fillable_exchange_quantity(
+        just_below_one,
+        available_quantity=just_below_one,
+        max_participation=Decimal("1"),
+    ) == Decimal("0")
+    with pytest.raises(
+        InstrumentContractError,
+        match="exchange_quantity_lot_misaligned",
+    ):
+        whole_unit_contract.validate_exchange_quantity(just_above_one)
+
+
+def test_discrete_price_arithmetic_never_rounds_sell_above_reference() -> None:
+    whole_tick_contract = replace(SPOT_CONTRACT, tick_size=Decimal("1"))
+    reference = Decimal("99." + "9" * 80)
+
+    sell = whole_tick_contract.execution_price(
+        reference,
+        side="sell",
+        slippage_bps=Decimal("0"),
+    )
+    buy = whole_tick_contract.execution_price(
+        reference,
+        side="buy",
+        slippage_bps=Decimal("0"),
+    )
+
+    assert sell == Decimal("99")
+    assert sell <= reference
+    assert buy == Decimal("100")
+    assert buy >= reference
+
+
+def test_discrete_quantity_does_not_depend_on_python_int_string_limit() -> None:
+    tiny_lot_contract = replace(
+        SPOT_CONTRACT,
+        lot_size=Decimal("1e-5000"),
+        min_size=Decimal("1e-5000"),
+    )
+
+    assert tiny_lot_contract.fillable_exchange_quantity(
+        Decimal("1"),
+        available_quantity=Decimal("1"),
+        max_participation=Decimal("1"),
+    ) == Decimal("1")
+
+
+def test_exchange_and_settlement_sums_preserve_large_cancellation_exactly() -> None:
+    left = Decimal("9" * 53)
+    right = Decimal("-" + "9" * 52 + "8")
+
+    assert SPOT_CONTRACT.add_exchange_quantities(left, right) == Decimal("1")
+    assert SPOT_CONTRACT.add_settlement_amounts(left, right) == Decimal("1")

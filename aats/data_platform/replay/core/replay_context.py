@@ -16,10 +16,28 @@ Edge Contract（P0-3 统一语义）：
 
 from __future__ import annotations
 
+import copy
 import dataclasses as dc
-from datetime import datetime
+import math
+import re
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, ClassVar, Literal
+
+
+REPLAY_EXECUTION_STYLES = frozenset(
+    {
+        "bounded_limit_ioc",
+        "maker",
+        "passive",
+        "passive_first",
+        "bounded_limit",
+        "taker",
+        "bounded_taker_cap",
+        "exchange",
+        "market",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +58,34 @@ class ReplayBar:
     is_closed: bool
     aligned_funding_rate: Decimal | None
     funding_source_ts: datetime | None
+
+
+def canonicalize_replay_timeframe(timeframe: str) -> str:
+    """Return the stable spelling of one fixed replay timeframe."""
+    if not isinstance(timeframe, str):
+        raise ValueError(
+            "Unsupported replay timeframe for causal timing: "
+            f"{timeframe!r}; expected <positive integer>[m|h|d]"
+        )
+    match = re.fullmatch(r"([1-9][0-9]*)([mhd])", timeframe.strip().lower())
+    if match is None:
+        raise ValueError(
+            "Unsupported replay timeframe for causal timing: "
+            f"{timeframe!r}; expected <positive integer>[m|h|d]"
+        )
+    return f"{int(match.group(1))}{match.group(2)}"
+
+
+def parse_replay_timeframe(timeframe: str) -> timedelta:
+    """Parse a fixed replay timeframe without accepting calendar periods."""
+    canonical = canonicalize_replay_timeframe(timeframe)
+    amount = int(canonical[:-1])
+    unit = canonical[-1]
+    if unit == "m":
+        return timedelta(minutes=amount)
+    if unit == "h":
+        return timedelta(hours=amount)
+    return timedelta(days=amount)
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +128,48 @@ class ReplayCostConfig:
         "passive_first", "bounded_limit",           # 策略层别名
     })
 
+    def __post_init__(self) -> None:
+        resolved: dict[str, float] = {}
+        for name in (
+            "taker_fee_bps",
+            "slippage_bps",
+            "maker_fee_bps",
+            "passive_bias",
+            "maker_taker_bias",
+        ):
+            value = getattr(self, name)
+            if type(value) is bool:
+                raise ValueError(f"{name} must be numeric, not boolean")
+            try:
+                finite = math.isfinite(float(value))
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"{name} must be numeric") from exc
+            if not finite:
+                raise ValueError(f"{name} must be finite")
+            canonical = float(value)
+            if canonical == 0.0:
+                canonical = 0.0
+            resolved[name] = canonical
+            object.__setattr__(self, name, resolved[name])
+        if not isinstance(self.execution_style, str):
+            raise ValueError("execution_style must be a string")
+        canonical_style = self.execution_style.strip().lower()
+        if not canonical_style:
+            raise ValueError("execution_style must be non-empty")
+        object.__setattr__(self, "execution_style", canonical_style)
+        if not -10_000.0 < resolved["maker_fee_bps"] < 10_000.0:
+            raise ValueError("replay_maker_fee_bps_out_of_range")
+        if not 0.0 <= resolved["taker_fee_bps"] < 10_000.0:
+            raise ValueError("replay_taker_fee_bps_out_of_range")
+        if not 0.0 <= resolved["slippage_bps"] < 10_000.0:
+            raise ValueError("replay_slippage_bps_out_of_range")
+        if not 0.0 <= resolved["passive_bias"] <= 1.0:
+            raise ValueError("replay_passive_bias_out_of_range")
+        if not -1.0 <= resolved["maker_taker_bias"] <= 1.0:
+            raise ValueError("replay_maker_taker_bias_out_of_range")
+        if canonical_style not in REPLAY_EXECUTION_STYLES:
+            raise ValueError("replay_execution_style_unsupported")
+
     @property
     def blended_fee_bps(self) -> float:
         """按执行策略计算的混合费率（bps）。
@@ -115,15 +203,70 @@ class ReplayCostConfig:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> ReplayCostConfig:
-        return cls(
-            taker_fee_bps=float(d.get("taker_fee_bps", 5.0)),
-            slippage_bps=float(d.get("slippage_bps", 1.0)),
-            maker_fee_bps=float(d.get("maker_fee_bps", 2.0)),
-            execution_style=str(d.get("execution_style", "passive_first")),
-            passive_bias=float(d.get("passive_bias", 0.7)),
-            maker_taker_bias=float(d.get("maker_taker_bias", 0.0)),
+    def from_dict(
+        cls,
+        d: dict[str, Any],
+        *,
+        base: ReplayCostConfig | None = None,
+    ) -> ReplayCostConfig:
+        if not isinstance(d, dict) or any(not isinstance(key, str) for key in d):
+            raise ValueError("cost_config must be a string-keyed mapping")
+        writable_keys = {
+            "taker_fee_bps",
+            "slippage_bps",
+            "maker_fee_bps",
+            "execution_style",
+            "passive_bias",
+            "maker_taker_bias",
+        }
+        read_only_keys = {"blended_fee_bps", "total_cost_bps"}
+        unknown = set(d) - writable_keys - read_only_keys
+        if unknown:
+            raise ValueError(
+                "unknown_cost_config_keys:" + ",".join(sorted(unknown))
+            )
+        defaults = base or cls()
+
+        def _number(key: str, default: float) -> float:
+            if key not in d:
+                return float(default)
+            value = d[key]
+            if value is None:
+                raise ValueError(f"{key} must not be null")
+            if type(value) is bool:
+                raise ValueError(f"{key} must be numeric, not boolean")
+            try:
+                return float(value)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"{key} must be numeric") from exc
+
+        execution_style = d.get("execution_style", defaults.execution_style)
+        if "execution_style" in d and execution_style is None:
+            raise ValueError("execution_style must not be null")
+        if not isinstance(execution_style, str):
+            raise ValueError("execution_style must be a string")
+        resolved = cls(
+            taker_fee_bps=_number("taker_fee_bps", defaults.taker_fee_bps),
+            slippage_bps=_number("slippage_bps", defaults.slippage_bps),
+            maker_fee_bps=_number("maker_fee_bps", defaults.maker_fee_bps),
+            execution_style=execution_style,
+            passive_bias=_number("passive_bias", defaults.passive_bias),
+            maker_taker_bias=_number(
+                "maker_taker_bias",
+                defaults.maker_taker_bias,
+            ),
         )
+        for key in read_only_keys & set(d):
+            provided = d[key]
+            if provided is None or type(provided) is bool:
+                raise ValueError(f"{key} must be numeric")
+            try:
+                matches = float(provided) == float(getattr(resolved, key))
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"{key} must be numeric") from exc
+            if not matches:
+                raise ValueError(f"{key} does not match resolved cost config")
+        return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -284,12 +427,109 @@ class ReplayParameterOverrides:
     extra: dict[str, Any] = dc.field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """参数约束校验（frozen dataclass 只能 raise，不能 mutate）。"""
+        """校验并规范化会进入 artifact/fingerprint 的策略参数。"""
+        if type(self.extra) is not dict:
+            raise ValueError("extra must be a dict")
+        if any(type(key) is not str or not key for key in self.extra):
+            raise ValueError("extra keys must be non-empty strings")
+        # ``extra`` remains an opaque compatibility payload for legacy replay
+        # callers.  Detach nested values from the caller so later mutation of
+        # the source mapping cannot silently alter this frozen dataclass.  The
+        # versioned backtest artifact contract separately requires this mapping
+        # to be empty, so opaque values never become part of that schema.
+        try:
+            frozen_extra = copy.deepcopy(self.extra)
+        except Exception as exc:
+            raise ValueError("extra values must support defensive copying") from exc
+        object.__setattr__(self, "extra", frozen_extra)
+        if type(self.min_confirm_ticks) is not int or self.min_confirm_ticks < 1:
+            raise ValueError("min_confirm_ticks must be a positive integer")
         if type(self.strategy_short_bias_enabled) is not bool:
             raise ValueError(
                 "strategy_short_bias_enabled 必须是 bool，"
                 f"实际为 {type(self.strategy_short_bias_enabled).__name__}"
             )
+        optional_numeric_fields = {
+            "short_entry_threshold",
+            "short_close_threshold",
+            "min_score_drawdown_bps",
+        }
+        numeric_fields = {
+            field.name: getattr(self, field.name)
+            for field in dc.fields(self)
+            if field.name
+            not in {
+                "min_confirm_ticks",
+                "strategy_short_bias_enabled",
+                "cost_config",
+                "extra",
+            }
+        }
+        for name, value in numeric_fields.items():
+            if value is None:
+                if name not in optional_numeric_fields:
+                    raise ValueError(f"{name} must not be null")
+                continue
+            if type(value) is bool:
+                raise ValueError(f"{name} must be numeric, not boolean")
+            if type(value) not in {int, float, Decimal}:
+                raise ValueError(f"{name} must be numeric")
+            try:
+                canonical = float(value)
+            except OverflowError as exc:
+                raise ValueError(f"{name} must be finite") from exc
+            if not math.isfinite(canonical):
+                raise ValueError(f"{name} must be finite")
+            # JSON distinguishes -0.0 lexically even though the economics do
+            # not.  Normalize before dataclass serialization/fingerprinting.
+            if canonical == 0.0:
+                canonical = 0.0
+            object.__setattr__(self, name, canonical)
+        unit_interval_fields = {
+            "entry_threshold": self.entry_threshold,
+            "close_threshold": self.close_threshold,
+            "scale_in_threshold": self.scale_in_threshold,
+            "directional_trend_weight": self.directional_trend_weight,
+            "min_liquidity_quality": self.min_liquidity_quality,
+        }
+        if self.short_entry_threshold is not None:
+            unit_interval_fields["short_entry_threshold"] = (
+                self.short_entry_threshold
+            )
+        if self.short_close_threshold is not None:
+            unit_interval_fields["short_close_threshold"] = (
+                self.short_close_threshold
+            )
+        for name, value in unit_interval_fields.items():
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be in [0, 1]")
+        non_negative_fields = {
+            "score_stability_threshold": self.score_stability_threshold,
+            "min_safe_net_edge_bps": self.min_safe_net_edge_bps,
+            "min_hold_seconds": self.min_hold_seconds,
+            "rebalance_cooldown_seconds": self.rebalance_cooldown_seconds,
+            "max_thesis_age_seconds": self.max_thesis_age_seconds,
+            "expected_slippage_buffer_bps": (
+                self.expected_slippage_buffer_bps
+            ),
+            "expected_execution_buffer_bps": (
+                self.expected_execution_buffer_bps
+            ),
+            "max_acceptable_cost_bps": self.max_acceptable_cost_bps,
+            "limit_offset_bps_entry": self.limit_offset_bps_entry,
+            "noise_buffer_bps": self.noise_buffer_bps,
+        }
+        if self.min_score_drawdown_bps is not None:
+            non_negative_fields["min_score_drawdown_bps"] = (
+                self.min_score_drawdown_bps
+            )
+        for name, value in non_negative_fields.items():
+            if value < 0.0:
+                raise ValueError(f"{name} must be non-negative")
+        if self.signal_edge_scale_bps <= 0.0:
+            raise ValueError("signal_edge_scale_bps must be positive")
+        if self.directional_return_clamp_bps <= 0.0:
+            raise ValueError("directional_return_clamp_bps must be positive")
         if self.failed_thesis_net_edge_bps > self.de_risk_net_edge_bps:
             raise ValueError(
                 f"约束违反: failed_thesis_net_edge_bps ({self.failed_thesis_net_edge_bps}) "
@@ -346,7 +586,7 @@ class ReplayParameterOverrides:
 
         directional 家族原始硬编码阈值与 independent 不同：
           - directional: entry=0.45, close=0.20
-          - independent: entry=0.40, close=0.15
+          - independent: entry=0.30, close=0.15
         使用本方法可避免共享默认值导致的静默行为变更。
         """
         if family == "directional":
@@ -355,7 +595,9 @@ class ReplayParameterOverrides:
                 close_threshold=0.20,
                 scale_in_threshold=0.55,
             )
-        return cls()
+        if family == "independent":
+            return cls()
+        raise ValueError(f"unsupported_replay_family:{family}")
 
     # ── 辅助方法：获取方向特定阈值 ──────────────────────────────
     def get_entry_threshold(self, leg: str = "long") -> float:
@@ -405,14 +647,21 @@ class ReplayParameterOverrides:
         return d
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> ReplayParameterOverrides:
+    def from_dict(
+        cls,
+        d: dict[str, Any],
+        *,
+        base: ReplayParameterOverrides | None = None,
+    ) -> ReplayParameterOverrides:
         """从字典反序列化。
 
         支持两种成本传入方式：
         1. 嵌套: {"cost_config": {"taker_fee_bps": 5, "slippage_bps": 2}}
         2. 平铺（CLI 友好）: {"taker_fee_bps": 5, "slippage_bps": 2}
-        平铺方式优先级更高（直接来自 --param）。
+        平铺与嵌套成本来源不得并存；并存时失败关闭，避免静默覆盖。
         """
+        if not isinstance(d, dict) or any(not isinstance(key, str) for key in d):
+            raise ValueError("replay parameters must be a string-keyed mapping")
         known = {
             "min_confirm_ticks", "score_stability_threshold",
             "min_safe_net_edge_bps", "signal_edge_scale_bps",
@@ -436,75 +685,203 @@ class ReplayParameterOverrides:
             "noise_buffer_bps",
         }
 
-        # null-safe 取值：JSON null → 用默认值
-        def _v(key: str, default: float) -> float:
-            val = d.get(key)
-            return float(val) if val is not None else float(default)
+        defaults = base or cls()
 
-        # null-safe 可选值
+        # 缺失字段继承 family baseline；显式 JSON null 必须失败，避免把
+        # 错拼/空覆盖静默解释成另一组默认值。
+        def _v(key: str, default: float) -> float:
+            if key not in d:
+                return float(default)
+            val = d[key]
+            if val is None:
+                raise ValueError(f"{key} must not be null")
+            if type(val) is bool:
+                raise ValueError(f"{key} must be numeric, not boolean")
+            if type(val) not in {int, float, Decimal}:
+                raise ValueError(f"{key} must be numeric")
+            try:
+                return float(val)
+            except OverflowError as exc:
+                raise ValueError(f"{key} must be finite") from exc
+
+        # 真正的可选数值仍允许显式 null（当前仅用于 min_score_drawdown_bps）。
         def _v_opt(key: str) -> float | None:
             val = d.get(key)
-            return float(val) if val is not None else None
+            if val is None:
+                return None
+            if type(val) is bool:
+                raise ValueError(f"{key} must be numeric, not boolean")
+            if type(val) not in {int, float, Decimal}:
+                raise ValueError(f"{key} must be numeric")
+            try:
+                return float(val)
+            except OverflowError as exc:
+                raise ValueError(f"{key} must be finite") from exc
 
         def _v_bool(key: str, default: bool) -> bool:
-            val = d.get(key)
-            if val is None:
+            if key not in d:
                 return default
+            val = d[key]
+            if val is None:
+                raise ValueError(f"{key} must not be null")
             if type(val) is not bool:
                 raise ValueError(
                     f"{key} 必须是 JSON boolean，实际为 {type(val).__name__}"
                 )
             return val
 
-        # 成本配置：优先从平铺 keys 组装，其次从嵌套 cost_config
-        has_flat_cost = "taker_fee_bps" in d or "slippage_bps" in d or "maker_fee_bps" in d
+        # 成本配置：优先从平铺 keys 组装，其次从嵌套 cost_config。
+        # 任一平铺成本字段都必须触发该分支，否则 execution_style/
+        # bias 类单项覆盖会被静默丢弃。未指定字段继承 family
+        # baseline 的完整 ReplayCostConfig，不得漂移回另一组常量。
+        flat_cost_keys = {
+            "taker_fee_bps",
+            "slippage_bps",
+            "maker_fee_bps",
+            "execution_style",
+            "passive_bias",
+            "maker_taker_bias",
+        }
+        has_flat_cost = any(key in d for key in flat_cost_keys)
+        if "cost_config" in d:
+            cost_raw = d["cost_config"]
+            if not isinstance(cost_raw, dict) or any(
+                not isinstance(key, str) for key in cost_raw
+            ):
+                raise ValueError("cost_config must be a string-keyed mapping")
+            if has_flat_cost:
+                raise ValueError(
+                    "flat cost parameters conflict with nested cost_config"
+                )
         if has_flat_cost:
-            cost = ReplayCostConfig(
-                taker_fee_bps=_v("taker_fee_bps", 5.0),
-                slippage_bps=_v("slippage_bps", 2.0),
-                maker_fee_bps=_v("maker_fee_bps", 2.0),
-                execution_style=str(d.get("execution_style", "passive_first")),
-                passive_bias=_v("passive_bias", 0.7),
-                maker_taker_bias=_v("maker_taker_bias", 0.0),
+            flat_cost = {key: d[key] for key in flat_cost_keys if key in d}
+            cost = ReplayCostConfig.from_dict(
+                flat_cost,
+                base=defaults.cost_config,
             )
         else:
             cost_raw = d.get("cost_config")
-            cost = ReplayCostConfig.from_dict(cost_raw) if isinstance(cost_raw, dict) else ReplayCostConfig()
+            cost = (
+                ReplayCostConfig.from_dict(
+                    cost_raw,
+                    base=defaults.cost_config,
+                )
+                if "cost_config" in d
+                else defaults.cost_config
+            )
 
         confirm_raw = d.get("min_confirm_ticks")
-        confirm = int(confirm_raw) if confirm_raw is not None else 2
+        if "min_confirm_ticks" not in d:
+            confirm = defaults.min_confirm_ticks
+        else:
+            if confirm_raw is None:
+                raise ValueError("min_confirm_ticks must not be null")
+            if type(confirm_raw) is not int:
+                if type(confirm_raw) is bool:
+                    raise ValueError(
+                        "min_confirm_ticks must be an integer, not boolean"
+                    )
+                raise ValueError("min_confirm_ticks must be an integer")
+            confirm = confirm_raw
 
         return cls(
             min_confirm_ticks=confirm,
-            score_stability_threshold=_v("score_stability_threshold", 5.0),
-            min_safe_net_edge_bps=_v("min_safe_net_edge_bps", 2.0),
-            signal_edge_scale_bps=_v("signal_edge_scale_bps", 12.0),
-            directional_trend_weight=_v("directional_trend_weight", 0.7),
-            directional_return_clamp_bps=_v("directional_return_clamp_bps", 20.0),
+            score_stability_threshold=_v(
+                "score_stability_threshold",
+                defaults.score_stability_threshold,
+            ),
+            min_safe_net_edge_bps=_v(
+                "min_safe_net_edge_bps",
+                defaults.min_safe_net_edge_bps,
+            ),
+            signal_edge_scale_bps=_v(
+                "signal_edge_scale_bps",
+                defaults.signal_edge_scale_bps,
+            ),
+            directional_trend_weight=_v(
+                "directional_trend_weight",
+                defaults.directional_trend_weight,
+            ),
+            directional_return_clamp_bps=_v(
+                "directional_return_clamp_bps",
+                defaults.directional_return_clamp_bps,
+            ),
             # Phase 1 扩展
-            entry_threshold=_v("entry_threshold", 0.30),
-            close_threshold=_v("close_threshold", 0.15),
-            scale_in_threshold=_v("scale_in_threshold", 0.40),
-            short_entry_threshold=_v_opt("short_entry_threshold"),
-            short_close_threshold=_v_opt("short_close_threshold"),
-            strategy_short_bias_enabled=_v_bool("strategy_short_bias_enabled", True),
-            min_hold_seconds=_v("min_hold_seconds", 300.0),
-            rebalance_cooldown_seconds=_v("rebalance_cooldown_seconds", 120.0),
-            max_thesis_age_seconds=_v("max_thesis_age_seconds", 1800.0),
-            de_risk_net_edge_bps=_v("de_risk_net_edge_bps", 2.0),
-            failed_thesis_net_edge_bps=_v("failed_thesis_net_edge_bps", -1.0),
-            catastrophic_failed_thesis_buffer_bps=_v("catastrophic_failed_thesis_buffer_bps", 3.0),
-            expected_slippage_buffer_bps=_v("expected_slippage_buffer_bps", 0.5),
-            expected_execution_buffer_bps=_v("expected_execution_buffer_bps", 0.5),
-            max_acceptable_cost_bps=_v("max_acceptable_cost_bps", 7.5),
+            entry_threshold=_v("entry_threshold", defaults.entry_threshold),
+            close_threshold=_v("close_threshold", defaults.close_threshold),
+            scale_in_threshold=_v(
+                "scale_in_threshold",
+                defaults.scale_in_threshold,
+            ),
+            short_entry_threshold=(
+                _v_opt("short_entry_threshold")
+                if "short_entry_threshold" in d
+                else defaults.short_entry_threshold
+            ),
+            short_close_threshold=(
+                _v_opt("short_close_threshold")
+                if "short_close_threshold" in d
+                else defaults.short_close_threshold
+            ),
+            strategy_short_bias_enabled=_v_bool(
+                "strategy_short_bias_enabled",
+                defaults.strategy_short_bias_enabled,
+            ),
+            min_hold_seconds=_v(
+                "min_hold_seconds",
+                defaults.min_hold_seconds,
+            ),
+            rebalance_cooldown_seconds=_v(
+                "rebalance_cooldown_seconds",
+                defaults.rebalance_cooldown_seconds,
+            ),
+            max_thesis_age_seconds=_v(
+                "max_thesis_age_seconds",
+                defaults.max_thesis_age_seconds,
+            ),
+            de_risk_net_edge_bps=_v(
+                "de_risk_net_edge_bps",
+                defaults.de_risk_net_edge_bps,
+            ),
+            failed_thesis_net_edge_bps=_v(
+                "failed_thesis_net_edge_bps",
+                defaults.failed_thesis_net_edge_bps,
+            ),
+            catastrophic_failed_thesis_buffer_bps=_v(
+                "catastrophic_failed_thesis_buffer_bps",
+                defaults.catastrophic_failed_thesis_buffer_bps,
+            ),
+            expected_slippage_buffer_bps=_v(
+                "expected_slippage_buffer_bps",
+                defaults.expected_slippage_buffer_bps,
+            ),
+            expected_execution_buffer_bps=_v(
+                "expected_execution_buffer_bps",
+                defaults.expected_execution_buffer_bps,
+            ),
+            max_acceptable_cost_bps=_v(
+                "max_acceptable_cost_bps",
+                defaults.max_acceptable_cost_bps,
+            ),
             # min_score_drawdown_bps: key 缺失→6.0（新默认）; 显式 null→None（禁用 drawdown 检查）
             min_score_drawdown_bps=(
-                float(d["min_score_drawdown_bps"]) if d.get("min_score_drawdown_bps") is not None
-                else (None if "min_score_drawdown_bps" in d else 6.0)
+                _v_opt("min_score_drawdown_bps")
+                if d.get("min_score_drawdown_bps") is not None
+                else (
+                    None
+                    if "min_score_drawdown_bps" in d
+                    else defaults.min_score_drawdown_bps
+                )
             ),
-            min_liquidity_quality=_v("min_liquidity_quality", 0.55),
-            limit_offset_bps_entry=_v("limit_offset_bps_entry", 1.5),
-            noise_buffer_bps=_v("noise_buffer_bps", 2.0),
+            min_liquidity_quality=_v(
+                "min_liquidity_quality",
+                defaults.min_liquidity_quality,
+            ),
+            limit_offset_bps_entry=_v(
+                "limit_offset_bps_entry",
+                defaults.limit_offset_bps_entry,
+            ),
+            noise_buffer_bps=_v("noise_buffer_bps", defaults.noise_buffer_bps),
             cost_config=cost,
             extra={k: v for k, v in d.items() if k not in known},
         )
@@ -536,7 +913,12 @@ class ReplayState:
 
 @dc.dataclass(frozen=True)
 class ReplayBarContext:
-    """单根 bar 传递给 adapter 的完整上下文。"""
+    """区分 observation identity 与因果决策时间的单根 bar 上下文。
+
+    ``bar.ts`` 是 Gold bar 起点和 :class:`ReplayDecision` 的稳定身份。
+    已闭合 bar 直到 ``observation_completed_at_ts`` 才可观测；所有
+    持仓、thesis 和冷却生命周期计算必须使用 ``decision_ts``。
+    """
     bar: ReplayBar
     bar_index: int
     state: ReplayState
@@ -545,6 +927,29 @@ class ReplayBarContext:
     symbol: str
     timeframe: str
     dataset_version: str
+    observation_completed_at_ts: datetime
+    decision_ts: datetime
+
+    def __post_init__(self) -> None:
+        canonical_timeframe = canonicalize_replay_timeframe(self.timeframe)
+        object.__setattr__(self, "timeframe", canonical_timeframe)
+        timestamps = {
+            "bar.ts": self.bar.ts,
+            "observation_completed_at_ts": self.observation_completed_at_ts,
+            "decision_ts": self.decision_ts,
+        }
+        for name, value in timestamps.items():
+            if not isinstance(value, datetime):
+                raise ValueError(f"{name} must be a datetime")
+            if value.tzinfo is None or value.utcoffset() != timedelta(0):
+                raise ValueError(f"{name} must be timezone-aware UTC")
+        expected_completion = self.bar.ts + parse_replay_timeframe(canonical_timeframe)
+        if self.observation_completed_at_ts != expected_completion:
+            raise ValueError(
+                "observation completion must equal bar start plus timeframe"
+            )
+        if self.decision_ts < self.observation_completed_at_ts:
+            raise ValueError("decision cannot precede observation completion")
 
 
 # ---------------------------------------------------------------------------
@@ -591,6 +996,13 @@ class ReplayDecision:
     funding_rate: float | None = None
     close_price: float | None = None
     bar_index: int = 0
+    # 新增字段置于旧可选位置参数之后，避免 legacy 位置构造静默错位。
+    # False 仅保留 legacy 反序列化兼容；versioned harness 会失败关闭。
+    cost_bps_is_explicit: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.cost_bps_is_explicit) is not bool:
+            raise ValueError("cost_bps_is_explicit must be boolean")
 
     def to_flat_dict(self) -> dict[str, Any]:
         """序列化为平坦字典（写 CSV / parquet 用）。"""

@@ -12,7 +12,7 @@
 
 import inspect
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -90,6 +90,8 @@ for i in range(25):
         bar=bar, bar_index=i, state=ind_state, params=params,
         family="independent", symbol="BTC-USDT-SWAP", timeframe="15m",
         dataset_version="v1.0",
+        observation_completed_at_ts=bar.ts + timedelta(minutes=15),
+        decision_ts=bar.ts + timedelta(minutes=15),
     )
     decision = ind_adapter.evaluate_bar(ctx)
 
@@ -112,6 +114,8 @@ for i in range(25):
         bar=bar, bar_index=i, state=dir_state, params=dir_params,
         family="directional", symbol="BTC-USDT-SWAP", timeframe="15m",
         dataset_version="v1.0",
+        observation_completed_at_ts=bar.ts + timedelta(minutes=15),
+        decision_ts=bar.ts + timedelta(minutes=15),
     )
     dir_decision = dir_adapter.evaluate_bar(ctx)
 
@@ -131,6 +135,8 @@ for i in range(25):
         bar=bar, bar_index=i, state=ind_state2, params=params,
         family="independent", symbol="BTC-USDT-SWAP", timeframe="15m",
         dataset_version="v1.0",
+        observation_completed_at_ts=bar.ts + timedelta(minutes=15),
+        decision_ts=bar.ts + timedelta(minutes=15),
     )
     decision_none = ind_adapter2.evaluate_bar(ctx)
 
@@ -187,15 +193,15 @@ print()
 # P1-2: _compute_position_delta 签名
 # ══════════════════════════════════════════════════════════════
 print("=" * 60)
-print("P1-2: _compute_position_delta 签名简化")
+print("P1-2: _compute_position_delta partial-fill 真实余量契约")
 print("=" * 60)
 
 sig = inspect.signature(IndependentReplayAdapter._compute_position_delta)
 param_names = list(sig.parameters.keys())
 
 check(
-    "参数只有 self, state, action",
-    param_names == ["self", "state", "action"],
+    "参数包含 prior_position_qty 用于按真实余量 close",
+    param_names == ["self", "state", "action", "prior_position_qty"],
     f"got {param_names}",
 )
 check(
@@ -362,6 +368,8 @@ for i in range(25):
         bar=bar, bar_index=i, state=ind_reg_state, params=params_reg,
         family="independent", symbol="BTC-USDT-SWAP", timeframe="15m",
         dataset_version="v1.0",
+        observation_completed_at_ts=bar.ts + timedelta(minutes=15),
+        decision_ts=bar.ts + timedelta(minutes=15),
     )
     d = ind_reg.evaluate_bar(ctx)
 
@@ -380,6 +388,8 @@ for i in range(25):
         bar=bar, bar_index=i, state=dir_reg_state, params=dir_params_reg,
         family="directional", symbol="BTC-USDT-SWAP", timeframe="15m",
         dataset_version="v1.0",
+        observation_completed_at_ts=bar.ts + timedelta(minutes=15),
+        decision_ts=bar.ts + timedelta(minutes=15),
     )
     d = dir_reg.evaluate_bar(ctx)
 

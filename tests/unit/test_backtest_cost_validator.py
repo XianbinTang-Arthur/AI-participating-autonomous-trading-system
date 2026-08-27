@@ -20,6 +20,7 @@ from aats.data_platform.replay.backtest.cost_validator import (
     CostValidationSummary,
     CostValidator,
 )
+from aats.data_platform.replay.backtest.numeric import finite_float
 
 
 class EmptySummaryTests(unittest.TestCase):
@@ -41,6 +42,40 @@ class EmptySummaryTests(unittest.TestCase):
 
 
 class SingleRecordTests(unittest.TestCase):
+    def test_signed_zero_diagnostic_fields_are_canonical(self) -> None:
+        self.assertEqual(repr(finite_float(-0.0, reason="invalid")), "0.0")
+        direct = CostDiagnostic(
+            decision_id="zero-direct",
+            assumed_cost_bps=-0.0,
+            actual_cost_bps=-0.0,
+            cost_diff_bps=-0.0,
+            assumed_net_edge_bps=-0.0,
+            actual_net_edge_bps=-0.0,
+            edge_flipped_negative=False,
+            actual_fee_bps=-0.0,
+            actual_slippage_bps=-0.0,
+        )
+        recorded = CostValidator().record(
+            decision_id="zero-recorded",
+            assumed_cost_bps=-0.0,
+            actual_cost_bps=-0.0,
+            assumed_net_edge_bps=-0.0,
+            actual_fee_bps=-0.0,
+            actual_slippage_bps=-0.0,
+        )
+
+        for diagnostic in (direct, recorded):
+            for field_name in (
+                "assumed_cost_bps",
+                "actual_cost_bps",
+                "cost_diff_bps",
+                "assumed_net_edge_bps",
+                "actual_net_edge_bps",
+                "actual_fee_bps",
+                "actual_slippage_bps",
+            ):
+                self.assertEqual(repr(getattr(diagnostic, field_name)), "0.0")
+
     def test_single_record_no_flip(self) -> None:
         validator = CostValidator()
         diag = validator.record(
@@ -273,6 +308,97 @@ class DiagnosticsImmutabilityTests(unittest.TestCase):
         )
         with self.assertRaises((AttributeError, TypeError)):
             diag.actual_cost_bps = 999.0  # type: ignore[misc]
+
+
+class NonFiniteBoundaryTests(unittest.TestCase):
+    def test_non_finite_input_is_rejected_without_appending(self) -> None:
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                validator = CostValidator()
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "cost_diagnostic_non_finite",
+                ):
+                    validator.record(
+                        decision_id="bad",
+                        assumed_cost_bps=0.0,
+                        actual_cost_bps=value,
+                        assumed_net_edge_bps=1.0,
+                    )
+                self.assertEqual(validator.diagnostics, ())
+
+    def test_summary_rejects_finite_inputs_whose_sum_overflows(self) -> None:
+        validator = CostValidator()
+        for index in range(2):
+            validator.record(
+                decision_id=f"large-{index}",
+                assumed_cost_bps=0.0,
+                actual_cost_bps=1e308,
+                assumed_net_edge_bps=0.0,
+            )
+
+        with self.assertRaisesRegex(ValueError, "cost_summary_non_finite"):
+            validator.summary()
+
+
+class FillTimestampAttributionTests(unittest.TestCase):
+    def test_legacy_positional_construction_keeps_new_fields_optional(self) -> None:
+        diagnostic = CostDiagnostic(
+            "legacy",
+            6.0,
+            5.0,
+            -1.0,
+            10.0,
+            11.0,
+            False,
+            "legacy-note",
+            5.0,
+            0.0,
+        )
+
+        self.assertIsNone(diagnostic.resolved_at_ts_ms)
+        self.assertIsNone(diagnostic.fill_ts_ms)
+        self.assertIsNone(diagnostic.equity_attribution_ts_ms)
+
+    def test_record_preserves_explicit_fill_and_equity_timestamps(self) -> None:
+        validator = CostValidator()
+        diagnostic = validator.record(
+            decision_id="decision",
+            assumed_cost_bps=6.0,
+            actual_cost_bps=5.0,
+            assumed_net_edge_bps=10.0,
+            resolved_at_ts_ms=1_000,
+            fill_ts_ms=1_000,
+            equity_attribution_ts_ms=2_000,
+        )
+
+        self.assertEqual(diagnostic.resolved_at_ts_ms, 1_000)
+        self.assertEqual(diagnostic.fill_ts_ms, 1_000)
+        self.assertEqual(diagnostic.equity_attribution_ts_ms, 2_000)
+
+    def test_invalid_timestamp_contract_fails_without_appending(self) -> None:
+        validator = CostValidator()
+        cases = (
+            ({"fill_ts_ms": 1.5}, "fill_ts_ms_must_be_integer"),
+            (
+                {
+                    "fill_ts_ms": 2_000,
+                    "equity_attribution_ts_ms": 1_000,
+                },
+                "equity_attribution_precedes_fill",
+            ),
+        )
+        for timestamp_args, reason in cases:
+            with self.subTest(reason=reason):
+                with self.assertRaisesRegex(ValueError, reason):
+                    validator.record(
+                        decision_id="bad",
+                        assumed_cost_bps=0.0,
+                        actual_cost_bps=0.0,
+                        assumed_net_edge_bps=0.0,
+                        **timestamp_args,
+                    )
+                self.assertEqual(validator.diagnostics, ())
 
 
 if __name__ == "__main__":

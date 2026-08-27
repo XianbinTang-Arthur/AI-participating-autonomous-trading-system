@@ -22,11 +22,18 @@ from __future__ import annotations
 
 import hashlib
 import unittest
-from decimal import Decimal
+from dataclasses import replace
+from decimal import Decimal, localcontext
 
 from aats.data_platform.replay.backtest.fill_simulator import (
     FillRequest,
     FillSimulator,
+)
+from aats.domain.instrument_contract import InstrumentContractError
+from tests.unit.replay_contract_fixtures import (
+    INVERSE_SWAP_CONTRACT,
+    LINEAR_SWAP_CONTRACT,
+    SPOT_CONTRACT,
 )
 
 
@@ -34,14 +41,17 @@ def _md5_uniform(seed: str) -> float:
     """Test helper: mirror the sampler in fill_simulator for picking seeds."""
     digest = hashlib.md5(seed.encode("utf-8")).digest()
     as_int = int.from_bytes(digest, "big")
-    return float(Decimal(as_int) / (Decimal(2) ** 128))
+    return as_int / (2**128)
 
 
 class TestFillSimulatorIOC(unittest.TestCase):
     """IOC 分支：participation cap + taker fee + slippage 带方向。"""
 
     def setUp(self) -> None:
-        self.sim = FillSimulator()  # 默认参数: maker 2, taker 5, slip 1
+        self.sim = FillSimulator(
+            instrument_contract=SPOT_CONTRACT,
+            spot_buy_fee_asset="quote",
+        )
 
     def test_ioc_buy_taker_fill(self) -> None:
         """cap 内 IOC buy 全量成交，filled_qty = target_qty，fee 为 taker。"""
@@ -86,7 +96,10 @@ class TestFillSimulatorPostOnly(unittest.TestCase):
     """post_only 分支：按 volume_ratio 分段概率 + deterministic 抽样。"""
 
     def setUp(self) -> None:
-        self.sim = FillSimulator()
+        self.sim = FillSimulator(
+            instrument_contract=SPOT_CONTRACT,
+            spot_buy_fee_asset="quote",
+        )
 
     def test_post_only_high_prob_fills(self) -> None:
         """低 volume_ratio + deterministic 低抽样值应能成交（@bar_close, maker fee）。"""
@@ -108,8 +121,8 @@ class TestFillSimulatorPostOnly(unittest.TestCase):
         self.assertEqual(result.avg_fill_price, Decimal("50000"))
         self.assertEqual(result.fee_bps, 2.0)
 
-    def test_post_only_fill_price_no_slippage(self) -> None:
-        """post_only 成交时 avg_fill_price 必须精确等于 bar_close（无 slippage）。"""
+    def test_post_only_price_is_tick_aligned_and_reports_realized_slippage(self) -> None:
+        """post_only 无配置滑点，但必须保守对齐 tick 并披露实际价差。"""
         req = FillRequest(
             order_id="order-4",
             side="sell",
@@ -121,7 +134,8 @@ class TestFillSimulatorPostOnly(unittest.TestCase):
         result = self.sim.simulate(req, bar_close, Decimal("100"))
 
         self.assertEqual(result.fill_kind, "maker")
-        self.assertEqual(result.avg_fill_price, bar_close)
+        self.assertEqual(result.avg_fill_price, Decimal("12345.6"))
+        self.assertGreater(result.slippage_bps, 0.0)
 
     def test_post_only_over_10_pct_no_fill(self) -> None:
         """qty/bar_vol > 10% 必定 no_fill，与种子无关。"""
@@ -205,7 +219,10 @@ class TestFillSimulatorBoundedLimit(unittest.TestCase):
     """bounded_limit 分支：participation cap 下保守按 taker fallback。"""
 
     def setUp(self) -> None:
-        self.sim = FillSimulator()
+        self.sim = FillSimulator(
+            instrument_contract=SPOT_CONTRACT,
+            spot_buy_fee_asset="quote",
+        )
 
     def test_bounded_limit_taker_fallback(self) -> None:
         """bounded_limit 应施加 taker fee 与固定不利滑点。"""
@@ -243,7 +260,10 @@ class TestFillSimulatorGuards(unittest.TestCase):
     """入参健壮性：target_qty<=0、bar_close<=0、未知 order_type。"""
 
     def setUp(self) -> None:
-        self.sim = FillSimulator()
+        self.sim = FillSimulator(
+            instrument_contract=SPOT_CONTRACT,
+            spot_buy_fee_asset="quote",
+        )
 
     def test_zero_qty_no_fill(self) -> None:
         """target_qty == 0 → no_fill，notes 说明 non-positive qty。"""
@@ -325,20 +345,54 @@ class TestFillSimulatorGuards(unittest.TestCase):
             {"max_volume_participation": Decimal("NaN")},
             {"max_volume_participation": Decimal("Infinity")},
             {"ioc_slippage_bps": float("nan")},
+            {"ioc_slippage_bps": 10000.0},
+            {"taker_fee_bps": -0.1},
+            {"taker_fee_bps": 10000.0},
+            {"maker_fee_bps": -10000.0},
+            {"maker_fee_bps": 10000.0},
             {"taker_fee_bps": float("inf")},
             {"post_only_fill_prob_high": 1.01},
         )
         for config in invalid_configs:
             with self.subTest(config=config):
                 with self.assertRaises(ValueError):
-                    FillSimulator(**config)
+                    FillSimulator(instrument_contract=SPOT_CONTRACT, **config)
+
+    def test_decimal_model_config_is_normalized_to_float(self) -> None:
+        simulator = FillSimulator(
+            instrument_contract=SPOT_CONTRACT,
+            maker_fee_bps=Decimal("-2"),
+            taker_fee_bps=Decimal("5"),
+            ioc_slippage_bps=Decimal("1"),
+            post_only_fill_prob_high=Decimal("0.9"),
+        )
+
+        self.assertIsInstance(simulator.maker_fee_bps, float)
+        self.assertIsInstance(simulator.taker_fee_bps, float)
+        self.assertIsInstance(simulator.ioc_slippage_bps, float)
+        self.assertIsInstance(simulator.post_only_fill_prob_high, float)
+
+    def test_negative_zero_cost_config_is_canonicalized(self) -> None:
+        simulator = FillSimulator(
+            instrument_contract=SPOT_CONTRACT,
+            maker_fee_bps=-0.0,
+            taker_fee_bps=-0.0,
+            ioc_slippage_bps=-0.0,
+        )
+
+        self.assertEqual(repr(simulator.maker_fee_bps), "0.0")
+        self.assertEqual(repr(simulator.taker_fee_bps), "0.0")
+        self.assertEqual(repr(simulator.ioc_slippage_bps), "0.0")
 
 
 class TestFillSimulatorDecimalPrecision(unittest.TestCase):
     """fee 计算必须保持 Decimal 精度，无 float 舍入误差。"""
 
     def setUp(self) -> None:
-        self.sim = FillSimulator()
+        self.sim = FillSimulator(
+            instrument_contract=SPOT_CONTRACT,
+            spot_buy_fee_asset="quote",
+        )
 
     def test_fee_notional_is_decimal_precise(self) -> None:
         """校验 fee_notional 等于显式 Decimal 算的精确值，而非 float 近似。"""
@@ -349,12 +403,10 @@ class TestFillSimulatorDecimalPrecision(unittest.TestCase):
             target_qty=Decimal("0.3"),   # 0.3 float 有二进制舍入
             submitted_at_ts=1,
         )
-        bar_close = Decimal("0.1")       # 0.1 float 亦有二进制舍入
+        bar_close = Decimal("100")
         result = self.sim.simulate(req, bar_close, Decimal("100"))
 
-        expected_avg = Decimal("0.1") * (
-            Decimal(1) + Decimal("1") / Decimal("10000")
-        )
+        expected_avg = Decimal("100.1")
         expected = (
             Decimal("0.3")
             * expected_avg
@@ -385,11 +437,11 @@ class TestFillSimulatorDecimalPrecision(unittest.TestCase):
             target_qty=Decimal("0.3"),
             submitted_at_ts=1,
         )
-        bar_close = Decimal("0.1")
+        bar_close = Decimal("100")
         result = self.sim.simulate(req, bar_close, Decimal("100"))
 
-        # avg = 0.1 * (1 + 1/10000) = 0.1 * 1.0001 = 0.10001
-        expected_avg = Decimal("0.1") * (Decimal(1) + Decimal("1") / Decimal("10000"))
+        # 1 bps 原始值为 100.01；buy 侧按 0.1 tick 保守向上对齐为 100.1。
+        expected_avg = Decimal("100.1")
         self.assertEqual(result.avg_fill_price, expected_avg)
 
         # fee = qty * avg * 5/10000
@@ -401,7 +453,10 @@ class TestFillSimulatorReproducibility(unittest.TestCase):
     """同种子同 order_id → 同 outcome（reproducibility）。"""
 
     def setUp(self) -> None:
-        self.sim = FillSimulator()
+        self.sim = FillSimulator(
+            instrument_contract=SPOT_CONTRACT,
+            spot_buy_fee_asset="quote",
+        )
 
     def test_same_seed_same_outcome(self) -> None:
         """两次相同调用给出完全一致的 FillResult。"""
@@ -433,6 +488,204 @@ class TestFillSimulatorReproducibility(unittest.TestCase):
             req, Decimal("50000"), Decimal("100"), rng_seed="order-4"
         )
         self.assertEqual(lucky_result.fill_kind, "maker")
+
+    def test_result_is_independent_from_ambient_decimal_context(self) -> None:
+        req = FillRequest(
+            order_id="context-independent",
+            side="buy",
+            order_type="ioc",
+            target_qty=Decimal("28.95899865432099750190521"),
+            submitted_at_ts=1,
+        )
+        with localcontext() as ctx:
+            ctx.prec = 8
+            low_precision = self.sim.simulate(
+                req,
+                Decimal("12345.67890123456789"),
+                Decimal("3878.5094139697099750190521"),
+            )
+        with localcontext() as ctx:
+            ctx.prec = 50
+            high_precision = self.sim.simulate(
+                req,
+                Decimal("12345.67890123456789"),
+                Decimal("3878.5094139697099750190521"),
+            )
+
+        self.assertEqual(low_precision, high_precision)
+
+    def test_contract_arithmetic_failure_aborts_instead_of_becoming_no_fill(self) -> None:
+        req = FillRequest(
+            order_id="overflow",
+            side="buy",
+            order_type="ioc",
+            target_qty=Decimal("1"),
+            submitted_at_ts=1,
+        )
+        with self.assertRaisesRegex(
+            InstrumentContractError,
+            "contract_discrete_arithmetic_too_large",
+        ):
+            self.sim.simulate(req, Decimal("1e999999"), Decimal("1000"))
+
+    def test_extreme_tick_rounding_cannot_emit_infinite_slippage(self) -> None:
+        simulator = FillSimulator(
+            instrument_contract=replace(
+                SPOT_CONTRACT,
+                lot_size=Decimal("1"),
+                min_size=Decimal("1"),
+                tick_size=Decimal("1"),
+            ),
+            ioc_slippage_bps=0.0,
+            max_volume_participation=Decimal("1"),
+        )
+        request = FillRequest(
+            order_id="extreme-slippage",
+            side="buy",
+            order_type="ioc",
+            target_qty=Decimal("1"),
+            submitted_at_ts=1,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "fill_slippage_bps_non_finite",
+        ):
+            simulator.simulate(
+                request,
+                Decimal("1e-500"),
+                Decimal("1"),
+            )
+
+
+class TestFillSimulatorInstrumentContract(unittest.TestCase):
+    def test_spot_buy_requires_explicit_fee_asset_policy(self) -> None:
+        simulator = FillSimulator(
+            instrument_contract=SPOT_CONTRACT,
+            taker_fee_bps=10.0,
+            ioc_slippage_bps=0.0,
+            max_volume_participation=Decimal("1"),
+        )
+
+        with self.assertRaisesRegex(ValueError, "spot_buy_fee_asset_required"):
+            simulator.simulate(
+                FillRequest(
+                    order_id="spot-fee-policy-missing",
+                    side="buy",
+                    order_type="ioc",
+                    target_qty=Decimal("1"),
+                    submitted_at_ts=1,
+                ),
+                Decimal("100"),
+                Decimal("10"),
+            )
+
+    def test_linear_contract_fee_uses_face_value_and_quote_currency(self) -> None:
+        simulator = FillSimulator(
+            instrument_contract=LINEAR_SWAP_CONTRACT,
+            ioc_slippage_bps=0.0,
+        )
+        result = simulator.simulate(
+            FillRequest(
+                order_id="linear",
+                side="buy",
+                order_type="ioc",
+                target_qty=Decimal("1"),
+                submitted_at_ts=1,
+            ),
+            Decimal("50000"),
+            Decimal("1000"),
+        )
+
+        self.assertEqual(result.fee_notional, Decimal("0.25000"))
+        self.assertEqual(result.fee_currency, "USDT")
+        self.assertEqual(result.fee_asset, "USDT")
+        self.assertEqual(result.fee_asset_quantity, Decimal("0.25000"))
+
+    def test_spot_buy_base_fee_has_explicit_asset_lineage(self) -> None:
+        simulator = FillSimulator(
+            instrument_contract=SPOT_CONTRACT,
+            taker_fee_bps=10.0,
+            ioc_slippage_bps=0.0,
+            max_volume_participation=Decimal("1"),
+            spot_buy_fee_asset="base",
+        )
+        result = simulator.simulate(
+            FillRequest(
+                order_id="spot-base-fee",
+                side="buy",
+                order_type="ioc",
+                target_qty=Decimal("1"),
+                submitted_at_ts=1,
+            ),
+            Decimal("100"),
+            Decimal("10"),
+        )
+
+        self.assertEqual(result.fee_notional, Decimal("0.1"))
+        self.assertEqual(result.fee_currency, "USDT")
+        self.assertEqual(result.fee_asset, "BTC")
+        self.assertEqual(result.fee_asset_quantity, Decimal("0.001"))
+
+    def test_inverse_contract_fee_uses_base_settlement_notional(self) -> None:
+        simulator = FillSimulator(
+            instrument_contract=INVERSE_SWAP_CONTRACT,
+            maker_fee_bps=5.0,
+        )
+        result = simulator.simulate(
+            FillRequest(
+                order_id="order-4",
+                side="buy",
+                order_type="post_only",
+                target_qty=Decimal("3"),
+                submitted_at_ts=1,
+            ),
+            Decimal("60000"),
+            Decimal("1000"),
+        )
+
+        self.assertEqual(result.fill_kind, "maker")
+        self.assertEqual(result.fee_notional, Decimal("0.0000025"))
+        self.assertEqual(result.fee_currency, "BTC")
+
+    def test_negative_maker_fee_is_a_signed_rebate(self) -> None:
+        simulator = FillSimulator(
+            instrument_contract=LINEAR_SWAP_CONTRACT,
+            maker_fee_bps=-2.0,
+        )
+        result = simulator.simulate(
+            FillRequest(
+                order_id="order-4",
+                side="buy",
+                order_type="post_only",
+                target_qty=Decimal("1"),
+                submitted_at_ts=1,
+            ),
+            Decimal("50000"),
+            Decimal("1000"),
+        )
+
+        self.assertEqual(result.fee_notional, Decimal("-0.10000"))
+
+    def test_inverse_fill_below_contract_minimum_is_no_fill(self) -> None:
+        simulator = FillSimulator(
+            instrument_contract=INVERSE_SWAP_CONTRACT,
+            max_volume_participation=Decimal("0.01"),
+        )
+        result = simulator.simulate(
+            FillRequest(
+                order_id="inverse-below-min",
+                side="buy",
+                order_type="ioc",
+                target_qty=Decimal("5"),
+                submitted_at_ts=1,
+            ),
+            Decimal("50000"),
+            Decimal("10"),
+        )
+
+        self.assertEqual(result.fill_kind, "no_fill")
+        self.assertEqual(result.notes, "below_contract_min_size_or_lot")
 
 
 if __name__ == "__main__":

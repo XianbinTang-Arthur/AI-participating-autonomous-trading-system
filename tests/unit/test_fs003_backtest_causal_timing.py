@@ -11,6 +11,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from aats.data_platform.replay.adapters.base_adapter import BaseReplayAdapter
+from aats.data_platform.replay.adapters.independent_adapter import (
+    IndependentReplayAdapter,
+)
 from aats.data_platform.replay.backtest.fill_simulator import (
     FillResult,
     FillSimulator,
@@ -20,11 +23,23 @@ from aats.data_platform.replay.core.replay_context import (
     ReplayBar,
     ReplayBarContext,
     ReplayDecision,
+    ReplayParameterOverrides,
     ReplayState,
 )
+from tests.unit.replay_contract_fixtures import SPOT_CONTRACT
 
 
 _BASE_TS = datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc)
+
+
+def _config(**overrides: Any) -> BacktestConfig:
+    values = {
+        "symbol": SPOT_CONTRACT.symbol,
+        "instrument_contract": SPOT_CONTRACT,
+        "spot_buy_fee_asset": "quote",
+    }
+    values.update(overrides)
+    return BacktestConfig(**values)
 
 
 def _bar(
@@ -38,7 +53,7 @@ def _bar(
     open_value = Decimal(open_price)
     close_value = Decimal(close_price)
     return ReplayBar(
-        symbol="BTC-USDT-SWAP",
+        symbol="BTC-USDT",
         ts=ts,
         open=open_value,
         high=max(open_value, close_value),
@@ -73,8 +88,11 @@ def _decision(
         expected_net_edge_bps=10.0,
         target_position_qty=target,
         delta_position_qty=delta,
+        signal_edge_proxy_bps=16.0,
         cost_bps=6.0,
+        cost_bps_is_explicit=True,
         action=action,
+        score_stable=True,
     )
 
 
@@ -87,6 +105,14 @@ class _ScriptAdapter(BaseReplayAdapter):
     @property
     def family_name(self) -> str:
         return "independent"
+
+    @property
+    def algorithm_version(self) -> str:
+        return "test-script-adapter/v1"
+
+    @property
+    def accepted_parameter_keys(self) -> frozenset[str]:
+        return frozenset({"strategy_short_bias_enabled"})
 
     def reset_state(self) -> ReplayState:
         self.cursor = 0
@@ -120,6 +146,14 @@ class _StateMutatingAdapter(BaseReplayAdapter):
     def family_name(self) -> str:
         return "independent"
 
+    @property
+    def algorithm_version(self) -> str:
+        return "test-state-mutating-adapter/v1"
+
+    @property
+    def accepted_parameter_keys(self) -> frozenset[str]:
+        return frozenset({"strategy_short_bias_enabled"})
+
     def reset_state(self) -> ReplayState:
         self.cursor = 0
         self.seen_states.clear()
@@ -143,21 +177,68 @@ class _StateMutatingAdapter(BaseReplayAdapter):
         return _decision(ctx, action=action, delta=delta, target=target)
 
 
+class _AlwaysLongAdapter(IndependentReplayAdapter):
+    """Deterministic real-state-machine adapter for lifecycle timing tests."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.decisions: list[ReplayDecision] = []
+        self.held_seconds: list[float] = []
+        self.context_times: list[tuple[datetime, datetime, datetime]] = []
+
+    def _compute_book_score(self, _bar: ReplayBar, *, leg: str) -> float:
+        return 0.9 if leg == "long" else 0.0
+
+    def _compute_edge_breakdown(
+        self,
+        _bar: ReplayBar,
+        _leg: str,
+        _dominant_score: float,
+        _params: ReplayParameterOverrides,
+    ) -> dict[str, float]:
+        return {
+            "signal": 10.0,
+            "funding": 0.0,
+            "cost": 0.0,
+            "noise_buffer": 0.0,
+            "net": 10.0,
+        }
+
+    def evaluate_bar(self, ctx: ReplayBarContext) -> ReplayDecision:
+        self.context_times.append(
+            (ctx.bar.ts, ctx.observation_completed_at_ts, ctx.decision_ts)
+        )
+        if ctx.state.entry_ts is not None:
+            self.held_seconds.append(
+                (ctx.decision_ts - ctx.state.entry_ts).total_seconds()
+            )
+        decision = super().evaluate_bar(ctx)
+        self.decisions.append(decision)
+        return decision
+
+
 def _run(
     bars: list[ReplayBar],
     adapter: BaseReplayAdapter,
     *,
     config: BacktestConfig | None = None,
+    parameter_overrides: dict[str, Any] | None = None,
 ):
+    resolved_overrides: dict[str, Any] = {
+        "strategy_short_bias_enabled": False,
+    }
+    if parameter_overrides:
+        resolved_overrides.update(parameter_overrides)
     with patch(
         "aats.data_platform.replay.backtest.harness.load_gold_bars",
         return_value=bars,
     ):
         return run_backtest(
             MagicMock(),
-            config=config or BacktestConfig(),
+            config=config or _config(),
             start_ts=_BASE_TS,
             end_ts=_BASE_TS + timedelta(days=2),
+            parameter_overrides=resolved_overrides,
             adapter=adapter,
         )
 
@@ -264,7 +345,7 @@ def test_post_only_missing_liquidity_is_no_fill_and_rejects_proposed_state() -> 
             volume=None,
         ),
     ]
-    result = _run(bars, adapter, config=BacktestConfig(order_type="post_only"))
+    result = _run(bars, adapter, config=_config(order_type="post_only"))
 
     assert result.fills_count == 0
     assert result.execution_timeline[0].status == "no_fill"
@@ -333,6 +414,9 @@ def test_partial_fill_commits_only_actual_position_quantity() -> None:
             avg_fill_price=bar_close_price,
             fee_bps=5.0,
             fee_notional=Decimal("0.024"),
+            fee_currency="USDT",
+            instrument_symbol=SPOT_CONTRACT.symbol,
+            instrument_contract_fingerprint=SPOT_CONTRACT.fingerprint,
             fill_kind="taker",
             notes="adversarial partial fill",
         )
@@ -369,14 +453,14 @@ def test_invalid_timeframe_fails_before_adapter_evaluation() -> None:
         _run(
             [_bar(ts=_BASE_TS, open_price="100", close_price="101")],
             adapter,
-            config=BacktestConfig(timeframe="calendar-month"),
+            config=_config(timeframe="calendar-month"),
         )
     assert adapter.calls == 0
 
 
 def test_legacy_same_bar_model_cannot_be_reenabled() -> None:
     adapter = _ScriptAdapter([])
-    legacy_config = BacktestConfig(execution_model_version="same_bar_v1")  # type: ignore[arg-type]
+    legacy_config = _config(execution_model_version="same_bar_v1")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="Unsupported execution_model_version"):
         _run(
             [_bar(ts=_BASE_TS, open_price="100", close_price="101")],
@@ -384,3 +468,87 @@ def test_legacy_same_bar_model_cannot_be_reenabled() -> None:
             config=legacy_config,
         )
     assert adapter.calls == 0
+
+
+def test_max_thesis_age_uses_closed_bar_decision_time() -> None:
+    bars = [
+        _bar(ts=_BASE_TS, open_price="100", close_price="100"),
+        _bar(
+            ts=_BASE_TS + timedelta(hours=1),
+            open_price="100",
+            close_price="100",
+        ),
+    ]
+    adapter = _AlwaysLongAdapter()
+
+    _run(
+        bars,
+        adapter,
+        parameter_overrides={
+            "min_confirm_ticks": 1,
+            "min_hold_seconds": 0.0,
+            "max_thesis_age_seconds": 3600.0,
+        },
+    )
+
+    assert [decision.action for decision in adapter.decisions] == ["open", "close"]
+    assert adapter.decisions[1].close_reason == "thesis_stale"
+    assert adapter.held_seconds == [3600.0]
+    assert [decision.ts for decision in adapter.decisions] == [bar.ts for bar in bars]
+    assert adapter.context_times == [
+        (bar.ts, bar.ts + timedelta(hours=1), bar.ts + timedelta(hours=1))
+        for bar in bars
+    ]
+
+
+def test_post_only_fill_never_produces_negative_held_duration() -> None:
+    bars = [
+        _bar(ts=_BASE_TS, open_price="100", close_price="100"),
+        _bar(
+            ts=_BASE_TS + timedelta(hours=1),
+            open_price="100",
+            close_price="100",
+        ),
+    ]
+    adapter = _AlwaysLongAdapter()
+
+    with patch(
+        "aats.data_platform.replay.backtest.fill_simulator._deterministic_uniform",
+        return_value=0.0,
+    ):
+        result = _run(
+            bars,
+            adapter,
+            config=_config(order_type="post_only"),
+            parameter_overrides={
+                "min_confirm_ticks": 1,
+                "min_hold_seconds": 0.0,
+                "max_thesis_age_seconds": 86_400.0,
+            },
+        )
+
+    assert result.fills_count == 1
+    assert result.execution_timeline[0].fill_ts == _BASE_TS + timedelta(hours=2)
+    assert adapter.held_seconds == [0.0]
+    assert all(seconds >= 0.0 for seconds in adapter.held_seconds)
+
+
+def test_replay_bar_context_fails_closed_on_non_causal_times() -> None:
+    bar = _bar(ts=_BASE_TS, open_price="100", close_price="100")
+    valid = ReplayBarContext(
+        bar=bar,
+        bar_index=0,
+        state=ReplayState(),
+        params=ReplayParameterOverrides(),
+        family="independent",
+        symbol=bar.symbol,
+        timeframe="1h",
+        dataset_version="test",
+        observation_completed_at_ts=_BASE_TS + timedelta(hours=1),
+        decision_ts=_BASE_TS + timedelta(hours=1),
+    )
+
+    with pytest.raises(ValueError, match="bar start plus timeframe"):
+        replace(valid, observation_completed_at_ts=_BASE_TS)
+    with pytest.raises(ValueError, match="decision cannot precede"):
+        replace(valid, decision_ts=_BASE_TS)

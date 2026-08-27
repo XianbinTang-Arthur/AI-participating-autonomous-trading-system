@@ -1,7 +1,7 @@
 # AATS 上线前本地测试指南
 
 > 文档状态：现行操作说明  
-> 最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`，包含 Phase 3A–3W 整改提交候选）
+> 最后核对：2026-08-27（起始 HEAD `c0f59047ed71bd2989a3ab279d323401c04b0477`，包含本轮 RDP contract-aware replay P0-D 本地候选，以本文档所在 HEAD 为准）
 > 核对范围：测试目录、仓库命令、managed profile、本地 API 入口和部署纪律的静态核对  
 > 运行时状态：未验证；本文不证明数据库、容器、交易所或实盘链路可用
 
@@ -17,7 +17,7 @@
 - 不手工执行 `docker compose`，不使用 `rsync`；需要部署式演练时只走 [`../../DEPLOYMENT.md`](../../DEPLOYMENT.md) 规定的入口。
 - `scripts/run_local.py` 是只输出迁移指引并 exit `2` 的失败关闭入口，不能作为 paper loop；有限迭代闭环使用明确选择的 integration scenario。
 - 测试失败、skip 原因不明、运行时证据缺失或文档与代码冲突时停止推进，不以人工“看起来正常”覆盖失败。
-- 回测验证必须同时记录 `next_bar_event_v2` 与 `ohlcv_participation_cap_v2`；OHLCV participation-cap 通过不能替代 L2/历史真实 fill 校准，也不能作为 live 容量或收益证明。
+- 回测验证必须同时记录 `next_bar_event_v2`、`ohlcv_participation_cap_contract_v3`、`backtest-run/v2` manifest、完整显式 SPOT contract、显式 `base|quote` 买入手续费资产、adapter algorithm version、规范化 resolved parameters、bar-end decision time、causal timeline、fill attribution、cadence gap 与风险指标策略。CLI 输出目录必须尚不存在；5 个 payload（包括逐笔 `cost_diagnostics.json` 和含完整仓位账本的 equity curve）与 manifest 必须完整且 hash 一致。严格发布预检必须按统一 decision ID 和时间，以持久化 request/side/reference/liquidity/participation 重放 `FillSimulator`，再以逐点 mark 重放 `PositionTracker`，闭合 filled/partial/no-fill、fee/slippage、base-fee dust、净仓、均价、已实现/未实现 PnL、累计手续费和净值，并拒绝类型、finite、tick/lot/min 不一致。Phase 2 promotion 还要求同一 manifest 完整 hash 绑定、schema 为 `phase2-promotion-metrics/v1` 的指标文件；缺 manifest、缺/错 hash、schema 不明或旧 evidence bundle 缺 qualification policy 时，消费者必须把指标保留为 audit-only 并返回 unavailable。现行 replay/calibration/scan writer 尚不生成这条新链，所以旧产物不能因消费者升级而自动获得 promotion 资格。OHLCV participation-cap 通过不能证明 reference/mark 来自未封存 Gold，也不能替代 source-aware historical contract、funding、初始资本/报告币种、L2/历史真实 fill 校准或作为 live 容量/收益证明；当前 Sharpe 字段只是 bar PnL-increment proxy。
 - Dashboard 无障碍单元测试只锁定 modal/focus/reduced-motion 代码契约；上线前仍须在目标浏览器完成 keyboard-only、NVDA/VoiceOver、axe、缩放和 reduced-motion 人工验证。
 - Managed profile 测试必须证明 YAML 是 mapping 且零未知 `AATSSettings` key；静态/单元通过仍不能替代 committed candidate 的目标进程启动与仓库外 overlay 盘点。
 - 面向某个 profile 的 independent replay 必须把解析后的 `strategy_short_bias_enabled`

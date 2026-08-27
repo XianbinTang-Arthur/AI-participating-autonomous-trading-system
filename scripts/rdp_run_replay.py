@@ -134,7 +134,10 @@ def main() -> None:
         **tuning_overrides,
         **_parse_params(args.param),
     }
-    params = ReplayParameterOverrides.from_dict(param_dict)
+    params = ReplayParameterOverrides.from_dict(
+        param_dict,
+        base=ReplayParameterOverrides.for_family(args.family),
+    )
 
     start_ts = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end_ts = datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=timezone.utc)

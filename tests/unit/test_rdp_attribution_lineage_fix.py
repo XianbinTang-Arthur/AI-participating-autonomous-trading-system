@@ -15,6 +15,9 @@ from aats.data_platform.attribution.layer_classifier import classify_all
 from aats.data_platform.decision_system.readiness_evaluator import (
     evaluate_promotion_readiness,
 )
+from aats.data_platform.decision_system.evidence_bundle import (
+    PHASE2_PROMOTION_QUALIFICATION_POLICY,
+)
 from aats.schemas.decision import DecisionContext
 from aats.schemas.market import KlineBar, MarketSnapshot
 from aats.schemas.strategy_runtime import StrategySleeveIntent
@@ -115,6 +118,9 @@ def test_legacy_live_intent_is_unattributable_instead_of_guessed() -> None:
 def _readiness_evidence(*, aligned: int, unattributable: int, live_ok: bool) -> dict:
     return {
         "phase2_evidence": {
+            "promotion_qualification_policy": (
+                PHASE2_PROMOTION_QUALIFICATION_POLICY
+            ),
             "combo_stats": {
                 "independent_15m": {
                     "available": True,

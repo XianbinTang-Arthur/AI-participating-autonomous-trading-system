@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import math
 import pathlib
 import re
 from datetime import datetime, timezone
@@ -20,8 +22,16 @@ from aats.data_platform.governance.snapshot_db import (
     load_latest_research_round_snapshot,
 )
 from aats.data_platform.governance.parameter_registry import load_registry
+from aats.data_platform.replay.backtest.equity_builder import (
+    REPLAY_RISK_METRIC_POLICY_ID,
+)
+from aats.data_platform.replay.backtest.fill_simulator import FILL_MODEL_VERSION
 from aats.data_platform.replay.diagnostics.replay_diagnostics import (
     extract_comparison_rows,
+)
+from aats.domain.instrument_contract import (
+    INSTRUMENT_ARITHMETIC_POLICY_ID,
+    InstrumentContract,
 )
 
 log = logging.getLogger(__name__)
@@ -35,6 +45,80 @@ COMBOS: list[dict[str, str]] = [
 
 _UNTRUSTED_STATUSES: set[str] = {"deprecated", "failed"}
 _ROUND_DIR_PATTERN = re.compile(r"^\d{8}_\d{6}_[0-9a-f]{8}$")
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+_BACKTEST_MANIFEST_KIND = "backtest_run_manifest"
+_BACKTEST_MANIFEST_SCHEMA = "backtest-run/v2"
+_BACKTEST_MANIFEST_NAME = "manifest.json"
+_BACKTEST_REQUIRED_ARTIFACTS = frozenset(
+    {
+        "summary.json",
+        "equity_curve.csv",
+        "cost_validation.json",
+        "cost_diagnostics.json",
+        "execution_timeline.json",
+    }
+)
+_BACKTEST_MANIFEST_KEYS = frozenset(
+    {
+        "artifact_kind",
+        "artifact_schema_version",
+        "complete",
+        "run_fingerprint",
+        "artifact_set_fingerprint",
+        "instrument_arithmetic_policy_id",
+        "fill_model_version",
+        "contract_lineage_status",
+        "settlement_currency",
+        "instrument_symbol",
+        "instrument_contract_fingerprint",
+        "instrument_contract",
+        "resolved_parameters",
+        "adapter_identity",
+        "adapter_algorithm_version",
+        "cadence_gap_count",
+        "risk_metric_policy_id",
+        "artifact_sha256",
+    }
+)
+_BACKTEST_SUMMARY_KEYS = frozenset(
+    {
+        "artifact_kind",
+        "artifact_schema_version",
+        "config",
+        "resolved_parameters",
+        "adapter_identity",
+        "adapter_algorithm_version",
+        "cadence_gap_count",
+        "summary",
+        "decisions_count",
+        "fills_count",
+        "start_ts",
+        "end_ts",
+    }
+)
+
+_PHASE2_PROMOTION_METRICS_NAME = "phase2_promotion_metrics.json"
+_PHASE2_PROMOTION_METRICS_KIND = "phase2_promotion_metrics"
+PHASE2_PROMOTION_QUALIFICATION_POLICY = "phase2-promotion-metrics/v1"
+_PHASE2_PROMOTION_METRICS_SCHEMA = PHASE2_PROMOTION_QUALIFICATION_POLICY
+_BACKTEST_ALLOWED_ARTIFACTS = (
+    _BACKTEST_REQUIRED_ARTIFACTS | {_PHASE2_PROMOTION_METRICS_NAME}
+)
+_PHASE2_PROMOTION_METRICS_KEYS = frozenset(
+    {
+        "artifact_kind",
+        "artifact_schema_version",
+        "family",
+        "timeframe",
+        "total_bars",
+        "opening_count",
+        "positive_edge_ratio",
+        "mean_expected_edge_bps",
+        "execution_compatible_ratio",
+        "selectable_ratio",
+    }
+)
 
 
 def _safe_load_json(path: pathlib.Path) -> dict | list | None:
@@ -46,6 +130,417 @@ def _safe_load_json(path: pathlib.Path) -> dict | list | None:
     except Exception as exc:  # pragma: no cover - defensive
         log.warning("Failed to load JSON from %s: %s", path, exc)
         return None
+
+
+def _strict_load_json_object(path: pathlib.Path) -> dict[str, Any] | None:
+    """Load one standards-compliant, finite JSON object for evidence checks."""
+
+    try:
+        with path.open(encoding="utf-8") as handle:
+            payload = json.load(
+                handle,
+                parse_constant=lambda token: (_raise_json_constant(token)),
+            )
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or not _json_numbers_are_finite(payload):
+        return None
+    return payload
+
+
+def _raise_json_constant(token: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {token}")
+
+
+def _json_numbers_are_finite(value: Any) -> bool:
+    if isinstance(value, bool) or value is None or isinstance(value, (str, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_json_numbers_are_finite(child) for child in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str) and _json_numbers_are_finite(child)
+            for key, child in value.items()
+        )
+    return False
+
+
+def _sha256_file(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_hash_bound_json_object(
+    path: pathlib.Path,
+    *,
+    expected_hash: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Parse the exact bytes whose manifest hash is being trusted."""
+
+    try:
+        payload_bytes = path.read_bytes()
+    except OSError:
+        return None, "backtest_manifest_artifact_unreadable"
+    if hashlib.sha256(payload_bytes).hexdigest() != expected_hash:
+        return None, "backtest_manifest_artifact_changed_after_validation"
+    try:
+        payload = json.loads(
+            payload_bytes.decode("utf-8"),
+            parse_constant=lambda token: (_raise_json_constant(token)),
+        )
+    except (UnicodeDecodeError, ValueError):
+        return None, "backtest_manifest_bound_json_invalid"
+    if not isinstance(payload, dict) or not _json_numbers_are_finite(payload):
+        return None, "backtest_manifest_bound_json_invalid"
+    return payload, "qualified"
+
+
+def _resolve_evidence_path(
+    raw_path: str | pathlib.Path,
+    *,
+    project_root: pathlib.Path,
+) -> pathlib.Path | None:
+    root = project_root.resolve(strict=False)
+    candidate = pathlib.Path(raw_path)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return resolved
+
+
+def _manifest_reference(
+    raw: dict[str, Any],
+    *,
+    project_root: pathlib.Path,
+    default_artifact_dir: pathlib.Path | None,
+) -> pathlib.Path | None:
+    declared = raw.get("backtest_manifest_path")
+    if declared is not None:
+        if not isinstance(declared, str) or not declared.strip():
+            return None
+        candidate: str | pathlib.Path = declared.strip()
+    elif default_artifact_dir is not None:
+        candidate = default_artifact_dir / _BACKTEST_MANIFEST_NAME
+    else:
+        return None
+    resolved = _resolve_evidence_path(candidate, project_root=project_root)
+    if (
+        resolved is None
+        or resolved.name != _BACKTEST_MANIFEST_NAME
+        or not resolved.is_file()
+    ):
+        return None
+    return resolved
+
+
+def _validate_backtest_manifest(
+    manifest_path: pathlib.Path,
+) -> tuple[dict[str, Any] | None, str]:
+    manifest = _strict_load_json_object(manifest_path)
+    if manifest is None:
+        return None, "backtest_manifest_invalid_json"
+    if set(manifest) != _BACKTEST_MANIFEST_KEYS:
+        return None, "backtest_manifest_schema_mismatch"
+    if (
+        manifest.get("artifact_kind") != _BACKTEST_MANIFEST_KIND
+        or manifest.get("artifact_schema_version") != _BACKTEST_MANIFEST_SCHEMA
+        or manifest.get("complete") is not True
+    ):
+        return None, "backtest_manifest_contract_unsupported"
+    if type(manifest.get("cadence_gap_count")) is not int:
+        return None, "backtest_manifest_cadence_gap_invalid"
+    if manifest["cadence_gap_count"] != 0:
+        return None, "backtest_manifest_cadence_gap_present"
+    for key in (
+        "run_fingerprint",
+        "artifact_set_fingerprint",
+        "instrument_contract_fingerprint",
+    ):
+        if not isinstance(manifest.get(key), str) or not _SHA256_PATTERN.fullmatch(
+            manifest[key]
+        ):
+            return None, f"backtest_manifest_{key}_invalid"
+    for key in (
+        "instrument_arithmetic_policy_id",
+        "fill_model_version",
+        "contract_lineage_status",
+        "settlement_currency",
+        "instrument_symbol",
+        "adapter_identity",
+        "adapter_algorithm_version",
+        "risk_metric_policy_id",
+    ):
+        if not isinstance(manifest.get(key), str) or not manifest[key].strip():
+            return None, f"backtest_manifest_{key}_invalid"
+    if not isinstance(manifest.get("instrument_contract"), dict) or not isinstance(
+        manifest.get("resolved_parameters"),
+        dict,
+    ):
+        return None, "backtest_manifest_lineage_payload_invalid"
+    if (
+        manifest["instrument_arithmetic_policy_id"]
+        != INSTRUMENT_ARITHMETIC_POLICY_ID
+        or manifest["fill_model_version"] != FILL_MODEL_VERSION
+        or manifest["risk_metric_policy_id"] != REPLAY_RISK_METRIC_POLICY_ID
+    ):
+        return None, "backtest_manifest_policy_unsupported"
+    try:
+        contract = InstrumentContract(**manifest["instrument_contract"])
+    except (TypeError, ValueError):
+        return None, "backtest_manifest_instrument_contract_invalid"
+    if (
+        contract.instrument_type != "SPOT"
+        or contract.contract_type != "spot"
+        or contract.symbol != manifest["instrument_symbol"]
+        or contract.settle_currency != manifest["settlement_currency"]
+        or contract.fingerprint != manifest["instrument_contract_fingerprint"]
+    ):
+        return None, "backtest_manifest_instrument_contract_mismatch"
+
+    artifact_hashes = manifest.get("artifact_sha256")
+    if not isinstance(artifact_hashes, dict):
+        return None, "backtest_manifest_artifact_set_incomplete"
+    artifact_names = set(artifact_hashes)
+    if (
+        not _BACKTEST_REQUIRED_ARTIFACTS <= artifact_names
+        or not artifact_names <= _BACKTEST_ALLOWED_ARTIFACTS
+    ):
+        return None, "backtest_manifest_artifact_set_incomplete"
+    manifest_dir = manifest_path.parent.resolve(strict=True)
+    for name, expected_hash in artifact_hashes.items():
+        if (
+            not isinstance(name, str)
+            or pathlib.Path(name).name != name
+            or not isinstance(expected_hash, str)
+            or not _SHA256_PATTERN.fullmatch(expected_hash)
+        ):
+            return None, "backtest_manifest_artifact_hash_schema_invalid"
+        artifact_path = (manifest_dir / name).resolve(strict=False)
+        try:
+            artifact_path.relative_to(manifest_dir)
+        except ValueError:
+            return None, "backtest_manifest_artifact_path_escape"
+        if not artifact_path.is_file():
+            return None, "backtest_manifest_artifact_missing"
+        try:
+            actual_hash = _sha256_file(artifact_path)
+        except OSError:
+            return None, "backtest_manifest_artifact_unreadable"
+        if actual_hash != expected_hash:
+            return None, "backtest_manifest_artifact_hash_mismatch"
+
+    fingerprint_payload = {
+        "artifact_schema_version": _BACKTEST_MANIFEST_SCHEMA,
+        "artifact_sha256": artifact_hashes,
+    }
+    expected_fingerprint = hashlib.sha256(
+        json.dumps(
+            fingerprint_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    if manifest["artifact_set_fingerprint"] != expected_fingerprint:
+        return None, "backtest_manifest_artifact_set_fingerprint_mismatch"
+    return manifest, "qualified"
+
+
+def _validated_promotion_metrics(
+    raw: dict[str, Any],
+    *,
+    project_root: pathlib.Path,
+    default_artifact_dir: pathlib.Path | None,
+    expected_family: str | None,
+    expected_timeframe: str | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Return only metrics that are schema-checked and hash-bound to v2 output."""
+
+    qualification: dict[str, Any] = {
+        "promotion_eligible": False,
+        "promotion_qualification_reason": "backtest_manifest_missing",
+        "backtest_manifest_path": None,
+        "promotion_metrics_schema_version": None,
+    }
+    manifest_path = _manifest_reference(
+        raw,
+        project_root=project_root,
+        default_artifact_dir=default_artifact_dir,
+    )
+    if manifest_path is None:
+        return None, qualification
+    qualification["backtest_manifest_path"] = str(manifest_path)
+    manifest, reason = _validate_backtest_manifest(manifest_path)
+    if manifest is None:
+        qualification["promotion_qualification_reason"] = reason
+        return None, qualification
+
+    artifact_hashes = manifest["artifact_sha256"]
+    if _PHASE2_PROMOTION_METRICS_NAME not in artifact_hashes:
+        qualification["promotion_qualification_reason"] = (
+            "phase2_promotion_metrics_not_manifest_bound"
+        )
+        return None, qualification
+    metrics_path = manifest_path.parent / _PHASE2_PROMOTION_METRICS_NAME
+    metrics, metrics_load_reason = _load_hash_bound_json_object(
+        metrics_path,
+        expected_hash=artifact_hashes[_PHASE2_PROMOTION_METRICS_NAME],
+    )
+    if metrics is None:
+        qualification["promotion_qualification_reason"] = metrics_load_reason
+        return None, qualification
+    if set(metrics) != _PHASE2_PROMOTION_METRICS_KEYS:
+        qualification["promotion_qualification_reason"] = (
+            "phase2_promotion_metrics_schema_mismatch"
+        )
+        return None, qualification
+    if (
+        metrics.get("artifact_kind") != _PHASE2_PROMOTION_METRICS_KIND
+        or metrics.get("artifact_schema_version")
+        != _PHASE2_PROMOTION_METRICS_SCHEMA
+    ):
+        qualification["promotion_qualification_reason"] = (
+            "phase2_promotion_metrics_contract_unsupported"
+        )
+        return None, qualification
+
+    summary, summary_load_reason = _load_hash_bound_json_object(
+        manifest_path.parent / "summary.json",
+        expected_hash=artifact_hashes["summary.json"],
+    )
+    if summary is None:
+        qualification["promotion_qualification_reason"] = summary_load_reason
+        return None, qualification
+    if (
+        set(summary) != _BACKTEST_SUMMARY_KEYS
+        or summary.get("artifact_kind") != "backtest_run_summary"
+        or summary.get("artifact_schema_version") != _BACKTEST_MANIFEST_SCHEMA
+        or not isinstance(summary.get("config"), dict)
+        or not isinstance(summary.get("summary"), dict)
+        or type(summary.get("decisions_count")) is not int
+        or type(summary.get("fills_count")) is not int
+        or summary["decisions_count"] < 0
+        or summary["fills_count"] < 0
+    ):
+        qualification["promotion_qualification_reason"] = (
+            "backtest_summary_schema_mismatch"
+        )
+        return None, qualification
+    if (
+        summary.get("adapter_identity") != manifest["adapter_identity"]
+        or summary.get("adapter_algorithm_version")
+        != manifest["adapter_algorithm_version"]
+        or summary.get("resolved_parameters") != manifest["resolved_parameters"]
+        or summary.get("cadence_gap_count") != manifest["cadence_gap_count"]
+    ):
+        qualification["promotion_qualification_reason"] = (
+            "backtest_summary_manifest_lineage_mismatch"
+        )
+        return None, qualification
+
+    config = summary["config"]
+    summary_metrics = summary["summary"]
+    if (
+        config.get("symbol") != manifest["instrument_symbol"]
+        or config.get("instrument_contract") != manifest["instrument_contract"]
+        or config.get("fill_model_version") != manifest["fill_model_version"]
+        or config.get("execution_model_version") != "next_bar_event_v2"
+        or summary_metrics.get("settlement_currency")
+        != manifest["settlement_currency"]
+        or summary_metrics.get("instrument_symbol") != manifest["instrument_symbol"]
+        or summary_metrics.get("instrument_contract_fingerprint")
+        != manifest["instrument_contract_fingerprint"]
+        or summary_metrics.get("risk_metric_policy_id")
+        != manifest["risk_metric_policy_id"]
+        or summary_metrics.get("bar_count") != summary["decisions_count"]
+        or summary_metrics.get("fill_count") != summary["fills_count"]
+    ):
+        qualification["promotion_qualification_reason"] = (
+            "backtest_summary_manifest_contract_mismatch"
+        )
+        return None, qualification
+
+    family = metrics.get("family")
+    timeframe = normalize_timeframe_value(metrics.get("timeframe"))
+    raw_family = expected_family or raw.get("family")
+    raw_timeframe = normalize_timeframe_value(
+        expected_timeframe or raw.get("timeframe")
+    )
+    if (
+        not isinstance(family, str)
+        or not family.strip()
+        or timeframe is None
+        or make_combo_key(family, timeframe)
+        not in {combo["key"] for combo in COMBOS}
+        or (raw_family is not None and raw_family != family)
+        or (raw_timeframe is not None and raw_timeframe != timeframe)
+        or summary["config"].get("family") != family
+        or normalize_timeframe_value(summary["config"].get("timeframe"))
+        != timeframe
+    ):
+        qualification["promotion_qualification_reason"] = (
+            "phase2_promotion_metrics_scope_mismatch"
+        )
+        return None, qualification
+
+    total_bars = metrics.get("total_bars")
+    opening_count = metrics.get("opening_count")
+    if (
+        type(total_bars) is not int
+        or type(opening_count) is not int
+        or total_bars < 0
+        or not 0 <= opening_count <= total_bars
+        or summary.get("decisions_count") != total_bars
+    ):
+        qualification["promotion_qualification_reason"] = (
+            "phase2_promotion_metrics_counts_invalid"
+        )
+        return None, qualification
+    for key in (
+        "positive_edge_ratio",
+        "execution_compatible_ratio",
+        "selectable_ratio",
+    ):
+        value = metrics.get(key)
+        if (key == "positive_edge_ratio" and value is None) or (
+            value is not None
+            and (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not 0.0 <= float(value) <= 1.0
+            )
+        ):
+            qualification["promotion_qualification_reason"] = (
+                f"phase2_promotion_metrics_{key}_invalid"
+            )
+            return None, qualification
+    expected_edge = metrics.get("mean_expected_edge_bps")
+    if expected_edge is not None and (
+        isinstance(expected_edge, bool)
+        or not isinstance(expected_edge, (int, float))
+    ):
+        qualification["promotion_qualification_reason"] = (
+            "phase2_promotion_metrics_mean_expected_edge_bps_invalid"
+        )
+        return None, qualification
+
+    qualification.update(
+        {
+            "promotion_eligible": True,
+            "promotion_qualification_reason": "qualified",
+            "promotion_metrics_schema_version": _PHASE2_PROMOTION_METRICS_SCHEMA,
+        }
+    )
+    return metrics, qualification
 
 
 def normalize_timeframe_value(timeframe: str | None) -> str | None:
@@ -87,14 +582,26 @@ def _build_phase2_diag_entry(
     *,
     diag_id: str,
     diag_type: str,
+    project_root: pathlib.Path,
+    default_artifact_dir: pathlib.Path | None = None,
     family: str | None = None,
     timeframe: str | None = None,
     label: str | None = None,
     scan_key: str | None = None,
     scan_run_id: str | None = None,
 ) -> dict[str, Any]:
-    resolved_family = family or raw.get("family")
-    resolved_timeframe = timeframe or raw.get("timeframe")
+    verified_metrics, qualification = _validated_promotion_metrics(
+        raw,
+        project_root=project_root,
+        default_artifact_dir=default_artifact_dir,
+        expected_family=family,
+        expected_timeframe=timeframe,
+    )
+    metric_source = verified_metrics or raw
+    resolved_family = family or metric_source.get("family") or raw.get("family")
+    resolved_timeframe = (
+        timeframe or metric_source.get("timeframe") or raw.get("timeframe")
+    )
     combo_key = make_combo_key(resolved_family, resolved_timeframe)
 
     entry: dict[str, Any] = {
@@ -103,15 +610,20 @@ def _build_phase2_diag_entry(
         "family": resolved_family,
         "timeframe": resolved_timeframe,
         "combo_key": combo_key,
-        "total_bars": _coerce_int(raw.get("total_bars")),
-        "opening_count": _coerce_int(raw.get("opening_count")),
-        "positive_edge_ratio": _coerce_float(raw.get("positive_edge_ratio")) or 0.0,
-        "mean_expected_edge_bps": _coerce_float(raw.get("mean_expected_edge_bps")),
-        "execution_compatible_ratio": _coerce_float(
-            raw.get("execution_compatible_ratio"),
+        "total_bars": _coerce_int(metric_source.get("total_bars")),
+        "opening_count": _coerce_int(metric_source.get("opening_count")),
+        "positive_edge_ratio": (
+            _coerce_float(metric_source.get("positive_edge_ratio")) or 0.0
         ),
-        "selectable_ratio": _coerce_float(raw.get("selectable_ratio")),
+        "mean_expected_edge_bps": _coerce_float(
+            metric_source.get("mean_expected_edge_bps")
+        ),
+        "execution_compatible_ratio": _coerce_float(
+            metric_source.get("execution_compatible_ratio"),
+        ),
+        "selectable_ratio": _coerce_float(metric_source.get("selectable_ratio")),
     }
+    entry.update(qualification)
     if label or raw.get("label"):
         entry["label"] = label or raw.get("label")
     if scan_key:
@@ -122,6 +634,9 @@ def _build_phase2_diag_entry(
 
 
 def _aggregate_phase2_stats(diags: list[dict[str, Any]]) -> dict[str, Any]:
+    # No caller-supplied metric is promotion evidence until the centralized
+    # verifier has bound it to a complete, hash-valid backtest-run/v2 bundle.
+    diags = [diag for diag in diags if diag.get("promotion_eligible") is True]
     if not diags:
         return {
             "available": False,
@@ -176,6 +691,20 @@ def get_phase2_combo_stats(
     timeframe: str,
 ) -> dict[str, Any]:
     combo_key = make_combo_key(family, timeframe)
+    if (
+        evidence.get("promotion_qualification_policy")
+        != PHASE2_PROMOTION_QUALIFICATION_POLICY
+    ):
+        fallback = _aggregate_phase2_stats([])
+        fallback.update(
+            {
+                "family": family,
+                "timeframe": timeframe,
+                "combo_key": combo_key,
+                "fallback_reason": "promotion_qualification_policy_unsupported",
+            }
+        )
+        return fallback
     combo_stats = evidence.get("combo_stats", {})
     if combo_key and combo_key in combo_stats:
         return combo_stats[combo_key]
@@ -207,6 +736,19 @@ def _find_latest_round_dir(root: pathlib.Path) -> pathlib.Path | None:
     return sorted(round_dirs, key=lambda path: path.stat().st_mtime)[-1]
 
 
+def _artifact_dir(
+    raw_path: Any,
+    *,
+    project_root: pathlib.Path,
+) -> pathlib.Path | None:
+    if not isinstance(raw_path, (str, pathlib.Path)) or not str(raw_path).strip():
+        return None
+    candidate = pathlib.Path(raw_path)
+    if not candidate.is_absolute():
+        candidate = project_root / candidate
+    return candidate
+
+
 def _collect_latest_step2_round_diags(project_root: pathlib.Path) -> list[dict[str, Any]]:
     snapshot = load_latest_research_round_snapshot(
         phase=ROUND_PHASE_STEP2,
@@ -224,6 +766,10 @@ def _collect_latest_step2_round_diags(project_root: pathlib.Path) -> list[dict[s
         return []
     if snapshot:
         diags: list[dict[str, Any]] = []
+        round_dir = _artifact_dir(
+            snapshot.get("round_path"),
+            project_root=project_root,
+        )
         summary = snapshot.get("summary", {}) or {}
         family_summary = summary.get("family_timeframe_summary", {}) or {}
         for index, item in enumerate(family_summary.get("experiments", [])):
@@ -232,6 +778,8 @@ def _collect_latest_step2_round_diags(project_root: pathlib.Path) -> list[dict[s
                     item,
                     diag_id=f"{snapshot.get('round_id')}/calibration/{index}",
                     diag_type="calibration_experiment",
+                    project_root=project_root,
+                    default_artifact_dir=round_dir,
                 ),
             )
 
@@ -242,6 +790,8 @@ def _collect_latest_step2_round_diags(project_root: pathlib.Path) -> list[dict[s
                     item,
                     diag_id=f"{snapshot.get('round_id')}/scan/{index}",
                     diag_type="parameter_scan_item",
+                    project_root=project_root,
+                    default_artifact_dir=round_dir,
                     scan_key=item.get("scan_key"),
                     scan_run_id=item.get("scan_run_id"),
                 ),
@@ -256,8 +806,11 @@ def _finalize_phase2_stats(
     evidence: dict[str, Any],
     all_diags: list[dict[str, Any]],
 ) -> None:
+    eligible_diags = [
+        diag for diag in all_diags if diag.get("promotion_eligible") is True
+    ]
     combo_diags: dict[str, list[dict[str, Any]]] = {}
-    for diag in all_diags:
+    for diag in eligible_diags:
         combo_key = diag.get("combo_key")
         if combo_key:
             combo_diags.setdefault(combo_key, []).append(diag)
@@ -271,15 +824,24 @@ def _finalize_phase2_stats(
         stats["combo_key"] = combo_key
         combo_stats[combo_key] = stats
 
-    global_stats = _aggregate_phase2_stats(all_diags)
+    global_stats = _aggregate_phase2_stats(eligible_diags)
     evidence["combo_stats"] = combo_stats
     evidence["global_stats"] = global_stats
     evidence["aggregate_stats"] = global_stats
     evidence["best_experiments"] = sorted(
+        eligible_diags,
+        key=lambda item: item.get("opening_count", 0),
+        reverse=True,
+    )[:3]
+    evidence["audit_best_experiments"] = sorted(
         all_diags,
         key=lambda item: item.get("opening_count", 0),
         reverse=True,
     )[:3]
+    evidence["promotion_eligible_experiment_count"] = len(eligible_diags)
+    evidence["promotion_ineligible_experiment_count"] = (
+        len(all_diags) - len(eligible_diags)
+    )
 
 
 def collect_phase2_evidence(
@@ -288,6 +850,7 @@ def collect_phase2_evidence(
     artifact_index: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """收集 Phase 2 (Step 1/2) 研究证据。"""
+    project_root = project_root.resolve(strict=False)
     evidence: dict[str, Any] = {
         "source": "phase2",
         "evidence_source": "governance_index" if artifact_index else "directory_scan",
@@ -295,9 +858,13 @@ def collect_phase2_evidence(
         "parameter_scan_count": 0,
         "experiments": [],
         "best_experiments": [],
+        "audit_best_experiments": [],
         "combo_stats": {},
         "global_stats": {},
         "aggregate_stats": {},
+        "promotion_eligible_experiment_count": 0,
+        "promotion_ineligible_experiment_count": 0,
+        "promotion_qualification_policy": _PHASE2_PROMOTION_METRICS_SCHEMA,
     }
 
     all_diags: list[dict[str, Any]] = []
@@ -311,7 +878,12 @@ def collect_phase2_evidence(
                 continue
 
             artifact_type = artifact.get("artifact_type", "experiment")
-            artifact_path = pathlib.Path(artifact.get("path", ""))
+            artifact_path = _artifact_dir(
+                artifact.get("path"),
+                project_root=project_root,
+            )
+            if artifact_path is None:
+                continue
 
             if artifact_type == "parameter_scan":
                 evidence["parameter_scan_count"] += 1
@@ -332,6 +904,8 @@ def collect_phase2_evidence(
                                 item,
                                 diag_id=f"{artifact['artifact_id']}/scan/{index}",
                                 diag_type="parameter_scan_item",
+                                project_root=project_root,
+                                default_artifact_dir=artifact_path,
                                 family=artifact.get("family"),
                                 timeframe=artifact.get("timeframe"),
                                 scan_key=artifact.get("artifact_id"),
@@ -352,6 +926,8 @@ def collect_phase2_evidence(
                 payload,
                 diag_id=artifact["artifact_id"],
                 diag_type="experiment",
+                project_root=project_root,
+                default_artifact_dir=artifact_path,
                 family=artifact.get("family"),
                 timeframe=artifact.get("timeframe"),
             )
@@ -385,6 +961,8 @@ def collect_phase2_evidence(
                                     item,
                                     diag_id=f"{subdir.name}/scan/{index}",
                                     diag_type="parameter_scan_item",
+                                    project_root=project_root,
+                                    default_artifact_dir=subdir,
                                     scan_key=subdir.name,
                                     scan_run_id=subdir.name,
                                 ),
@@ -399,6 +977,8 @@ def collect_phase2_evidence(
                     diag,
                     diag_id=subdir.name,
                     diag_type="experiment",
+                    project_root=project_root,
+                    default_artifact_dir=subdir,
                 )
                 evidence["experiments"].append(entry)
                 all_diags.append(entry)

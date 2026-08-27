@@ -29,6 +29,28 @@ class BaseReplayAdapter(abc.ABC):
     def family_name(self) -> str:
         """返回策略家族名称，如 'independent' 或 'directional'。"""
 
+    @property
+    def algorithm_version(self) -> str:
+        """Stable behavior version persisted in replay evidence artifacts.
+
+        The empty compatibility sentinel keeps third-party legacy subclasses
+        instantiable.  Versioned backtest preflight rejects it before I/O, so a
+        subclass must override this property before it can emit trusted evidence.
+        """
+
+        return ""
+
+    @property
+    def accepted_parameter_keys(self) -> frozenset[str]:
+        """Explicit override keys that this adapter behaviorally consumes.
+
+        An empty default is migration-safe and fail-closed: legacy adapters may
+        run their old read-only path, but cannot silently consume overrides in
+        the versioned harness.
+        """
+
+        return frozenset()
+
     @abc.abstractmethod
     def evaluate_bar(self, ctx: ReplayBarContext) -> ReplayDecision:
         """对单根 bar 做策略评估。

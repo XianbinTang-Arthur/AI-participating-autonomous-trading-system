@@ -51,14 +51,20 @@ def _evaluate_phase2_score(
         "dimension": "phase2_research",
         "score": 0.0,
         "max_score": 3.0,
+        "promotion_evidence_qualified": False,
         "details": [],
     }
 
     combo_key = make_combo_key(family, timeframe) or f"{family}_{timeframe}"
     agg = get_phase2_combo_stats(evidence, family, timeframe)
     if not agg.get("available"):
-        result["details"].append(f"{combo_key} 缺少 Phase 2 有效证据")
+        fallback_reason = agg.get("fallback_reason")
+        reason_suffix = f" ({fallback_reason})" if fallback_reason else ""
+        result["details"].append(
+            f"{combo_key} 缺少 Phase 2 有效证据{reason_suffix}"
+        )
         return result
+    result["promotion_evidence_qualified"] = True
 
     experiments_with_openings = agg.get("experiments_with_openings", 0)
     mean_edge_ratio = agg.get("mean_positive_edge_ratio", 0)
@@ -277,7 +283,10 @@ def evaluate_parameter_set(
     ratio = total_score / max_score if max_score > 0 else 0
 
     # 决策逻辑
-    if ratio >= 0.7:
+    phase2_promotion_qualified = bool(
+        p2_score.get("promotion_evidence_qualified", False)
+    )
+    if ratio >= 0.7 and phase2_promotion_qualified:
         decision = "promote_candidate"
         confidence = "high" if ratio >= 0.85 else "medium"
     elif ratio >= 0.4:

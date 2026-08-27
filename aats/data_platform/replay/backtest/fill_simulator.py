@@ -62,6 +62,9 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal
 
+from aats.data_platform.replay.backtest.numeric import finite_float
+from aats.domain.instrument_contract import InstrumentContract
+
 # ---------------------------------------------------------------------------
 # 类型别名
 # ---------------------------------------------------------------------------
@@ -71,7 +74,7 @@ OrderSide = Literal["buy", "sell"]
 
 FillKind = Literal["taker", "maker", "no_fill"]
 
-FILL_MODEL_VERSION = "ohlcv_participation_cap_v2"
+FILL_MODEL_VERSION = "ohlcv_participation_cap_contract_v3"
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +109,10 @@ class FillResult:
           ``fee_notional`` 一律为零值（Decimal(0) / 0.0），``fill_kind``
           为 "no_fill"，``notes`` 描述原因。
         * 成交时 ``avg_fill_price > 0``。
+        * ``fee_notional`` 是 settlement currency 下的有符号费用；正数为
+          成本，负数为 maker rebate，币种由 ``fee_currency`` 明示。
+        * ``fee_asset`` / ``fee_asset_quantity`` 明示实际扣费资产与数量；
+          它可以与 settlement currency 不同，不能由买卖方向隐式推断。
     """
     order_id: str
     side: OrderSide
@@ -113,9 +120,16 @@ class FillResult:
     avg_fill_price: Decimal
     fee_bps: float
     fee_notional: Decimal
+    fee_currency: str
+    instrument_symbol: str
+    instrument_contract_fingerprint: str
     fill_kind: FillKind
     notes: str = ""
     slippage_bps: float = 0.0
+    # Optional defaults retain source compatibility for historical in-memory
+    # callers. Versioned replay artifacts require both fields to be populated.
+    fee_asset: str | None = None
+    fee_asset_quantity: Decimal | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -128,11 +142,8 @@ _POST_ONLY_MID_RATIO = Decimal("0.05")    # 1% ~ 5%
 _POST_ONLY_LOW_RATIO = Decimal("0.10")    # 5% ~ 10%
 # > 10% → 必不成交
 
-# bps → ratio
-_BPS_DENOM = Decimal("10000")
-
 # deterministic 抽样：md5 截断到 16 字节 → 128-bit int → 除以 2**128
-_MD5_MAX = Decimal(2) ** 128
+_MD5_MAX = 2**128
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +158,7 @@ class FillSimulator:
     因为是 frozen dataclass，多个 backtest runner 可以共享同一个实例。
     """
 
+    instrument_contract: InstrumentContract
     maker_fee_bps: float = 2.0
     taker_fee_bps: float = 5.0
     ioc_slippage_bps: float = 1.0
@@ -157,33 +169,54 @@ class FillSimulator:
     post_only_fill_prob_mid: float = 0.60    # 1% ~ 5%
     post_only_fill_prob_low: float = 0.20    # 5% ~ 10%
     # > 10% 强制 no_fill
+    # Appended after historical constructor fields for positional compatibility.
+    spot_buy_fee_asset: Literal["base", "quote"] | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.instrument_contract, InstrumentContract):
+            raise ValueError("instrument_contract_required")
         if not isinstance(self.max_volume_participation, Decimal) or not (
             self.max_volume_participation.is_finite()
             and Decimal("0") < self.max_volume_participation <= Decimal("1")
         ):
             raise ValueError("max_volume_participation must be finite and in (0, 1]")
+        if self.spot_buy_fee_asset is not None and self.spot_buy_fee_asset not in {
+            "base",
+            "quote",
+        }:
+            raise ValueError("spot_buy_fee_asset must be 'base' or 'quote'")
         for field_name in (
             "maker_fee_bps",
             "taker_fee_bps",
             "ioc_slippage_bps",
         ):
-            value = float(getattr(self, field_name))
+            raw_value = getattr(self, field_name)
+            if isinstance(raw_value, bool):
+                raise ValueError(f"{field_name} must be numeric, not boolean")
+            value = float(raw_value)
             if not math.isfinite(value):
                 raise ValueError(f"{field_name} must be finite")
-        if float(self.taker_fee_bps) < 0.0:
-            raise ValueError("taker_fee_bps must be non-negative")
-        if float(self.ioc_slippage_bps) < 0.0:
-            raise ValueError("ioc_slippage_bps must be non-negative")
+            if value == 0.0:
+                value = 0.0
+            object.__setattr__(self, field_name, value)
+        if not -10000.0 < float(self.maker_fee_bps) < 10000.0:
+            raise ValueError("maker_fee_bps must be in (-10000, 10000)")
+        if not 0.0 <= float(self.taker_fee_bps) < 10000.0:
+            raise ValueError("taker_fee_bps must be in [0, 10000)")
+        if not 0.0 <= float(self.ioc_slippage_bps) < 10000.0:
+            raise ValueError("ioc_slippage_bps must be in [0, 10000)")
         for field_name in (
             "post_only_fill_prob_high",
             "post_only_fill_prob_mid",
             "post_only_fill_prob_low",
         ):
-            value = float(getattr(self, field_name))
+            raw_value = getattr(self, field_name)
+            if isinstance(raw_value, bool):
+                raise ValueError(f"{field_name} must be numeric, not boolean")
+            value = float(raw_value)
             if not math.isfinite(value) or not 0.0 <= value <= 1.0:
                 raise ValueError(f"{field_name} must be finite and in [0, 1]")
+            object.__setattr__(self, field_name, value)
 
     # ------------------------------------------------------------------
     # public API
@@ -199,7 +232,8 @@ class FillSimulator:
     ) -> FillResult:
         """模拟一次下单。
 
-        绝不抛异常：对任何无效输入返回 no_fill + notes 解释。
+        普通缺失/非正输入返回 no_fill + notes；contract arithmetic 异常会
+        直接抛出并中止 replay，禁止把数据损坏伪装成市场未成交。
 
         Args:
             request: 下单意图。
@@ -230,6 +264,9 @@ class FillSimulator:
             return self._no_fill(request, notes="missing or non-positive bar_volume")
 
         # -- 2. 分支派发 --
+        if request.side not in {"buy", "sell"}:
+            return self._no_fill(request, notes=f"unknown side={request.side!r}")
+
         if request.order_type == "ioc":
             return self._simulate_ioc(request, bar_close_price, bar_volume)
 
@@ -263,13 +300,29 @@ class FillSimulator:
     ) -> FillResult:
         """IOC：受 OHLCV participation cap 的 taker 成交。"""
         filled_qty = self._fillable_qty(request, bar_volume)
-        direction = Decimal(1) if request.side == "buy" else Decimal(-1)
-        slip_ratio = direction * Decimal(str(self.ioc_slippage_bps)) / _BPS_DENOM
-        avg_price = bar_close_price * (Decimal(1) + slip_ratio)
+        if filled_qty == 0:
+            return self._no_fill(request, notes="below_contract_min_size_or_lot")
+        avg_price = self.instrument_contract.execution_price(
+            bar_close_price,
+            side=request.side,
+            slippage_bps=Decimal(str(self.ioc_slippage_bps)),
+        )
+        actual_slippage_bps = finite_float(
+            self.instrument_contract.execution_slippage_bps(
+                bar_close_price,
+                execution_price=avg_price,
+                side=request.side,
+            ),
+            reason="fill_slippage_bps_non_finite",
+        )
 
         fee_bps = self.taker_fee_bps
-        fee_ratio = Decimal(str(fee_bps)) / _BPS_DENOM
-        fee_notional = filled_qty * avg_price * fee_ratio
+        fee_notional, fee_asset, fee_asset_quantity = self._fee_lineage(
+            request=request,
+            filled_qty=filled_qty,
+            avg_price=avg_price,
+            fee_bps=fee_bps,
+        )
 
         return FillResult(
             order_id=request.order_id,
@@ -278,6 +331,9 @@ class FillSimulator:
             avg_fill_price=avg_price,
             fee_bps=fee_bps,
             fee_notional=fee_notional,
+            fee_currency=self.instrument_contract.settle_currency,
+            instrument_symbol=self.instrument_contract.symbol,
+            instrument_contract_fingerprint=self.instrument_contract.fingerprint,
             fill_kind="taker",
             notes=self._fill_notes(
                 order_type="ioc",
@@ -285,7 +341,9 @@ class FillSimulator:
                 filled_qty=filled_qty,
                 bar_volume=bar_volume,
             ),
-            slippage_bps=self.ioc_slippage_bps,
+            slippage_bps=actual_slippage_bps,
+            fee_asset=fee_asset,
+            fee_asset_quantity=fee_asset_quantity,
         )
 
     def _simulate_post_only(
@@ -300,7 +358,10 @@ class FillSimulator:
 
         成交 → maker fill @ event reference，无 slippage；否则 no_fill。
         """
-        volume_ratio = request.target_qty / bar_volume
+        volume_ratio = self.instrument_contract.quantity_ratio(
+            request.target_qty,
+            denominator=bar_volume,
+        )
         fill_prob = self._post_only_fill_prob(volume_ratio)
 
         if fill_prob <= 0.0:
@@ -328,24 +389,47 @@ class FillSimulator:
         # 成交：maker fill @ caller-provided event reference（无 slippage），
         # 但实际数量仍受 participation cap。
         filled_qty = self._fillable_qty(request, bar_volume)
+        if filled_qty == 0:
+            return self._no_fill(request, notes="below_contract_min_size_or_lot")
+        avg_price = self.instrument_contract.execution_price(
+            bar_close_price,
+            side=request.side,
+        )
+        actual_slippage_bps = finite_float(
+            self.instrument_contract.execution_slippage_bps(
+                bar_close_price,
+                execution_price=avg_price,
+                side=request.side,
+            ),
+            reason="fill_slippage_bps_non_finite",
+        )
         fee_bps = self.maker_fee_bps
-        fee_ratio = Decimal(str(fee_bps)) / _BPS_DENOM
-        fee_notional = filled_qty * bar_close_price * fee_ratio
+        fee_notional, fee_asset, fee_asset_quantity = self._fee_lineage(
+            request=request,
+            filled_qty=filled_qty,
+            avg_price=avg_price,
+            fee_bps=fee_bps,
+        )
 
         return FillResult(
             order_id=request.order_id,
             side=request.side,
             filled_qty=filled_qty,
-            avg_fill_price=bar_close_price,
+            avg_fill_price=avg_price,
             fee_bps=fee_bps,
             fee_notional=fee_notional,
+            fee_currency=self.instrument_contract.settle_currency,
+            instrument_symbol=self.instrument_contract.symbol,
+            instrument_contract_fingerprint=self.instrument_contract.fingerprint,
             fill_kind="maker",
             notes=(
                 f"{self._fill_notes(order_type='post_only', request=request, filled_qty=filled_qty, bar_volume=bar_volume)} "
                 f"volume_ratio={self._fmt_pct(volume_ratio)} "
                 f"fill_prob={fill_prob * 100:.1f}%"
             ),
-            slippage_bps=0.0,
+            slippage_bps=actual_slippage_bps,
+            fee_asset=fee_asset,
+            fee_asset_quantity=fee_asset_quantity,
         )
 
     def _simulate_bounded_limit(
@@ -356,12 +440,28 @@ class FillSimulator:
     ) -> FillResult:
         """bounded_limit：保守按受 cap 的 taker fallback 计价。"""
         filled_qty = self._fillable_qty(request, bar_volume)
-        direction = Decimal(1) if request.side == "buy" else Decimal(-1)
-        slip_ratio = direction * Decimal(str(self.ioc_slippage_bps)) / _BPS_DENOM
-        avg_price = bar_close_price * (Decimal(1) + slip_ratio)
+        if filled_qty == 0:
+            return self._no_fill(request, notes="below_contract_min_size_or_lot")
+        avg_price = self.instrument_contract.execution_price(
+            bar_close_price,
+            side=request.side,
+            slippage_bps=Decimal(str(self.ioc_slippage_bps)),
+        )
+        actual_slippage_bps = finite_float(
+            self.instrument_contract.execution_slippage_bps(
+                bar_close_price,
+                execution_price=avg_price,
+                side=request.side,
+            ),
+            reason="fill_slippage_bps_non_finite",
+        )
         fee_bps = self.taker_fee_bps
-        fee_ratio = Decimal(str(fee_bps)) / _BPS_DENOM
-        fee_notional = filled_qty * avg_price * fee_ratio
+        fee_notional, fee_asset, fee_asset_quantity = self._fee_lineage(
+            request=request,
+            filled_qty=filled_qty,
+            avg_price=avg_price,
+            fee_bps=fee_bps,
+        )
 
         return FillResult(
             order_id=request.order_id,
@@ -370,6 +470,9 @@ class FillSimulator:
             avg_fill_price=avg_price,
             fee_bps=fee_bps,
             fee_notional=fee_notional,
+            fee_currency=self.instrument_contract.settle_currency,
+            instrument_symbol=self.instrument_contract.symbol,
+            instrument_contract_fingerprint=self.instrument_contract.fingerprint,
             fill_kind="taker",
             notes=self._fill_notes(
                 order_type="bounded_limit_taker_fallback",
@@ -377,7 +480,9 @@ class FillSimulator:
                 filled_qty=filled_qty,
                 bar_volume=bar_volume,
             ),
-            slippage_bps=self.ioc_slippage_bps,
+            slippage_bps=actual_slippage_bps,
+            fee_asset=fee_asset,
+            fee_asset_quantity=fee_asset_quantity,
         )
 
     # ------------------------------------------------------------------
@@ -400,8 +505,42 @@ class FillSimulator:
         bar_volume: Decimal,
     ) -> Decimal:
         """按已知 volume 与固定 participation cap 返回实际可成交量。"""
-        cap = bar_volume * self.max_volume_participation
-        return min(request.target_qty, cap)
+        return self.instrument_contract.fillable_exchange_quantity(
+            request.target_qty,
+            available_quantity=bar_volume,
+            max_participation=self.max_volume_participation,
+        )
+
+    def _fee_lineage(
+        self,
+        *,
+        request: FillRequest,
+        filled_qty: Decimal,
+        avg_price: Decimal,
+        fee_bps: float,
+    ) -> tuple[Decimal, str, Decimal]:
+        """Return settlement valuation plus the explicitly charged asset."""
+
+        contract = self.instrument_contract
+        fee_rate = Decimal(str(fee_bps))
+        fee_asset = contract.settle_currency
+        if contract.contract_type == "spot" and request.side == "buy":
+            if self.spot_buy_fee_asset is None:
+                raise ValueError("spot_buy_fee_asset_required")
+            if self.spot_buy_fee_asset == "base":
+                fee_asset = contract.base_currency
+        fee_asset_quantity = contract.fee_asset_amount(
+            filled_qty,
+            price=avg_price,
+            fee_bps=fee_rate,
+            fee_asset=fee_asset,
+        )
+        fee_notional = contract.fee_settlement_value(
+            fee_asset_quantity,
+            fee_asset=fee_asset,
+            price=avg_price,
+        )
+        return fee_notional, fee_asset, fee_asset_quantity
 
     def _fill_notes(
         self,
@@ -411,7 +550,10 @@ class FillSimulator:
         filled_qty: Decimal,
         bar_volume: Decimal,
     ) -> str:
-        participation = filled_qty / bar_volume
+        participation = self.instrument_contract.quantity_ratio(
+            filled_qty,
+            denominator=bar_volume,
+        )
         status = "filled" if filled_qty == request.target_qty else "partial_fill"
         return (
             f"{order_type} {status}: filled_qty={filled_qty} "
@@ -420,8 +562,7 @@ class FillSimulator:
             f"max_participation={self._fmt_pct(self.max_volume_participation)}"
         )
 
-    @staticmethod
-    def _no_fill(request: FillRequest, *, notes: str) -> FillResult:
+    def _no_fill(self, request: FillRequest, *, notes: str) -> FillResult:
         """构造一个统一的 no_fill 结果。"""
         return FillResult(
             order_id=request.order_id,
@@ -430,8 +571,13 @@ class FillSimulator:
             avg_fill_price=Decimal(0),
             fee_bps=0.0,
             fee_notional=Decimal(0),
+            fee_currency=self.instrument_contract.settle_currency,
+            instrument_symbol=self.instrument_contract.symbol,
+            instrument_contract_fingerprint=self.instrument_contract.fingerprint,
             fill_kind="no_fill",
             notes=notes,
+            fee_asset=self.instrument_contract.settle_currency,
+            fee_asset_quantity=Decimal(0),
         )
 
     @staticmethod
@@ -460,5 +606,6 @@ def _deterministic_uniform(seed: str) -> float:
     """
     digest = hashlib.md5(seed.encode("utf-8")).digest()
     as_int = int.from_bytes(digest, "big")
-    # Decimal 精确除法再转 float，避免大整数直接 float 化的舍入不稳
-    return float(Decimal(as_int) / _MD5_MAX)
+    # int 真除法由 Python 直接得到 IEEE-754 float，不受 Decimal ambient
+    # context 的 precision/rounding 影响。
+    return as_int / _MD5_MAX

@@ -9,7 +9,7 @@ AATS 是一个以 AI 为核心受益主体的 AI 辅助自动化交易系统。�
 
 本文档是项目级入口，描述当前模块边界、运行方式和主要文档索引。具体交易链路见 [ARCHITECTURE.md](ARCHITECTURE.md)，部署流程见 [DEPLOYMENT.md](DEPLOYMENT.md)，逐文件代码核对后的完整现状见 [项目代码审查与系统说明](docs/code_review/README.md)。
 
-> 当前静态事实复核：2026-08-25，起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`，当前工作区包含 Phase 3A–3W 整改提交候选。发生冲突时，以当前工作区代码、数据库迁移和部署脚本为准；`docs/task/`、`docs/design/`、`docs/review/` 中带日期或阶段编号的材料只代表当时状态。账户、容器、订单、仓位、schema、实际网络绑定与风险门等运行时事实仍须现场验证。
+> 当前静态事实复核：2026-08-27，起始 HEAD `c0f59047ed71bd2989a3ab279d323401c04b0477`，当前工作区包含 RDP contract-aware replay P0-D 的本地候选。发生冲突时，以当前工作区代码、数据库迁移和部署脚本为准；`docs/task/`、`docs/design/`、`docs/review/` 中带日期或阶段编号的材料只代表当时状态。账户、容器、订单、仓位、schema、实际网络绑定与风险门等运行时事实仍须现场验证。
 
 ## 1. 项目边界
 
@@ -163,7 +163,9 @@ Phase 3L 把 FS-002 的长期恢复状态与在线增险许可分离：Gateway/m
 
 Phase 3M 已封闭 FS-001 的另一条错误成功路径：profile recommendation 的 apply 与 rollback 现在都只在认证、action-bound token、状态和双人签署校验后返回无写入 `501`；不会创建/续跑历史 apply Saga，不会写 research/live 数据，也不会把 recommendation 标为 `applied/rolled_back`。approve/release 仍只是研究治理状态，不能推导交易 runtime 已采用参数。真正的 execution-owned profile activation、单调 generation、worker ack/readback、反向 Saga 和历史漂移对账仍未实现，因此 FS-001 继续是 P1 HARD BLOCKER，G2 未放行。
 
-Phase 3N 将离线 backtest fill 固定为 `ohlcv_participation_cap_v2`：IOC、post-only 与 bounded-limit 都要求正 volume 并受默认 1% participation cap，超量只产生 partial fill；IOC/bounded 在 next-open 只使用已经闭合的 observation volume，bounded 按保守 taker fee + fixed slippage 计价，成本诊断显式保存 fee/slippage。scorecard 会声明 OHLCV 粒度以及无 L2 depth、spread/queue、impact/latency 校准。该变更只收敛 bar proxy 的全成与成本漏记，不能证明 live 容量或收益；FS-014 仍为 `PARTIALLY REMEDIATED / OHLCV CONTAINED / L2 CALIBRATION OPEN`，G3 未放行。
+Phase 3N 的离线 bar-proxy 在 2026-08-27 P0-D 候选中提升为 `ohlcv_participation_cap_contract_v3`：IOC、post-only 与 bounded-limit 都要求正 volume 并受默认 1% participation cap，超量只产生 partial fill；IOC/bounded 在 next-open 只使用已经闭合的 observation volume，bounded 按保守 taker fee + fixed slippage 计价。SPOT CLI 必须显式选择买入手续费从 `base` 或 `quote` 扣除；base fee 会减少真实库存，低于 lot/min 的余尘会继续盯市并报告 partial/no-order，绝不量化成虚假平仓。正式产物为 `backtest-run/v2`，包含 5 个 payload（其中 `cost_diagnostics.json` 保存逐笔成本归因）和最后发布的 `manifest.json`；scorecard 为 `backtest-evidence-scorecard/v2`。两者绑定显式 SPOT `InstrumentContract`、adapter algorithm version、规范化 resolved parameters、bar-end decision time、causal timeline、成本归因、cadence gap 与 PnL-increment 风险指标策略。严格发布预检会以持久化的请求量、方向、参考价、流动性和 participation 输入重新运行 `FillSimulator`，再以逐点 mark 和完整仓位账本重新运行 `PositionTracker`，闭合 partial/no-fill、fee/slippage、库存、均价、已实现/未实现 PnL、累计手续费与净值；Decimal/float 类型、finite、tick/lot/min 和决策时间也失败关闭。缺少这些归因的产物不得冒充可独立复算的 v2。该风险指标没有初始本金，只是按 bar PnL 增量年化的 proxy，不是资本收益率 Sharpe。当前公共 harness/CLI 对 derivative 与 MARGIN 均在 DB/文件 I/O 前失败关闭；linear/inverse 算术只完成纯组件覆盖，reference/mark 的上游真实性仍受未封存 Gold 限制，source-aware historical contract、funding、初始资本/报告币种与 L2 校准仍未完成，因此 FS-014、P0-D 总验收和 G3 均未放行。
+
+旧 `ohlcv_participation_cap_v2`、无 manifest 的 replay/calibration/scan 产物、无版本 `replay_decisions.csv`/`diagnostics.json` 以及旧 custom adapter 只能用于历史审计或校准，不能原地补字段后转成 v2，也不能进入 Route-A/promotion。新 custom adapter 必须提供非空稳定 `algorithm_version` 与精确 `accepted_parameter_keys`；现行 built-in adapter 版本为 `independent-replay/v2` / `directional-replay/v2`。Route-A bundle v2 会把单次 daily snapshot 明确标为 `incomplete_single_snapshot`，它不证明完整 7 天自然观察窗。
 
 Phase 3O 将 Dashboard 详情抽屉改为具名、具说明的原生 modal `<dialog>`：九类异步详情入口保留原触发按钮，打开后焦点进入关闭按钮，关闭按钮/Escape/backdrop 走同一清理路径并尽可能返回焦点。`prefers-reduced-motion: reduce` 同时停止 CSS 动画/过渡/平滑滚动和 JavaScript 显式 smooth scroll。该结论来自静态契约、Node 语法和单元测试；目标浏览器、键盘-only、NVDA/VoiceOver、axe、缩放与 reduced-motion 人工观察仍 OPEN，因此 FS-017/018 不能标为最终 CLOSED。
 

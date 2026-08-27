@@ -182,7 +182,11 @@ def run_parameter_scan(
         artifact_root = _ARTIFACT_ROOT
 
     grid = grid_to_json(parameter_grid)
-    combos = build_grid(parameter_grid, base_params=base_params)
+    combos = build_grid(
+        parameter_grid,
+        base_params=base_params,
+        family=adapter.family_name,
+    )
 
     # 1. 创建 scan_run
     scan_run_id = create_scan_run(

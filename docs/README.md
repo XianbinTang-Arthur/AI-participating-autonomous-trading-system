@@ -1,6 +1,6 @@
 # AATS 文档地图与适用边界
 
-最后核对：2026-08-26（已提交基线 `c1b015ec`；含待提交的 RDP 历史数据恢复与持续采集加固实现，以本文档所在 HEAD 为准）
+最后核对：2026-08-27（起始 HEAD `c0f59047ed71bd2989a3ab279d323401c04b0477`；含本轮 RDP contract-aware replay P0-D 本地候选，以本文档所在 HEAD 为准）
 
 本页解决一个长期问题：仓库同时保存当前规范、专题参考、历史设计、审查报告、任务书和一次性观察记录。文件仍在仓库中，不代表它描述当前行为。
 
@@ -184,11 +184,23 @@
   历史漂移对账仍 OPEN。详见
   [`task/fs_001_profile_apply_fail_closed_sow_2026_08_24.md`](task/fs_001_profile_apply_fail_closed_sow_2026_08_24.md)
   和 [`../audit/full_system_2026_08_24/33-fs-001-profile-apply-fail-closed.md`](../audit/full_system_2026_08_24/33-fs-001-profile-apply-fail-closed.md)。
-- 2026-08-24 Phase 3N 已将回测 fill 固定为 `ohlcv_participation_cap_v2`：
+- 2026-08-27 P0-D 本地候选已将回测 fill 提升为 `ohlcv_participation_cap_contract_v3`：
   三类订单都要求正 volume 并受默认 1% cap，IOC/bounded 只使用下单前已知的
-  observation volume，bounded 按 taker fee + fixed slippage，成本和 scorecard
-  明示 fee/slippage、OHLCV 粒度与 L2/queue/impact 限制。它只收敛 bar proxy，
-  不构成 live 容量/收益证明；FS-014/G3 仍 OPEN。详见
+  observation volume，bounded 按 taker fee + fixed slippage；SPOT 买入手续费资产必须显式
+  选择 `base|quote`，base fee 形成的非 lot 余尘会保留、盯市并报告 partial/no-order。当前 `backtest-run/v2`
+  固定 5 个 payload（含逐笔 `cost_diagnostics.json`）+ manifest-last，`backtest-evidence-scorecard/v2` 冻结嵌套 schema、
+  合同/规范化参数/adapter version、bar-end decision time、显式 fill attribution、cadence gap 与风险指标策略；
+  严格预检会从 execution basis 重放 `FillSimulator`，再用逐点 mark/仓位账本重放
+  `PositionTracker`，闭合成交状态、费用、仓位、PnL 和净值，并拒绝错误类型、非 finite、tick/lot/min
+  不一致。family
+  baseline 按 independent/directional 解析，built-in algorithm version 均提升为 v2。
+  Route-A bundle v2 明示单次 daily snapshot 不等于完整 7 天观察窗。公共 harness/CLI
+  当前只执行 SPOT，derivative/MARGIN 在 I/O 前失败关闭；风险指标只是无初始资本的 bar
+  PnL-increment proxy。旧 fill v2、无 manifest/无版本 replay/calibration/scan artifact 仅可
+  审计或校准，不能 Route/promotion，也不能原地补字段升级。reference/mark 的上游真实性仍取决于
+  尚未封存的 Gold；source-aware historical contract、
+  funding、initial capital/reporting currency 与 L2/queue/impact 仍 OPEN，所以 P0-D、FS-014/G3
+  均未放行。详见
   [`task/fs_014_ohlcv_fill_realism_containment_sow_2026_08_24.md`](task/fs_014_ohlcv_fill_realism_containment_sow_2026_08_24.md)
   和 [`../audit/full_system_2026_08_24/34-fs-014-ohlcv-fill-realism-containment.md`](../audit/full_system_2026_08_24/34-fs-014-ohlcv-fill-realism-containment.md)。
 - 2026-08-25 Phase 3O 已将 Dashboard 详情抽屉改为原生 modal dialog，补齐

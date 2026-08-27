@@ -17,6 +17,10 @@ from typing import Any
 
 import pytest
 
+from aats.data_platform.decision_system.evidence_bundle import (
+    PHASE2_PROMOTION_QUALIFICATION_POLICY,
+)
+
 _PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
@@ -818,6 +822,9 @@ class TestReadinessEvaluatorIntegration:
 
         evidence: dict[str, Any] = {
             "phase2_evidence": {
+                "promotion_qualification_policy": (
+                    PHASE2_PROMOTION_QUALIFICATION_POLICY
+                ),
                 "combo_stats": {
                     "independent_15m": {
                         "available": True,
@@ -942,6 +949,9 @@ def _gate_evidence_with_overrides(
     """完整可 promote 证据模板；调用方用 overrides 只替换需要被测的 Phase。"""
     return {
         "phase2_evidence": {
+            "promotion_qualification_policy": (
+                PHASE2_PROMOTION_QUALIFICATION_POLICY
+            ),
             "combo_stats": {
                 "independent_15m": {
                     "available": True,

@@ -27,6 +27,8 @@ from aats.data_platform.replay.core.replay_context import (
     ReplayBarContext,
     ReplayDecision,
     ReplayParameterOverrides,
+    canonicalize_replay_timeframe,
+    parse_replay_timeframe,
 )
 from aats.domain.instrument_scope import (
     INSTRUMENT_SCOPE_UNSUPPORTED_REASON,
@@ -130,11 +132,13 @@ def run_replay(
     4. 返回所有决策
     """
     if params is None:
-        params = ReplayParameterOverrides()
+        params = ReplayParameterOverrides.for_family(adapter.family_name)
+    canonical_timeframe = canonicalize_replay_timeframe(timeframe)
+    bar_duration = parse_replay_timeframe(canonical_timeframe)
 
     log.info(
         "Starting replay: family=%s symbol=%s tf=%s window=[%s, %s) params=%s",
-        adapter.family_name, symbol, timeframe,
+        adapter.family_name, symbol, canonical_timeframe,
         start_ts.isoformat(), end_ts.isoformat(),
         params.to_dict(),
     )
@@ -143,7 +147,7 @@ def run_replay(
     bars = load_gold_bars(
         session,
         symbol=symbol,
-        timeframe=timeframe,
+        timeframe=canonical_timeframe,
         start_ts=start_ts,
         end_ts=end_ts,
         dataset_version=dataset_version,
@@ -153,6 +157,12 @@ def run_replay(
     if not bars:
         log.warning("No Gold bars found for replay window. Returning empty decisions.")
         return []
+    for index, bar in enumerate(bars):
+        if type(bar.is_closed) is not bool or not bar.is_closed:
+            raise ValueError(
+                "legacy replay requires closed Gold bars before evaluation: "
+                f"bar_index={index}"
+            )
 
     # 2. 重置 adapter 状态
     state = adapter.reset_state()
@@ -161,6 +171,7 @@ def run_replay(
     decisions: list[ReplayDecision] = []
     for i, bar in enumerate(bars):
         state.bar_index = i
+        observation_completed_at = bar.ts + bar_duration
         ctx = ReplayBarContext(
             bar=bar,
             bar_index=i,
@@ -168,8 +179,10 @@ def run_replay(
             params=params,
             family=adapter.family_name,
             symbol=symbol,
-            timeframe=timeframe,
+            timeframe=canonical_timeframe,
             dataset_version=dataset_version,
+            observation_completed_at_ts=observation_completed_at,
+            decision_ts=observation_completed_at,
         )
         decision = adapter.evaluate_bar(ctx)
         decisions.append(decision)

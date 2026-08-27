@@ -4,12 +4,38 @@ import pytest
 
 from scripts.rdp_run_execution_realism import (
     _annotate_research_evidence_identity,
+    _load_replay_params as load_execution_replay_params,
     _parse_utc_datetime,
+)
+from scripts.rdp_run_live_attribution import (
+    _load_replay_params as load_attribution_replay_params,
 )
 
 UTC = timezone.utc
 START = datetime(2026, 5, 2, 4, 48, tzinfo=UTC)
 END = datetime(2026, 5, 2, 7, 12, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    "loader",
+    (load_execution_replay_params, load_attribution_replay_params),
+)
+def test_legacy_runners_use_directional_baseline_for_empty_and_partial_params(
+    loader,
+) -> None:
+    baseline = loader(None, None, [], family="directional")
+    partial = loader(
+        None,
+        None,
+        ["min_confirm_ticks=3"],
+        family="directional",
+    )
+
+    for params in (baseline, partial):
+        assert params.entry_threshold == 0.45
+        assert params.close_threshold == 0.20
+        assert params.scale_in_threshold == 0.55
+    assert partial.min_confirm_ticks == 3
 
 
 def test_parse_utc_datetime_accepts_date_and_offset_timestamp() -> None:

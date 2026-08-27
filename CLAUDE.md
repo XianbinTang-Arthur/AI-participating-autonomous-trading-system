@@ -2,7 +2,7 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](docs/project_positioning.md)。
 
-> 文档状态：现行约束。最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`，包含 Phase 3A–3W 整改提交候选）。运行架构、部署、安全纪律或文档治理变化时必须同步复核。
+> 文档状态：现行约束。最后核对：2026-08-27（起始 HEAD `c0f59047ed71bd2989a3ab279d323401c04b0477`，包含本轮 RDP contract-aware replay P0-D 本地候选，以本文档所在 HEAD 为准）。运行架构、部署、安全纪律或文档治理变化时必须同步复核。
 
 > 本文件是仓库级操作手册。所有在本仓库工作的编码代理必须遵守此文档约束。
 
@@ -47,7 +47,7 @@ AATS 的首要意义是通过自动化交易持续追求长期稳定盈利，为
 - **运行时参数**: managed profile 代码基线 + `configs/strategy_profiles/<profile>.yaml` + 允许的 `.env.*` override；RDP active parameters 最后从 Postgres `governance.active_parameter_sets` 注入
 - **Managed 配置真实性**: Phase 3P 后 strategy YAML 必须是 mapping，runtime defaults 与 YAML 的每个 key 都必须属于 `AATSSettings.model_fields`，未知 key 在 runtime 构建前失败；`strategy_profile_auto_rollback_enabled` 从未有消费者且已删除，不能写成已实现能力
 - **Profile recommendation 边界**: `approve/release` 只推进研究治理状态；Phase 3M 后 `profile-recommendations/{id}/apply` 与 `/rollback` 均在授权检查后无写入 `501`。在 execution-owned generation/worker readback 完成前，不得把它们用于运行参数变更
-- **回测成交证据边界**: Phase 3N 后只接受带 `next_bar_event_v2` 与 `ohlcv_participation_cap_v2` 的新回测作为当前 bar-proxy 证据；三类订单均受 volume/cap 约束，artifact 必须声明无 L2 depth、spread/queue、impact/latency 校准，不能外推 live 容量或收益
+- **回测成交证据边界**: 当前只接受 `next_bar_event_v2` + `ohlcv_participation_cap_contract_v3` + `backtest-run/v2` manifest 的新 SPOT 回测作为 bar-proxy 候选；CLI 必须提供完整 `InstrumentContract`、显式 `base|quote` 买入手续费资产并写入全新输出目录，custom adapter 必须声明非空 `algorithm_version` 和精确 `accepted_parameter_keys`。严格 v2 以持久化 execution basis 重放 `FillSimulator`，再按逐点 mark/仓位账本重放 `PositionTracker`，闭合 partial/no-fill、fee/slippage、base-fee dust、PnL、累计费和净值；bar-end decision time、参数类型、tick/lot/min 也失败关闭。`backtest-evidence-scorecard/v2` 必须有显式 fill attribution、零 cadence gap 才可进入 Route-A scaffold；bundle v2 的单个 daily snapshot 固定标为观察窗未完成。旧 v2 fill、无 manifest/无版本 replay 产物只可审计/校准。三类订单仍仅是 OHLCV proxy；reference/mark 的来源真实性仍受未封存 Gold 限制，当前风险指标是无初始本金的 bar PnL-increment proxy，不是资本收益率 Sharpe。derivative/MARGIN、funding、source-aware contract snapshot、初始资本/报告币种与 L2 calibration 均失败关闭或 OPEN，不能外推 live 容量或收益
 - **收益证据 v1 边界**: 公共微观结构 eligibility、v2 候选审计/复跑、统计门、L2 event replay、paper calibration、一次性 holdout 账本、参数 generation、故障/readiness schema 的现行入口见 `docs/operations/profit_readiness_runbook.md`。格式 v1 只能产生模拟就绪，`production_ready`/`trading_ready` 固定 false；runtime worker 尚未接 ACK，profile apply/rollback 继续 501
 - **Dashboard 无障碍边界**: Phase 3O 后详情抽屉必须保持原生 modal dialog、初始/返回焦点、Escape/backdrop 统一关闭和 reduced-motion CSS/JS 契约；静态/单元通过不能替代目标浏览器、键盘、NVDA/VoiceOver 与 axe 实测
 

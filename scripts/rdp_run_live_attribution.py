@@ -125,6 +125,8 @@ def _load_replay_params(
     params_json: str | None,
     parameter_set: str | None,
     param_overrides: list[str],
+    *,
+    family: str,
 ) -> Any:
     """加载 replay 参数。
 
@@ -187,13 +189,14 @@ def _load_replay_params(
         log.info("  Applied CLI overrides: %s", cli_overrides)
 
     # 3. 构造 ReplayParameterOverrides
+    baseline = ReplayParameterOverrides.for_family(family)
     if param_dict:
-        params = ReplayParameterOverrides.from_dict(param_dict)
+        params = ReplayParameterOverrides.from_dict(param_dict, base=baseline)
         log.info("  Final params: %s", params.to_dict())
         return params
 
     log.info("  Using default ReplayParameterOverrides")
-    return ReplayParameterOverrides()
+    return baseline
 
 
 # =========================================================================
@@ -230,7 +233,7 @@ def _run_replay(
         raise ValueError(f"Unknown family: {family}")
 
     if params is None:
-        params = ReplayParameterOverrides()
+        params = ReplayParameterOverrides.for_family(family)
 
     decisions = run_replay(
         session,
@@ -541,6 +544,7 @@ def main() -> int:
     # 加载 replay 参数 (P0: Phase 2 -> Phase 3 闭环)
     replay_params = _load_replay_params(
         args.params_json, args.parameter_set, args.param,
+        family=args.family,
     )
 
     # 产物目录

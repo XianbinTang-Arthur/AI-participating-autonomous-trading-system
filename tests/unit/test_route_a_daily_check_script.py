@@ -132,6 +132,8 @@ def test_script_emits_machine_readable_json_summary(script_text: str) -> None:
     assert '_json_dir="artifacts/route_a_observation_window"' in script_text
     assert '"${_json_dir}/${CHECK_DATE}.json"' in script_text
     for field in (
+        '"artifact_kind":',
+        '"artifact_schema_version":',
         '"generated_at":',
         '"window_start":',
         '"window_target":',
@@ -142,6 +144,16 @@ def test_script_emits_machine_readable_json_summary(script_text: str) -> None:
         '"checks":',
     ):
         assert field in script_text, f"missing JSON field emitter: {field}"
+    assert '"route_a_observation_window_summary"' in script_text
+    assert '"route-a-observation-window/v1"' in script_text
+
+
+def test_script_publishes_json_from_same_directory_staging_file(
+    script_text: str,
+) -> None:
+    assert '.json.staging.XXXXXX' in script_text
+    assert 'mv -f -- "$_json_tmp" "$_json_file"' in script_text
+    assert 'rm -f -- "$_json_tmp"' in script_text
 
 
 def test_script_json_verdicts_use_stable_string_values(script_text: str) -> None:
@@ -187,6 +199,8 @@ def test_ops_doc_documents_json_artifact() -> None:
     assert "machine-readable" in doc.lower() or "机读" in doc or "机器看" in doc
     # 字段必须逐条列出, 否则 operator / automation 作者只能猜
     for field in (
+        "artifact_kind",
+        "artifact_schema_version",
         "generated_at",
         "window_start",
         "window_target",

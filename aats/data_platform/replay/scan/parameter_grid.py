@@ -56,6 +56,7 @@ def build_grid(
     grid: dict[str, list[Any]] | None = None,
     *,
     base_params: dict[str, Any] | None = None,
+    family: str = "independent",
 ) -> list[ReplayParameterOverrides]:
     """从参数网格生成所有组合的 ReplayParameterOverrides 列表。
 
@@ -71,6 +72,11 @@ def build_grid(
     """
     if grid is None:
         grid = DEFAULT_PARAMETER_GRID
+    if not isinstance(grid, dict) or not grid:
+        raise ValueError("parameter_grid_must_be_non_empty_mapping")
+    if any(not isinstance(values, list) or not values for values in grid.values()):
+        raise ValueError("parameter_grid_dimensions_must_be_non_empty_lists")
+    baseline = ReplayParameterOverrides.for_family(family)
 
     keys = list(grid.keys())
     values = list(grid.values())
@@ -84,11 +90,21 @@ def build_grid(
             **dict(zip(keys, combo)),
         }
         try:
-            overrides.append(ReplayParameterOverrides.from_dict(param_dict))
-        except (ValueError, TypeError):
-            # 约束冲突（如 close_threshold > entry_threshold），跳过此组合
-            skipped += 1
-            continue
+            resolved = ReplayParameterOverrides.from_dict(
+                param_dict,
+                base=baseline,
+            )
+        except ValueError as exc:
+            # Only an explicit cross-field constraint marks one combination as
+            # infeasible.  Schema/type/family errors invalidate the scan.
+            if str(exc).startswith("约束违反:"):
+                skipped += 1
+                continue
+            raise
+        if resolved.extra:
+            unknown = ",".join(sorted(resolved.extra))
+            raise ValueError(f"unknown_replay_parameter_keys:{unknown}")
+        overrides.append(resolved)
 
     if skipped > 0:
         log.info(
@@ -96,6 +112,8 @@ def build_grid(
             len(overrides), skipped,
         )
 
+    if not overrides:
+        raise ValueError("parameter_grid_has_no_valid_combinations")
     return overrides
 
 

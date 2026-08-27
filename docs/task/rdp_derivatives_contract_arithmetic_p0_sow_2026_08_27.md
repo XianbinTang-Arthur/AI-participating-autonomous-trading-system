@@ -2,7 +2,8 @@
 
 > 文档状态：现行实施任务书；P0-A 已完成本地验证与独立复审；P0-B 的 LF-A
 > 应用层失败关闭切片已完成本地静态验收与独立复审，但数据库不可变性、source-aware Gold
-> 与运行验证未完成
+> 与运行验证未完成；P0-D 的纯 replay 算术/产物合同 LF-A 已完成本地验证和独立复审，但尚未
+> 通过整个 P0-D 验收
 > 最后核对：2026-08-27（P0-B 起始代码基线
 > `main@e3d16681431fcea0c0ffa4c7054e8db46cc98a23`，以本文档所在 HEAD 为准）
 > Freeze 分类：应用层金融正确性/数据真实性修复为 `LF-A`；Stage 20 schema、触发器与
@@ -306,3 +307,106 @@ PostgreSQL、WSL2 E2E 或部署；因此这些结果只证明候选代码的本�
 `60e46f5e-e3e0-4090-b141-b53c92f1aa71` 是在旧 WSL 提交上运行的 v1 manifest。候选代码不会
 中断该真实进程，但部署候选版本后 v1 不可继续完整 pipeline；因此必须等待当前任务安全完成，
 或另行批准并设计 raw-only 过渡，禁止为了验证新代码重启/恢复/替换该 campaign。
+
+## 17. P0-D LF-A 本地候选边界（2026-08-27）
+
+本节登记的是 P0-D 的一个可独立复核代码切片，不覆盖 P0-B/C/E/F，也不把纯组件支持
+linear/inverse 解读为公共 derivative replay 已开放。
+
+已实现并由代码冻结的行为：
+
+1. `InstrumentContract` 成为 fill、position、fee、realized/unrealized PnL 与 equity 的唯一
+   Decimal 算术输入；spot/linear/inverse 的纯组件黄金向量、lot/min/tick、币种、finite、
+   大数抵消和 inverse WAC/PnL 均有回归。组件能力不等于数据 lineage 已成立。
+2. 公共 `run_backtest`/CLI 当前只允许 `SPOT/spot`。derivative 因 source-aware historical
+   contract 尚未完成而在 Gold/DB/文件 I/O 前返回
+   `legacy_derivative_replay_contract_lineage_required`；MARGIN 因缺 borrow/interest 模型返回
+   `legacy_margin_replay_borrow_model_required`。SPOT short 与显式 short 阈值也失败关闭。
+3. causal execution 仍固定为 `next_bar_event_v2`，fill 提升为
+   `ohlcv_participation_cap_contract_v3`。`ReplayDecision.ts` 只保存 observation bar-start identity；
+   harness 与 legacy runner 均以已闭合 bar end 作为真实 `decision_ts`，持仓时长、thesis age、
+   平仓时间和 cooldown 全部使用该时间，拒绝未来状态时间。partial fill 后 adapter 状态以实际
+   成交仓位为准；后续 close 只允许请求 tracker 的真实剩余仓位，若策略再次给出 close 才继续
+   处理余量。bar identity、OHLC 的 tick/finite/窗口、严格递增、cadence gap 和 adapter 输出都在
+   副作用前校验。
+4. `backtest-run/v2` 只写入全新目录，先生成 5 个 payload（含逐笔
+   `cost_diagnostics.json`），再以 `manifest.json` 最后原子发布。SPOT 买入手续费资产必须显式为
+   `base` 或 `quote`；base fee 会减少实际库存，close 只对可交易数量做 lot-floor，低于 min 的
+   余尘继续盯市并报告 partial/no-order，不会被量化成虚假 flat。严格预检按统一 decision ID 和
+   时间，以持久化的 action/side/request/reference/liquidity/participation 重放 `FillSimulator`，
+   重算 filled/partial/no-fill、fee/slippage 与 fee asset lineage；随后以逐点 mark 和完整仓位账本
+   重放 `PositionTracker`，逐项闭合净仓、均价、realized/unrealized PnL、累计手续费、fill count
+   与 net equity。summary、diagnostic、timeline、equity 的 Decimal/float/UTC/finite/tick/lot/min
+   类型和单位也失败关闭；
+   manifest 绑定 artifact hash、semantic fingerprint、完整 contract、resolved parameters、
+   adapter algorithm version、causal timeline、cost attribution、cadence gap 与 risk policy。
+   写入前会交叉核对 config、窗口、summary/curve/count、cost diagnostics 和 timeline，畸形完成
+   对象不能创建目录。该重放证明 artifact 内部执行与账本一致；在 P0-B 完成 Gold 行级封存和
+   DB-backed verifier 之前，仍不能证明持久化的 reference/mark 确实来自所声明的上游数据。
+5. `backtest-evidence-scorecard/v2` 冻结顶层和全部嵌套 schema。Route-A 消费端再次验证类型、
+   UTC 窗口、指标范围、fill 分区、contract fingerprint、resolved parameter 复原、显式
+   attribution 与零 cadence gap；字符串伪指标、空 cross-window 或 legacy attribution 均失败。
+6. 当前 `sharpe_ratio` 使用非重叠 bar-close PnL 增量、sample stdev 和 365.25 日历年/中位
+   cadence 年化，policy 为 `calendar-365.25-bar-pnl-increment/v1`。由于没有 initial capital，
+   它只是风险调整后的 PnL-increment proxy，严禁写成资本收益率 Sharpe。
+7. independent/directional 参数 override 现在以各自 `for_family()` baseline 做精确 patch；普通
+   数值规范为 canonical float，`-0.0` 归一为 `0.0`，整数/布尔/可选字段和 `extra` schema 分别
+   严格校验；null、numeric boolean、unknown/unconsumed key 与无有效组合的 parameter grid 均
+   失败关闭，等价参数不能产生不同 semantic fingerprint。built-in
+   adapter behavior version 提升为 `independent-replay/v2` / `directional-replay/v2`。旧 custom
+   subclass 仍可实例化用于 legacy read-only 路径，但必须补非空 `algorithm_version` 与精确
+   `accepted_parameter_keys` 才能生成版本化证据。
+8. `route-a-observation-window/v1` daily JSON 已有 kind/schema 与原子单文件发布，但单次快照不
+   能证明完整 7 天。`route-a-evidence-bundle/v2` 固定写
+   `artifact_set_complete=false` / `incomplete_single_snapshot`，不得成为自动 gate 结论。
+9. P0-F 的 evidence bundle → selector 资格入口已失败关闭：旧 replay/calibration/scan 指标仍保留
+   在原始 artifact，并最多以 `audit_best_experiments` 摘要暴露，但不会进入 `combo_stats`、
+   `best_experiments` 或 readiness。
+   只有显式引用完整 `backtest-run/v2` manifest、manifest 声明的每个 artifact hash 均复核通过，
+   `summary.json` 与 manifest 的 adapter/resolved-parameter/cadence lineage 一致，并且
+   `phase2-promotion-metrics/v1` 指标文件也被同一 manifest hash 绑定时，Phase 2 指标才具备
+   promotion 资格。旧版已落盘 evidence bundle 没有这一 qualification policy 时，下游
+   selector/readiness 同样按 unavailable 处理，不能靠旧 `available=true` 绕过；selector 另有
+   与评分权重无关的显式 Phase 2 qualification 硬门。
+
+兼容和失格矩阵：
+
+| 输入/产物 | 当前处置 |
+| --- | --- |
+| 新 `aats.cli backtest` | 必须提供 canonical symbol 与 11 个显式 contract 字段；只允许 SPOT；全新目录；产出 `backtest-run/v2` |
+| custom adapter | legacy subclass 可加载；没有稳定 version/accepted-key contract 时，版本化 harness 在 I/O 前拒绝 |
+| 旧 `ohlcv_participation_cap_v2` / same-bar artifact | 历史审计或校准用途；不得原地补 version/contract 后升级 |
+| `scripts/rdp_run_replay.py`、calibration、scan 的无 manifest CSV/JSON | legacy audit/calibration-only；原始指标保留在审计视图，但不进入 promotion 聚合 |
+| 完整 `backtest-run/v2`，但没有 manifest-bound `phase2-promotion-metrics/v1` | 回测 payload 可按原用途审计；Phase 2 promotion 资格仍失败关闭 |
+| 完整且 hash-valid 的 v2 manifest + `phase2-promotion-metrics/v1` | 仅可进入 Phase 2 promotion 评分；仍须通过 Phase 3/4/5、readiness 与人工治理门 |
+| `backtest-evidence-scorecard/v2` | 只有显式 attribution、完整嵌套 schema、零 cadence gap 才能进入 scaffold；仍不代表人工批准 |
+| 单个 observation daily snapshot / bundle v2 scaffold | 明确 incomplete；不能证明 7 天完成或资本资格 |
+
+尚未完成且继续阻断 P0-D/P0 总验收：
+
+- P0-B 的 immutable/source-aware instrument snapshot、Gold row binding、DB-backed verifier 与
+  historical effective-window 证据；因此 derivative/MARGIN 公共 replay 仍关闭；
+- funding cash-flow、initial capital、reporting currency/FX 与资本收益率口径；
+- L2 depth、spread、queue、market impact、latency 与真实历史 fill 校准；
+- P0-F 的 legacy promotion 隔离代码切片已经收紧，但统一历史 artifact inventory、失格清单、
+  新 metrics producer 与确定性重建仍未完成。现行 replay/calibration/scan writer 不会自动生成
+  manifest-bound `phase2-promotion-metrics/v1`，因此不得把“消费者已失败关闭”误报成“已有旧产物
+  已升级”或“P0-F 全部完成”；
+- WSL2/PostgreSQL integration、模拟栈 E2E、部署和运行验证。本候选没有同步或重启正在运行的
+  历史恢复 campaign，也没有 live 订单、资金、参数应用、凭证访问或 push。
+
+本地验证证据（最终稳定工作树）：主 RDP/scorecard/Route-A/CLI/合同聚焦回归为
+`513 passed, 159 subtests passed`；Windows 全量 unit 为 `5225 passed, 30 skipped,
+1659 warnings, 244 subtests passed`，warning 仅为仓库 CI 已精确 allowlist 的 Python 3.12
+SQLite 默认 datetime adapter 弃用提示；`aats/` 与全部变更 Python 文件 Ruff 通过，daily-check
+shell 通过 `bash -n`，`git diff --check` 通过。首次全量运行因用户默认 `%TEMP%` 根目录权限错误在
+107 passed 后中止，最终使用仓库内本次运行唯一的 `--basetemp` 完整通过，所有隔离临时目录均已
+删除。独立 replay 核心终审复验已报告的 fee/equity/partial-fill、UTC/funding、bar-end time、
+schema type、`extra`、timeframe 与 signed-zero/fingerprint 攻击后给出 `ACCEPT`（终审定向
+`94 passed, 96 subtests passed`）；Route-A 语义复审也为 `ACCEPT`。这些结论只覆盖本节 LF-A，
+不能提前写成整个 P0-D 或 P0 完成。
+
+P0-F legacy promotion 隔离补充验证（2026-08-27）：证据汇聚、selector、readiness 与 attribution
+lineage 三套定向回归合计 `89 passed`；相关实现与测试 Ruff 通过，并已包含在上述全量 unit。
+默认 `%TEMP%` 权限错误不属于业务测试失败，以上全量 pytest 结果来自仓库内全新隔离
+`--basetemp`。未运行 WSL2、数据库、部署、live profile 或任何资金副作用。

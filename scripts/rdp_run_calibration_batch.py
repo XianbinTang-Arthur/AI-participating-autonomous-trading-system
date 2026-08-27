@@ -234,7 +234,10 @@ def _run_single_experiment(
         raw_params["cost_config"] = cost_dict
         log.debug("Normalized flat cost keys %s → cost_config=%s", flat_cost_keys, cost_dict)
 
-    params = ReplayParameterOverrides.from_dict(raw_params)
+    params = ReplayParameterOverrides.from_dict(
+        raw_params,
+        base=ReplayParameterOverrides.for_family(family),
+    )
     # 保留用户原始写法用于 summary（不含归一化后的结构）
     params_dict = exp_def["params"]
 
