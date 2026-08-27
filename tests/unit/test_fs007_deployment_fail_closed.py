@@ -104,6 +104,21 @@ def test_entrypoint_wrappers_default_to_simulation_and_reject_live() -> None:
         assert "REAL-MONEY PRODUCTION is NO-GO" in source
 
 
+def test_deploy_wrapper_rejects_windows_bash_launchers() -> None:
+    source = (
+        REPO_ROOT / ".codex" / "skills" / "wsl2-deploy" / "scripts" / "run-deploy.ps1"
+    ).read_text(encoding="utf-8")
+
+    for rejected in (
+        r"*\WindowsApps\bash.exe",
+        r"*\Windows\System32\bash.exe",
+        r"*\Windows\Sysnative\bash.exe",
+        r"*\Windows\SysWOW64\bash.exe",
+    ):
+        assert f"'{rejected}'" in source
+    assert r"D:\Git\Git\bin\bash.exe" in source
+
+
 def test_lifecycle_helpers_keep_legacy_stop_and_remove_paths_available() -> None:
     keepalive = (REPO_ROOT / "scripts" / "keepalive_wsl2_aats.ps1").read_text(encoding="utf-8")
     startup_task = (REPO_ROOT / "scripts" / "register_wsl2_aats_startup_task.ps1").read_text(

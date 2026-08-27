@@ -303,10 +303,11 @@ PostgreSQL、WSL2 E2E 或部署；因此这些结果只证明候选代码的本�
 - P0-C 至 P0-F 的金额聚合、replay fee/PnL、L2/execution realism、旧产物清单与确定性重建；
 - WSL2 集成、模拟环境端到端与部署验证。
 
-运行兼容边界：当前恢复 campaign
-`60e46f5e-e3e0-4090-b141-b53c92f1aa71` 是在旧 WSL 提交上运行的 v1 manifest。候选代码不会
-中断该真实进程，但部署候选版本后 v1 不可继续完整 pipeline；因此必须等待当前任务安全完成，
-或另行批准并设计 raw-only 过渡，禁止为了验证新代码重启/恢复/替换该 campaign。
+运行兼容边界：恢复 campaign
+`60e46f5e-e3e0-4090-b141-b53c92f1aa71` 是旧 WSL 提交的 v1 manifest。2026-08-27 只读核验
+确认其已于 `19:50:04+08` 写入 `SUCCEEDED`，且无对应 runner 进程，因此部署候选不再会中断
+该任务。该旧终态不满足当前 v2 manifest、持久 fencing、不可变 Silver 与逐行 verifier 契约；
+候选代码不会恢复或短路接受它，也不能把它计为本 P0-B 当前验收完成。
 
 ## 17. P0-D LF-A 本地候选边界（2026-08-27）
 

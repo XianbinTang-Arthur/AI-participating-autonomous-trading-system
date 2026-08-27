@@ -1,14 +1,15 @@
 # 收益可信度整改验收矩阵
 
 > 文档状态：现行测试说明
-> 最后核对：2026-08-26（实现基线 `314adc6e8f17`；derivatives generation `314adc6e8f17-20260826T193656Z-763-10457`；旧 generation 仅作历史证据）
+> 最后核对：2026-08-27（当前静态起始 HEAD `9c4112c6`；2026-08-26 derivatives generation 仅作历史运行证据）
+> 核对范围：当前静态 schema/API/测试验收条件与明确标日期的历史运行快照；不证明现场状态
 > 边界：本文定义可执行验收，不把未运行的项目标记为通过。
 
 | 层级 | 验收项 | 通过条件 | 失败/未知处理 |
 | --- | --- | --- | --- |
 | 静态 | Ruff | `ruff check aats/` 无错误 | 修复后重跑 |
 | 单元 | 全量 unit | 全部通过，无 warning 契约回退 | 停止部署 |
-| Schema | Batch B stage 18 / 98 张 ORM 表 | forward/rollback、ledger checksum、表、唯一键、CHECK 与 registry 一致 | 停止 RDP writer |
+| Schema | 102 张 ORM 表；18 个有序 Batch B stage，末项 `batch_b_19_historical_research_artifacts` | forward/rollback、ledger checksum、表、唯一键、CHECK 与 registry 一致 | 停止 RDP writer |
 | 配置 | derivatives Compose | 公共采集器存在、不加载 live env、七个应用容器 required | 停止部署 |
 | 配置 | canary | validator 通过、`deployable=false`、deploy 入口无注册 | 视为安全回退失败 |
 | 研究 | 历史审计 | 所有旧候选 `capital_eligible=false` | 禁止引用旧结果 |
@@ -51,6 +52,7 @@
   `77ed0bcec772b2f5c73c8e396fad3f6ae85286fbe0f31297520f21e01c160ea8`。98 个 dataset 中
   `missing=35`、`observed=37`、`observed_with_quality_issues=24`、
   `present_unbounded_not_scanned=2`、`audit_failed=0`；
+  这里的 98 是当时 deployment snapshot 中实际审计到的 dataset 数，不是当前 ORM 表数；
 - 一日 OHLCV、funding、mark proxy、4,092,576 笔官方 trade 与 6,684,186 条官方 L2 事件已导入并形成
   `ELIGIBLE` bundle；L2/trade-flow Silver 重建指纹确定且重复执行幂等；Gold 15m/1H 为 96/24 行。
   这不证明历史 OI/强平或当时 AATS live capture；

@@ -1,7 +1,8 @@
 # AATS RDP 文档索引
 
 > 文档状态：现行索引  
-> 最后核对：2026-08-26（实现基线 `314adc6e8f17`；历史数据恢复与持续采集加固已完成一日官方样本、归档恢复、故障注入和标准 derivatives 模拟部署，30/90 日与 NO-GO 边界见现行验收文档）
+> 最后核对：2026-08-27（起始 HEAD `9c4112c6`，含当前 RDP 控制面收口候选；以本文档所在 HEAD 为准）
+> 核对范围：当前入口、任务状态和静态模块边界；历史运行证据不证明现场状态
 
 ## 当前入口
 
@@ -20,6 +21,8 @@
 - [`../task/rdp_live_attribution_lineage_fix_sow_2026_08_26.md`](../task/rdp_live_attribution_lineage_fix_sow_2026_08_26.md)：完整 RDP 默认 live attribution、精确 lineage、schema migration 与 readiness fail-closed 边界。
 - [`../operations/rdp_historical_data_recovery_runbook.md`](../operations/rdp_historical_data_recovery_runbook.md)：当前历史数据审计、raw archive、官方导入、归档、持续采集与 bundle 重建唯一操作入口；
 - [`../task/rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md`](../task/rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md)：历史数据恢复与持续采集加固范围、验收门和未完成现场事项。
+- [`../task/rdp_legacy_recommendation_forward_isolation_p0_sow_2026_08_27.md`](../task/rdp_legacy_recommendation_forward_isolation_p0_sow_2026_08_27.md)：旧 recommendation 精确 evidence-round 前向隔离；当前为 LF-A 实施/验收范围，不改写历史证据。
+- [`../task/rdp_control_plane_truth_finalization_sow_2026_08_27.md`](../task/rdp_control_plane_truth_finalization_sow_2026_08_27.md)：控制面 canonical 真值、DB/mirror、post-apply provenance 与风险收敛 action proof；完成状态以任务书头和当前验证为准。
 
 ## 深入参考
 

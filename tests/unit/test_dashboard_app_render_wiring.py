@@ -393,8 +393,10 @@ class TestStep2IntegrityGuard(unittest.TestCase):
 
         healthy_snapshot = {
             "round_id": "20260416_120000_abcd1234",
-            "data_source": "round_manifest",
-            "overall_status": "ok",
+            "data_source": "db",
+            "status": "succeeded",
+            "finished_at": "2026-04-16T12:10:00+00:00",
+            "manifest": {"round_id": "20260416_120000_abcd1234"},
         }
         with patch(
             "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
@@ -402,6 +404,26 @@ class TestStep2IntegrityGuard(unittest.TestCase):
         ):
             reason = step2_integrity_guard.step2_integrity_blocking_reason(Path("."))
         self.assertIsNone(reason, "健康快照不应触发 guard 阻塞")
+
+    def test_failed_snapshot_returns_blocking_reason(self) -> None:
+        """有 manifest 不等于成功；failed/partial Step2 均不得批准。"""
+        from unittest.mock import patch
+
+        from aats.data_platform.governance import step2_integrity_guard
+
+        with patch(
+            "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+            return_value={
+                "round_id": "20260416_120000_deadbeef",
+                "data_source": "db",
+                "status": "failed",
+                "manifest": {},
+            },
+        ):
+            assessment = step2_integrity_guard.assess_step2_integrity(Path("."))
+
+        self.assertFalse(assessment["ok"])
+        self.assertEqual(assessment["code"], "snapshot_status_invalid")
 
     def test_incomplete_snapshot_returns_reason(self) -> None:
         """file_incomplete 快照（round 目录缺 round_manifest.json）应被 guard 拒掉。"""

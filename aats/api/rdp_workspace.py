@@ -16,6 +16,8 @@ from typing import Any
 from fastapi import Request
 
 from aats.api.rdp_control_summary import (
+    _RELEASE_ALLOWED_DECISION_STATUSES,
+    _promotion_qualification_allows,
     build_rdp_control_summary,
     build_rdp_workbench_bundle,
 )
@@ -352,8 +354,17 @@ def _lifecycle_projection(
         return next((item for item in recent if item.get("workflow") == workflow), None)
 
     integrity_alerts = _as_items(alerts.get("integrity_alerts"))
+    governance_state = _as_dict(control.get("governance_state"))
+    governance_blocked = (
+        governance_state.get("audit_only") is True
+        or governance_state.get("db_load_failed") is True
+        or bool(_as_dict(governance_state.get("quarantined_combos")))
+    )
     research_items = _as_items(workbench.get("items"))
-    release_candidates = _as_items(_as_dict(workbench.get("release_candidates")).get("items"))
+    release_payload = _as_dict(workbench.get("release_candidates"))
+    release_candidates = _as_items(release_payload.get("items"))
+    audit_only_items = _as_items(release_payload.get("audit_only_items"))
+    governance_items = [*research_items, *audit_only_items]
     observations = _as_items(control.get("observation_queue"))
     rollback_count = sum(
         1 for item in observations if item.get("observation_status") == "rollback_recommended"
@@ -381,14 +392,26 @@ def _lifecycle_projection(
         {
             "key": "governance",
             "label": "治理审阅",
-            "status": "blocked" if integrity_alerts else ("action_required" if research_items else "idle"),
-            "evidence_count": len(research_items),
+            "status": (
+                "blocked"
+                if integrity_alerts or governance_blocked
+                else "action_required"
+                if governance_items
+                else "idle"
+            ),
+            "evidence_count": len(governance_items),
             "summary": "完整性、建议、批准/拒绝与 tuning。",
         },
         {
             "key": "release",
             "label": "Gate 与发布",
-            "status": "action_required" if release_candidates else "idle",
+            "status": (
+                "blocked"
+                if governance_blocked
+                else "action_required"
+                if release_candidates
+                else "idle"
+            ),
             "evidence_count": len(release_candidates),
             "summary": "只处理已批准且可映射的参数候选。",
         },
@@ -402,14 +425,20 @@ def _lifecycle_projection(
         {
             "key": "runtime",
             "label": "运行参数",
-            "status": "complete" if active_parameter_count else "idle",
+            "status": (
+                "blocked"
+                if governance_blocked
+                else "complete"
+                if active_parameter_count
+                else "idle"
+            ),
             "evidence_count": active_parameter_count,
             "summary": "Postgres active parameter 与 runtime provenance。",
         },
     ]
     if rollback_count:
         current_stage = "observation"
-    elif integrity_alerts or research_items:
+    elif governance_blocked or integrity_alerts or governance_items:
         current_stage = "governance"
     elif release_candidates:
         current_stage = "release"
@@ -421,7 +450,11 @@ def _lifecycle_projection(
         current_stage = "runtime" if active_parameter_count else "data"
     return {
         "current_stage": current_stage,
-        "overall_status": overview.get("overall_status") or "idle",
+        "overall_status": (
+            "blocked"
+            if governance_blocked
+            else overview.get("overall_status") or "idle"
+        ),
         "stages": stages,
     }
 
@@ -430,7 +463,11 @@ def _release_projection(
     control: dict[str, Any],
     workbench: dict[str, Any],
 ) -> dict[str, Any]:
-    source_candidates = _as_items(_as_dict(workbench.get("release_candidates")).get("items"))
+    release_candidates_payload = _as_dict(workbench.get("release_candidates"))
+    source_candidates = [
+        *_as_items(release_candidates_payload.get("items")),
+        *_as_items(release_candidates_payload.get("audit_only_items")),
+    ]
     release_history_status = _as_dict(control.get("release_history_status"))
     gate_history_status = _as_dict(control.get("gate_history_status"))
     histories_fresh = (
@@ -438,21 +475,93 @@ def _release_projection(
         and release_history_status.get("stale") is False
         and gate_history_status.get("available") is True
     )
+    governance_state = _as_dict(control.get("governance_state"))
+    governance_forward_available = (
+        governance_state.get("audit_only") is not True
+        and governance_state.get("db_load_failed") is not True
+    )
+    decision_truth_available = (
+        governance_state.get("decision_truth_available") is True
+    )
+    decision_state_by_combo = {
+        str(item.get("combo_key")): item
+        for item in _as_items(governance_state.get("combo_states"))
+        if item.get("combo_key")
+    }
     candidates: list[dict[str, Any]] = []
     for source in source_candidates:
         candidate = dict(source)
-        gate_passed = str(candidate.get("gate_status") or "") == "pass"
+        combo_key = str(candidate.get("combo_key") or "")
+        combo_decision = _as_dict(decision_state_by_combo.get(combo_key))
+        decision_status = combo_decision.get("decision_status")
+        decision_allows_release = (
+            governance_forward_available
+            and combo_decision.get("audit_only") is not True
+            and decision_truth_available
+            and combo_decision.get("decision_truth_available") is True
+            and decision_status in _RELEASE_ALLOWED_DECISION_STATUSES
+        )
+        gate_passed = (
+            str(candidate.get("gate_status") or "") == "pass"
+            and candidate.get("allow_apply") is True
+        )
+        promotion_eligible = _promotion_qualification_allows(candidate)
+        approved = candidate.get("status") == "approved"
+        audit_only = bool(candidate.get("audit_only")) or not promotion_eligible
+        allowed_action_keys = (
+            {"supersede"}
+            if approved and audit_only
+            else {"run_gate", "create_release"}
+            if approved and promotion_eligible
+            else set()
+        )
+        expected_ui_actions = {
+            "supersede": "rdp-supersede-recommendation",
+            "run_gate": "rdp-run-gate",
+            "create_release": "rdp-create-release",
+        }
         normalized_actions: list[dict[str, Any]] = []
         for source_action in _as_items(candidate.get("actions")):
             action = dict(source_action)
-            if action.get("key") == "create_release" and not (gate_passed and histories_fresh):
+            action_key = action.get("key")
+            if (
+                action_key not in allowed_action_keys
+                or action.get("ui_action") != expected_ui_actions.get(action_key)
+                or action.get("value") != candidate.get("recommendation_id")
+                or type(action.get("enabled")) is not bool
+            ):
+                continue
+            if action.get("key") == "create_release" and not (
+                promotion_eligible
+                and decision_allows_release
+                and gate_passed
+                and histories_fresh
+            ):
                 action["enabled"] = False
                 action["disabled_reason"] = (
-                    "先运行并通过最新门禁，且确保治理历史可用后，才能创建发布。"
+                    "该建议缺少现行精确证据资格，仅供审计，不能创建发布。"
+                    if not promotion_eligible
+                    else (
+                        "当前决策真源不可验证，或该组合处于暂停/无效状态；"
+                        "确认现行治理决策后才能创建发布。"
+                    )
+                    if not decision_allows_release
+                    else "先运行并通过最新门禁，且确保治理历史可用后，才能创建发布。"
                 )
             normalized_actions.append(action)
         candidate["actions"] = normalized_actions
-        candidate["eligible_for_release_review"] = gate_passed and histories_fresh
+        candidate["audit_only"] = audit_only
+        candidate["decision_status"] = decision_status
+        candidate["decision_truth_available"] = decision_truth_available
+        candidate["decision_allows_release"] = decision_allows_release
+        candidate["eligible_for_release_review"] = (
+            approved
+            and promotion_eligible
+            and not audit_only
+            and decision_allows_release
+            and gate_passed
+            and histories_fresh
+        )
         candidates.append(candidate)
     eligible = [
         dict(item)
@@ -464,13 +573,15 @@ def _release_projection(
     if selected:
         selection_status = "eligible_for_release_review"
         selection_explanation = (
-            "这是最新的已批准且 Gate=pass 候选；它仍需要在实际发布时"
+            "这是最新的精确证据合格、现行决策允许、已批准且 Gate=pass 候选；"
+            "它仍需要在实际发布时"
             "重新执行权限、token、映射、Gate 和 rollback 检查。"
         )
     else:
         selection_status = "no_eligible_candidate"
         selection_explanation = (
-            "当前没有同时满足已批准、Gate=pass 和治理读模型新鲜的候选；"
+            "当前没有同时满足精确证据资格、现行决策允许、已批准、Gate=pass 和"
+            "治理读模型新鲜的候选；"
             "不会从失败候选中强制选一个应用。"
         )
     return {
@@ -478,7 +589,9 @@ def _release_projection(
         "eligible_candidates": eligible,
         "eligible_candidate": selected,
         "selection_status": selection_status,
-        "selection_basis": "latest_approved_gate_pass",
+        "selection_basis": (
+            "latest_promotion_qualified_decision_allowed_approved_gate_pass"
+        ),
         "selection_explanation": selection_explanation,
         "observations": _as_items(control.get("observation_queue")),
         "active_parameters": _as_dict(control.get("active_parameters")),
@@ -513,6 +626,33 @@ def _next_action(
             "value": candidate.get("recommendation_id"),
             "enabled": True,
         }
+    audit_candidates = [
+        item
+        for item in _as_items(release.get("candidates"))
+        if bool(item.get("audit_only"))
+    ]
+    audit_candidates.sort(
+        key=lambda item: str(item.get("created_at") or ""),
+        reverse=True,
+    )
+    for candidate in audit_candidates:
+        action = next(
+            (
+                item
+                for item in _as_items(candidate.get("actions"))
+                if item.get("key") == "supersede" and item.get("enabled") is True
+            ),
+            None,
+        )
+        if action is not None:
+            return {
+                "kind": "supersede_audit_recommendation",
+                "label": action.get("label") or "归档历史建议",
+                "description": "该建议仅供审计，归档后将不再出现在前向治理待办中。",
+                "ui_action": "rdp-supersede-recommendation",
+                "value": candidate.get("recommendation_id"),
+                "enabled": True,
+            }
     primary = _as_dict(overview.get("primary_action"))
     if primary:
         return {
@@ -545,6 +685,45 @@ def build_rdp_workspace(request: Request, *, run_limit: int = 20) -> dict[str, A
     tuning_proposals = _as_dict(bundle.get("tuning_proposals"))
     runs = build_rdp_runs_panel(limit=run_limit)
     health = dict(_as_dict(control.get("health")))
+    governance_state = dict(_as_dict(control.get("governance_state")))
+    governance_blocked = (
+        governance_state.get("audit_only") is True
+        or governance_state.get("db_load_failed") is True
+        or bool(_as_dict(governance_state.get("quarantined_combos")))
+    )
+    if governance_blocked:
+        reason_code = str(
+            governance_state.get("reason_code")
+            or "governance_runtime_quarantine"
+        )
+        governance_alert = {
+            "code": reason_code,
+            "severity": "danger",
+            "scope": "runtime",
+            "phase": "governance",
+            "title": "运行参数治理已失败关闭",
+            "message": (
+                "治理数据库不可用或 canonical active 参数已被隔离；"
+                "完成对账前禁止前向发布。"
+            ),
+            "blocks_approval": True,
+            "quarantined_combos": _as_dict(
+                governance_state.get("quarantined_combos")
+            ),
+        }
+        alerts = dict(alerts)
+        integrity_alerts = _as_items(alerts.get("integrity_alerts"))
+        if not any(item.get("code") == reason_code for item in integrity_alerts):
+            integrity_alerts.append(governance_alert)
+        alerts["integrity_alerts"] = integrity_alerts
+        alerts["governance_alerts"] = [governance_alert]
+        health["overall_health"] = "blocked"
+        health_reasons = [
+            str(item) for item in health.get("blocking_reasons") or []
+        ]
+        if reason_code not in health_reasons:
+            health_reasons.append(reason_code)
+        health["blocking_reasons"] = health_reasons
     execution = _execution_projection(runs, health, control)
     if execution.get("capacity_violation"):
         health["overall_health"] = "blocked"
@@ -561,6 +740,7 @@ def build_rdp_workspace(request: Request, *, run_limit: int = 20) -> dict[str, A
         "schema_version": RDP_WORKSPACE_SCHEMA_VERSION,
         "generated_at": utc_now().isoformat(),
         "environment": _as_dict(control.get("environment")),
+        "governance_state": governance_state,
         "health": health,
         "lifecycle": lifecycle,
         "next_action": next_action,

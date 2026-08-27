@@ -263,11 +263,11 @@ class TestRecommendationRegistryStateGuard:
             load_recommendation_registry,
         )
 
-        reg = load_recommendation_registry(pathlib.Path("/nonexistent"))
+        reg = load_recommendation_registry(pathlib.Path("/nonexistent"), skip_db=True)
         rec = create_recommendation(
             family="independent",
             timeframe="15m",
-            recommendation_type="parameter_upgrade",
+            recommendation_type="keep_active",
             confidence="high",
             reason="test",
         )
@@ -287,11 +287,11 @@ class TestRecommendationRegistryStateGuard:
             load_recommendation_registry,
         )
 
-        reg = load_recommendation_registry(pathlib.Path("/nonexistent"))
+        reg = load_recommendation_registry(pathlib.Path("/nonexistent"), skip_db=True)
         rec = create_recommendation(
             family="independent",
             timeframe="15m",
-            recommendation_type="parameter_upgrade",
+            recommendation_type="keep_active",
             confidence="high",
             reason="test",
         )
@@ -315,7 +315,7 @@ class TestRecommendationRegistryStateGuard:
             reject_recommendation,
         )
 
-        reg = load_recommendation_registry(pathlib.Path("/nonexistent"))
+        reg = load_recommendation_registry(pathlib.Path("/nonexistent"), skip_db=True)
         rec = create_recommendation(
             family="independent",
             timeframe="15m",
@@ -343,7 +343,7 @@ class TestRecommendationRegistryStateGuard:
             reject_recommendation,
         )
 
-        reg = load_recommendation_registry(pathlib.Path("/nonexistent"))
+        reg = load_recommendation_registry(pathlib.Path("/nonexistent"), skip_db=True)
         rec = create_recommendation(
             family="independent",
             timeframe="15m",
@@ -366,7 +366,7 @@ class TestRecommendationRegistryStateGuard:
             reject_recommendation,
         )
 
-        reg = load_recommendation_registry(pathlib.Path("/nonexistent"))
+        reg = load_recommendation_registry(pathlib.Path("/nonexistent"), skip_db=True)
         rec = create_recommendation(
             family="independent",
             timeframe="15m",
@@ -394,11 +394,11 @@ class TestRecommendationRegistryStateGuard:
             reject_recommendation,
         )
 
-        reg = load_recommendation_registry(pathlib.Path("/nonexistent"))
+        reg = load_recommendation_registry(pathlib.Path("/nonexistent"), skip_db=True)
         rec = create_recommendation(
             family="independent",
             timeframe="15m",
-            recommendation_type="parameter_upgrade",
+            recommendation_type="keep_active",
             confidence="high",
             reason="test",
         )
@@ -422,11 +422,11 @@ class TestRecommendationRegistryStateGuard:
             supersede_recommendation,
         )
 
-        reg = load_recommendation_registry(pathlib.Path("/nonexistent"))
+        reg = load_recommendation_registry(pathlib.Path("/nonexistent"), skip_db=True)
         rec = create_recommendation(
             family="independent",
             timeframe="15m",
-            recommendation_type="parameter_upgrade",
+            recommendation_type="keep_active",
             confidence="high",
             reason="test",
         )
@@ -446,7 +446,7 @@ class TestRecommendationRegistryStateGuard:
             load_recommendation_registry,
         )
 
-        reg = load_recommendation_registry(pathlib.Path("/nonexistent"))
+        reg = load_recommendation_registry(pathlib.Path("/nonexistent"), skip_db=True)
         parameter_rec = create_recommendation(
             family="independent",
             timeframe="15m",

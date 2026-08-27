@@ -1,7 +1,7 @@
 # RDP 历史数据恢复与持续采集运行手册
 
 > 文档状态：现行操作说明
-> 最后核对：2026-08-27（当前代码基线 `main@6dd75ab01381f5372e9a60117b83ed21079c5103`，尚未部署；上一已核验 derivatives generation 为 `314adc6e8f17-20260826T193656Z-763-10457`）
+> 最后核对：2026-08-27（当前静态起始 HEAD `main@9c4112c6d769735f171971c8fa4f2cae5a03a824`，含尚未部署的控制面候选；上一已核验 derivatives generation `314adc6e8f17-20260826T193656Z-763-10457` 仅作历史运行证据）
 > 核对范围：当前代码、迁移、CLI、单元契约、上一受控 derivatives 模拟部署及本轮只读运行快照；数据库覆盖、磁盘容量、网络和 collector 连续性会漂移，执行时必须重新验证
 > 安全边界：只允许 RDP research/governance 数据库与 `derivatives` 模拟栈；禁止 live profile、真实订单和参数 apply
 
@@ -55,7 +55,7 @@ Windows 静态检查仍使用：
 
 ## 4. 第一步：只读覆盖审计
 
-Stage 19 后，覆盖审计在 PostgreSQL `REPEATABLE READ, READ ONLY` 快照中读取全部 101 张当前 ORM 表；有时间列的表只扫描给定窗口，无时间列的表只读 planner estimate。数据库已用完全一致的主键/唯一约束禁止重复时，审计直接报告重复为 0，不再重复执行高成本分组扫描。它不会建表、补数或修改状态。若目标库仍只显示 98 张，说明 Stage 19 尚未标准部署，不能运行多日 campaign。
+覆盖审计在 PostgreSQL `REPEATABLE READ, READ ONLY` 快照中读取全部 102 张当前 ORM 表；有时间列的表只扫描给定窗口，无时间列的表只读 planner estimate。数据库已用完全一致的主键/唯一约束禁止重复时，审计直接报告重复为 0，不再重复执行高成本分组扫描。它不会建表、补数或修改状态。若目标库表数不等于 102，或 Batch B 账本没有完成全部 18 个有序 stage（末项 `batch_b_19_historical_research_artifacts`），说明当前 schema 未经标准部署，不能运行多日 campaign。
 
 ```bash
 cd ~/aats
@@ -322,6 +322,12 @@ reserve 复查。
 上述统一 reason code 失败关闭，既不能启动，也不能把旧 `SUCCEEDED` 记录短路为已验证成功。
 只有完成持久 fencing、不可变 Silver 与能够重建 plan、逐行重算 fingerprint 的只读终态
 verifier 后，才可重新开放状态机和成功终态。
+
+> 现场历史边界（2026-08-27）：旧部署的 v1 campaign
+> `60e46f5e-e3e0-4090-b141-b53c92f1aa71` 已在数据库记录为 `SUCCEEDED`，30 日窗口为
+> `[2026-07-22 08:00+08, 2026-08-21 08:00+08)`，结束时间 `2026-08-27 19:50:04+08`，
+> 且已无对应 runner 进程。该记录允许保留审计，但不满足本节当前 v2/fencing/不可变 Silver/
+> 终态 verifier 契约，不能用于跳过重验、解除 NO-GO 或恢复旧 runner。
 
 90 日必须先做容量 dry-run；当前校准下应返回 `capacity_projection_exceeds_safe_free_bytes`，不得增加 `--apply --confirm`：
 

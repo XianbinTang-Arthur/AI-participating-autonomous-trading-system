@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+import math
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -85,52 +86,20 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
 
 
 def _collect_latest_workflow_runs(project_root: Path) -> dict[str, dict[str, Any]]:
+    """Use the same managed workflow truth contract as the capital Gate."""
+    from aats.data_platform.governance._exceptions import DBUnavailableError
+    from aats.data_platform.production_workflow.gate_runtime_contract import (
+        _collect_latest_workflow_runs as collect_gate_workflow_runs,
+    )
+
     try:
-        from aats.api._governance_db import governance_session
-        from aats.data_platform.governance.operational_state_db import (
-            db_load_latest_workflow_runs,
+        return collect_gate_workflow_runs(project_root)
+    except DBUnavailableError as exc:
+        log.warning(
+            "managed workflow truth unavailable; stale file substitution denied (%s)",
+            type(exc).__name__,
         )
-
-        with governance_session() as session:
-            latest_by_workflow = db_load_latest_workflow_runs(session)
-        if latest_by_workflow:
-            return latest_by_workflow
-    except Exception:
-        pass
-
-    runs_dir = project_root / "artifacts/operations/workflow_runs"
-    latest_by_workflow: dict[str, dict[str, Any]] = {}
-    if not runs_dir.exists():
-        return latest_by_workflow
-
-    for path in sorted(runs_dir.glob("*.json"), reverse=True):
-        payload = _safe_load_json(path)
-        if not isinstance(payload, dict):
-            continue
-        workflow = str(payload.get("workflow") or "").strip()
-        if not workflow:
-            continue
-        candidate = {
-            "run_id": payload.get("run_id"),
-            "workflow": workflow,
-            "overall_status": payload.get("overall_status"),
-            "started_at": payload.get("started_at"),
-            "finished_at": payload.get("finished_at"),
-            "path": str(path),
-        }
-        current = latest_by_workflow.get(workflow)
-        candidate_dt = _parse_iso_datetime(
-            str(candidate.get("finished_at") or candidate.get("started_at") or ""),
-        )
-        current_dt = _parse_iso_datetime(
-            str(current.get("finished_at") or current.get("started_at") or "")
-            if current else None,
-        )
-        if current is None or (
-            candidate_dt is not None and current_dt is not None and candidate_dt > current_dt
-        ) or (current_dt is None and candidate_dt is not None):
-            latest_by_workflow[workflow] = candidate
-    return latest_by_workflow
+        return {}
 
 
 def _collect_latest_workflow_runs_from_db(
@@ -170,7 +139,23 @@ def _collect_latest_workflow_runs_from_db(
     return latest_by_workflow
 
 
-def _load_latest_decision_round_from_db() -> dict[str, Any] | None:
+def _load_latest_decision_round_from_db(
+    project_root: Path | None = None,
+) -> dict[str, Any] | None:
+    """Resolve DB truth without conflating empty/error with file-only mode.
+
+    ``None`` is reserved for an explicitly file-only development context.
+    Once a DB probe succeeds, or managed DB configuration exists, an empty or
+    failed query is an authoritative unavailable result and must not trigger a
+    stale latest-file substitution.
+    """
+
+    from aats.data_platform.governance._db_util import (
+        has_explicit_governance_db_configuration,
+    )
+
+    db_is_managed_truth = has_explicit_governance_db_configuration(project_root)
+    engine = None
     try:
         from sqlalchemy.orm import Session
 
@@ -181,15 +166,31 @@ def _load_latest_decision_round_from_db() -> dict[str, Any] | None:
 
         engine, ok = try_governance_db()
         if not ok:
+            if db_is_managed_truth:
+                return {
+                    "available": False,
+                    "data_source": "db",
+                    "authoritative": True,
+                    "audit_only": True,
+                    "reason_code": "decision_round_db_unavailable",
+                }
             return None
         try:
             with Session(engine) as session:
                 snapshot = db_load_latest_decision_round_snapshot(session)
             if not snapshot:
-                return None
+                return {
+                    "available": False,
+                    "data_source": "db",
+                    "authoritative": True,
+                    "audit_only": True,
+                    "reason_code": "decision_round_db_empty",
+                }
             return {
                 "available": True,
                 "data_source": "db",
+                "authoritative": True,
+                "audit_only": False,
                 "round_id": snapshot.get("round_id"),
                 "round_dir": None,
                 "started_at": snapshot.get("started_at"),
@@ -205,8 +206,14 @@ def _load_latest_decision_round_from_db() -> dict[str, Any] | None:
             if engine is not None:
                 engine.dispose()
     except Exception as exc:
-        log.warning("decision round DB 读取失败: %s", exc)
-        return None
+        log.warning("decision round DB 读取失败，已禁止文件替代 (%s)", type(exc).__name__)
+        return {
+            "available": False,
+            "data_source": "db",
+            "authoritative": True,
+            "audit_only": True,
+            "reason_code": "decision_round_db_error",
+        }
 
 
 def _query_latest_decision_round_from_files(project_root: Path) -> dict[str, Any]:
@@ -261,8 +268,8 @@ def _augment_workflow_runs_with_decision_round(
     latest_runs: dict[str, dict[str, Any]],
     project_root: Path,
 ) -> dict[str, dict[str, Any]]:
-    snapshot = _load_latest_decision_round_from_db()
-    if snapshot is None or not snapshot.get("available"):
+    snapshot = _load_latest_decision_round_from_db(project_root)
+    if snapshot is None:
         snapshot = _query_latest_decision_round_from_files(project_root)
     if not snapshot or not snapshot.get("available"):
         return latest_runs
@@ -386,14 +393,11 @@ def query_active_parameter_sets(project_root: Path) -> dict[str, Any]:
 def query_parameter_registry(project_root: Path) -> dict[str, Any]:
     """查询 parameter registry，用于解释 candidate / active 参数状态。"""
     registry_path = project_root / _GOVERNANCE_DIR / "current_parameter_registry.json"
+    from aats.data_platform.governance._db_util import (
+        has_explicit_governance_db_configuration,
+    )
 
-    try:
-        from aats.data_platform.governance.parameter_registry import load_registry
-
-        registry = load_registry(registry_path)
-    except Exception:
-        registry = _safe_load_json(registry_path)
-
+    managed_truth = has_explicit_governance_db_configuration(project_root)
     result: dict[str, Any] = {
         "available": False,
         "registry_path": str(registry_path),
@@ -403,10 +407,30 @@ def query_parameter_registry(project_root: Path) -> dict[str, Any]:
         "status_distribution": {},
     }
 
+    try:
+        from aats.data_platform.governance.parameter_registry import load_registry
+
+        registry = load_registry(registry_path)
+    except Exception as exc:
+        if managed_truth:
+            result.update({
+                "audit_only": True,
+                "reason_code": "parameter_registry_db_unavailable",
+                "error_type": type(exc).__name__,
+            })
+            return result
+        registry = _safe_load_json(registry_path)
+
     if registry is None:
         return result
 
     parameter_sets = registry.get("parameter_sets", [])
+    if managed_truth and not parameter_sets:
+        result.update({
+            "audit_only": True,
+            "reason_code": "parameter_registry_db_empty",
+        })
+        return result
     result["available"] = True
     result["generated_at"] = registry.get("generated_at")
     result["version"] = registry.get("version")
@@ -660,6 +684,19 @@ def query_latest_decisions(project_root: Path) -> dict[str, Any]:
     优先级: DB → 文件 fallback（复用 recommendation_registry 的 DB-first loader）。
     """
     dec_path = project_root / _DECISION_SYSTEM_DIR / "active_decision_registry.json"
+    from aats.data_platform.governance._db_util import (
+        has_explicit_governance_db_configuration,
+    )
+
+    managed_truth = has_explicit_governance_db_configuration(project_root)
+    result: dict[str, Any] = {
+        "available": False,
+        "registry_path": str(dec_path),
+        "generated_at": None,
+        "version": None,
+        "decisions": [],
+        "status_distribution": {},
+    }
 
     # 复用 DB-first loader
     try:
@@ -667,24 +704,31 @@ def query_latest_decisions(project_root: Path) -> dict[str, Any]:
             load_active_decision_registry,
         )
         registry = load_active_decision_registry(dec_path)
-    except Exception:
+    except Exception as exc:
+        if managed_truth:
+            result.update({
+                "audit_only": True,
+                "reason_code": "active_decision_db_unavailable",
+                "error_type": type(exc).__name__,
+            })
+            return result
         registry = _safe_load_json(dec_path)
 
-    result: dict[str, Any] = {
-        "available": False,
-        "registry_path": str(dec_path),
-        "generated_at": None,
-        "version": None,
-        "decisions": [],
-    }
-
     if registry is None:
+        return result
+
+    decisions = registry.get("decisions", [])
+    if managed_truth and not decisions:
+        result.update({
+            "audit_only": True,
+            "reason_code": "active_decision_db_empty",
+        })
         return result
 
     result["available"] = True
     result["generated_at"] = registry.get("generated_at")
     result["version"] = registry.get("version")
-    result["decisions"] = registry.get("decisions", [])
+    result["decisions"] = decisions
 
     # 按状态统计
     status_counts: dict[str, int] = {}
@@ -710,15 +754,31 @@ def query_latest_recommendations(
     优先级: DB → 文件 fallback（复用 recommendation_registry 的 DB-first loader）。
     """
     rec_path = project_root / _DECISION_SYSTEM_DIR / "recommendation_registry.json"
+    truth_error: str | None = None
 
-    # 复用 DB-first loader
+    # 复用 DB-first loader。loader 已在明确 file-only 模式内自行 fallback；
+    # 它抛错表示 managed DB 真值不可用，禁止在这里再次复活 JSON 审计副本。
     try:
         from aats.data_platform.decision_system.recommendation_registry import (
             load_recommendation_registry,
         )
+        from aats.data_platform.governance._exceptions import DBUnavailableError
+
         registry = load_recommendation_registry(rec_path)
-    except Exception:
-        registry = _safe_load_json(rec_path)
+    except DBUnavailableError as exc:
+        log.warning(
+            "recommendation truth unavailable; stale file substitution denied (%s)",
+            type(exc).__name__,
+        )
+        registry = None
+        truth_error = "recommendation_db_unavailable"
+    except Exception as exc:
+        log.warning(
+            "recommendation registry invalid; no recommendations exposed (%s)",
+            type(exc).__name__,
+        )
+        registry = None
+        truth_error = "recommendation_registry_invalid"
 
     result: dict[str, Any] = {
         "available": False,
@@ -727,6 +787,11 @@ def query_latest_recommendations(
         "version": None,
         "total_count": 0,
         "recommendations": [],
+        "data_source": (
+            "db" if truth_error == "recommendation_db_unavailable" else None
+        ),
+        "audit_only": truth_error is not None,
+        "reason_code": truth_error,
     }
 
     if registry is None:
@@ -993,10 +1058,6 @@ def query_rdp_health(project_root: Path) -> dict[str, Any]:
         "decision_cycle": 168,
     }
     latest_runs = _collect_latest_workflow_runs(project_root)
-    # 容器内无本地 workflow_runs 文件时，从 DB task_queue 回退
-    if not latest_runs and db_connected:
-        latest_runs = _collect_latest_workflow_runs_from_db(governance_runtime)
-    latest_runs = _augment_workflow_runs_with_decision_round(latest_runs, project_root)
     workflow_status = "ok"
     workflow_details: list[str] = []
     now = datetime.now(timezone.utc)
@@ -1006,17 +1067,24 @@ def query_rdp_health(project_root: Path) -> dict[str, Any]:
             workflow_status = "blocked"
             workflow_details.append(f"{workflow}=missing")
             continue
-        finished_at = _parse_iso_datetime(
-            str(latest.get("finished_at") or latest.get("started_at") or ""),
-        )
         status = str(latest.get("overall_status") or "unknown")
-        if status not in {"success", "partial"}:
+        if status != "success":
             workflow_status = "blocked"
             workflow_details.append(f"{workflow}=status:{status}")
             continue
-        if finished_at is None:
-            workflow_status = "warn" if workflow_status == "ok" else workflow_status
+        raw_finished_at = latest.get("finished_at")
+        if not isinstance(raw_finished_at, str) or not raw_finished_at.strip():
+            workflow_status = "blocked"
             workflow_details.append(f"{workflow}=missing_finished_at")
+            continue
+        finished_at = _parse_iso_datetime(raw_finished_at)
+        if finished_at is None:
+            workflow_status = "blocked"
+            workflow_details.append(f"{workflow}=invalid_finished_at")
+            continue
+        if finished_at > now + timedelta(minutes=5):
+            workflow_status = "blocked"
+            workflow_details.append(f"{workflow}=future_finished_at")
             continue
         age_hours = (now - finished_at).total_seconds() / 3600
         if age_hours > max_age_hours:
@@ -1113,8 +1181,8 @@ def query_latest_decision_round(project_root: Path) -> dict[str, Any]:
 
     优先走 governance DB snapshot，文件系统仅作为 fallback。
     """
-    snapshot = _load_latest_decision_round_from_db()
-    if snapshot is not None and snapshot.get("available"):
+    snapshot = _load_latest_decision_round_from_db(project_root)
+    if snapshot is not None:
         return snapshot
     return _query_latest_decision_round_from_files(project_root)
 
@@ -1122,21 +1190,421 @@ def query_latest_decision_round(project_root: Path) -> dict[str, Any]:
 # ── 8. Promotion Readiness ────────────────────────────────────────
 
 
+_PROMOTION_READINESS_STATUSES = frozenset({
+    "ready_for_next_live_test",
+    "not_ready_more_research_needed",
+    "not_ready_attribution_issue",
+    "not_ready_execution_issue",
+    "not_ready_governance_issue",
+})
+_PROMOTION_READINESS_CHECKS = (
+    "research_stability",
+    "attribution_no_severe_issue",
+    "execution_not_severe",
+    "governance_healthy",
+    "parameter_traceable",
+    "has_promote_candidate",
+    "has_keep_active_ft",
+)
+_PROMOTION_READINESS_ASSESSMENT_FIELDS = frozenset({
+    "generated_at",
+    "readiness",
+    "overall_confidence",
+    "checks_total",
+    "checks_passed",
+    "checks_failed",
+    "blockers",
+    "checks",
+    "promoted_candidates",
+    "active_family_timeframes",
+})
+
+
+def _parse_canonical_promotion_timestamp(
+    value: Any,
+    *,
+    context: str,
+) -> datetime | None:
+    """Parse one exact UTC timestamp used by the readiness projection."""
+
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or not (value.endswith("Z") or value.endswith("+00:00"))
+    ):
+        return None
+    from aats.data_platform.governance._time_util import parse_iso_datetime_utc
+
+    try:
+        return parse_iso_datetime_utc(value, context=context)
+    except (TypeError, ValueError):
+        return None
+
+
+def _derived_promotion_readiness(checks: list[dict[str, Any]]) -> str:
+    """Reproduce the current readiness evaluator's ordered decision contract."""
+
+    if all(check["passed"] for check in checks):
+        return "ready_for_next_live_test"
+    if not checks[0]["passed"]:
+        return "not_ready_more_research_needed"
+    if not checks[1]["passed"]:
+        return "not_ready_attribution_issue"
+    if not checks[2]["passed"]:
+        return "not_ready_execution_issue"
+    if not checks[3]["passed"]:
+        return "not_ready_governance_issue"
+    return "not_ready_more_research_needed"
+
+
+def _validate_promotion_readiness_assessment(
+    assessment: Any,
+    *,
+    manifest: dict[str, Any],
+    upgrade_candidates: Any,
+    ft_decisions: Any,
+    round_started_at: datetime,
+    round_finished_at: datetime,
+) -> str | None:
+    """Return a fail-closed reason code, or ``None`` for the current schema.
+
+    The persisted assessment has no standalone round-id field.  Its identity is
+    therefore bound by the enclosing exact snapshot, manifest readiness, and a
+    generated-at value inside the same canonical start/finish interval.
+    Internal counts and the ordered seven-check state machine are recomputed
+    instead of trusted.
+    """
+
+    if type(assessment) is not dict or not assessment:
+        return "promotion_readiness_assessment_invalid"
+    if frozenset(assessment) != _PROMOTION_READINESS_ASSESSMENT_FIELDS:
+        return "promotion_readiness_assessment_schema_invalid"
+
+    readiness = assessment.get("readiness")
+    confidence = assessment.get("overall_confidence")
+    if (
+        type(readiness) is not str
+        or readiness not in _PROMOTION_READINESS_STATUSES
+        or type(confidence) is not str
+        or confidence not in {"medium", "high"}
+    ):
+        return "promotion_readiness_assessment_schema_invalid"
+    if manifest.get("readiness") != readiness:
+        return "promotion_readiness_assessment_manifest_mismatch"
+
+    generated_at = _parse_canonical_promotion_timestamp(
+        assessment.get("generated_at"),
+        context="rdp_queries.promotion_readiness.assessment.generated_at",
+    )
+    if (
+        generated_at is None
+        or generated_at < round_started_at
+        or generated_at > round_finished_at
+    ):
+        return "promotion_readiness_assessment_identity_mismatch"
+
+    counts = tuple(
+        assessment.get(field)
+        for field in ("checks_total", "checks_passed", "checks_failed")
+    )
+    if any(type(value) is not int or value < 0 for value in counts):
+        return "promotion_readiness_assessment_schema_invalid"
+    checks_total, checks_passed, checks_failed = counts
+
+    checks = assessment.get("checks")
+    blockers = assessment.get("blockers")
+    promoted = assessment.get("promoted_candidates")
+    active = assessment.get("active_family_timeframes")
+    if not all(type(value) is list for value in (checks, blockers, promoted, active)):
+        return "promotion_readiness_assessment_schema_invalid"
+    if (
+        len(checks) != len(_PROMOTION_READINESS_CHECKS)
+        or checks_total != len(checks)
+    ):
+        return "promotion_readiness_assessment_count_mismatch"
+
+    for expected_name, check in zip(_PROMOTION_READINESS_CHECKS, checks, strict=True):
+        if (
+            type(check) is not dict
+            or frozenset(check) != {"check", "passed", "detail"}
+            or check.get("check") != expected_name
+            or type(check.get("passed")) is not bool
+            or type(check.get("detail")) is not str
+            or not check["detail"].strip()
+        ):
+            return "promotion_readiness_assessment_schema_invalid"
+
+    actual_passed = sum(1 for check in checks if check["passed"])
+    actual_failed = len(checks) - actual_passed
+    if (
+        checks_passed != actual_passed
+        or checks_failed != actual_failed
+        or checks_passed + checks_failed != checks_total
+    ):
+        return "promotion_readiness_assessment_count_mismatch"
+    if (
+        not all(type(blocker) is str and blocker.strip() for blocker in blockers)
+        or len(blockers) != actual_failed
+    ):
+        return "promotion_readiness_assessment_count_mismatch"
+
+    if readiness != _derived_promotion_readiness(checks):
+        return "promotion_readiness_assessment_schema_invalid"
+    expected_confidence = (
+        "high" if actual_failed == 0 or len(blockers) > 2 else "medium"
+    )
+    if confidence != expected_confidence:
+        return "promotion_readiness_assessment_schema_invalid"
+
+    promoted_ids: set[str] = set()
+    for item in promoted:
+        if type(item) is not dict or frozenset(item) != {
+            "parameter_set_id",
+            "score_ratio",
+        }:
+            return "promotion_readiness_assessment_schema_invalid"
+        parameter_set_id = item.get("parameter_set_id")
+        score_ratio = item.get("score_ratio")
+        if (
+            type(parameter_set_id) is not str
+            or not parameter_set_id.strip()
+            or parameter_set_id in promoted_ids
+            or type(score_ratio) not in {int, float}
+            or not math.isfinite(float(score_ratio))
+        ):
+            return "promotion_readiness_assessment_schema_invalid"
+        promoted_ids.add(parameter_set_id)
+
+    active_combos: set[str] = set()
+    for item in active:
+        if type(item) is not dict or frozenset(item) != {"combo_key", "confidence"}:
+            return "promotion_readiness_assessment_schema_invalid"
+        combo_key = item.get("combo_key")
+        item_confidence = item.get("confidence")
+        if (
+            type(combo_key) is not str
+            or not combo_key.strip()
+            or combo_key in active_combos
+            or item_confidence not in {"low", "medium", "high"}
+        ):
+            return "promotion_readiness_assessment_schema_invalid"
+        active_combos.add(combo_key)
+
+    upgrade_count = manifest.get("upgrade_candidates_count")
+    ft_decision_count = manifest.get("ft_decisions_count")
+    if (
+        type(upgrade_count) is not int
+        or upgrade_count < 0
+        or type(ft_decision_count) is not int
+        or ft_decision_count < 0
+    ):
+        return "promotion_readiness_manifest_count_invalid"
+    if (
+        type(upgrade_candidates) is not list
+        or type(ft_decisions) is not list
+        or not all(type(item) is dict for item in upgrade_candidates)
+        or not all(type(item) is dict for item in ft_decisions)
+    ):
+        return "promotion_readiness_round_payload_invalid"
+    if (
+        len(upgrade_candidates) != upgrade_count
+        or len(ft_decisions) != ft_decision_count
+    ):
+        return "promotion_readiness_manifest_count_mismatch"
+
+    expected_promoted = [
+        {
+            "parameter_set_id": item.get("parameter_set_id"),
+            "score_ratio": item.get("score_ratio"),
+        }
+        for item in upgrade_candidates
+        if item.get("decision") == "promote_candidate"
+    ]
+    expected_active = [
+        {
+            "combo_key": item.get("combo_key"),
+            "confidence": item.get("confidence"),
+        }
+        for item in ft_decisions
+        if item.get("decision") == "keep_active"
+    ]
+    if promoted != expected_promoted or active != expected_active:
+        return "promotion_readiness_assessment_count_mismatch"
+
+    checks_by_name = {check["check"]: check for check in checks}
+    if checks_by_name["has_promote_candidate"]["passed"] is not bool(promoted):
+        return "promotion_readiness_assessment_count_mismatch"
+    if checks_by_name["has_keep_active_ft"]["passed"] is not bool(active):
+        return "promotion_readiness_assessment_count_mismatch"
+    return None
+
+
 def query_promotion_readiness(project_root: Path) -> dict[str, Any]:
     """查询最近一次 promotion readiness 评估.
 
-    从最近 decision round 中提取。
+    从最近完整且仍新鲜的 Phase 6 decision round 中提取。
+
+    这是资本推进读模型；最新 round 的目录或快照存在并不证明它可用于
+    promotion。因此只接受 manifest 与 snapshot 身份一致、明确成功完成，且
+    canonical UTC ``finished_at`` 不在未来并且不超过 168 小时的 round。
     """
     dr = query_latest_decision_round(project_root)
     if not dr.get("available"):
-        return {"available": False}
+        return {
+            "available": False,
+            "audit_only": bool(dr.get("audit_only")),
+            "data_source": dr.get("data_source"),
+            "reason_code": dr.get("reason_code") or "decision_round_unavailable",
+        }
+
+    round_id = dr.get("round_id")
+    manifest = dr.get("manifest")
+    if not isinstance(manifest, dict):
+        return {
+            "available": False,
+            "round_id": round_id,
+            "audit_only": True,
+            "reason_code": "promotion_readiness_manifest_invalid",
+        }
+    if (
+        type(round_id) is not str
+        or not round_id
+        or round_id != round_id.strip()
+        or manifest.get("round_id") != round_id
+    ):
+        return {
+            "available": False,
+            "round_id": round_id,
+            "audit_only": True,
+            "reason_code": "promotion_readiness_round_id_mismatch",
+        }
+    if manifest.get("phase") != "phase6":
+        return {
+            "available": False,
+            "round_id": round_id,
+            "audit_only": True,
+            "reason_code": "promotion_readiness_round_phase_invalid",
+        }
+    if manifest.get("status") != "succeeded":
+        return {
+            "available": False,
+            "round_id": round_id,
+            "audit_only": True,
+            "reason_code": "promotion_readiness_round_status_invalid",
+        }
+
+    raw_finished_at = dr.get("finished_at")
+    if not isinstance(raw_finished_at, str) or not raw_finished_at.strip():
+        return {
+            "available": False,
+            "round_id": round_id,
+            "audit_only": True,
+            "reason_code": "promotion_readiness_finished_at_missing",
+        }
+    finished_at = _parse_canonical_promotion_timestamp(
+        raw_finished_at,
+        context="rdp_queries.promotion_readiness.finished_at",
+    )
+    if finished_at is None:
+        return {
+            "available": False,
+            "round_id": round_id,
+            "audit_only": True,
+            "reason_code": "promotion_readiness_finished_at_invalid",
+        }
+
+    started_at = _parse_canonical_promotion_timestamp(
+        dr.get("started_at"),
+        context="rdp_queries.promotion_readiness.started_at",
+    )
+    manifest_started_at = _parse_canonical_promotion_timestamp(
+        manifest.get("started_at"),
+        context="rdp_queries.promotion_readiness.manifest.started_at",
+    )
+    manifest_finished_at = _parse_canonical_promotion_timestamp(
+        manifest.get("finished_at"),
+        context="rdp_queries.promotion_readiness.manifest.finished_at",
+    )
+    if (
+        started_at is None
+        or manifest_started_at is None
+        or manifest_finished_at is None
+    ):
+        return {
+            "available": False,
+            "round_id": round_id,
+            "audit_only": True,
+            "reason_code": "promotion_readiness_round_timestamps_invalid",
+        }
+    if (
+        started_at != manifest_started_at
+        or finished_at != manifest_finished_at
+        or started_at > finished_at
+    ):
+        return {
+            "available": False,
+            "round_id": round_id,
+            "audit_only": True,
+            "reason_code": "promotion_readiness_round_timestamp_mismatch",
+        }
+    now = datetime.now(timezone.utc)
+    if finished_at > now:
+        return {
+            "available": False,
+            "round_id": round_id,
+            "audit_only": True,
+            "reason_code": "promotion_readiness_finished_at_future",
+        }
+    if now - finished_at > timedelta(hours=168):
+        return {
+            "available": False,
+            "round_id": round_id,
+            "audit_only": True,
+            "reason_code": "promotion_readiness_round_stale",
+        }
+
+    # 历史 Phase 6 round 可能把旧的自声明 Phase 2 聚合写成
+    # ``ready_for_next_live_test``。readiness 是资本推进读模型，不能只因
+    # report 文件存在就恢复资格；必须与现行、hash-bound promotion policy
+    # 同时出现。旧 round 仍可通过 query_latest_decision_round() 审计查看。
+    from aats.data_platform.decision_system.evidence_bundle import (
+        PHASE2_PROMOTION_QUALIFICATION_POLICY,
+    )
+
+    evidence = dr.get("evidence_bundle_summary")
+    phase2 = evidence.get("phase2_evidence") if isinstance(evidence, dict) else None
+    policy = phase2.get("promotion_qualification_policy") if isinstance(phase2, dict) else None
+    if policy != PHASE2_PROMOTION_QUALIFICATION_POLICY:
+        return {
+            "available": False,
+            "round_id": dr.get("round_id"),
+            "audit_only": True,
+            "reason_code": "promotion_qualification_policy_unsupported",
+            "promotion_qualification_policy": policy,
+        }
 
     readiness = dr.get("promotion_readiness_assessment")
-    if readiness is None:
-        return {"available": False, "round_id": dr.get("round_id")}
+    assessment_error = _validate_promotion_readiness_assessment(
+        readiness,
+        manifest=manifest,
+        upgrade_candidates=dr.get("parameter_upgrade_candidates"),
+        ft_decisions=dr.get("family_timeframe_decisions"),
+        round_started_at=started_at,
+        round_finished_at=finished_at,
+    )
+    if assessment_error is not None:
+        return {
+            "available": False,
+            "round_id": round_id,
+            "audit_only": True,
+            "reason_code": assessment_error,
+        }
 
     return {
         "available": True,
-        "round_id": dr.get("round_id"),
+        "round_id": round_id,
+        "audit_only": False,
+        "promotion_qualification_policy": policy,
         "assessment": readiness,
     }

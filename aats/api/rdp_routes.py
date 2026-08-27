@@ -21,7 +21,7 @@
   POST /rdp/recommendations/{id}/reject               — 拒绝 recommendation
   POST /rdp/recommendations/{id}/supersede            — 替代 recommendation
   POST /rdp/recommendations/{id}/approve-and-release  — 审批 + gate + release + apply 原子链
-  POST /rdp/parameters/apply                          — 应用已批准 recommendation 的参数
+  POST /rdp/parameters/apply                          — 已停用；固定要求 canonical release
   POST /rdp/parameters/rollback                       — 回滚 active parameter set
   POST /rdp/tasks/trigger                             — 触发 RDP workflow 任务
 """
@@ -526,6 +526,26 @@ def _precheck_recommendation_transitionable(
     return registry, rec
 
 
+def _attach_recommendation_mirror_status(
+    response: dict[str, Any],
+    *,
+    refreshed: bool,
+) -> dict[str, Any]:
+    """在不改写 canonical 业务结果的前提下暴露 JSON 镜像健康度。"""
+    response["recommendation_mirror_refreshed"] = refreshed
+    response["recommendation_mirror_status"] = (
+        "refreshed" if refreshed else "degraded"
+    )
+    if not refreshed:
+        # ``ok`` 仍表示 DB canonical transition / release 结果；镜像失败
+        # 是可修复的审计降级，不得伪装成业务转移失败。
+        response["degraded"] = True
+        response["recommendation_mirror_degradation_reason"] = (
+            "recommendation_audit_mirror_refresh_failed"
+        )
+    return response
+
+
 # ── Recommendation Approve ─────────────────────────────────────────
 
 
@@ -547,9 +567,11 @@ async def approve_recommendation_api(
     """
     from aats.data_platform.decision_system.recommendation_registry import (
         approve_recommendation,
-        save_recommendation_registry,
+        refresh_recommendation_audit_mirror_after_db_commit,
     )
-
+    from aats.data_platform.decision_system.promotion_guard import (
+        PromotionQualificationBlockedError,
+    )
     root = _project_root(request)
 
     # Server-side integrity gate：Step2 快照不完整时拒绝审批，避免 UI-only
@@ -568,11 +590,15 @@ async def approve_recommendation_api(
     )
     reg_path = root / "artifacts/decision_system/recommendation_registry.json"
 
-    rec = approve_recommendation(
-        registry, recommendation_id,
-        approved_by=_resolve_actor(principal, body.actor),
-        notes=body.notes,
-    )
+    try:
+        rec = approve_recommendation(
+            registry, recommendation_id,
+            approved_by=_resolve_actor(principal, body.actor),
+            notes=body.notes,
+            project_root=root,
+        )
+    except PromotionQualificationBlockedError as exc:
+        raise HTTPException(status_code=409, detail=exc.to_dict()) from exc
 
     if rec is None:
         # 预检已经过了，这里 None 只可能来自 CAS race：另一个 operator 在
@@ -588,8 +614,15 @@ async def approve_recommendation_api(
             },
         )
 
-    save_recommendation_registry(registry, reg_path)
-    return {"ok": True, "recommendation": rec}
+    mirror_refreshed = refresh_recommendation_audit_mirror_after_db_commit(
+        reg_path,
+        recommendation_id=recommendation_id,
+        transition="approve",
+    )
+    return _attach_recommendation_mirror_status(
+        {"ok": True, "recommendation": rec},
+        refreshed=mirror_refreshed,
+    )
 
 
 # ── Recommendation Reject ──────────────────────────────────────────
@@ -612,8 +645,8 @@ async def reject_recommendation_api(
       - 409: 状态不是 draft，或 CAS 竞态
     """
     from aats.data_platform.decision_system.recommendation_registry import (
+        refresh_recommendation_audit_mirror_after_db_commit,
         reject_recommendation,
-        save_recommendation_registry,
     )
 
     root = _project_root(request)
@@ -640,8 +673,15 @@ async def reject_recommendation_api(
             },
         )
 
-    save_recommendation_registry(registry, reg_path)
-    return {"ok": True, "recommendation": rec}
+    mirror_refreshed = refresh_recommendation_audit_mirror_after_db_commit(
+        reg_path,
+        recommendation_id=recommendation_id,
+        transition="reject",
+    )
+    return _attach_recommendation_mirror_status(
+        {"ok": True, "recommendation": rec},
+        refreshed=mirror_refreshed,
+    )
 
 
 # ── Recommendation Supersede ───────────────────────────────────────
@@ -665,23 +705,15 @@ async def supersede_recommendation_api(
         或 CAS 竞态
     """
     from aats.data_platform.decision_system.recommendation_registry import (
-        save_recommendation_registry,
+        refresh_recommendation_audit_mirror_after_db_commit,
         supersede_recommendation,
     )
 
     root = _project_root(request)
 
-    # supersede 语义是 "用新 rec 替换 active rec"，新 rec 同样会推进执行链路，
-    # 和 approve 的影响面对等，因此必须走同一个 Step2 integrity gate。历史上
-    # 只有 approve 加了 gate，supersede 未加，curl 可绕过；这里补齐。
-    blocking_reason = _step2_integrity_blocking_reason(root)
-    if blocking_reason is not None:
-        return {
-            "ok": False,
-            "message": blocking_reason,
-            "integrity_blocked": True,
-        }
-
+    # supersede 是风险收敛终止动作，不会创建 release 或应用参数。即使 Step2
+    # 已降级，operator 仍必须能把 approved audit-only 历史建议从前向队列移除；
+    # 写入继续受认证、状态预检和完整 identity CAS 保护。
     registry, _snapshot_rec = _precheck_recommendation_transitionable(
         root, recommendation_id, expected_current=("draft", "approved"),
     )
@@ -705,8 +737,15 @@ async def supersede_recommendation_api(
             },
         )
 
-    save_recommendation_registry(registry, reg_path)
-    return {"ok": True, "recommendation": rec}
+    mirror_refreshed = refresh_recommendation_audit_mirror_after_db_commit(
+        reg_path,
+        recommendation_id=recommendation_id,
+        transition="supersede",
+    )
+    return _attach_recommendation_mirror_status(
+        {"ok": True, "recommendation": rec},
+        refreshed=mirror_refreshed,
+    )
 
 
 # ── Recommendation Approve + Release 原子链 ───────────────────────
@@ -732,18 +771,22 @@ async def approve_and_release_api(
     （后者自带 gate + apply）= 2 个独立 HTTP 请求。把这两步折叠成一次调用，
     让 operator UI "审批并发布" 按钮能原子地走完整个治理链。
 
-    当 ``skip_apply=False`` 时，本端点与 ``/parameters/apply``、
-    ``/releases/create`` 一样要求 action=apply 的短时 ``X-Rdp-Apply-Token``；
+    当 ``skip_apply=False`` 时，本端点与 ``/releases/create`` 一样要求
+    action=apply 的短时 ``X-Rdp-Apply-Token``；保留的 ``/parameters/apply``
+    只是一条无写入的迁移失败入口。
     token 校验先于审批和任何持久化，避免组合入口绕过参数应用的第二道授权。
 
     失败恢复：
       - 审批失败（404 / CAS race）：recommendation 未变，release 未创建，回 HTTP 错误
       - Step2 integrity 阻断：什么都没做，回 200 ``integrity_blocked=True``
+      - 资格阻断：组合授权和审批 helper 的两次预写校验都发生在首次写入前；
+        任一次失败均保持 draft，且不创建 release / apply
       - Gate 阻断：recommendation 已 approved 不回滚；release record 写入并标记
         ``apply_result=blocked_by_gate``；返回 200 ``ok=False`` + release 详情
       - Apply 失败：同 gate 阻断，release record 标记 ``apply_result=failed``
-      - 即"只要 approve 成功，recommendation 就是 approved 的"；下次可单独重试
-        ``/parameters/apply`` 或 ``/releases/create``。和现有链路保持一致。
+      - 即"只要 approve 成功，recommendation 就是 approved 的"；下次只能通过
+        ``/releases/create`` 重新建立完整 release 血缘，不能改走已停用的
+        ``/parameters/apply``。
 
     返回体契约（UI 状态恢复依赖这个）：
       **只要本端点返回 200**，``recommendation`` 字段就是 approve 之后的
@@ -763,7 +806,11 @@ async def approve_and_release_api(
         approve_recommendation,
         find_recommendation,
         load_recommendation_registry,
-        save_recommendation_registry,
+        refresh_recommendation_audit_mirror_after_db_commit,
+    )
+    from aats.data_platform.decision_system.promotion_guard import (
+        PromotionQualificationBlockedError,
+        issue_promotion_authorization,
     )
     from aats.data_platform.production_workflow.release_registry import (
         create_parameter_release,
@@ -791,17 +838,32 @@ async def approve_and_release_api(
         }
 
     # 预检 recommendation 状态；draft → approved 的真 CAS 由底层 helper 保证。
-    registry, _snapshot_rec = _precheck_recommendation_transitionable(
+    registry, snapshot_rec = _precheck_recommendation_transitionable(
         root, recommendation_id, expected_current=("draft",),
     )
     reg_path = root / "artifacts/decision_system/recommendation_registry.json"
 
+    # 在任何治理写入之前签发一次仅进程内、完整身份绑定的资格授权。审批
+    # helper 随后仍执行自己的最后预写校验；release/gate/apply 只验证该授权，
+    # 不会在 recommendation 已变成 approved 后因再次查询可变证据而留下孤儿状态。
+    try:
+        promotion_authorization = issue_promotion_authorization(
+            root,
+            snapshot_rec,
+        )
+    except PromotionQualificationBlockedError as exc:
+        raise HTTPException(status_code=409, detail=exc.to_dict()) from exc
+
     # ── 1. 审批 ─────────────────────────────────────────────────
-    approved_rec = approve_recommendation(
-        registry, recommendation_id,
-        approved_by=actor,
-        notes=body.approval_notes,
-    )
+    try:
+        approved_rec = approve_recommendation(
+            registry, recommendation_id,
+            approved_by=actor,
+            notes=body.approval_notes,
+            project_root=root,
+        )
+    except PromotionQualificationBlockedError as exc:
+        raise HTTPException(status_code=409, detail=exc.to_dict()) from exc
     if approved_rec is None:
         # 预检过了但 approve 返回 None = CAS race（见 approve helper）。这里把
         # race 映射成 409，让 UI 能刷新后重试。recommendation 本身没变——
@@ -823,11 +885,16 @@ async def approve_and_release_api(
                 "current_recommendation": current_rec,
             },
         )
-    save_recommendation_registry(registry, reg_path)
+    mirror_refreshed = refresh_recommendation_audit_mirror_after_db_commit(
+        reg_path,
+        recommendation_id=recommendation_id,
+        transition="approve_and_release",
+    )
 
     # ── 2+3+4. Gate + release + apply ──────────────────────────
-    # approve 已经把 DB/JSON 都推到 approved；create_parameter_release 会再次
-    # load_recommendation_registry 命中同一条记录。
+    # approve 已经把 DB 推到 approved；create_parameter_release 会再次
+    # 从 DB canonical registry 命中同一条记录。即使 JSON 审计镜像
+    # 刷新失败，也必须继续创建 release，避免留下 approved orphan。
     release_result = create_parameter_release(
         root,
         recommendation_id=recommendation_id,
@@ -836,16 +903,25 @@ async def approve_and_release_api(
         notes=body.release_notes,
         run_gate=not body.skip_gate,
         run_apply=not body.skip_apply,
+        promotion_authorization=promotion_authorization,
     )
 
-    return {
+    # Preserve structured failure extensions (for example ``code`` and
+    # ``promotion_qualification``) while pinning the public composite fields to
+    # the recommendation and release result produced by this request.
+    response = dict(release_result)
+    response.update({
         "ok": bool(release_result.get("ok")),
         "recommendation": approved_rec,
         "release": release_result.get("release"),
         "gate_result": release_result.get("gate_result"),
         "apply_result": release_result.get("apply_result"),
         "message": release_result.get("message") or "审批并发布完成",
-    }
+    })
+    return _attach_recommendation_mirror_status(
+        response,
+        refreshed=mirror_refreshed,
+    )
 
 
 # ── Operator Token 签发 ───────────────────────────────────────────
@@ -893,36 +969,21 @@ async def apply_parameter_api(
     principal: OperatorPrincipal = Depends(require_write_access),
     token_actor: str = Depends(_require_apply_token("apply")),
 ) -> dict[str, Any]:
-    """从已批准 recommendation 应用参数到 active parameter set."""
-    from aats.data_platform.decision_system.active_parameter_apply import (
-        apply_approved_recommendation,
-    )
+    """Legacy direct-apply endpoint retained as a fail-closed migration guard."""
 
     _enforce_token_actor_matches_session(
         principal=principal, token_actor=token_actor, action="apply"
     )
 
-    root = _project_root(request)
-
-    # Server-side integrity gate：与 approve / supersede 对等。approve 时已
-    # 有门闸，但 approve → apply 之间 Step2 snapshot 仍可能 degrade（比如
-    # 研究数据落库失败），UI 会同步禁用按钮但 curl 可直接打过来。apply 动作
-    # 会把批准的 parameter set 推到 active_parameter_sets，影响面比
-    # approve 本身大，必须再次强制 server-side 校验。
-    blocking_reason = _step2_integrity_blocking_reason(root)
-    if blocking_reason is not None:
-        return {
-            "ok": False,
-            "message": blocking_reason,
-            "integrity_blocked": True,
-        }
-
-    return apply_approved_recommendation(
-        root,
-        recommendation_id=body.recommendation_id,
-        actor=_resolve_actor(principal, body.actor),
-        notes=body.notes,
-    )
+    return {
+        "ok": False,
+        "code": "release_required",
+        "message": (
+            "直接 apply 已停用：该入口无法建立 canonical release、applied_at "
+            "与观察/回滚血缘。请改用 approve-and-release 或 releases/create。"
+        ),
+        "recommendation_id": body.recommendation_id,
+    }
 
 
 # ── Parameter Rollback ─────────────────────────────────────────────
@@ -1029,9 +1090,9 @@ async def create_release_api(
         run_apply=not body.skip_apply,
     )
 
-    # Server-side integrity gate：/releases/create 触发 gate + apply 全链路，
-    # 比单独 /parameters/apply 影响更大（会生成 parameter_release 行并进入
-    # observation 阶段）。approve / apply 已各自有门闸，这里补齐入口层。
+    # Server-side integrity gate：/releases/create 是现行前向资本入口之一，
+    # 会生成 parameter_release 行、执行 apply 并进入 observation 阶段，必须在
+    # 入口层再次校验；退役的 /parameters/apply 不参与该链路。
     # 与 /parameters/rollback 区别：rollback 是安全操作，Step2 即便挂也必须
     # 让运营能用；release/create 是前向动作，任何 Step2 降级都应先阻断。
     blocking_reason = _step2_integrity_blocking_reason(root)
@@ -1110,38 +1171,14 @@ async def run_observation_api(
     from aats.data_platform.production_workflow.observation_window import (
         run_observation,
     )
-    from aats.data_platform.production_workflow.release_registry import (
-        find_release,
-        load_release_history,
-    )
 
     root = _project_root(request)
-    family = body.family
-    timeframe = body.timeframe
-
-    if not family or not timeframe:
-        history = load_release_history(root)
-        release = find_release(history, body.release_id)
-        if release is None:
-            # release_id 查不到时要让 operator 明确知道是 id 错了，而不是
-            # 回一条"无法确定 family/timeframe"把锅甩给 body 参数。
-            return {
-                "ok": False,
-                "message": f"release 未找到: {body.release_id}",
-                "reason": "release_not_found",
-                "release_id": body.release_id,
-            }
-        family = family or release.get("family")
-        timeframe = timeframe or release.get("timeframe")
-
-    if not family or not timeframe:
-        return {"ok": False, "message": "无法确定 family/timeframe"}
 
     return run_observation(
         root,
         release_id=body.release_id,
-        family=family,
-        timeframe=timeframe,
+        family=body.family,
+        timeframe=body.timeframe,
         window_hours=body.window_hours,
     )
 
@@ -1158,39 +1195,17 @@ async def evaluate_rollback_api(
     body: EvaluateRollbackRequest,
 ) -> dict[str, Any]:
     """评估是否建议 rollback."""
-    from aats.data_platform.production_workflow.release_registry import (
-        find_release,
-        load_release_history,
-    )
     from aats.data_platform.production_workflow.rollback_policy import (
         evaluate_rollback_recommendation,
     )
 
     root = _project_root(request)
-    family = body.family
-    timeframe = body.timeframe
-
-    if not family or not timeframe:
-        history = load_release_history(root)
-        release = find_release(history, body.release_id)
-        if release is None:
-            return {
-                "ok": False,
-                "message": f"release 未找到: {body.release_id}",
-                "reason": "release_not_found",
-                "release_id": body.release_id,
-            }
-        family = family or release.get("family")
-        timeframe = timeframe or release.get("timeframe")
-
-    if not family or not timeframe:
-        return {"ok": False, "message": "无法确定 family/timeframe"}
 
     return evaluate_rollback_recommendation(
         root,
         release_id=body.release_id,
-        family=family,
-        timeframe=timeframe,
+        family=body.family,
+        timeframe=body.timeframe,
     )
 
 

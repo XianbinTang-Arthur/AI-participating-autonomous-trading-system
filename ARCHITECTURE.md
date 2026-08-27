@@ -3,8 +3,10 @@
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](docs/project_positioning.md)。
 
 
-最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；包含 Phase 3A–3W 整改提交候选）
-适用范围：主交易系统、四个主交易切片、支持守护进程、订单/成交/资金/账本/对账链路、RDP 参数回灌边界
+> 文档状态：现行架构说明
+> 最后核对：2026-08-27（起始 HEAD `9c4112c6d769735f171971c8fa4f2cae5a03a824`；含当前 RDP 控制面收口候选，以本文档所在 HEAD 为准）
+> 适用范围：主交易系统、四个主交易切片、支持守护进程、订单/成交/资金/账本/对账链路、RDP 参数回灌边界
+> 运行边界：静态架构不证明当前容器、数据库、账户、订单或 trading-ready 状态
 
 本文档描述当前代码实际实现的系统结构和长期维护边界。
 
@@ -314,10 +316,12 @@ historical data
 ```
 
 离线 backtest 有两个必须同时记录的模型契约：`next_bar_event_v2` 约束完整 K 线
-决策只能在下一可交易事件解析，`ohlcv_participation_cap_v2` 用已知 bar volume 的
-默认 1% participation cap 约束 IOC/post-only/bounded-limit 并把 fee 与 fixed
-slippage 纳入成本。后者只是一种 OHLCV proxy，不建模 L2 depth、spread、queue
-position、真实 latency 或 market impact；它不能支撑 live 容量/收益外推。
+决策只能在下一可交易事件解析，`ohlcv_participation_cap_contract_v3` 则要求显式
+`InstrumentContract`，按产品语义换算张数、base quantity、quote notional、fee 与 PnL，
+显式记录 spot 买入扣费资产、量价精度和 liquidity-source lineage，并以 observation bar
+volume 或明确配置的下一 bar volume 约束 IOC/post-only/bounded-limit。后者仍只是 OHLCV
+proxy，不建模 L2 depth、spread、queue position、真实 latency 或 market impact；它不能
+支撑 live 容量/收益外推。
 
 关键边界：
 
@@ -326,6 +330,8 @@ position、真实 latency 或 market impact；它不能支撑 live 容量/收益
 - `governance.active_parameter_sets` 是 runtime active parameter 的唯一真源；`configs/active_parameter_sets/` 只保留兼容/审计用途，runtime 不做 JSON fallback。
 - `release_cycle` 与 `decision_cycle` 的调度配置当前禁用，其中 `release_cycle` 还被任务队列显式冻结；不得把历史文档中的自动发布描述当成当前行为。
 - 缺少上述两个 model version 或现实性限制元数据的旧回测 artifact 不是当前资本证据，必须失效并重跑。
+- apply-capable recommendation 必须绑定精确、成功、未过期且使用当前 qualification policy 的 Phase 6 round；不得以“最新 round”替历史 recommendation 背书。
+- direct apply 已停用；前向参数写入必须建立 canonical release。启用的 observation cycle 仍承担已有 release 的安全收敛：仅在 exact post-apply provenance、combo lock、clean attempt 和应用层 insert-once DB action proof 完整时回滚、取消或 soft pause，其余状态进入 reconciliation 并阻断新 apply。
 
 生产参数变更必须能追踪 recommendation、gate、release、actor、apply history 和 rollback target。
 

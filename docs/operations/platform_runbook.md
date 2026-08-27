@@ -1,12 +1,14 @@
 # RDP 平台运行手册
 
-> 最后核对：2026-08-26（实现基线 `fe5596fd5ee4`；历史数据恢复与持续采集加固已完成标准 derivatives 模拟部署）。本手册面向当前 task-daemon、数据库队列和 10 个 workflow；早期仅含 4 个 workflow、JSON active parameter fallback 或直写 CLI 的说明均已失效。当前标准入口只允许模拟 profile。
+> 文档状态：现行操作说明
+> 最后核对：2026-08-27（起始 HEAD `9c4112c6`，含当前控制面收口候选；以本文档所在 HEAD 为准）
+> 核对范围：task-daemon、数据库队列、10 个 workflow、schema/API 与标准模拟部署静态契约；不证明现场覆盖或容器状态
 
 ## 1. 运行边界
 
 - RDP 写 research/governance 数据库，对主交易数据库保持只读。
 - 主交易 runtime active parameter 只从 `governance.active_parameter_sets` 加载。
-- 参数变更只能通过认证后的 RDP API 和 gate；所有会执行 apply 的直接或组合入口都要求短时 `action=apply` token，rollback 要求独立的 `action=rollback` token。旧直写脚本已禁用。
+- 参数前向变更只能通过认证后的 release API 和 gate；`skip_apply=false` 的两个组合入口都要求短时 `action=apply` token。direct apply 已停用并固定无写入返回 `release_required`。Operator rollback 要求独立的 `action=rollback` token；内部 observation 风险收敛走精确数据库证明而非浏览器 token。旧直写脚本已禁用。
 - `release_cycle` 当前禁用且禁止入队；不要通过手工改任务表绕过。
 - 标准 `aats-rdp-daemon` 随部署启动，不需要在宿主机另起 nohup 进程。
 - 不在终端、文档、工单或聊天中显示 `.env.*` 内容、连接串、token 或交易所凭证。
@@ -15,8 +17,8 @@
 
 ### 2.1 主系统与 RDP 健康
 
-1. 确认部署报告中的 gateway、market、decision、execution、rdp-daemon 健康。
-2. future derivatives-live required list 已纳入 liquidations-daemon 与 microstructure-collector；当前 live 在副作用前被拒绝，因此两者必须标为未运行验证。
+1. derivatives 模拟 profile 的部署报告必须同时证明 gateway、market、decision、execution、rdp-daemon、liquidations-daemon、microstructure-collector 七个应用容器健康。
+2. live profile 仍在副作用前被拒绝；模拟 collector 健康不能外推为 live 可部署或历史覆盖完整。
 3. 登录 Operator UI，检查：
    - `/system/health` 无 critical blocker；
    - `/system/recovery` 无未处理 stuck/ambiguous submit；
@@ -53,7 +55,7 @@
 | `microstructure_silver_15m` | 每 15 分钟 | 是 | Silver 聚合 |
 | `reliability_cycle` | 每小时 :15 | 是 | 可靠性 |
 | `okx_rest_history_rolling_1h` | 每小时 :20 | 是 | OI/mark/long-short |
-| `observation_cycle` | 每小时 :30 | 是 | release observation |
+| `observation_cycle` | 每小时 :30 | 是 | release observation + 受控 pending-risk 收敛 |
 | `data_maintenance` | 每日 04:00 | 是 | ingest/index/retention |
 | `governance_cycle` | 每日 07:00 | 是 | quality/validation/candidate |
 | `research_cycle` | 周日 08:00 | 是 | refresh/full pipeline |
@@ -91,7 +93,7 @@
 .\.venv\Scripts\python.exe scripts\rdp_detect_gaps.py
 ```
 
-`rdp_init_db.py` 是受控显式迁移入口，执行 ORM baseline、完整 Batch B ledger/checksum chain 和最终只读校验；当前 ORM 为 98 张表，历史数据治理迁移是 Batch B stage 18。不要按旧的 48/78/81/84 表清单验收。`--ensure-schema` 为旧 CLI 名，在 daily ingest/replay 等业务 runner 中已收紧为只读 validate-only，不再执行 DDL。Live 部署不手工运行本节命令，只通过根 `scripts/deploy.sh` 的一次性综合 schema job。
+`rdp_init_db.py` 是受控显式迁移入口，执行 ORM baseline、完整 Batch B ledger/checksum chain 和最终只读校验；当前 ORM 为 102 张表，Batch B 仍为 18 个有序 stage，末项名称是 `batch_b_19_historical_research_artifacts`。不要按旧的 48/78/81/84/98/101 表清单验收。`--ensure-schema` 为旧 CLI 名，在 daily ingest/replay 等业务 runner 中已收紧为只读 validate-only，不再执行 DDL。Live 部署不手工运行本节命令，只通过根 `scripts/deploy.sh` 的一次性综合 schema job。
 
 ### 5.2 历史数据治理
 
@@ -117,7 +119,7 @@
 - pre-apply gate 允许；
 - 主交易 health/recovery/reconciliation 可接受；
 - actor、release id、observation plan、rollback target 齐全；
-- 当前 Operator session 签发的短时 `X-Rdp-Apply-Token`；直接 apply 以及 `skip_apply=false` 的组合 release 入口都要求 `action=apply` token。
+- 当前 Operator session 签发的短时 `X-Rdp-Apply-Token`；`skip_apply=false` 的组合 release 入口要求 `action=apply` token。
 
 ### 6.2 当前写入口
 
@@ -129,12 +131,17 @@
 | Gate | `POST /rdp/gates/run` |
 | 获取 Operator token | `POST /rdp/operator-tokens` |
 | 创建 release + apply | `POST /rdp/releases/create` + `action=apply` token |
-| 单独 apply | `POST /rdp/parameters/apply` |
+| Direct apply 迁移失败入口 | `POST /rdp/parameters/apply`（固定 `release_required`，无写入） |
 | 观察 | `POST /rdp/observations/run` |
 | 回滚评估 | `POST /rdp/rollback-recommendation/evaluate` |
 | 执行回滚 | `POST /rdp/parameters/rollback` |
 
 apply/release/rollback 的 token 属于敏感短期凭证，不写入 shell history、文档或工单。完整 payload 契约以 `/openapi.json` 为准。
+
+启用的 `observation_cycle` 会在持久化评估后处理 pending rollback risk。它只在 exact
+release/post-apply provenance、clean attempt、combo lock 与应用层 insert-once action proof
+全部成立时回滚、取消或 soft pause；其他记录进入 `reconciliation_required` 并继续阻断前向
+apply。不得用 legacy boolean、JSON 镜像或 release 状态单独宣告回滚完成。
 
 以下脚本已禁用，运行会退出 2：
 

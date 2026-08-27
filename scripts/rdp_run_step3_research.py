@@ -444,6 +444,7 @@ _STEP3_EXPANDED_PARAMS = frozenset({
     # 以下参数虽未做 Step 3 专项扫描，但需纳入合并输出和约束校验
     "max_thesis_age_seconds",
     "max_acceptable_cost_bps",
+    "min_score_drawdown_bps",
     "min_liquidity_quality",
     "limit_offset_bps_entry",
     "directional_trend_weight",
@@ -565,6 +566,35 @@ def _merge_recommendations(
                     "reason": prec.get("reason", ""),
                     "source": "step3",
                 }
+
+        # independent 的 replay 默认允许 short 阈值为 None（运行时跟随 long），
+        # 但生产引擎的 short 字段是独立、非空设置。若候选不把 replay 的
+        # resolved 语义物化，发布后生产会继续使用 profile short 默认值，造成
+        # replay/资本行为分裂。这里在治理候选形成前显式固化等价数值。
+        if family == "independent":
+            resolved_pairs = (
+                ("short_entry_threshold", "entry_threshold"),
+                ("short_close_threshold", "close_threshold"),
+            )
+            for short_name, long_name in resolved_pairs:
+                short_record = m.get(short_name)
+                if not isinstance(short_record, dict) or short_record.get("value") is None:
+                    long_record = m.get(long_name)
+                    long_value = (
+                        long_record.get("value")
+                        if isinstance(long_record, dict)
+                        else None
+                    )
+                    if long_value is not None:
+                        m[short_name] = {
+                            "value": long_value,
+                            "confidence": long_record.get("confidence", "low"),
+                            "reason": (
+                                f"物化 ReplayParameterOverrides 的 {short_name} "
+                                f"缺失时跟随 {long_name} 语义"
+                            ),
+                            "source": "resolved_replay_semantics",
+                        }
 
         merged[ft_key] = m
 

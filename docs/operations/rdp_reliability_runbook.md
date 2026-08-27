@@ -2,7 +2,9 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
-> 最后核对：2026-08-25（起始代码基线 `70f1a581`，含本轮 RDP 业务逻辑整改工作区）。workflow 共 10 个；`decision_cycle`、`release_cycle` disabled，旧 active JSON seed 和直写 rollback CLI 不可用。标准入口只允许模拟 profile；本文不以静态代码推断当前容器在线。
+> 文档状态：现行操作说明
+> 最后核对：2026-08-27（起始 HEAD `9c4112c6`，含当前 RDP 控制面收口候选；以本文档所在 HEAD 为准）
+> 核对范围：可靠性 checker、10 个 workflow、schema 与控制面静态契约；不以静态代码推断当前容器在线
 
 
 ## 概述
@@ -92,7 +94,7 @@
 ```
 1. 停止新的参数发布，查看 /rdp/health 和数据库容器健康/日志。
 2. 不输出连接串或环境文件内容；使用项目健康检查确认 research/governance DB。
-3. 核对 governance migrations 和 81 表 schema，不用临时 Python 建表替代迁移。
+3. 核对 governance migrations、102 表 schema，以及 18 个有序 Batch B stage（末项 `batch_b_19_historical_research_artifacts`）；不用临时 Python 建表替代迁移。
 4. 恢复数据库真源；不得从 active JSON 人工 seed runtime 状态。
 5. 核对 active parameter sets、apply history、release、scheduler state 和 runtime provenance。
 ```

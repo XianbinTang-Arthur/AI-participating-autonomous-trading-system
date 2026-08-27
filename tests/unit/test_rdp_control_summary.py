@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase
@@ -36,6 +37,52 @@ def _fake_snapshot_request(runtime: object | None = None) -> SimpleNamespace:
         app=SimpleNamespace(state=SimpleNamespace(runtime=runtime)),
         state=SimpleNamespace(_dashboard_snapshot_loader=True),
     )
+
+
+def test_environment_summary_never_advertises_retired_direct_apply() -> None:
+    with (
+        patch.object(rdp_control_summary, "get_current_environment", return_value="staging"),
+        patch.object(
+            rdp_control_summary,
+            "get_policy",
+            return_value={
+                "description": "test",
+                "require_gate_pass": True,
+                "require_approval": False,
+                "allow_parameter_rollback": True,
+            },
+        ),
+        patch.object(
+            rdp_control_summary,
+            "get_observation_window_hours",
+            return_value=24,
+        ),
+    ):
+        summary = rdp_control_summary._environment_summary()
+
+    assert summary["direct_apply_allowed"] is False
+    assert summary["direct_apply_status"] == "retired_release_required"
+
+
+def _qualified_promotion_verdicts(
+    _root: Path,
+    recommendations: list[dict[str, object]],
+) -> dict[str, SimpleNamespace]:
+    return {
+        str(rec["recommendation_id"]): SimpleNamespace(
+            to_dict=lambda rec=rec: {
+                "required": True,
+                "eligible": True,
+                "reason_code": "qualified",
+                "evidence_bundle_ref": rec.get("evidence_bundle_ref") or "20260827_120000_deadbeef",
+                "source_round_id": rec.get("source_round_id") or "research_round_1",
+                "qualified_round_id": rec.get("evidence_bundle_ref") or "20260827_120000_deadbeef",
+                "detail": "qualified",
+            },
+        )
+        for rec in recommendations
+        if rec.get("recommendation_type") == "parameter_upgrade"
+    }
 
 
 class TestRdpControlSummary(TestCase):
@@ -701,7 +748,13 @@ class TestRdpControlSummary(TestCase):
 
         self.assertEqual(payload["environment"]["name"], "staging")
         self.assertEqual(payload["health"]["overall_health"], "degraded")
-        self.assertEqual(payload["operations_summary"]["approved_release_candidate_count"], 1)
+        self.assertEqual(payload["operations_summary"]["approved_release_candidate_count"], 0)
+        self.assertEqual(
+            payload["operations_summary"][
+                "audit_only_approved_parameter_recommendation_count"
+            ],
+            1,
+        )
         self.assertEqual(payload["operations_summary"]["draft_recommendation_count"], 0)
         self.assertEqual(payload["operations_summary"]["latest_gate_status"], "warn")
         self.assertEqual(payload["recent_gate_results"][0]["gate_run_id"], "gate_1")
@@ -1053,6 +1106,11 @@ class TestRdpControlSummary(TestCase):
                     "recommendation_type": "keep_active",
                     "status": "draft",
                     "created_at": "2026-04-10T12:01:00Z",
+                    "promotion_qualification": {
+                        "required": False,
+                        "eligible": True,
+                        "reason_code": "not_required",
+                    },
                 },
                 {
                     "combo_key": "directional_1h",
@@ -1069,6 +1127,11 @@ class TestRdpControlSummary(TestCase):
                     "recommendation_type": "keep_active",
                     "status": "draft",
                     "created_at": "2026-04-10T12:02:00Z",
+                    "promotion_qualification": {
+                        "required": False,
+                        "eligible": True,
+                        "reason_code": "not_required",
+                    },
                 },
                 {
                     "combo_key": "approved_15m",
@@ -1265,7 +1328,12 @@ class TestRdpControlSummary(TestCase):
             ),
             patch(
                 "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
-                return_value={"round_id": "step2_keep_active", "manifest": {"status": "complete"}},
+                return_value={
+                    "round_id": "step2_keep_active",
+                    "status": "succeeded",
+                    "finished_at": "2026-04-10T12:00:00+00:00",
+                    "manifest": {"round_id": "step2_keep_active"},
+                },
             ),
             patch(
                 "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
@@ -1281,11 +1349,10 @@ class TestRdpControlSummary(TestCase):
         self.assertEqual(item["decision_summary"], "这轮先保持不动。现在还没有实盘参数，这次只记录治理结论。")
         self.assertEqual(item["approval_effect_summary"], "批准后只记录“保持当前”，不会进入发布。")
 
-    def test_workbench_items_prefer_parameter_upgrade_over_keep_active_for_same_combo(self) -> None:
-        """Research 每轮对同一 combo 会成对写 parameter_upgrade + keep_active,且
-        keep_active 的 created_at 往往更新。as-is 按 created_at 去重让 operator
-        永远只看到 keep_active,选不到参数升级。这里锁死新的优先级:同 combo 下
-        parameter_upgrade 先露出,keep_active 需要等它被拒后下一轮才能浮上来。
+    def test_workbench_items_do_not_let_legacy_upgrade_hide_safe_keep_active(self) -> None:
+        """缺少精确证据资格的旧 parameter_upgrade 只能审计，不能继续压住
+        同 combo 下仍可处理的 keep_active。具备资格的新 parameter_upgrade 另有
+        release-candidate 回归覆盖其优先级与发布动作。
         """
         request = _fake_request()
 
@@ -1367,14 +1434,17 @@ class TestRdpControlSummary(TestCase):
 
         self.assertEqual(payload["total"], 1)
         item = payload["items"][0]
-        self.assertEqual(item["recommendation_id"], "rec_upgrade_older")
-        self.assertEqual(item["recommendation_type"], "parameter_upgrade")
-        self.assertEqual(item["actions"][0]["label"], "批准参数候选")
+        self.assertEqual(item["recommendation_id"], "rec_keep_newer")
+        self.assertEqual(item["recommendation_type"], "keep_active")
 
     def test_workbench_items_include_release_candidates_after_parameter_upgrade_is_approved(self) -> None:
         request = _fake_request()
 
         with (
+            patch(
+                "aats.api.rdp_control_summary.evaluate_promotion_qualifications",
+                side_effect=_qualified_promotion_verdicts,
+            ),
             patch("aats.api.rdp_control_summary._governance_session", _dummy_session),
             patch("aats.data_platform.governance.rdp_task_db.db_get_recent_tasks", return_value=[]),
             patch("aats.api.rdp_control_summary._environment_summary", return_value={"name": "staging"}),
@@ -1398,6 +1468,8 @@ class TestRdpControlSummary(TestCase):
                         "reason": "已完成审批，准备创建 release",
                         "status": "approved",
                         "target_parameter_set_id": "ps_candidate_2",
+                        "source_round_id": "research_round_1",
+                        "evidence_bundle_ref": "20260827_120000_deadbeef",
                         "created_at": "2026-04-10T12:05:00Z",
                     },
                 ],
@@ -1433,9 +1505,253 @@ class TestRdpControlSummary(TestCase):
         self.assertEqual(payload["total"], 0)
         self.assertEqual(payload["release_candidates"]["total"], 1)
         candidate = payload["release_candidates"]["items"][0]
-        self.assertEqual(candidate["headline"], "已批准，待发布")
+        self.assertEqual(candidate["headline"], "已批准，等待治理决策")
         self.assertEqual(candidate["actions"][0]["ui_action"], "rdp-run-gate")
         self.assertEqual(candidate["actions"][1]["ui_action"], "rdp-create-release")
+        self.assertFalse(candidate["actions"][1]["enabled"])
+
+    def test_release_candidates_keep_legacy_approved_recommendation_audit_only(self) -> None:
+        payload = rdp_control_summary._build_release_candidates_payload(
+            {
+                "pending_recommendations": [
+                    {
+                        "recommendation_id": "rec_legacy_approved",
+                        "family": "independent",
+                        "timeframe": "15m",
+                        "recommendation_type": "parameter_upgrade",
+                        "status": "approved",
+                        "promotion_qualification": {
+                            "required": True,
+                            "eligible": False,
+                            "reason_code": "promotion_qualification_policy_unsupported",
+                        },
+                    },
+                ],
+                "governance_state": {"combo_states": []},
+                "recent_gate_results": [
+                    {
+                        "recommendation_id": "rec_legacy_approved",
+                        "gate_status": "pass",
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(payload["total"], 0)
+        self.assertEqual(payload["audit_only_total"], 1)
+        self.assertTrue(payload["audit_only_items"][0]["audit_only"])
+        self.assertEqual(
+            payload["audit_only_items"][0]["actions"],
+            [
+                {
+                    "key": "supersede",
+                    "label": "归档为已替代",
+                    "ui_action": "rdp-supersede-recommendation",
+                    "value": "rec_legacy_approved",
+                    "enabled": True,
+                    "disabled_reason": None,
+                }
+            ],
+        )
+
+    def test_release_candidates_keep_newest_gate_when_older_pass_follows(self) -> None:
+        round_id = "20260827_120000_deadbeef"
+        payload = rdp_control_summary._build_release_candidates_payload(
+            {
+                "pending_recommendations": [
+                    {
+                        "recommendation_id": "rec_latest_block",
+                        "family": "independent",
+                        "timeframe": "15m",
+                        "recommendation_type": "parameter_upgrade",
+                        "status": "approved",
+                        "target_parameter_set_id": "ps_candidate",
+                        "source_round_id": "research_round_1",
+                        "evidence_bundle_ref": round_id,
+                        "promotion_qualification": {
+                            "required": True,
+                            "eligible": True,
+                            "reason_code": "qualified",
+                            "source_round_id": "research_round_1",
+                            "evidence_bundle_ref": round_id,
+                            "qualified_round_id": round_id,
+                        },
+                    }
+                ],
+                "governance_state": {"combo_states": []},
+                # DB reader contract is newest-first.  The old pass must not
+                # overwrite the newer block for the same recommendation.
+                "recent_gate_results": [
+                    {
+                        "recommendation_id": "rec_latest_block",
+                        "gate_status": "block",
+                        "allow_apply": False,
+                        "created_at": "2026-08-27T12:00:00+00:00",
+                        "blocking_reasons": ["latest block"],
+                    },
+                    {
+                        "recommendation_id": "rec_latest_block",
+                        "gate_status": "pass",
+                        "allow_apply": True,
+                        "created_at": "2026-08-27T11:00:00+00:00",
+                    },
+                ],
+            }
+        )
+
+        candidate = payload["items"][0]
+        self.assertEqual(candidate["gate_status"], "block")
+        self.assertIs(candidate["allow_apply"], False)
+
+    def test_release_candidate_create_action_is_disabled_for_paused_combo(self) -> None:
+        round_id = "20260827_120000_deadbeef"
+        payload = rdp_control_summary._build_release_candidates_payload({
+            "pending_recommendations": [{
+                "recommendation_id": "rec_paused_combo",
+                "family": "independent",
+                "timeframe": "15m",
+                "combo_key": "independent_15m",
+                "recommendation_type": "parameter_upgrade",
+                "status": "approved",
+                "target_parameter_set_id": "ps_candidate",
+                "source_round_id": "research_round_1",
+                "evidence_bundle_ref": round_id,
+                "promotion_qualification": {
+                    "required": True,
+                    "eligible": True,
+                    "reason_code": "qualified",
+                    "source_round_id": "research_round_1",
+                    "evidence_bundle_ref": round_id,
+                    "qualified_round_id": round_id,
+                },
+            }],
+            "governance_state": {
+                "decision_truth_available": True,
+                "combo_states": [{
+                    "combo_key": "independent_15m",
+                    "decision_status": "pause",
+                    "decision_truth_available": True,
+                }],
+            },
+            "recent_gate_results": [],
+        })
+
+        candidate = payload["items"][0]
+        create_action = next(
+            action for action in candidate["actions"]
+            if action["key"] == "create_release"
+        )
+        self.assertFalse(create_action["enabled"])
+        self.assertIn("安全暂停", create_action["disabled_reason"])
+        self.assertEqual(candidate["headline"], "已批准，当前暂停")
+
+    def test_release_candidate_create_action_is_disabled_without_decision_truth(self) -> None:
+        round_id = "20260827_120000_deadbeef"
+        payload = rdp_control_summary._build_release_candidates_payload({
+            "pending_recommendations": [{
+                "recommendation_id": "rec_decision_truth_missing",
+                "family": "independent",
+                "timeframe": "15m",
+                "combo_key": "independent_15m",
+                "recommendation_type": "parameter_upgrade",
+                "status": "approved",
+                "target_parameter_set_id": "ps_candidate",
+                "source_round_id": "research_round_1",
+                "evidence_bundle_ref": round_id,
+                "promotion_qualification": {
+                    "required": True,
+                    "eligible": True,
+                    "reason_code": "qualified",
+                    "source_round_id": "research_round_1",
+                    "evidence_bundle_ref": round_id,
+                    "qualified_round_id": round_id,
+                },
+            }],
+            "governance_state": {
+                "decision_truth_available": False,
+                "decision_truth_reason_code": "active_decision_db_unavailable",
+                "combo_states": [],
+            },
+            "recent_gate_results": [],
+        })
+
+        candidate = payload["items"][0]
+        create_action = next(
+            action for action in candidate["actions"]
+            if action["key"] == "create_release"
+        )
+        self.assertFalse(create_action["enabled"])
+        self.assertIn("决策真源不可验证", create_action["disabled_reason"])
+        self.assertEqual(candidate["headline"], "已批准，等待决策真源")
+
+    def test_promotion_ui_contract_fails_closed_on_missing_or_semantic_drift(self) -> None:
+        base = {
+            "recommendation_type": "pause",
+            "target_parameter_set_id": "ps_legacy",
+        }
+        self.assertFalse(rdp_control_summary._promotion_qualification_allows(base))
+        self.assertFalse(
+            rdp_control_summary._promotion_qualification_allows({
+                **base,
+                "promotion_qualification": {"required": False, "eligible": True},
+            })
+        )
+        self.assertFalse(
+            rdp_control_summary._promotion_qualification_allows({
+                **base,
+                "promotion_qualification": {"required": True, "eligible": False},
+            })
+        )
+        self.assertTrue(
+            rdp_control_summary._promotion_qualification_allows({
+                "recommendation_type": "keep_active",
+                "target_parameter_set_id": None,
+                "promotion_qualification": {
+                    "required": False,
+                    "eligible": True,
+                    "reason_code": "not_required",
+                    "qualified_round_id": None,
+                },
+            })
+        )
+        self.assertFalse(
+            rdp_control_summary._promotion_qualification_allows({
+                "recommendation_type": "parameter_upgrade",
+                "target_parameter_set_id": None,
+                "promotion_qualification": {
+                    "required": True,
+                    "eligible": True,
+                    "reason_code": "qualified",
+                },
+            })
+        )
+        self.assertFalse(
+            rdp_control_summary._promotion_qualification_allows({
+                "recommendation_type": "unknown_type",
+                "target_parameter_set_id": None,
+                "promotion_qualification": {
+                    "required": False,
+                    "eligible": True,
+                    "reason_code": "not_required",
+                },
+            })
+        )
+        self.assertFalse(
+            rdp_control_summary._promotion_qualification_allows({
+                "recommendation_type": "parameter_upgrade",
+                "target_parameter_set_id": "ps_1",
+                "source_round_id": "research_round_1",
+                "evidence_bundle_ref": "round_1",
+                "promotion_qualification": {
+                    "required": True,
+                    "eligible": True,
+                    "reason_code": "promotion_round_not_found",
+                    "source_round_id": "research_round_1",
+                    "evidence_bundle_ref": "round_1",
+                    "qualified_round_id": None,
+                },
+            })
+        )
 
     def test_tuning_overview_counts_pending_and_active_overrides(self) -> None:
         request = _fake_request()
@@ -1542,7 +1858,13 @@ class TestRdpControlSummary(TestCase):
             ),
             patch(
                 "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
-                return_value={"round_id": "step2_ok", "manifest_synthesized": False},
+                return_value={
+                    "round_id": "step2_ok",
+                    "status": "succeeded",
+                    "finished_at": "2026-04-10T12:00:00+00:00",
+                    "manifest": {"round_id": "step2_ok"},
+                    "manifest_synthesized": False,
+                },
             ),
             patch(
                 "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
@@ -1620,7 +1942,7 @@ class TestRdpControlSummary(TestCase):
                         "confidence": "medium",
                         "reason": "归因失败率偏高；执行边际仍未改善",
                         "status": "draft",
-                        "target_parameter_set_id": "ps_candidate_9",
+                        "target_parameter_set_id": None,
                         "source_round_id": "round_step2_1",
                         "created_at": "2026-04-10T12:05:00Z",
                     },
@@ -1661,7 +1983,12 @@ class TestRdpControlSummary(TestCase):
             ),
             patch(
                 "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
-                return_value={"round_id": "step2_detail", "manifest": {"status": "complete"}},
+                return_value={
+                    "round_id": "step2_detail",
+                    "status": "succeeded",
+                    "finished_at": "2026-04-10T12:00:00+00:00",
+                    "manifest": {"round_id": "step2_detail"},
+                },
             ),
             patch(
                 "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
@@ -1802,7 +2129,12 @@ class TestRdpControlSummary(TestCase):
             ),
             patch(
                 "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
-                return_value={"round_id": "round_step2_m7", "manifest": {"status": "complete"}},
+                return_value={
+                    "round_id": "round_step2_m7",
+                    "status": "succeeded",
+                    "finished_at": "2026-04-10T12:00:00+00:00",
+                    "manifest": {"round_id": "round_step2_m7"},
+                },
             ),
             patch(
                 "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
@@ -1839,7 +2171,11 @@ class TestRdpControlSummary(TestCase):
             "round_step2_m7",
             "phase2 round_id must fall back to decision_round.round_id when item-level keys are absent",
         )
-        self.assertEqual(phase2["status"], "available")
+        self.assertEqual(phase2["status"], "audit_only")
+        self.assertEqual(
+            phase2["incomplete_reason"],
+            "promotion_qualification_policy_unsupported",
+        )
 
     def test_workbench_overview_exposes_specific_disabled_reason_for_running_workflow(self) -> None:
         request = _fake_request()
@@ -1987,6 +2323,25 @@ class TestRdpControlSummary(TestCase):
 
 
 class TestLoadRecentGateResultsDBOnly(TestCase):
+    def test_summary_failure_contract_never_leaks_driver_exception(self) -> None:
+        secret = "postgresql://admin:super-secret@example.invalid/aats"
+        with (
+            patch(
+                "aats.api.rdp_control_summary._load_recent_gate_results",
+                side_effect=RuntimeError(secret),
+            ),
+            self.assertLogs("aats.api.rdp_control_summary", level="WARNING") as logs,
+        ):
+            results, status = rdp_control_summary._load_gate_history_for_summary(
+                Path("/tmp/nonexistent_project_root")
+            )
+
+        serialized = json.dumps({"results": results, "status": status})
+        self.assertNotIn(secret, serialized)
+        self.assertNotIn(secret, "\n".join(logs.output))
+        self.assertEqual(results, [])
+        self.assertEqual(status["reason_code"], "governance_db_unavailable")
+
     def test_returns_rows_from_db(self) -> None:
         class _OKEngine:
             def dispose(self) -> None:

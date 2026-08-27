@@ -365,6 +365,30 @@ export function createRdpActionHandlers({
     }
   }
 
+  async function supersedeRecommendation(recommendationId) {
+    if (!recommendationId) return;
+    if (!windowRef.confirm(`确认将 ${truncateForConfirm(recommendationId)} 归档为已替代吗？`)) return;
+    if (!ensureNotBusy()) return;
+    const finishAction = beginAction(null, "正在归档历史建议…");
+    try {
+      const result = await requestJson(
+        `/rdp/recommendations/${encodeURIComponent(recommendationId)}/supersede`,
+        { method: "POST", body: { actor: "operator", notes: "UI 归档历史建议" } },
+      );
+      if (result.ok) {
+        setFlash(state, "info", `${truncateForConfirm(recommendationId)} 已归档为已替代。`);
+      } else {
+        setFlash(state, "warning", result.message || "归档历史建议失败。");
+      }
+      await refreshDashboard({ manual: true });
+    } catch (error) {
+      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
+      renderBanners();
+    } finally {
+      finishAction();
+    }
+  }
+
   async function runGate(recommendationId) {
     if (!recommendationId) return;
     if (!ensureNotBusy()) return;
@@ -613,6 +637,7 @@ export function createRdpActionHandlers({
     "rdp-approve-only": (recommendationId) => approveOnly(recommendationId),
     "rdp-apply-only": (recommendationId) => applyOnly(recommendationId),
     "rdp-reject-recommendation": (recommendationId) => rejectRecommendation(recommendationId),
+    "rdp-supersede-recommendation": (recommendationId) => supersedeRecommendation(recommendationId),
     "rdp-rollback-parameters": (combo) => rollbackParameters(combo),
     "rdp-run-gate": (recommendationId) => runGate(recommendationId),
     "rdp-create-release": (recommendationId) => createRelease(recommendationId),

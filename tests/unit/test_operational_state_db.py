@@ -17,10 +17,20 @@ from typing import Any
 
 from aats.data_platform.governance.operational_state_db import (
     _SCHEDULER_META_WORKFLOW,
+    db_find_parameter_release,
+    db_find_release_effectiveness,
     db_get_gate_result_by_run_id,
+    db_get_latest_release_for_combo,
     db_get_latest_gate_result,
+    db_get_observation_result,
+    db_get_rollback_recommendation,
     db_list_gate_results_for_recommendation,
     db_list_gate_results_for_release,
+    db_list_pre_apply_gate_results,
+    db_list_workflow_runs,
+    db_load_latest_workflow_runs,
+    db_load_effectiveness_registry,
+    db_load_release_history,
     db_load_scheduler_state,
     db_record_gate_result,
     db_save_scheduler_state,
@@ -63,6 +73,7 @@ class _FakeSession:
 
     def execute(self, statement: Any, params: dict[str, Any] | None = None) -> _FakeResult:
         sql = str(statement).strip()
+
         if sql.startswith("INSERT INTO governance.workflow_scheduler_state"):
             assert params is not None, "upsert 必须带参数"
             workflow = params["workflow"]
@@ -210,6 +221,59 @@ def test_scheduler_state_load_ignores_meta_row_from_workflows() -> None:
         "sentinel workflow 绝不能出现在 workflows dict 里"
 
 
+class _FakeWorkflowReadSession:
+    def __init__(self, row: _FakeRow) -> None:
+        self.row = row
+
+    def execute(self, statement: Any, params: dict[str, Any] | None = None) -> _FakeResult:
+        sql = str(statement)
+        assert "FROM governance.workflow_run_reports" in sql
+        return _FakeResult([self.row])
+
+
+def test_workflow_readers_overlay_all_authoritative_columns_on_stale_report() -> None:
+    """DB failed 必须覆盖 JSON success；NULL 列也不能让旧值复活。"""
+    started_at = datetime(2026, 8, 27, 11, 0, tzinfo=timezone.utc)
+    finished_at = datetime(2026, 8, 27, 11, 5, tzinfo=timezone.utc)
+    created_at = datetime(2026, 8, 27, 10, 59, tzinfo=timezone.utc)
+    updated_at = datetime(2026, 8, 27, 11, 6, tzinfo=timezone.utc)
+    session = _FakeWorkflowReadSession(
+        _FakeRow(
+            {
+                "run_id": "run_column",
+                "workflow": "governance_cycle",
+                "overall_status": "failed",
+                "description": None,
+                "report": {
+                    "run_id": "run_payload",
+                    "workflow": "decision_cycle",
+                    "overall_status": "success",
+                    "description": "stale success report",
+                    "started_at": "2026-01-01T00:00:00+00:00",
+                    "finished_at": "2026-01-01T00:01:00+00:00",
+                },
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "created_at": created_at,
+                "updated_at": updated_at,
+            }
+        )
+    )
+
+    latest = db_load_latest_workflow_runs(session)["governance_cycle"]
+    listed = db_list_workflow_runs(session)[0]
+
+    for result in (latest, listed):
+        assert result["run_id"] == "run_column"
+        assert result["workflow"] == "governance_cycle"
+        assert result["overall_status"] == "failed"
+        assert result["description"] is None
+        assert result["started_at"] == started_at.isoformat()
+        assert result["finished_at"] == finished_at.isoformat()
+        assert result["created_at"] == created_at.isoformat()
+        assert result["updated_at"] == updated_at.isoformat()
+
+
 # =====================================================================
 # P0-2 阶段 A：pre_apply_gate_results 业务查询 API
 # =====================================================================
@@ -261,8 +325,13 @@ class _FakeGateSession:
             "gate_run_id": gate_run_id,
             "recommendation_id": params.get("recommendation_id"),
             "release_id": release_id,
+            "allow_apply": params.get("allow_apply"),
+            "gate_status": params.get("gate_status"),
+            "total_checks": params.get("total_checks"),
+            "passed_checks": params.get("passed_checks"),
             "payload": payload_decoded,
             "created_at": params.get("created_at"),
+            "updated_at": params.get("updated_at"),
         }
 
     def _store_release(self, *, release_id: str, gate_result_ref: str | None = None) -> None:
@@ -273,6 +342,21 @@ class _FakeGateSession:
 
     def execute(self, statement: Any, params: dict[str, Any] | None = None) -> _FakeResult:
         sql = str(statement).strip()
+
+        if (
+            "FROM governance.parameter_releases" in sql
+            and "WHERE release_id = :release_id" in sql
+            and "FOR UPDATE" in sql
+        ):
+            assert params is not None
+            row = self.releases.get(params["release_id"])
+            return _FakeResult([_FakeRow(row)] if row else [])
+
+        if (
+            "FROM governance.parameter_releases" in sql
+            and "WHERE" not in sql
+        ):
+            return _FakeResult([_FakeRow(row) for row in self.releases.values()])
 
         if sql.startswith("INSERT INTO governance.pre_apply_gate_results"):
             assert params is not None
@@ -295,11 +379,28 @@ class _FakeGateSession:
             # 行以便后续 JOIN 查询走真实数据而非 _store_release 手搭的测试桩。
             assert params is not None
             release_id = params["release_id"]
+            payload = params.get("payload")
+            if isinstance(payload, str):
+                payload = json.loads(payload)
             self.releases[release_id] = {
-                "release_id": release_id,
-                "gate_result_ref": params.get("gate_result_ref"),
+                **dict(params),
+                "payload": payload or {},
             }
             return _FakeResult([])
+
+        if sql.startswith("UPDATE governance.parameter_releases"):
+            assert params is not None
+            release_id = params["release_id"]
+            if release_id not in self.releases:
+                return _FakeResult([], rowcount=0)
+            payload = params.get("payload")
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            self.releases[release_id].update({
+                **dict(params),
+                "payload": payload or {},
+            })
+            return _FakeResult([], rowcount=1)
 
         if (
             "FROM governance.pre_apply_gate_results" in sql
@@ -347,6 +448,15 @@ class _FakeGateSession:
                 return _FakeResult(matched[:1])
             limit = int(params.get("limit") or 20)
             return _FakeResult(matched[:limit])
+
+        if "FROM governance.pre_apply_gate_results" in sql and "WHERE" not in sql:
+            assert params is not None
+            matched = [_FakeRow(g) for g in self.gates.values()]
+            matched.sort(
+                key=lambda r: r.created_at or datetime.min.replace(tzinfo=timezone.utc),
+                reverse=True,
+            )
+            return _FakeResult(matched[: int(params.get("limit") or 8)])
 
         raise AssertionError(f"Unexpected SQL in fake gate session: {sql[:80]}...")
 
@@ -458,6 +568,207 @@ def test_get_latest_gate_result_returns_most_recent_for_recommendation() -> None
 def test_get_latest_gate_result_returns_none_when_no_history() -> None:
     session = _FakeGateSession()
     assert db_get_latest_gate_result(session, recommendation_id="rec_empty") is None
+
+
+def test_gate_readers_overlay_authoritative_columns_on_stale_payload() -> None:
+    """Gate 规范列是真值，即使列内部状态组合需后续规则解释。"""
+    session = _FakeGateSession()
+    db_record_gate_result(
+        session,
+        _make_gate_result(gate_run_id="gate_truth", recommendation_id="rec_column"),
+    )
+    stored = session.gates["gate_truth"]
+    stored.update(
+        {
+            "release_id": "rel_column",
+            "allow_apply": False,
+            "gate_status": "pass",
+            "total_checks": 7,
+            "passed_checks": 2,
+        }
+    )
+    stored["payload"].update(
+        {
+            "gate_run_id": "gate_payload",
+            "recommendation_id": "rec_payload",
+            "release_id": "rel_payload",
+            "allow_apply": True,
+            "gate_status": "block",
+            "total_checks": 1,
+            "passed_checks": 1,
+        }
+    )
+
+    results = [
+        db_list_pre_apply_gate_results(session, limit=8)[0],
+        db_get_gate_result_by_run_id(session, "gate_truth"),
+        db_get_latest_gate_result(session, recommendation_id="rec_column"),
+        db_list_gate_results_for_recommendation(
+            session, recommendation_id="rec_column", limit=8
+        )[0],
+        db_list_gate_results_for_release(session, release_id="rel_column", limit=8)[0],
+    ]
+
+    for result in results:
+        assert result is not None
+        assert result["gate_run_id"] == "gate_truth"
+        assert result["recommendation_id"] == "rec_column"
+        assert result["release_id"] == "rel_column"
+        assert result["allow_apply"] is False
+        assert result["gate_status"] == "pass"
+        assert result["total_checks"] == 7
+        assert result["passed_checks"] == 2
+
+
+class _FakeReleaseReadSession:
+    def __init__(self, row: _FakeRow) -> None:
+        self.row = row
+
+    def execute(self, statement: Any, params: dict[str, Any] | None = None) -> _FakeResult:
+        del params
+        assert "FROM governance.parameter_releases" in str(statement)
+        return _FakeResult([self.row])
+
+
+def test_release_readers_overlay_authoritative_columns_on_stale_payload() -> None:
+    """成功发布的权威列不得被 JSON 伪装成另一个待执行 recommendation。"""
+    created_at = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+    updated_at = datetime(2026, 8, 27, 12, 5, tzinfo=timezone.utc)
+    session = _FakeReleaseReadSession(
+        _FakeRow(
+            {
+                "release_id": "rel_column",
+                "family": "independent",
+                "timeframe": "15m",
+                "combo_key": "independent_15m",
+                "recommendation_id": "rec_already_applied",
+                "parameter_set_id": "ps_live",
+                "previous_parameter_set_id": None,
+                "actor": "operator",
+                "gate_result_ref": "gate_column",
+                "gate_status": "pass",
+                "apply_result": "success",
+                "observation_status": "observing",
+                "observation_window_hours": 24,
+                "notes": None,
+                "payload": {
+                    "release_id": "rel_payload",
+                    "recommendation_id": "rec_replay_me",
+                    "apply_result": "pending",
+                    "gate_status": "block",
+                },
+                "created_at": created_at,
+                "updated_at": updated_at,
+            }
+        )
+    )
+
+    results = [
+        db_load_release_history(session)["releases"][0],
+        db_find_parameter_release(session, "rel_column"),
+        db_get_latest_release_for_combo(
+            session,
+            family="independent",
+            timeframe="15m",
+        ),
+    ]
+
+    for result in results:
+        assert result is not None
+        assert result["release_id"] == "rel_column"
+        assert result["recommendation_id"] == "rec_already_applied"
+        assert result["apply_result"] == "success"
+        assert result["gate_status"] == "pass"
+        assert result["previous_parameter_set_id"] is None
+        assert result["created_at"] == created_at.isoformat()
+        assert result["updated_at"] == updated_at.isoformat()
+
+
+def test_execution_evidence_readers_overlay_capital_columns_on_stale_payload() -> None:
+    evaluated_at = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+    updated_at = datetime(2026, 8, 27, 12, 5, tzinfo=timezone.utc)
+
+    class _Session:
+        def execute(
+            self,
+            statement: Any,
+            params: dict[str, Any] | None = None,
+        ) -> _FakeResult:
+            del params
+            sql = str(statement)
+            if "governance.observation_results" in sql:
+                return _FakeResult(
+                    [
+                        _FakeRow(
+                            {
+                                "release_id": "rel_1",
+                                "family": "independent",
+                                "timeframe": "15m",
+                                "combo_key": "independent_15m",
+                                "status": "healthy",
+                                "recommendation": "continue",
+                                "observation_window_hours": 24,
+                                "window_active": False,
+                                "started_at": evaluated_at,
+                                "evaluated_at": evaluated_at,
+                                "payload": {"status": "rollback_recommended"},
+                                "updated_at": updated_at,
+                            }
+                        )
+                    ]
+                )
+            if "governance.rollback_recommendations" in sql:
+                return _FakeResult(
+                    [
+                        _FakeRow(
+                            {
+                                "release_id": "rel_1",
+                                "family": "independent",
+                                "timeframe": "15m",
+                                "combo_key": "independent_15m",
+                                "rollback_recommended": False,
+                                "severity": "none",
+                                "suggested_target_parameter_set_id": None,
+                                "evaluated_at": evaluated_at,
+                                "payload": {
+                                    "rollback_recommended": True,
+                                    "severity": "critical",
+                                },
+                                "updated_at": updated_at,
+                            }
+                        )
+                    ]
+                )
+            if "governance.release_effectiveness" in sql:
+                return _FakeResult(
+                    [
+                        _FakeRow(
+                            {
+                                "evaluation_id": "eval_1",
+                                "release_id": "rel_1",
+                                "family": "independent",
+                                "timeframe": "15m",
+                                "conclusion": "effective",
+                                "evaluated_at": evaluated_at,
+                                "payload": {"conclusion": "rollback_triggered"},
+                                "updated_at": updated_at,
+                            }
+                        )
+                    ]
+                )
+            raise AssertionError(sql)
+
+    session = _Session()
+    observation = db_get_observation_result(session, "rel_1")
+    rollback = db_get_rollback_recommendation(session, "rel_1")
+    effectiveness = db_find_release_effectiveness(session, "rel_1")
+    registry_item = db_load_effectiveness_registry(session)["evaluations"][0]
+
+    assert observation is not None and observation["status"] == "healthy"
+    assert rollback is not None and rollback["rollback_recommended"] is False
+    assert rollback["severity"] == "none"
+    assert effectiveness is not None and effectiveness["conclusion"] == "effective"
+    assert registry_item["conclusion"] == "effective"
 
 
 def test_list_gate_results_for_recommendation_orders_desc_and_limits() -> None:
@@ -664,8 +975,8 @@ def test_save_release_history_backfills_gate_release_id_in_same_transaction(
                 "recommendation_id": "rec_live",
                 "parameter_set_id": "ps_1",
                 "gate_result_ref": "gate_live",
-                "apply_result": "success",
-                "observation_status": "observing",
+                "apply_result": "pending",
+                "observation_status": "pending",
                 "observation_window_hours": 24,
             },
             {
@@ -676,8 +987,8 @@ def test_save_release_history_backfills_gate_release_id_in_same_transaction(
                 "combo_key": "fam_1h",
                 "recommendation_id": "rec_manual",
                 "parameter_set_id": "ps_2",
-                "apply_result": "success",
-                "observation_status": "observing",
+                "apply_result": "pending",
+                "observation_status": "pending",
                 "observation_window_hours": 24,
             },
         ],
@@ -722,8 +1033,8 @@ def test_save_release_history_logs_warning_when_gate_row_missing(
                 "recommendation_id": "rec_x",
                 "parameter_set_id": "ps_x",
                 "gate_result_ref": "gate_missing",  # 没 record 过 → UPDATE miss
-                "apply_result": "success",
-                "observation_status": "observing",
+                "apply_result": "pending",
+                "observation_status": "pending",
                 "observation_window_hours": 24,
             },
         ],

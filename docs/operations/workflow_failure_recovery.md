@@ -1,6 +1,8 @@
 # RDP Workflow 失败恢复指南
 
-> 最后核对：2026-08-22（代码基线 `be9179e`）。当前 Gateway/daemon 通过 `governance.rdp_task_queue` 协作；旧 `/rdp/operations/failures*` API 已不存在。
+> 文档状态：现行操作说明
+> 最后核对：2026-08-27（起始 HEAD `9c4112c6`，含当前控制面收口候选；以本文档所在 HEAD 为准）
+> 核对范围：Gateway/daemon queue、失败分类与 observation 风险收敛静态契约；不证明当前任务或资本状态
 
 ## 1. 先区分故障域
 
@@ -72,8 +74,9 @@ RDP 失败通常不直接改变订单状态，但 gate/apply/observation 相关�
 | Gate 缺失/失败 | 未验证参数可能前向发布 | 阻止 apply，修复 evidence/gate |
 | Apply 返回失败或 history 不完整 | active/release 审计可能不一致 | 停止发布，核对 DB active/history/release |
 | Active parameter DB 不可用 | runtime 退化到 profile 参数 | 停止发布，恢复 DB；没有 JSON fallback |
-| Observation 失败 | 异常参数可能继续生效 | 人工检查主交易事实并评估 rollback |
-| Rollback 失败/无 target | 无法自动恢复 | 保持保护状态，人工审查合法 target |
+| Observation 任一阶段失败 | 异常参数可能继续生效；已有 canonical risk 仍会尝试 effectiveness 物化 | 核对每个 stage error、主交易事实与已提交 evidence，不用最后一个成功阶段覆盖前序失败 |
+| Rollback 无 target | 内部 enforcer 只能在证明充分时写 combo soft pause | 核对 pause 与 action proof；失败则保持 `reconciliation_required` |
+| Rollback `in_progress`/结果不确定 | 资本动作可能已发生，禁止自动重放 | 保持同 combo apply veto，人工对齐 active/history/release/attempt/proof |
 | Release cycle 被触发 | 违反冻结策略 | 立即审计触发源、任务表和 active history |
 
 高风险失败同时检查：`/system/health`、kill switch、recovery、reconciliation、active version、近期 decision/order intent、fee/slippage/PnL。
@@ -87,3 +90,4 @@ RDP 失败通常不直接改变订单状态，但 gate/apply/observation 相关�
 - 相关 artifact 与 DB snapshot 一致；
 - 涉及生产参数时，active/history/release/provenance 完整；
 - 没有通过直接 DB/JSON 编辑掩盖失败。
+- 所有 rollback risk 已有 exact terminal proof，或明确保留为阻断中的 `reconciliation_required`；不得只凭 legacy boolean 宣告恢复。

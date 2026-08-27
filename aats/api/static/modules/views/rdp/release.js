@@ -47,6 +47,7 @@ function effectivenessSummary(effectiveness = {}) {
 
 function renderCandidate(candidate = {}, canAdmin = false) {
   const actions = Array.isArray(candidate.actions) ? candidate.actions : [];
+  const auditOnly = Boolean(candidate.audit_only);
   return `
     <article class="rdp-v3-release-item">
       <div class="rdp-v3-release-item__head">
@@ -54,10 +55,14 @@ function renderCandidate(candidate = {}, canAdmin = false) {
           <span class="rdp-v3-eyebrow">${escapeHtml(`${candidate.family || "未知策略"} · ${candidate.timeframe || "未知周期"}`)}</span>
           <strong>${escapeHtml(candidate.headline || "已批准，待发布")}</strong>
         </div>
-        ${statusPill(`门禁${gateLabel(candidate.gate_status)}`, statusTone(candidate.gate_status))}
+        ${auditOnly
+          ? statusPill("仅审计", "neutral")
+          : statusPill(`门禁${gateLabel(candidate.gate_status)}`, statusTone(candidate.gate_status))}
       </div>
       <p>${escapeHtml(candidate.decision_summary || "发布前仍需要重新执行硬门禁。")}</p>
-      <div class="rdp-v3-actions">${actions.map((action, index) => renderAction(action, canAdmin, index === 0 ? "secondary" : "primary")).join("")}</div>
+      ${actions.length
+        ? `<div class="rdp-v3-actions">${actions.map((action, index) => renderAction(action, canAdmin, index === 0 ? "secondary" : "primary")).join("")}</div>`
+        : ""}
     </article>
   `;
 }

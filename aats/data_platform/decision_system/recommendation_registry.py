@@ -5,10 +5,10 @@
   - active_decision_registry.json: 当前 family/tf 运营状态
   - evidence_bundle_index.json: evidence bundle 引用索引
 
-数据存储策略（DB-first + 文件 fallback）:
-  - 写入: 同时写 DB + 文件（DB 失败不阻塞文件写入）
-  - 读取: DB 优先 → 文件 fallback
-  - DB 开关: 环境变量 AATS_ACTIVE_PARAMETER_DB_URL
+数据存储策略:
+  - 受管环境以 DB 为唯一真源；DB 不可用或查询失败时拒绝陈旧文件回退
+  - 文件只作为审计副本，以及明确离线开发模式的兼容读源
+  - DB 配置入口: AATS_ACTIVE_PARAMETER_DB_URL / RDP_DATABASE_URL
 """
 
 from __future__ import annotations
@@ -20,13 +20,20 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from aats.data_platform.governance._db_util import try_governance_db
+from aats.data_platform.governance._db_util import (
+    has_explicit_governance_db_configuration,
+    try_governance_db,
+)
 from aats.data_platform.governance._exceptions import (
     DBConstraintViolation,
     DBUnavailableError,
 )
 
 log = logging.getLogger(__name__)
+
+
+class RecommendationRegistryCASConflict(RuntimeError):
+    """JSON 审计镜像的 version 基线已被另一 writer 推进。"""
 
 
 # ── DB 辅助 ──────────────────────────────────────────────────────────
@@ -120,9 +127,9 @@ def _db_update_rec_status(
 
     Notes
     -----
-    调用方必须传 ``expected_current_status`` 才能拿到 CAS 竞态信号；不传则
-    相当于退化成 best-effort（只返回 ``True``，不会返回 ``False``），历史行为
-    保留是为了兼容早期读路径，新代码不要依赖。
+    每次状态写入都会绑定 recommendation 的完整业务身份；调用方再传
+    ``expected_current_status`` 时，同时获得状态与身份双重 CAS。任何同 ID 行
+    替换、证据引用变化或并发状态变化都会返回 ``False``，由调用方回滚内存态。
     """
     from sqlalchemy.exc import IntegrityError, OperationalError
     from sqlalchemy.orm import Session
@@ -149,6 +156,15 @@ def _db_update_rec_status(
                 superseded_at=rec.get("superseded_at"),
                 superseded_by_recommendation_id=rec.get("superseded_by_recommendation_id"),
                 expected_current_status=expected_current_status,
+                expected_identity={
+                    "family": rec.get("family"),
+                    "symbol": rec.get("symbol"),
+                    "timeframe": rec.get("timeframe"),
+                    "recommendation_type": rec.get("recommendation_type"),
+                    "target_parameter_set_id": rec.get("target_parameter_set_id"),
+                    "source_round_id": rec.get("source_round_id"),
+                    "evidence_bundle_ref": rec.get("evidence_bundle_ref"),
+                },
             )
     except IntegrityError as exc:
         raise DBConstraintViolation(
@@ -185,7 +201,7 @@ def _db_sync_active_decision(
         )
     try:
         with Session(engine) as session, session.begin():
-            db_upsert_active_decision(
+            updated = db_upsert_active_decision(
                 session,
                 family=family, timeframe=timeframe,
                 current_status=current_status,
@@ -193,6 +209,11 @@ def _db_sync_active_decision(
                 last_recommendation_id=last_recommendation_id,
                 notes=notes,
             )
+            if updated is not True:
+                raise DBConstraintViolation(
+                    f"active_decision {family}/{timeframe} safety pause is sticky; "
+                    "automatic overwrite rejected"
+                )
     except IntegrityError as exc:
         raise DBConstraintViolation(
             f"active_decision {family}/{timeframe} violated constraint: {exc}"
@@ -321,9 +342,15 @@ def _read_disk_base_version(path: pathlib.Path) -> int:
 def load_recommendation_registry(path: pathlib.Path, *, skip_db: bool = False) -> dict[str, Any]:
     """加载 recommendation registry.
 
-    优先级: DB → 文件 → 空 registry。skip_db=True 跳过 DB 直接读文件。
+    受管环境以 DB 为唯一真源，DB 不可用或查询失败时拒绝过期 JSON 回退。
+    仅明确的离线文件模式（包括 ``skip_db=True``）允许读取文件或空 registry。
     """
     if not skip_db:
+        try:
+            project_root = path.resolve(strict=False).parents[2]
+        except (IndexError, OSError, RuntimeError, ValueError):
+            project_root = None
+        db_is_managed_truth = has_explicit_governance_db_configuration(project_root)
         engine, ok = try_governance_db()
         if ok:
             try:
@@ -333,19 +360,29 @@ def load_recommendation_registry(path: pathlib.Path, *, skip_db: bool = False) -
 
                 with Session(engine) as session:
                     registry = db_load_recommendation_registry(session)
-                if registry.get("recommendations"):
-                    log.info("从数据库加载 recommendation registry (%d recommendations)",
-                             len(registry["recommendations"]))
-                    # DB 返回体没有 version 字段——把审计副本当前 version 戳进去,
-                    # 让 save 的 CAS 检查对齐磁盘基线。不戳会导致第二次 save 必 500。
-                    registry["version"] = _read_disk_base_version(path)
-                    return registry
-                log.debug("recommendation_registry: DB 为空，fallback 到文件")
+                log.info("从数据库加载 recommendation registry (%d recommendations)",
+                         len(registry.get("recommendations", [])))
+                # DB 查询成功后，空表也是权威结果。不得让 JSON 审计副本复活已从
+                # DB 删除的 recommendation。version 仅用于随后刷新审计副本的 CAS。
+                registry["version"] = _read_disk_base_version(path)
+                return registry
             except Exception as exc:
-                log.warning("recommendation_registry: DB 读取失败 (%s)，fallback 到文件", exc)
+                if db_is_managed_truth:
+                    raise DBUnavailableError(
+                        "governance DB recommendation read failed; stale JSON fallback denied"
+                    ) from exc
+                log.warning(
+                    "recommendation_registry: 离线开发 DB 读取失败 (%s)，"
+                    "fallback 到文件（stale）",
+                    type(exc).__name__,
+                )
             finally:
                 if engine is not None:
                     engine.dispose()
+        elif db_is_managed_truth:
+            raise DBUnavailableError(
+                "governance DB unavailable; stale recommendation JSON fallback denied"
+            )
 
     if not path.exists():
         return {"generated_at": None, "recommendations": []}
@@ -354,7 +391,10 @@ def load_recommendation_registry(path: pathlib.Path, *, skip_db: bool = False) -
 
 
 def save_recommendation_registry(
-    registry: dict[str, Any], path: pathlib.Path,
+    registry: dict[str, Any],
+    path: pathlib.Path,
+    *,
+    fail_on_cas_read_error: bool = False,
 ) -> None:
     """原子写 JSON-only recommendation registry.
 
@@ -364,6 +404,10 @@ def save_recommendation_registry(
       * 一致 → 正常 bump + 落盘
       * 不一致（base=N，磁盘=N+k，k>0）→ 抛 RuntimeError，把并发冲突显式
         抛给 caller，迫使它重跑 load → mutate 序列。
+
+    ``fail_on_cas_read_error`` 仅供 DB 已经提交后的审计镜像刷新使用。该模式下，
+    旧镜像无法读取或 JSON 结构已损坏时不冒险覆盖，而是把失败交给上层标记
+    degraded。默认值保留历史的离线纯文件语义。
 
     注意：这不是严格 CAS，因为 read+write 之间仍有 TOCTOU 窗口——要做到
     强序列化需要 DB 事务或文件级锁。但该检查能捕获最常见的 human-sequential
@@ -377,17 +421,27 @@ def save_recommendation_registry(
             with path.open(encoding="utf-8") as fh:
                 on_disk = json.load(fh)
         except (OSError, ValueError) as exc:
+            if fail_on_cas_read_error:
+                raise RuntimeError(
+                    "recommendation_registry 审计镜像基础副本不可读；"
+                    "拒绝跳过 CAS 覆盖"
+                ) from exc
             log.warning(
                 "recommendation_registry: CAS 读磁盘 version 失败 (%s)，"
                 "跳过 CAS 按 base_version=%d 继续；磁盘可能被外部进程损坏",
                 exc, expected_base_version,
             )
         else:
+            if not isinstance(on_disk, dict) and fail_on_cas_read_error:
+                raise RuntimeError(
+                    "recommendation_registry 审计镜像必须是 JSON object；"
+                    "拒绝覆盖损坏副本"
+                )
             disk_version = (
                 int(on_disk.get("version", 0)) if isinstance(on_disk, dict) else 0
             )
             if disk_version != expected_base_version:
-                raise RuntimeError(
+                raise RecommendationRegistryCASConflict(
                     f"recommendation_registry CAS 冲突：磁盘 version={disk_version}，"
                     f"内存 base_version={expected_base_version}；"
                     "另一操作已抢先写入，请重新 load→mutate→save"
@@ -398,6 +452,104 @@ def save_recommendation_registry(
     atomic_json_write(registry, path)
     log.info("保存 recommendation registry -> %s (v%d, %d items)",
              path, registry["version"], len(registry.get("recommendations", [])))
+
+
+def _load_canonical_recommendation_registry_for_audit_mirror(
+    path: pathlib.Path,
+) -> dict[str, Any]:
+    """从 governance DB 重读完整 recommendation 真值，禁止文件 fallback。"""
+    from sqlalchemy.orm import Session
+
+    from aats.data_platform.governance.recommendations_db import (
+        db_load_recommendation_registry,
+    )
+
+    engine, ok = try_governance_db()
+    if not ok:
+        raise DBUnavailableError(
+            "governance DB unavailable during recommendation audit-mirror readback"
+        )
+    try:
+        with Session(engine) as session:
+            registry = db_load_recommendation_registry(session)
+    finally:
+        if engine is not None:
+            engine.dispose()
+
+    if not isinstance(registry, dict) or not isinstance(
+        registry.get("recommendations"), list,
+    ):
+        raise DBConstraintViolation(
+            "canonical recommendation registry readback returned malformed payload"
+        )
+
+    # DB 不存文件 version。只在完整 DB 快照已经读出后对齐当前磁盘
+    # base；如果另一 writer 在此后抢先落盘，save 的 CAS 会把本次标记
+    # degraded，不会用旧快照覆盖新镜像。
+    registry["version"] = _read_disk_base_version(path)
+    return registry
+
+
+def refresh_recommendation_audit_mirror_after_db_commit(
+    path: pathlib.Path,
+    *,
+    recommendation_id: str,
+    transition: str,
+) -> bool:
+    """在 recommendation 状态 DB CAS 已提交后刷新 JSON 审计镜像。
+
+    此函数只能在 :func:`_db_update_rec_status` 成功返回之后调用。此时 DB
+    是 canonical truth，JSON 只是可修复的审计镜像；因此 CAS 竞态、损坏文件、
+    序列化错误或 I/O 失败都不能把已提交的业务转移伪装成 HTTP 失败。
+    CAS 冲突会最多两次重读 DB 后重试，防止较早的并发 writer 先落盘后
+    把较新转移永久遗漏在镜像外。最终失败只记录安全的异常类型并返回
+    ``False``，让调用方显式回传 degraded 状态。
+
+    请求开始时的 registry 快照可能漏掉其他已提交的并发转移，因此
+    本函数刻意不接收该快照；每次刷新必须先从 DB 重读整份 canonical
+    registry，再对 JSON 镜像执行 version CAS。
+
+    离线纯文件调用方必须继续直接使用 :func:`save_recommendation_registry`；
+    该路径不会吞掉 CAS 或写入失败。
+    """
+    max_cas_attempts = 3
+    for attempt in range(1, max_cas_attempts + 1):
+        try:
+            canonical_registry = (
+                _load_canonical_recommendation_registry_for_audit_mirror(path)
+            )
+            save_recommendation_registry(
+                canonical_registry,
+                path,
+                fail_on_cas_read_error=True,
+            )
+            return True
+        except RecommendationRegistryCASConflict as exc:
+            if attempt < max_cas_attempts:
+                log.warning(
+                    "recommendation audit mirror CAS retry after canonical DB commit: "
+                    "recommendation_id=%s transition=%s attempt=%d/%d",
+                    recommendation_id,
+                    transition,
+                    attempt,
+                    max_cas_attempts,
+                )
+                continue
+            failure_type = type(exc).__name__
+        except Exception as exc:
+            # 不输出 exception 正文或 traceback：底层 DB driver 消息可能带连接
+            # 元数据。类型 + recommendation/transition 足以用于安全告警聚合。
+            failure_type = type(exc).__name__
+        log.error(
+            "recommendation audit mirror degraded after canonical DB commit: "
+            "recommendation_id=%s transition=%s path=%s failure_type=%s",
+            recommendation_id,
+            transition,
+            path,
+            failure_type,
+        )
+        return False
+    return False
 
 
 def create_recommendation(
@@ -516,6 +668,7 @@ def approve_recommendation(
     *,
     approved_by: str = "operator",
     notes: str | None = None,
+    project_root: pathlib.Path | None = None,
 ) -> dict[str, Any] | None:
     """将 recommendation 从 draft → approved.
 
@@ -535,6 +688,17 @@ def approve_recommendation(
         )
         return None
 
+    # Apply-capable recommendations may advance only when their own exact
+    # evidence round satisfies the current promotion contract.  This runs
+    # before the in-memory transition and before the DB CAS write.  ``cwd`` is
+    # retained only for backwards-compatible direct callers; API/workflow
+    # callers pass their explicit project root.
+    from aats.data_platform.decision_system.promotion_guard import (
+        require_promotion_qualification,
+    )
+
+    require_promotion_qualification(project_root or pathlib.Path.cwd(), rec)
+
     # 保留 rollback 快照，DB 返回 False（竞态）时回滚内存状态，保证 JSON 与
     # DB 在并发情况下仍然一致。
     prev_snapshot = {
@@ -550,7 +714,7 @@ def approve_recommendation(
         rec["review_notes"] = notes
     try:
         db_result = _db_update_rec_status(rec, expected_current_status="draft")
-    except DBUnavailableError:
+    except (DBUnavailableError, DBConstraintViolation):
         for key, value in prev_snapshot.items():
             rec[key] = value
         raise
@@ -684,9 +848,15 @@ def supersede_recommendation(
 def load_active_decision_registry(path: pathlib.Path, *, skip_db: bool = False) -> dict[str, Any]:
     """加载 active decision registry.
 
-    优先级: DB → 文件 → 空 registry。skip_db=True 跳过 DB 直接读文件。
+    受管环境以 DB 为唯一真源；空表是权威空结果，查询失败或不可达时
+    拒绝陈旧 JSON。只有明确离线模式（包括 ``skip_db=True``）允许文件读。
     """
     if not skip_db:
+        try:
+            project_root = path.resolve(strict=False).parents[2]
+        except (IndexError, OSError, RuntimeError, ValueError):
+            project_root = None
+        db_is_managed_truth = has_explicit_governance_db_configuration(project_root)
         engine, ok = try_governance_db()
         if ok:
             try:
@@ -696,16 +866,31 @@ def load_active_decision_registry(path: pathlib.Path, *, skip_db: bool = False) 
 
                 with Session(engine) as session:
                     registry = db_load_active_decisions(session)
-                if registry.get("decisions"):
-                    log.info("从数据库加载 active decision registry (%d decisions)",
-                             len(registry["decisions"]))
-                    return registry
-                log.debug("active_decision_registry: DB 为空，fallback 到文件")
+                if not isinstance(registry, dict):
+                    registry = {"generated_at": None, "decisions": []}
+                registry.setdefault("decisions", [])
+                log.info(
+                    "从数据库加载 active decision registry (%d decisions)",
+                    len(registry["decisions"]),
+                )
+                return registry
             except Exception as exc:
-                log.warning("active_decision_registry: DB 读取失败 (%s)，fallback 到文件", exc)
+                if db_is_managed_truth:
+                    raise DBUnavailableError(
+                        "governance DB active-decision read failed; stale JSON fallback denied"
+                    ) from exc
+                log.warning(
+                    "active_decision_registry: 离线开发 DB 读取失败 (%s)，"
+                    "fallback 到文件（stale）",
+                    type(exc).__name__,
+                )
             finally:
                 if engine is not None:
                     engine.dispose()
+        elif db_is_managed_truth:
+            raise DBUnavailableError(
+                "governance DB unavailable; stale active-decision JSON fallback denied"
+            )
 
     if not path.exists():
         return {"generated_at": None, "decisions": []}
@@ -877,78 +1062,6 @@ def register_evidence_bundle(
     })
 
 
-def _sync_registries_to_db_best_effort(
-    rec_reg: dict[str, Any],
-    dec_reg: dict[str, Any],
-) -> None:
-    """将最新 registry 状态批量同步到 DB。
-
-    这一步是 Phase 5/6 在 daemon 容器内可见性的兜底收口：
-    gateway/UI 读取 recommendation / active decision 时优先走 DB，
-    因此这里需要确保最新 registry 至少在 DB 中是可见的。
-
-    失败语义（函数名 ``_best_effort`` 的含义）：
-      * governance DB 不可达（``try_governance_db`` 返回 not ok）——记 warning 后
-        静默返回，不抛异常；JSON 已经 append 好，caller 按文件模式继续跑。
-      * DB 可达但某条 upsert 抛 SQLAlchemy 错误——异常向上传播，caller 负责
-        回滚 / 告警（通常是 daemon 里被捕获并标记这一轮 cycle 为 failed）。
-
-    原函数名是 ``_or_raise`` 但只对第二种路径真正 raise，容易让人误以为 DB
-    不可达也会炸，所以改成 ``_best_effort`` 以避免误导。
-    """
-    engine, ok = try_governance_db()
-    if not ok:
-        log.warning("recommendation_registry: governance DB 不可用，跳过强制 registry 同步")
-        return
-    try:
-        from sqlalchemy.orm import Session
-
-        from aats.data_platform.governance.recommendations_db import (
-            db_upsert_active_decision,
-            db_upsert_recommendation,
-        )
-
-        with Session(engine) as session, session.begin():
-            for rec in rec_reg.get("recommendations", []):
-                db_upsert_recommendation(
-                    session,
-                    recommendation_id=rec["recommendation_id"],
-                    family=rec["family"],
-                    symbol=rec.get("symbol", "BTC-USDT-SWAP"),
-                    timeframe=rec["timeframe"],
-                    recommendation_type=rec.get("recommendation_type", "require_review"),
-                    target_parameter_set_id=rec.get("target_parameter_set_id"),
-                    source_round_id=rec.get("source_round_id"),
-                    confidence=rec.get("confidence", "low"),
-                    reason=rec.get("reason", ""),
-                    evidence_bundle_ref=rec.get("evidence_bundle_ref"),
-                    status=rec.get("status", "draft"),
-                    approved_by=rec.get("approved_by"),
-                    approved_at=rec.get("approved_at"),
-                    review_notes=rec.get("review_notes"),
-                    rejected_by=rec.get("rejected_by"),
-                    rejected_at=rec.get("rejected_at"),
-                    superseded_by=rec.get("superseded_by"),
-                    superseded_at=rec.get("superseded_at"),
-                    superseded_by_recommendation_id=rec.get("superseded_by_recommendation_id"),
-                    created_at=rec.get("created_at"),
-                )
-            for decision in dec_reg.get("decisions", []):
-                db_upsert_active_decision(
-                    session,
-                    family=decision["family"],
-                    symbol=decision.get("symbol", "BTC-USDT-SWAP"),
-                    timeframe=decision["timeframe"],
-                    current_status=decision.get("current_status", "require_review"),
-                    active_parameter_set_id=decision.get("active_parameter_set_id"),
-                    last_recommendation_id=decision.get("last_recommendation_id"),
-                    notes=decision.get("notes"),
-                )
-    finally:
-        if engine is not None:
-            engine.dispose()
-
-
 # ── 从 decision round 结果批量更新 ──────────────────────────────────
 
 
@@ -1049,6 +1162,10 @@ def update_registries_from_round(
     )
     save_evidence_bundle_index(bi, bundle_index_path)
     stats["bundles_registered"] += 1
-    _sync_registries_to_db_best_effort(rec_reg, dec_reg)
+    # Do not replay the full in-memory registries here.  Every newly created
+    # recommendation and every active-decision transition is already persisted
+    # DB-first by ``add_recommendation`` / ``upsert_active_decision``.  A final
+    # batch upsert would be a stale snapshot writer capable of resurrecting a
+    # recommendation concurrently superseded or approved by another actor.
 
     return stats

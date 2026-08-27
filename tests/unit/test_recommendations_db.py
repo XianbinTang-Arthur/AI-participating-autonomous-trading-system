@@ -22,8 +22,10 @@ from aats.data_platform.governance.recommendations_db import (
     db_count_recommendations,
     db_find_recommendation,
     db_get_recommendation,
+    db_get_recommendation_for_update,
     db_list_recommendations,
     db_transition_recommendation_status,
+    db_update_recommendation_status,
     db_upsert_recommendation,
 )
 
@@ -138,6 +140,14 @@ class _FakeRecSession:
                 expected_set = {params[k] for k in exp_keys}
         if expected_set is not None and existing.get("status") not in expected_set:
             return _FakeResult([], rowcount=0)
+
+        identity_prefix = "expected_identity_"
+        for key, expected_value in params.items():
+            if not key.startswith(identity_prefix):
+                continue
+            column = key.removeprefix(identity_prefix)
+            if existing.get(column) != expected_value:
+                return _FakeResult([], rowcount=0)
 
         # SET 子句解析：形如 "col = :param" 列表
         set_clause = sql.split(" SET ", 1)[1].split(" WHERE ", 1)[0]
@@ -254,6 +264,31 @@ def test_upsert_recommendation_round_trips_source_round_id() -> None:
     assert row["source_round_id"] == "round_source_001"
 
 
+def test_get_recommendation_for_update_uses_row_lock() -> None:
+    class _CaptureSession(_FakeRecSession):
+        statement = ""
+
+        def execute(
+            self,
+            statement: Any,
+            params: dict[str, Any] | None = None,
+        ) -> _FakeResult:
+            self.statement = str(statement)
+            return super().execute(statement, params)
+
+    session = _CaptureSession()
+    _seed_draft(session, "rec_locked")
+
+    row = db_get_recommendation_for_update(
+        session,  # type: ignore[arg-type]
+        "rec_locked",
+    )
+
+    assert row is not None
+    assert row["recommendation_id"] == "rec_locked"
+    assert "FOR UPDATE" in session.statement
+
+
 def test_upsert_sql_does_not_erase_existing_source_round() -> None:
     class _CaptureSession:
         statement = ""
@@ -307,6 +342,68 @@ def test_upsert_recommendation_rejects_invalid_status() -> None:
             reason="",
             status="bogus",
         )
+
+
+def test_status_update_identity_cas_rejects_same_id_row_replacement() -> None:
+    session = _FakeRecSession()
+    _seed_draft(session, "rec_identity")
+    expected_identity = {
+        "family": "independent",
+        "symbol": "BTC-USDT-SWAP",
+        "timeframe": "15m",
+        "recommendation_type": "parameter_upgrade",
+        "target_parameter_set_id": None,
+        "source_round_id": "round_original",
+        "evidence_bundle_ref": "evidence_original",
+    }
+
+    # 资格校验后、CAS 写入前，同 recommendation_id 的 DB 行被替换。
+    session.rows["rec_identity"]["source_round_id"] = "round_replaced"
+    session.rows["rec_identity"]["evidence_bundle_ref"] = "evidence_replaced"
+    updated = db_update_recommendation_status(
+        session,  # type: ignore[arg-type]
+        "rec_identity",
+        status="approved",
+        expected_current_status="draft",
+        expected_identity=expected_identity,
+    )
+
+    assert updated is False
+    assert session.rows["rec_identity"]["status"] == "draft"
+
+
+def test_status_update_identity_cas_uses_null_safe_bound_predicates() -> None:
+    class _CaptureSession:
+        def __init__(self) -> None:
+            self.statement = ""
+            self.params: dict[str, Any] = {}
+
+        def execute(self, statement: Any, params: dict[str, Any]) -> _FakeResult:
+            self.statement = str(statement)
+            self.params = params
+            return _FakeResult([], rowcount=1)
+
+    session = _CaptureSession()
+    identity = {
+        "family": "independent",
+        "symbol": "BTC-USDT-SWAP",
+        "timeframe": "15m",
+        "recommendation_type": "parameter_upgrade",
+        "target_parameter_set_id": None,
+        "source_round_id": "round_1",
+        "evidence_bundle_ref": "round_1",
+    }
+    assert db_update_recommendation_status(
+        session,  # type: ignore[arg-type]
+        "rec_identity",
+        status="approved",
+        expected_current_status="draft",
+        expected_identity=identity,
+    )
+    for column, value in identity.items():
+        param = f"expected_identity_{column}"
+        assert f"{column} IS NOT DISTINCT FROM :{param}" in session.statement
+        assert session.params[param] == value
 
 
 # =====================================================================

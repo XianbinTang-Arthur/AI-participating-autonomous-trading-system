@@ -127,6 +127,12 @@ def _db_down_patch_stack(root):
         "aats.api.rdp_routes._step2_integrity_blocking_reason",
         lambda _root: None,
     ))
+    # 本文件验证 DB 写失败纪律，不重复构造 exact-round 资格证据；资格门闸的
+    # 失败关闭由专属 control-plane 测试覆盖。
+    stack.enter_context(patch(
+        "aats.data_platform.decision_system.promotion_guard.require_promotion_qualification",
+        return_value=SimpleNamespace(required=True, eligible=True),
+    ))
     return stack
 
 
@@ -194,6 +200,10 @@ def test_approve_rolls_back_memory_on_db_unavailable(monkeypatch) -> None:
         raise DBUnavailableError("simulated DB down")
 
     monkeypatch.setattr(rr, "_db_update_rec_status", _fail_db)
+    monkeypatch.setattr(
+        "aats.data_platform.decision_system.promotion_guard.require_promotion_qualification",
+        lambda *_args, **_kwargs: SimpleNamespace(required=True, eligible=True),
+    )
 
     import pytest
     with pytest.raises(DBUnavailableError):

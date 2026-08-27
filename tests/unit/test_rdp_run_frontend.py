@@ -243,3 +243,49 @@ console.log(JSON.stringify({
     assert '"drawerOpened":true' in output
     assert '"terminalStepCopyIsTruthful":true' in output
     assert '"targetedRefreshes":true' in output
+
+
+def test_rdp_supersede_handler_is_registered_and_calls_risk_closing_route() -> None:
+    output = _node(
+        """
+import { isKnownRdpUiAction } from './aats/api/static/modules/action-contract.js';
+import { createRdpActionHandlers } from './aats/api/static/modules/actions/rdp-actions.js';
+
+const requests = [];
+let refreshCount = 0;
+const state = { actionInFlight: false, flash: null, data: {}, ui: { rdp: {} } };
+const handlers = createRdpActionHandlers({
+  beginAction: () => {
+    state.actionInFlight = true;
+    return () => { state.actionInFlight = false; };
+  },
+  openDrawer: () => {},
+  renderBanners: () => {},
+  renderShell: () => {},
+  refreshDashboard: async (options) => {
+    if (options?.manual === true) refreshCount += 1;
+  },
+  refreshPanels: async () => {},
+  requestJson: async (path, options = {}) => {
+    requests.push({ path, method: options.method, body: options.body });
+    return { ok: true, recommendation: { status: 'superseded' } };
+  },
+  state,
+  windowRef: { confirm: () => true },
+});
+
+await handlers['rdp-supersede-recommendation']('rec legacy/1');
+console.log(JSON.stringify({
+  known: isKnownRdpUiAction('rdp-supersede-recommendation'),
+  request: requests[0],
+  refreshed: refreshCount === 1,
+  unlocked: state.actionInFlight === false,
+}));
+"""
+    )
+    assert '"known":true' in output
+    assert '"path":"/rdp/recommendations/rec%20legacy%2F1/supersede"' in output
+    assert '"method":"POST"' in output
+    assert '"notes":"UI 归档历史建议"' in output
+    assert '"refreshed":true' in output
+    assert '"unlocked":true' in output

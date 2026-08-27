@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from aats.data_platform.governance._time_util import parse_iso_datetime_utc
@@ -36,7 +36,10 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from aats.data_platform.governance._db_util import try_governance_db
+from aats.data_platform.governance._db_util import (
+    has_explicit_governance_db_configuration,
+    try_governance_db,
+)
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +53,32 @@ GOVERNANCE_DIR = "artifacts/governance"
 
 def _make_operation_id() -> str:
     return f"op_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+
+
+def _approval_attestation_valid(recommendation: dict[str, Any]) -> bool:
+    """Require a named approver and a canonical, non-future UTC timestamp."""
+    approved_by = recommendation.get("approved_by")
+    if not isinstance(approved_by, str) or not approved_by.strip():
+        return False
+    raw = recommendation.get("approved_at")
+    try:
+        if isinstance(raw, datetime):
+            if raw.tzinfo is None or raw.utcoffset() is None:
+                return False
+            approved_at = raw.astimezone(timezone.utc)
+        elif isinstance(raw, str):
+            token = raw.strip()
+            if not token or not (token.endswith("Z") or token.endswith("+00:00")):
+                return False
+            approved_at = parse_iso_datetime_utc(
+                token,
+                context="active_parameter_apply.approved_at",
+            )
+        else:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return approved_at <= datetime.now(timezone.utc) + timedelta(minutes=5)
 
 
 # ── Apply History 管理 ─────────────────────────────────────────────
@@ -223,6 +252,7 @@ def apply_approved_recommendation(
     dry_run: bool = False,
     release_id: str | None = None,
     gate_result: dict[str, Any] | None = None,
+    promotion_authorization: Any | None = None,
 ) -> dict[str, Any]:
     """从已批准的 recommendation 应用参数到 active parameter set.
 
@@ -246,11 +276,28 @@ def apply_approved_recommendation(
         get_policy,
         guard_parameter_apply,
     )
+    from aats.data_platform.production_workflow.pre_apply_gate import (
+        gate_result_allows_apply,
+    )
 
     env = get_current_environment()
     apply_guard = guard_parameter_apply(env)
     if not apply_guard.allowed:
         return {"ok": False, "message": apply_guard.reason, "environment": env}
+    if (
+        not dry_run
+        and release_id is None
+        and has_explicit_governance_db_configuration(project_root)
+    ):
+        return {
+            "ok": False,
+            "code": "release_required",
+            "message": (
+                "受管环境禁止无 parameter release 的 direct apply；"
+                "请使用 approve-and-release 或 releases/create 完整链路"
+            ),
+            "environment": env,
+        }
 
     policy = get_policy(env)
     # A-0.5: prod 写闸改由 API 层的 HMAC apply-token 强制，不再用 env flag。
@@ -269,12 +316,35 @@ def apply_approved_recommendation(
             "message": f"recommendation 状态为 '{rec['status']}'，必须为 approved 才能 apply",
         }
 
-    if policy["require_approval"] and not (
-        rec.get("approved_by") or rec.get("approved_at")
-    ):
+    # Recheck the exact recommendation evidence for direct, release-owned and
+    # dry-run calls alike.  Keep this ahead of every parameter-registry read so
+    # a dry run cannot act as a legacy-evidence disclosure/bypass path.
+    from aats.data_platform.decision_system.promotion_guard import (
+        promotion_authorization_failure,
+        promotion_qualification_failure,
+    )
+
+    qualification_failure = (
+        promotion_authorization_failure(
+            project_root,
+            rec,
+            promotion_authorization,
+        )
+        if promotion_authorization is not None
+        else promotion_qualification_failure(project_root, rec)
+    )
+    if qualification_failure is not None:
+        qualification_failure["environment"] = env
+        return qualification_failure
+
+    if policy["require_approval"] and not _approval_attestation_valid(rec):
         return {
             "ok": False,
-            "message": f"{env} environment requires recorded approval metadata before apply",
+            "code": "recommendation_approval_attestation_invalid",
+            "message": (
+                f"{env} environment requires a named approver and canonical "
+                "non-future UTC approval timestamp before apply"
+            ),
             "environment": env,
         }
 
@@ -288,7 +358,7 @@ def apply_approved_recommendation(
                 ),
                 "environment": env,
             }
-        if not gate_result.get("allow_apply"):
+        if not gate_result_allows_apply(gate_result):
             return {
                 "ok": False,
                 "message": f"gate blocked apply: {gate_result.get('blocking_reasons')}",
@@ -312,7 +382,10 @@ def apply_approved_recommendation(
 
     # 2. 从 governance registry 获取参数值
     gov_reg_path = project_root / GOVERNANCE_DIR / "current_parameter_registry.json"
-    gov_registry = load_registry(gov_reg_path)
+    gov_registry = load_registry(
+        gov_reg_path,
+        fail_closed_on_db_error=True,
+    )
 
     target_ps = None
     for ps in gov_registry.get("parameter_sets", []):
@@ -351,16 +424,355 @@ def apply_approved_recommendation(
     from aats.data_platform.db import get_session
     from aats.data_platform.governance.active_params_db import (
         db_append_history,
+        db_get_known_bad_release_id_for_parameter_set,
+        db_get_parameter_set_for_update,
+        db_get_pending_rollback_release_id,
+        db_try_acquire_parameter_apply_lock,
         db_upsert_active_set,
+    )
+    from aats.data_platform.governance.recommendations_db import (
+        db_get_active_decision_for_update,
+        db_get_recommendation_for_update,
     )
 
     with get_session() as session:
-        # 查当前 active（用于 from_parameter_set_id）
+        # 所有人工/API/scheduler apply 在同一事务内共用 combo 锁。使用 try-lock
+        # 而非等待，避免 Gate 证据在长时间排队后悄然过期。
+        if not db_try_acquire_parameter_apply_lock(
+            session,
+            family=family,
+            timeframe=timeframe,
+        ):
+            return {
+                "ok": False,
+                "code": "parameter_apply_conflict",
+                "message": f"{combo_key} 正有另一个参数发布事务，请稍后重新核验",
+                "environment": env,
+            }
+
+        # release-owned apply 必须把 pending release 与 active/history/parameter
+        # lifecycle 放在同一个资本事务里。先锁住确切 release，证明调用者没有
+        # 换绑 recommendation/parameter/combo，也防止两个恢复者同时收口。
+        locked_release = None
+        if release_id is not None:
+            from aats.data_platform.governance.operational_state_db import (
+                db_get_parameter_release_for_update,
+            )
+
+            locked_release = db_get_parameter_release_for_update(
+                session,
+                release_id=release_id,
+                family=family,
+                timeframe=timeframe,
+                recommendation_id=recommendation_id,
+                parameter_set_id=ps_id,
+            )
+            canonical_family = family.strip().lower()
+            canonical_timeframe = timeframe.strip().lower()
+            canonical_combo = f"{canonical_family}_{canonical_timeframe}"
+            release_identity_valid = bool(
+                locked_release is not None
+                and str(locked_release.get("release_id") or "") == release_id
+                and str(locked_release.get("family") or "").strip().lower()
+                == canonical_family
+                and str(locked_release.get("timeframe") or "").strip().lower()
+                == canonical_timeframe
+                and str(locked_release.get("combo_key") or "").strip().lower()
+                == canonical_combo
+                and locked_release.get("recommendation_id") == recommendation_id
+                and locked_release.get("parameter_set_id") == ps_id
+                and locked_release.get("apply_result") == "pending"
+                and locked_release.get("observation_status") == "pending"
+                and (
+                    locked_release.get("apply_reconciliation_required") is None
+                    or locked_release.get("apply_reconciliation_required") is False
+                )
+                and type(
+                    locked_release.get("apply_reconciliation_required", False)
+                ) is bool
+                and locked_release.get("apply_reconciliation_reason") is None
+                and locked_release.get("apply_operation_id") is None
+                and type(locked_release.get("observation_window_hours")) is int
+                and locked_release.get("observation_window_hours") > 0
+            )
+            if not release_identity_valid:
+                return {
+                    "ok": False,
+                    "code": "release_state_changed",
+                    "message": (
+                        "pending release 缺失、身份不一致或已被其他事务推进；"
+                        "本次 apply 已零资本写入阻断"
+                    ),
+                    "environment": env,
+                    "release_id": release_id,
+                }
+
+        pending_rollback_release_id = db_get_pending_rollback_release_id(
+            session,
+            family=family,
+            timeframe=timeframe,
+        )
+        if pending_rollback_release_id is not None:
+            return {
+                "ok": False,
+                "code": "pending_rollback",
+                "message": (
+                    f"{combo_key} 存在未收口回滚 {pending_rollback_release_id}，"
+                    "完成回滚或人工对账前禁止发布新参数"
+                ),
+                "environment": env,
+                "pending_rollback_release_id": pending_rollback_release_id,
+            }
+
+        known_bad_release_id = db_get_known_bad_release_id_for_parameter_set(
+            session,
+            family=family,
+            timeframe=timeframe,
+            parameter_set_id=ps_id,
+        )
+        if known_bad_release_id is not None:
+            return {
+                "ok": False,
+                "code": "known_bad_parameter_set",
+                "message": (
+                    f"参数集 {ps_id} 已被 release {known_bad_release_id} 的效果评估"
+                    "判定为 rollback_triggered；必须生成新的不可变参数集并重新审批"
+                ),
+                "environment": env,
+                "known_bad_release_id": known_bad_release_id,
+            }
+
+        if policy["require_gate_pass"]:
+            # Gate is a snapshot.  Re-read the mutable combo decision only
+            # after acquiring the same lock used by soft-pause/rollback, so a
+            # pause committed after Gate evaluation cannot be bypassed.
+            locked_decision = db_get_active_decision_for_update(
+                session,
+                family=family,
+                timeframe=timeframe,
+            )
+            allowed_decision_statuses = {
+                "keep_active",
+                "lower_priority",
+                "require_review",
+            }
+            locked_status = (
+                locked_decision.get("current_status")
+                if isinstance(locked_decision, dict)
+                else None
+            )
+            if locked_status not in allowed_decision_statuses:
+                return {
+                    "ok": False,
+                    "code": "decision_state_changed",
+                    "message": (
+                        f"{combo_key} 当前决策状态缺失、无效或已暂停；"
+                        "旧 Gate 结果不可继续用于 apply"
+                    ),
+                    "environment": env,
+                    "current_decision_status": locked_status,
+                }
+
+        # 在持有 combo 锁后重读 recommendation 行并加行锁。两个 approved
+        # recommendation 即使同时通过了事务外预检，也只有先到者能写 active；
+        # 后到者会看到自身已被 superseded，绝不能继续覆盖。
+        locked_rec = db_get_recommendation_for_update(session, recommendation_id)
+        identity_fields = (
+            "family",
+            "symbol",
+            "timeframe",
+            "recommendation_type",
+            "target_parameter_set_id",
+            "source_round_id",
+            "evidence_bundle_ref",
+        )
+        identity_matches = isinstance(locked_rec, dict)
+        if identity_matches:
+            for field in identity_fields:
+                expected = rec.get(field)
+                actual = locked_rec.get(field)
+                if field == "timeframe":
+                    expected = str(expected or "").lower()
+                    actual = str(actual or "").lower()
+                if actual != expected:
+                    identity_matches = False
+                    break
+        locked_approval_state_ok = bool(
+            isinstance(locked_rec, dict)
+            and locked_rec.get("status") == "approved"
+            and locked_rec.get("recommendation_type") == "parameter_upgrade"
+            and locked_rec.get("target_parameter_set_id") == ps_id
+            and locked_rec.get("family") == family
+            and locked_rec.get("symbol") == target_ps.get("symbol")
+            and str(locked_rec.get("timeframe") or "").lower() == timeframe.lower()
+        )
+        locked_attestation_ok = bool(
+            not policy["require_approval"]
+            or (
+                isinstance(locked_rec, dict)
+                and _approval_attestation_valid(locked_rec)
+            )
+        )
+        if identity_matches and locked_approval_state_ok and not locked_attestation_ok:
+            return {
+                "ok": False,
+                "code": "recommendation_approval_attestation_invalid",
+                "message": (
+                    "锁内 recommendation 批准人或 canonical UTC 批准时间无效；"
+                    "本次 apply 已零资本写入阻断"
+                ),
+                "environment": env,
+            }
+        if not identity_matches or not locked_approval_state_ok:
+            return {
+                "ok": False,
+                "code": "recommendation_state_changed",
+                "message": (
+                    "recommendation 在 apply 事务开始前已变更或不再 approved，"
+                    "必须重新执行资格与 Gate 核验"
+                ),
+                "environment": env,
+            }
+
+        expected_values = target_ps.get("values")
+        expected_source_round_id = target_ps.get("source_round_id")
+        expected_symbol = target_ps.get("symbol")
+        if not (
+            type(expected_values) is dict
+            and isinstance(expected_source_round_id, str)
+            and expected_source_round_id.strip()
+            and isinstance(expected_symbol, str)
+            and expected_symbol.strip()
+        ):
+            return {
+                "ok": False,
+                "code": "parameter_set_identity_incomplete",
+                "message": (
+                    "parameter registry 缺少 immutable values/source_round/symbol；"
+                    "本次 apply 已零资本写入阻断"
+                ),
+                "environment": env,
+                "parameter_set_id": ps_id,
+            }
+        locked_ps = db_get_parameter_set_for_update(
+            session,
+            parameter_set_id=ps_id,
+            family=family,
+            timeframe=timeframe,
+            symbol=expected_symbol,
+            source_round_id=expected_source_round_id,
+            expected_values=expected_values,
+        )
+        parameter_set_identity_valid = bool(
+            isinstance(locked_ps, dict)
+            and locked_ps.get("parameter_set_id") == ps_id
+            and locked_ps.get("family") == family
+            and locked_ps.get("symbol") == rec.get("symbol")
+            and str(locked_ps.get("timeframe") or "").lower()
+            == timeframe.lower()
+            and locked_ps.get("source_round_id") == expected_source_round_id
+            and type(locked_ps.get("values")) is dict
+            and locked_ps.get("values") == expected_values
+            and locked_ps.get("status") in {"candidate", "frozen"}
+        )
+        if not parameter_set_identity_valid:
+            return {
+                "ok": False,
+                "code": "parameter_set_state_changed",
+                "message": (
+                    "parameter set 在 apply 事务开始前已变更、身份不完整或不再处于"
+                    " candidate/frozen；本次 apply 已零资本写入阻断"
+                ),
+                "environment": env,
+                "parameter_set_id": ps_id,
+            }
+        # 此后所有资本写入只使用锁内 canonical values/source，绝不继续使用
+        # 事务外 registry 快照。
+        values = locked_ps["values"]
+        target_source_round_id = locked_ps["source_round_id"]
+
+        if policy["require_gate_pass"]:
+            from aats.data_platform.governance.operational_state_db import (
+                db_get_gate_result_by_run_id,
+            )
+
+            gate_run_id = str((gate_result or {}).get("gate_run_id") or "").strip()
+            persisted_gate = (
+                db_get_gate_result_by_run_id(session, gate_run_id)
+                if gate_run_id
+                else None
+            )
+            gate_identity_matches = bool(
+                isinstance(persisted_gate, dict)
+                and persisted_gate.get("gate_run_id") == gate_run_id
+                and persisted_gate.get("recommendation_id") == recommendation_id
+                and gate_result_allows_apply(persisted_gate)
+                and (
+                    release_id is None
+                    or persisted_gate.get("release_id") == release_id
+                )
+            )
+            if not gate_identity_matches:
+                return {
+                    "ok": False,
+                    "code": "gate_state_changed",
+                    "message": (
+                        "持久化 Gate 结果缺失、已变更或未绑定当前 release，"
+                        "必须重新运行发布流程"
+                    ),
+                    "environment": env,
+                }
+
+        # 同一 recommendation 是一次性资本授权。即使调用方因网络超时重试，
+        # 也不能产生第二条 success release/history；必须人工核验首个结果。
+        prior_apply = session.execute(
+            text(
+                """
+                SELECT operation_id
+                FROM governance.parameter_apply_history
+                WHERE recommendation_id = :recommendation_id
+                  AND operation_type = 'apply'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            ),
+            {"recommendation_id": recommendation_id},
+        ).fetchone()
+
+        # 查当前 active（用于 from_parameter_set_id）；legacy 数据可能缺少 history，
+        # 因此同时检查 active lineage，避免旧数据上的重复 apply。
         existing = session.execute(
-            text("SELECT parameter_set_id FROM governance.active_parameter_sets WHERE family = :f AND timeframe = :t"),
+            text(
+                "SELECT parameter_set_id, approval_recommendation_id "
+                "FROM governance.active_parameter_sets "
+                "WHERE family = :f AND timeframe = :t"
+            ),
             {"f": family, "t": timeframe.lower()},
         ).fetchone()
         from_ps_id = existing.parameter_set_id if existing else None
+        active_approval_rec = (
+            getattr(existing, "approval_recommendation_id", None)
+            if existing is not None
+            else None
+        )
+        if prior_apply is not None or (
+            active_approval_rec == recommendation_id and from_ps_id == ps_id
+        ):
+            return {
+                "ok": False,
+                "code": "recommendation_already_applied",
+                "message": (
+                    f"recommendation {recommendation_id} 已执行过 apply；"
+                    "拒绝重复资本状态变更，需核验既有 release/history"
+                ),
+                "environment": env,
+                "parameter_set_id": ps_id,
+                "existing_operation_id": (
+                    getattr(prior_apply, "operation_id", None)
+                    if prior_apply is not None
+                    else None
+                ),
+            }
 
         db_upsert_active_set(
             session,
@@ -368,7 +780,7 @@ def apply_approved_recommendation(
             timeframe=timeframe,
             parameter_set_id=ps_id,
             values=values,
-            source_round_id=target_ps.get("source_round_id"),
+            source_round_id=target_source_round_id,
             approval_recommendation_id=recommendation_id,
             applied_by=f"rdp_apply ({actor})",
         )
@@ -462,7 +874,7 @@ def apply_approved_recommendation(
                 SET status = 'released',
                     frozen_at = COALESCE(frozen_at, now())
                 WHERE parameter_set_id = :pid
-                  AND status != 'released'
+                  AND status IN ('candidate', 'frozen')
                 """,
             ),
             {"pid": ps_id},
@@ -483,12 +895,68 @@ def apply_approved_recommendation(
         )
         ps_released_count = ps_status_result.rowcount or 0
         ps_demoted_count = ps_demoted_result.rowcount or 0
+        if ps_released_count != 1:
+            raise RuntimeError(
+                "locked parameter set lifecycle transition affected "
+                f"{ps_released_count} rows instead of 1"
+            )
         if ps_released_count or ps_demoted_count:
             log.info(
                 "apply_promoted_parameter_set_status family=%s timeframe=%s "
                 "parameter_set_id=%s released_transitions=%d demoted_count=%d",
                 family, timeframe.lower(), ps_id, ps_released_count, ps_demoted_count,
             )
+
+        canonical_release = None
+        if release_id is not None:
+            from aats.data_platform.governance.operational_state_db import (
+                db_upsert_parameter_release,
+            )
+
+            applied_at = datetime.now(timezone.utc).isoformat()
+            canonical_release = db_upsert_parameter_release(
+                session,
+                {
+                    "release_id": release_id,
+                    "family": family,
+                    "timeframe": timeframe.lower(),
+                    "combo_key": combo_key,
+                    "recommendation_id": recommendation_id,
+                    "parameter_set_id": ps_id,
+                    # 这是在同一 combo lock 下读取的真实 predecessor；事务外
+                    # 创建 pending anchor 时的快照不得覆盖它。
+                    "previous_parameter_set_id": from_ps_id,
+                    "gate_result_ref": locked_release.get("gate_result_ref"),
+                    "apply_result": "success",
+                    "observation_status": "observing",
+                    "observation_window_hours": locked_release.get(
+                        "observation_window_hours"
+                    ),
+                    "actor": locked_release.get("actor", actor),
+                    "notes": locked_release.get("notes", notes),
+                    "created_at": locked_release.get("created_at"),
+                    "apply_operation_id": op_id,
+                    # 观察期只能从资本状态真正生效的时刻起算；pending
+                    # release 的 created_at 只是授权锚点，不能冒充 apply 时间。
+                    "applied_at": applied_at,
+                },
+                allow_apply_success_transition=True,
+            )
+            if not (
+                canonical_release.get("release_id") == release_id
+                and canonical_release.get("recommendation_id")
+                == recommendation_id
+                and canonical_release.get("parameter_set_id") == ps_id
+                and canonical_release.get("previous_parameter_set_id")
+                == from_ps_id
+                and canonical_release.get("apply_result") == "success"
+                and canonical_release.get("observation_status") == "observing"
+                and canonical_release.get("apply_operation_id") == op_id
+                and canonical_release.get("applied_at") == applied_at
+            ):
+                raise RuntimeError(
+                    "canonical release apply transition was not persisted"
+                )
         # session 退出 with 块时自动 commit
 
     result["operation_id"] = op_id
@@ -496,6 +964,8 @@ def apply_approved_recommendation(
     result["superseded_count"] = superseded_count
     result["ps_released_transitions"] = ps_released_count
     result["ps_demoted_count"] = ps_demoted_count
+    if canonical_release is not None:
+        result["release"] = canonical_release
     result["message"] = f"已 apply {ps_id} 到 {combo_key}"
     return result
 
@@ -534,6 +1004,10 @@ def rollback_active_parameter_set(
     family: str,
     timeframe: str,
     to_parameter_set_id: str | None = None,
+    expected_from_parameter_set_id: str | None = None,
+    expected_from_recommendation_id: str | None = None,
+    expected_previous_parameter_set_id: str | None = None,
+    trigger_release_id: str | None = None,
     actor: str = "operator",
     notes: str | None = None,
     dry_run: bool = False,
@@ -551,6 +1025,10 @@ def rollback_active_parameter_set(
       确保校验到写入之间没有并发窗口。
     - 未提供 ``to_parameter_set_id`` 时从 history 推导前值；推导失败返回
       ``code='NO_PREVIOUS_TARGET'``。
+    - 自动化调用方同时提供 release、recommendation、current set 与 predecessor
+      四个 identity；它们会在 combo lock 内与 active row、parameter release 和
+      唯一成功 apply history 逐项核对，防止同参数集不同发布、失败发布或旧前驱
+      记录触发错误资本回滚。
     - 环境守卫失败返回 ``code='ENVIRONMENT_BLOCKED'``。
     - 任何 rejected 分支都通过 :func:`_log_rollback_rejection` 结构化留痕。
 
@@ -580,22 +1058,43 @@ def rollback_active_parameter_set(
         db_append_history,
         db_get_parameter_set_values,
         db_get_previous_set_id,
+        db_try_acquire_parameter_apply_lock,
         db_upsert_active_set,
         validate_rollback_target,
     )
 
     op_id = _make_operation_id()
+    release_id_to_transition: str | None = None
 
     # ── 单一事务：推导 → 校验 → 写入（FOR UPDATE 锁住并发 rollback） ──
     with get_session() as session:
+        if not db_try_acquire_parameter_apply_lock(
+            session,
+            family=family,
+            timeframe=timeframe,
+        ):
+            return {
+                "ok": False,
+                "code": "parameter_mutation_conflict",
+                "message": f"{combo_key} 正有另一个参数状态事务，请稍后重试",
+                "combo_key": combo_key,
+                "environment": env,
+            }
+
         existing = session.execute(
             text(
-                "SELECT parameter_set_id FROM governance.active_parameter_sets "
+                "SELECT parameter_set_id, approval_recommendation_id "
+                "FROM governance.active_parameter_sets "
                 "WHERE family = :f AND timeframe = :t FOR UPDATE"
             ),
             {"f": family, "t": timeframe.lower()},
         ).fetchone()
         from_ps_id = existing.parameter_set_id if existing else None
+        from_recommendation_id = (
+            getattr(existing, "approval_recommendation_id", None)
+            if existing is not None
+            else None
+        )
 
         if not from_ps_id:
             return {
@@ -603,6 +1102,95 @@ def rollback_active_parameter_set(
                 "code": "NO_ACTIVE_SET",
                 "message": f"{combo_key} 没有当前 active parameter set",
                 "combo_key": combo_key,
+            }
+
+        if (
+            expected_from_parameter_set_id is not None
+            and from_ps_id != expected_from_parameter_set_id
+        ):
+            reason = "expected_current_parameter_set_mismatch"
+            _log_rollback_rejection(
+                family=family,
+                timeframe=timeframe,
+                target_parameter_set_id=to_parameter_set_id or "<derived>",
+                reason=reason,
+                actor=actor,
+            )
+            return {
+                "ok": False,
+                "code": "ACTIVE_SET_CHANGED",
+                "reason": reason,
+                "message": (
+                    f"{combo_key} 当前参数集已从预期的 "
+                    f"{expected_from_parameter_set_id} 变为 {from_ps_id}；"
+                    "本次回滚未执行"
+                ),
+                "combo_key": combo_key,
+                "expected_from_parameter_set_id": expected_from_parameter_set_id,
+                "from_parameter_set_id": from_ps_id,
+                "to_parameter_set_id": to_parameter_set_id,
+                "environment": env,
+            }
+
+        if (
+            expected_from_recommendation_id is not None
+            and (
+                not isinstance(from_recommendation_id, str)
+                or not from_recommendation_id.strip()
+            )
+        ):
+            reason = "current_active_recommendation_lineage_missing"
+            _log_rollback_rejection(
+                family=family,
+                timeframe=timeframe,
+                target_parameter_set_id=to_parameter_set_id or "<derived>",
+                reason=reason,
+                actor=actor,
+            )
+            return {
+                "ok": False,
+                "code": "RELEASE_LINEAGE_INVALID",
+                "reason": reason,
+                "message": (
+                    f"{combo_key} 当前 active set 缺少 recommendation 血缘；"
+                    "已零写入阻断并要求人工 reconciliation"
+                ),
+                "combo_key": combo_key,
+                "expected_from_parameter_set_id": expected_from_parameter_set_id,
+                "from_parameter_set_id": from_ps_id,
+                "expected_from_recommendation_id": expected_from_recommendation_id,
+                "from_recommendation_id": from_recommendation_id,
+                "to_parameter_set_id": to_parameter_set_id,
+                "environment": env,
+            }
+
+        if (
+            expected_from_recommendation_id is not None
+            and from_recommendation_id != expected_from_recommendation_id
+        ):
+            reason = "expected_current_recommendation_mismatch"
+            _log_rollback_rejection(
+                family=family,
+                timeframe=timeframe,
+                target_parameter_set_id=to_parameter_set_id or "<derived>",
+                reason=reason,
+                actor=actor,
+            )
+            return {
+                "ok": False,
+                "code": "ACTIVE_SET_CHANGED",
+                "reason": reason,
+                "message": (
+                    f"{combo_key} 当前发布血缘已不是预期 recommendation "
+                    f"{expected_from_recommendation_id}；本次回滚未执行"
+                ),
+                "combo_key": combo_key,
+                "expected_from_parameter_set_id": expected_from_parameter_set_id,
+                "from_parameter_set_id": from_ps_id,
+                "expected_from_recommendation_id": expected_from_recommendation_id,
+                "from_recommendation_id": from_recommendation_id,
+                "to_parameter_set_id": to_parameter_set_id,
+                "environment": env,
             }
 
         # 推导目标（如未指定）—— db_get_previous_set_id 内部已加 FOR UPDATE
@@ -617,6 +1205,148 @@ def rollback_active_parameter_set(
                     "message": f"{combo_key} 没有可回滚的历史版本",
                     "combo_key": combo_key,
                 }
+
+        if trigger_release_id is not None:
+            strict_ids = (
+                expected_from_parameter_set_id,
+                expected_from_recommendation_id,
+                expected_previous_parameter_set_id,
+                to_parameter_set_id,
+            )
+            if any(
+                not isinstance(value, str) or not value.strip()
+                for value in strict_ids
+            ):
+                return {
+                    "ok": False,
+                    "code": "RELEASE_LINEAGE_INVALID",
+                    "reason": "automatic_rollback_lineage_identity_missing",
+                    "message": "自动回滚缺少完整 release/apply 血缘，已零写入阻断",
+                    "combo_key": combo_key,
+                    "release_id": trigger_release_id,
+                }
+
+            lineage = session.execute(
+                text(
+                    """
+                    SELECT r.release_id, r.family, r.timeframe, r.combo_key,
+                           r.recommendation_id, r.parameter_set_id,
+                           r.previous_parameter_set_id, r.apply_result,
+                           h.lineage_count, h.history_family,
+                           h.history_timeframe, h.history_from_parameter_set_id,
+                           h.history_to_parameter_set_id
+                    FROM governance.parameter_releases AS r
+                    LEFT JOIN LATERAL (
+                        SELECT COUNT(*) AS lineage_count,
+                               MIN(ah.family) AS history_family,
+                               MIN(ah.timeframe) AS history_timeframe,
+                               MIN(ah.from_parameter_set_id)
+                                   AS history_from_parameter_set_id,
+                               MIN(ah.to_parameter_set_id)
+                                   AS history_to_parameter_set_id
+                        FROM governance.parameter_apply_history AS ah
+                        WHERE ah.operation_type = 'apply'
+                          AND ah.recommendation_id = r.recommendation_id
+                    ) AS h ON TRUE
+                    WHERE r.release_id = :release_id
+                    FOR UPDATE OF r
+                    """
+                ),
+                {"release_id": trigger_release_id},
+            ).fetchone()
+            requested_family = family.strip().lower()
+            requested_timeframe = timeframe.strip().lower()
+            requested_combo = f"{requested_family}_{requested_timeframe}"
+            lineage_valid = bool(
+                lineage is not None
+                and str(lineage.apply_result or "") == "success"
+                and str(lineage.family or "").strip().lower()
+                == requested_family
+                and str(lineage.timeframe or "").strip().lower()
+                == requested_timeframe
+                and str(lineage.combo_key or "").strip().lower()
+                == requested_combo
+                and lineage.recommendation_id
+                == expected_from_recommendation_id
+                and lineage.parameter_set_id
+                == expected_from_parameter_set_id
+                and lineage.previous_parameter_set_id
+                == expected_previous_parameter_set_id
+                and int(lineage.lineage_count or 0) == 1
+                and str(lineage.history_family or "").strip().lower()
+                == requested_family
+                and str(lineage.history_timeframe or "").strip().lower()
+                == requested_timeframe
+                and lineage.history_from_parameter_set_id
+                == expected_previous_parameter_set_id
+                and lineage.history_to_parameter_set_id
+                == expected_from_parameter_set_id
+                and to_parameter_set_id
+                == expected_previous_parameter_set_id
+            )
+            if not lineage_valid:
+                reason = "release_apply_history_lineage_mismatch"
+                _log_rollback_rejection(
+                    family=family,
+                    timeframe=timeframe,
+                    target_parameter_set_id=to_parameter_set_id or "<missing>",
+                    reason=reason,
+                    actor=actor,
+                )
+                return {
+                    "ok": False,
+                    "code": "RELEASE_LINEAGE_INVALID",
+                    "reason": reason,
+                    "message": (
+                        "release、active parameter 与成功 apply history 血缘不一致；"
+                        "已零写入阻断并要求人工 reconciliation"
+                    ),
+                    "combo_key": combo_key,
+                    "release_id": trigger_release_id,
+                    "from_parameter_set_id": from_ps_id,
+                    "to_parameter_set_id": to_parameter_set_id,
+                }
+            release_id_to_transition = trigger_release_id
+
+        elif (
+            isinstance(from_recommendation_id, str)
+            and from_recommendation_id.strip()
+        ):
+            current_release = session.execute(
+                text(
+                    """
+                    SELECT COUNT(*) AS release_count,
+                           MIN(release_id) AS release_id
+                    FROM governance.parameter_releases
+                    WHERE recommendation_id = :recommendation_id
+                      AND parameter_set_id = :parameter_set_id
+                      AND apply_result = 'success'
+                      AND lower(btrim(family)) = lower(btrim(:family))
+                      AND lower(btrim(timeframe)) = lower(btrim(:timeframe))
+                    """
+                ),
+                {
+                    "recommendation_id": from_recommendation_id,
+                    "parameter_set_id": from_ps_id,
+                    "family": family,
+                    "timeframe": timeframe,
+                },
+            ).fetchone()
+            release_count = int(
+                getattr(current_release, "release_count", 0) or 0
+            )
+            if release_count > 1:
+                return {
+                    "ok": False,
+                    "code": "RELEASE_LINEAGE_INVALID",
+                    "reason": "current_release_lineage_ambiguous",
+                    "message": "当前 active recommendation 对应多个成功 release",
+                    "combo_key": combo_key,
+                    "from_parameter_set_id": from_ps_id,
+                    "from_recommendation_id": from_recommendation_id,
+                }
+            if release_count == 1:
+                release_id_to_transition = str(current_release.release_id)
 
         # 自回滚短路（也会被规则 5 捕获，但此处早一点返回更友好）
         if to_parameter_set_id == from_ps_id:
@@ -691,6 +1421,7 @@ def rollback_active_parameter_set(
             "family": family,
             "timeframe": timeframe,
             "from_parameter_set_id": from_ps_id,
+            "from_recommendation_id": from_recommendation_id,
             "to_parameter_set_id": to_parameter_set_id,
             "values": values,
             "environment": env,
@@ -725,24 +1456,111 @@ def rollback_active_parameter_set(
             actor=actor,
             notes=notes or f"Rollback from {from_ps_id}",
         )
+        rollback_promote = session.execute(
+            text(
+                """
+                UPDATE governance.parameter_sets
+                SET status = 'released',
+                    frozen_at = COALESCE(frozen_at, now()),
+                    deprecated_at = NULL
+                WHERE parameter_set_id = :target
+                  AND family = :family
+                  AND timeframe = :timeframe
+                  AND status IN ('candidate', 'frozen', 'deprecated')
+                """
+            ),
+            {
+                "target": to_parameter_set_id,
+                "family": family,
+                "timeframe": timeframe.lower(),
+            },
+        )
+        rollback_demote = session.execute(
+            text(
+                """
+                UPDATE governance.parameter_sets
+                SET status = 'deprecated', deprecated_at = now()
+                WHERE parameter_set_id = :current
+                  AND family = :family
+                  AND timeframe = :timeframe
+                  AND status = 'released'
+                """
+            ),
+            {
+                "current": from_ps_id,
+                "family": family,
+                "timeframe": timeframe.lower(),
+            },
+        )
+        if (rollback_promote.rowcount or 0) != 1 or (
+            rollback_demote.rowcount or 0
+        ) != 1:
+            raise RuntimeError(
+                "rollback parameter-set lifecycle transition was not atomic"
+            )
+        if release_id_to_transition is not None:
+            # 自动回滚的资本变更、apply-history 与 release 终态必须在同一
+            # transaction 内提交。release 不能留到提交后再 best-effort 写，
+            # 否则 active 已回滚而 canonical release 仍 observing。
+            from aats.data_platform.governance.operational_state_db import (
+                db_upsert_parameter_release,
+            )
+
+            rolled_back_at = datetime.now(timezone.utc).isoformat()
+            canonical_release = db_upsert_parameter_release(
+                session,
+                {
+                    "release_id": release_id_to_transition,
+                    "family": family,
+                    "timeframe": timeframe,
+                    "combo_key": combo_key,
+                    "recommendation_id": from_recommendation_id,
+                    "parameter_set_id": from_ps_id,
+                    "previous_parameter_set_id": expected_previous_parameter_set_id,
+                    "apply_result": "success",
+                    "observation_status": "rolled_back",
+                    "rolled_back_at": rolled_back_at,
+                    "rollback_to_parameter_set_id": to_parameter_set_id,
+                    "rollback_operation_id": op_id,
+                },
+                allow_rollback_transition=True,
+            )
+            if (
+                canonical_release.get("observation_status") != "rolled_back"
+                or canonical_release.get("rollback_to_parameter_set_id")
+                != to_parameter_set_id
+                or canonical_release.get("rollback_operation_id") != op_id
+            ):
+                raise RuntimeError(
+                    "canonical release rollback transition was not persisted"
+                )
         # session 退出 with 自动 commit，FOR UPDATE 锁同时释放
 
-    # ── 文件审计副本（best-effort，失败仅 warn，不回滚 DB） ──
+    if release_id_to_transition is not None:
+        result["release_id"] = release_id_to_transition
+
+    # ── 文件审计副本（best-effort；canonical DB 已在资本事务内收口） ──
     try:
         from aats.data_platform.production_workflow.release_registry import (
             load_release_history,
             mark_release_rolled_back,
-            save_release_history,
+            save_release_record,
         )
 
         release_history = load_release_history(project_root)
         rolled_back_release = None
         for release in reversed(release_history.get("releases", [])):
+            if release_id_to_transition is None:
+                break
+            if release.get("release_id") != release_id_to_transition:
+                continue
             if release.get("family") != family:
                 continue
             if str(release.get("timeframe") or "").lower() != timeframe.lower():
                 continue
             if release.get("parameter_set_id") != from_ps_id:
+                continue
+            if release.get("recommendation_id") != from_recommendation_id:
                 continue
             if release.get("apply_result") != "success":
                 continue
@@ -754,7 +1572,7 @@ def rollback_active_parameter_set(
             )
             break
         if rolled_back_release is not None:
-            save_release_history(release_history, project_root)
+            save_release_record(rolled_back_release, project_root)
             result["release_id"] = rolled_back_release.get("release_id")
     except Exception as exc:
         log.warning("rollback 后同步 release history 失败: %s", exc)
@@ -785,11 +1603,27 @@ def clear_active_parameter_set(
     from aats.data_platform.governance.active_params_db import (
         db_append_history,
         db_clear_active_set,
+        db_try_acquire_parameter_apply_lock,
     )
 
     with get_session() as session:
+        if not db_try_acquire_parameter_apply_lock(
+            session,
+            family=family,
+            timeframe=timeframe,
+        ):
+            return {
+                "ok": False,
+                "code": "parameter_mutation_conflict",
+                "message": f"{combo_key} 正有另一个参数状态事务，请稍后重试",
+                "combo_key": combo_key,
+            }
+
         existing = session.execute(
-            text("SELECT parameter_set_id FROM governance.active_parameter_sets WHERE family = :f AND timeframe = :t"),
+            text(
+                "SELECT parameter_set_id FROM governance.active_parameter_sets "
+                "WHERE family = :f AND timeframe = :t FOR UPDATE"
+            ),
             {"f": family, "t": timeframe.lower()},
         ).fetchone()
         from_ps_id = existing.parameter_set_id if existing else None

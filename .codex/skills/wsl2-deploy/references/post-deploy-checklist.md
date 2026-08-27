@@ -19,16 +19,21 @@ Use this after an enabled simulation deployment through `scripts/deploy.sh` or `
   - HTTP 200 is liveness only; it does not prove network isolation or trading readiness
 
 ## 3. Confirm required containers are healthy
-### Enabled simulation profiles
+### `spot`
 - `aats-gateway`
 - `aats-market`
 - `aats-decision`
 - `aats-execution`
 - `aats-rdp-daemon`
 
+### `derivatives`
+- all `spot` containers above
+- `aats-liquidations-daemon`
+- `aats-microstructure-collector`
+
 Check:
 ```powershell
-wsl -d Ubuntu bash -lc "for c in aats-gateway aats-market aats-decision aats-execution aats-rdp-daemon; do docker inspect --format '{{.Name}} {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \$c 2>/dev/null || echo \"\$c missing\"; done"
+wsl -d Ubuntu bash -lc "for c in aats-gateway aats-market aats-decision aats-execution aats-rdp-daemon aats-liquidations-daemon aats-microstructure-collector; do docker inspect --format '{{.Name}} {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \$c 2>/dev/null || echo \"\$c missing\"; done"
 ```
 
 Expected:
@@ -60,6 +65,7 @@ Expected:
   - `docker compose ... logs aats-decision --tail 100`
   - `docker compose ... logs aats-execution --tail 100`
   - `docker compose ... logs aats-rdp-daemon --tail 100`
+  - for `derivatives`, also inspect `aats-liquidations-daemon` and `aats-microstructure-collector`
 - Env confusion:
   - verify `~/aats/.env.wsl2`
   - verify `~/aats/.env.<profile>`

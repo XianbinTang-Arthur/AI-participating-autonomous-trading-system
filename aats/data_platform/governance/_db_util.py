@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 import threading
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -33,6 +34,9 @@ ADVISORY_LOCK_KEYS: dict[str, int] = {
     "governance_scheduler_singleton": 0x41415353,  # "AASS"
     # release_cycle 内部的 release-id 级锁，配合 pg_try_advisory_xact_lock 使用。
     "release_cycle_per_release": 0x41415243,  # "AARC"
+    # pg_try_advisory_xact_lock(namespace, hashtext(combo_key))：所有人工/API/
+    # scheduler 参数 apply 共用的 combo 级事务锁。
+    "parameter_apply_combo": 0x41504150,  # "APAP"
 }
 
 
@@ -94,6 +98,46 @@ def resolve_governance_db_url() -> str | None:
     except Exception as exc:  # pragma: no cover - defensive
         log.debug("failed to resolve governance DB URL from RDP settings: %s", exc)
         return None
+
+
+def has_explicit_governance_db_configuration(
+    project_root: Path | None = None,
+) -> bool:
+    """Return whether a governance DB is a managed truth source.
+
+    The research settings object carries an inert localhost default even in
+    file-only development.  Direct environment configuration, a non-default
+    resolved URL, or a project ``.env.research`` marker makes DB outages
+    authoritative failures instead of permission to resurrect stale JSON.
+    This check never reads an env file or returns a URL.
+    """
+
+    if any(
+        bool(os.environ.get(name, "").strip())
+        for name in ("AATS_ACTIVE_PARAMETER_DB_URL", "RDP_DATABASE_URL")
+    ):
+        return True
+    resolved_url = resolve_governance_db_url()
+    if resolved_url is None:
+        return False
+    from aats.data_platform.config import _DEFAULT_RESEARCH_DATABASE_URL
+
+    if project_root is None:
+        return resolved_url.strip() != _DEFAULT_RESEARCH_DATABASE_URL
+    try:
+        resolved_root = project_root.resolve(strict=False)
+        if (resolved_root / ".env.research").is_file():
+            return True
+        # A non-default settings URL is authoritative for the actual process
+        # root, but not for unrelated tmp_path fixtures that share a cached
+        # settings singleton in the same interpreter.
+        return (
+            resolved_root == Path.cwd().resolve(strict=False)
+            and resolved_url.strip() != _DEFAULT_RESEARCH_DATABASE_URL
+        )
+    except (OSError, RuntimeError, ValueError):
+        # An ambiguous managed root must not silently downgrade to stale files.
+        return True
 
 
 def get_cached_governance_engine() -> "Engine | None":

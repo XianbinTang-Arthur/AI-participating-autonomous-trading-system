@@ -22,14 +22,61 @@ API:
 from __future__ import annotations
 
 import logging
-import os
-from datetime import datetime, timezone
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from aats.data_platform.governance._db_util import (
+    has_explicit_governance_db_configuration,
+    resolve_governance_db_url,
+)
 from aats.storage.connection_budget import ACTIVE_PARAMETER_TRANSIENT_POOL
 
 log = logging.getLogger(__name__)
+
+
+class ActiveParameterSafetyError(RuntimeError):
+    """Active-parameter truth cannot be applied without runtime/DB divergence."""
+
+
+def _approval_timestamp_valid(value: Any) -> bool:
+    if not isinstance(value, datetime):
+        return False
+    # PostgreSQL timestamptz is an absolute instant, but psycopg renders it in
+    # the session timezone.  A +08 aware datetime is therefore just as valid as
+    # the equivalent +00 value; only naive datetimes are ambiguous.
+    if value.tzinfo is None or value.utcoffset() is None:
+        return False
+    return value.astimezone(timezone.utc) <= (
+        datetime.now(timezone.utc) + timedelta(minutes=5)
+    )
+
+
+def _release_apply_timestamp_valid(
+    applied_at_value: Any,
+    created_at_value: Any,
+) -> bool:
+    """Validate the payload audit instant against the canonical release row."""
+    if not isinstance(applied_at_value, str):
+        return False
+    token = applied_at_value.strip()
+    if not token or not (token.endswith("Z") or token.endswith("+00:00")):
+        return False
+    try:
+        applied_at = datetime.fromisoformat(token.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if applied_at.tzinfo is None or applied_at.utcoffset() != timedelta(0):
+        return False
+    if not isinstance(created_at_value, datetime):
+        return False
+    if created_at_value.tzinfo is None or created_at_value.utcoffset() is None:
+        return False
+    created_at = created_at_value.astimezone(timezone.utc)
+    return created_at <= applied_at <= (
+        datetime.now(timezone.utc) + timedelta(minutes=5)
+    )
 
 # ── 已知的 family × timeframe 组合 ─────────────────────────────────
 
@@ -361,18 +408,19 @@ DEFAULT_REGISTRY_FILENAME = "active_parameter_registry.json"
 def _try_load_from_db(db_url: str | None = None) -> dict[str, Any] | None:
     """尝试从数据库加载 active parameter registry.
 
-    同时查询 ``governance.active_decisions`` 表：
-    - 如果治理层已接管（表存在且有行），返回结果中
-      ``governance_managed=True`` + ``paused_combos=[...]``。
-    - 调用方据此决定是否 fallback 到文件 registry。
-      治理层主动 pause 的 combo 不应从文件补齐。
+    同时查询 ``governance.active_decisions`` 与 release effectiveness：
+    - 每个 active combo 必须有 allowlist 决策，缺失/无效/pause 均隔离；
+    - 任何曾产生 ``rollback_triggered`` 的 immutable parameter set 均隔离；
+    - 决策授权键由 canonical ``family + lower(timeframe)`` 构造，不信任旧
+      ``combo_key`` 文本。
 
     Returns
     -------
     dict | None  成功时返回 registry dict，失败或不可用时返回 None。
     """
-    # 确定 DB URL: 显式传入 > 环境变量 > None
-    url = db_url or os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
+    # 与所有 governance writer 共用同一 resolver，避免 writer 通过
+    # RDP_DATABASE_URL 写入、bootstrap 却只看专用变量而静默跑默认参数。
+    url = db_url or resolve_governance_db_url()
     if not url:
         return None
 
@@ -386,54 +434,331 @@ def _try_load_from_db(db_url: str | None = None) -> dict[str, Any] | None:
             max_overflow=ACTIVE_PARAMETER_TRANSIENT_POOL.max_overflow,
         )
         try:
-            with engine.connect() as conn:
+            with engine.connect() as conn, conn.begin():
+                # 三张治理表必须来自同一 MVCC 快照。PostgreSQL 默认的
+                # READ COMMITTED 会让每条 SELECT 看到不同提交点；并发 apply
+                # 可因此把旧 active set 与新 decision 拼成一个从未真实存在过的
+                # 启动配置。只读 REPEATABLE READ 把整个授权视图固定在同一时刻。
+                conn.execute(sa_text(
+                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+                ))
                 rows = conn.execute(sa_text(
-                    "SELECT family, timeframe, parameter_set_id, "
-                    "values AS param_values, "
-                    "source_round_id, approval_recommendation_id, applied_by, applied_at "
-                    "FROM governance.active_parameter_sets ORDER BY family, timeframe"
+                    "SELECT a.family, a.timeframe, a.parameter_set_id, "
+                    "a.values AS param_values, a.source_round_id, "
+                    "a.approval_recommendation_id, a.applied_by, a.applied_at, "
+                    "p.parameter_set_id AS canonical_parameter_set_id, "
+                    "p.family AS parameter_set_family, "
+                    "p.symbol AS parameter_set_symbol, "
+                    "p.timeframe AS parameter_set_timeframe, "
+                    "p.values AS canonical_param_values, "
+                    "p.status AS parameter_set_status, "
+                    "p.source_round_id AS parameter_set_source_round_id, "
+                    "r.recommendation_id AS canonical_recommendation_id, "
+                    "r.family AS recommendation_family, "
+                    "r.symbol AS recommendation_symbol, "
+                    "r.timeframe AS recommendation_timeframe, "
+                    "r.target_parameter_set_id, "
+                    "r.source_round_id AS recommendation_source_round_id, "
+                    "r.recommendation_type, r.status AS recommendation_status, "
+                    "r.evidence_bundle_ref, r.approved_by, r.approved_at, "
+                    "rel.release_id AS canonical_release_id, "
+                    "rel.release_count, rel.apply_operation_id, "
+                    "rel.release_applied_at, rel.release_created_at, "
+                    "h.lineage_count "
+                    "FROM governance.active_parameter_sets AS a "
+                    "LEFT JOIN governance.parameter_sets AS p "
+                    "ON p.parameter_set_id = a.parameter_set_id "
+                    "LEFT JOIN governance.recommendations AS r "
+                    "ON r.recommendation_id = a.approval_recommendation_id "
+                    "LEFT JOIN LATERAL ("
+                    "  SELECT pr.release_id, pr.created_at AS release_created_at, "
+                    "         pr.payload ->> 'apply_operation_id' AS apply_operation_id, "
+                    "         pr.payload ->> 'applied_at' AS release_applied_at, "
+                    "         COUNT(*) OVER () AS release_count "
+                    "  FROM governance.parameter_releases AS pr "
+                    "  WHERE pr.apply_result = 'success' "
+                    "    AND pr.parameter_set_id = a.parameter_set_id "
+                    "    AND pr.recommendation_id = a.approval_recommendation_id "
+                    "    AND lower(btrim(pr.family)) = lower(btrim(a.family)) "
+                    "    AND lower(btrim(pr.timeframe)) = lower(btrim(a.timeframe)) "
+                    "  ORDER BY pr.created_at DESC, pr.release_id DESC "
+                    "  LIMIT 1"
+                    ") AS rel ON TRUE "
+                    "LEFT JOIN LATERAL ("
+                    "  SELECT COUNT(*) AS lineage_count "
+                    "  FROM governance.parameter_apply_history AS ah "
+                    "  WHERE ah.operation_type = 'apply' "
+                    "    AND ah.operation_id = rel.apply_operation_id "
+                    "    AND ah.to_parameter_set_id = a.parameter_set_id "
+                    "    AND ah.recommendation_id = a.approval_recommendation_id "
+                    "    AND lower(btrim(ah.family)) = lower(btrim(a.family)) "
+                    "    AND lower(btrim(ah.timeframe)) = lower(btrim(a.timeframe))"
+                    ") AS h ON TRUE "
+                    "ORDER BY a.family, a.timeframe"
                 )).fetchall()
 
                 # ── 查询治理决策状态 ──
-                # 如果 governance.active_decisions 存在且有行，说明治理层
-                # 已接管参数管理。DB 返回空 active sets 是治理层主动 pause
-                # 的结果，不应 fallback 到文件 registry。
-                governance_managed = False
+                # active_parameter_sets 与 active_decisions 必须作为同一份风险
+                # 视图读取。任何一个查询失败都让整个 registry 失败关闭；否则
+                # 表级权限或瞬时错误会把数据库里的 pause 误解释成“没有暂停”。
+                governance_managed = True
                 paused_combos: set[str] = set()
-                try:
-                    decision_rows = conn.execute(sa_text(
-                        "SELECT combo_key, current_status "
-                        "FROM governance.active_decisions"
-                    )).fetchall()
-                    if decision_rows:
-                        governance_managed = True
-                        for dr in decision_rows:
-                            if str(dr.current_status).lower() == "pause":
-                                paused_combos.add(dr.combo_key)
-                except Exception:
-                    # governance 表尚未创建（首次部署等），忽略
-                    pass
+                decision_statuses: dict[str, list[Any]] = {}
+                decision_rows = conn.execute(sa_text(
+                    "SELECT family, timeframe, combo_key, current_status "
+                    "FROM governance.active_decisions"
+                )).fetchall()
+                for dr in decision_rows:
+                    decision_combo = (
+                        f"{str(dr.family).strip().lower()}_"
+                        f"{str(dr.timeframe).strip().lower()}"
+                    )
+                    decision_status = dr.current_status
+                    decision_statuses.setdefault(decision_combo, []).append(
+                        decision_status
+                    )
+                    if decision_status == "pause":
+                        paused_combos.add(decision_combo)
+
+                known_bad_rows = conn.execute(sa_text(
+                    "WITH risk_evidence AS ("
+                    "  SELECT e.release_id, e.family, e.timeframe, "
+                    "         e.payload ->> 'combo_key' AS risk_combo_key "
+                    "  FROM governance.release_effectiveness AS e "
+                    "  WHERE e.conclusion = 'rollback_triggered' "
+                    "  UNION ALL "
+                    "  SELECT o.release_id, o.family, o.timeframe, o.combo_key "
+                    "  FROM governance.observation_results AS o "
+                    "  WHERE o.status = 'rollback_recommended' "
+                    "  UNION ALL "
+                    "  SELECT rb.release_id, rb.family, rb.timeframe, rb.combo_key "
+                    "  FROM governance.rollback_recommendations AS rb "
+                    "  WHERE rb.rollback_recommended IS TRUE"
+                    ") "
+                    "SELECT risk.release_id, risk.family AS risk_family, "
+                    "risk.timeframe AS risk_timeframe, "
+                    "risk.risk_combo_key, r.parameter_set_id, "
+                    "r.family AS release_family, "
+                    "r.timeframe AS release_timeframe, "
+                    "r.combo_key AS release_combo_key, r.apply_result "
+                    "FROM risk_evidence AS risk "
+                    "LEFT JOIN governance.parameter_releases AS r "
+                    "ON r.release_id = risk.release_id"
+                )).fetchall()
+                # parameter_set_id 是 immutable/FK identity。不能再依赖旧 release
+                # 上可能为空、大小写漂移或被污染的 family/timeframe 来“洗白”
+                # 一个已经触发 rollback 的参数集。
+                known_bad_sets: set[str] = set()
+                global_risk_reconciliation = False
+                for bad in known_bad_rows:
+                    bad_parameter_set_id = str(
+                        getattr(bad, "parameter_set_id", "") or ""
+                    ).strip()
+                    release_family = str(
+                        getattr(bad, "release_family", "") or ""
+                    ).strip().lower()
+                    release_timeframe = str(
+                        getattr(bad, "release_timeframe", "") or ""
+                    ).strip().lower()
+                    release_combo = str(
+                        getattr(bad, "release_combo_key", "") or ""
+                    ).strip().lower()
+                    risk_family = str(
+                        getattr(bad, "risk_family", "") or ""
+                    ).strip().lower()
+                    risk_timeframe = str(
+                        getattr(bad, "risk_timeframe", "") or ""
+                    ).strip().lower()
+                    risk_combo = str(
+                        getattr(bad, "risk_combo_key", "") or ""
+                    ).strip().lower()
+                    risk_lineage_valid = bool(
+                        str(getattr(bad, "release_id", "") or "").strip()
+                        and bad_parameter_set_id
+                        and getattr(bad, "apply_result", None) == "success"
+                        and release_family
+                        and release_timeframe
+                        and release_combo
+                        and risk_family == release_family
+                        and risk_timeframe == release_timeframe
+                        and risk_combo == release_combo
+                        and release_combo
+                        == f"{release_family}_{release_timeframe}"
+                    )
+                    if not risk_lineage_valid:
+                        global_risk_reconciliation = True
+                        continue
+                    known_bad_sets.add(bad_parameter_set_id)
         finally:
             engine.dispose()
 
         active_sets: dict[str, Any] = {}
-        skipped_paused: list[str] = []
+        quarantined: dict[str, str] = {}
+        seen_active_combos: set[str] = set()
+        allowed_decision_statuses = {
+            "keep_active",
+            "lower_priority",
+            "require_review",
+        }
         for row in rows:
-            combo_key = f"{row.family}_{row.timeframe}"
-            if combo_key in paused_combos:
-                skipped_paused.append(combo_key)
+            family = str(row.family).strip().lower()
+            timeframe = str(row.timeframe).strip().lower()
+            combo_key = f"{family}_{timeframe}"
+            if combo_key in seen_active_combos:
+                quarantined[combo_key] = "duplicate_canonical_active_set"
+                active_sets.pop(combo_key, None)
+                continue
+            seen_active_combos.add(combo_key)
+            if global_risk_reconciliation:
+                quarantined[combo_key] = "global_risk_evidence_lineage_invalid"
+                active_sets.pop(combo_key, None)
+                continue
+            decision_values = decision_statuses.get(combo_key, [])
+            if len(decision_values) != 1:
+                quarantined[combo_key] = (
+                    "decision_missing_or_ambiguous:"
+                    f"count={len(decision_values)}"
+                )
+                active_sets.pop(combo_key, None)
+                continue
+            decision_status = decision_values[0]
+            if decision_status not in allowed_decision_statuses:
+                quarantined[combo_key] = (
+                    "decision_missing_or_not_apply_capable:"
+                    f"{decision_status if isinstance(decision_status, str) else 'invalid_type'}"
+                )
+                active_sets.pop(combo_key, None)
+                continue
+            if str(row.parameter_set_id).strip() in known_bad_sets:
+                quarantined[combo_key] = "known_bad_parameter_set"
+                active_sets.pop(combo_key, None)
+                continue
+            active_parameter_set_id = str(row.parameter_set_id or "").strip()
+            active_source_round_id = str(row.source_round_id or "").strip()
+            active_recommendation_id = str(
+                row.approval_recommendation_id or ""
+            ).strip()
+            lineage_valid = bool(
+                active_parameter_set_id
+                and active_source_round_id
+                and active_recommendation_id
+                and getattr(row, "canonical_parameter_set_id", None)
+                == active_parameter_set_id
+                and str(getattr(row, "parameter_set_family", "") or "")
+                .strip()
+                .lower()
+                == family
+                and str(getattr(row, "parameter_set_timeframe", "") or "")
+                .strip()
+                .lower()
+                == timeframe
+                and str(getattr(row, "parameter_set_symbol", "") or "").strip()
+                and getattr(row, "parameter_set_symbol", None)
+                == getattr(row, "recommendation_symbol", None)
+                and getattr(row, "canonical_param_values", None)
+                == row.param_values
+                and str(
+                    getattr(row, "parameter_set_source_round_id", "") or ""
+                ).strip()
+                == active_source_round_id
+                and getattr(row, "canonical_recommendation_id", None)
+                == active_recommendation_id
+                and str(getattr(row, "recommendation_family", "") or "")
+                .strip()
+                .lower()
+                == family
+                and str(getattr(row, "recommendation_timeframe", "") or "")
+                .strip()
+                .lower()
+                == timeframe
+                and getattr(row, "target_parameter_set_id", None)
+                == active_parameter_set_id
+                # recommendation 的 decision/evidence round 与 parameter set
+                # 的 generation round 是不同血缘；两者都必须存在，但绝不能
+                # 错误强制相等。
+                and str(getattr(row, "recommendation_source_round_id", "") or "")
+                .strip()
+                and str(getattr(row, "evidence_bundle_ref", "") or "").strip()
+                and getattr(row, "recommendation_type", None)
+                == "parameter_upgrade"
+                and getattr(row, "recommendation_status", None)
+                in {"approved", "superseded"}
+                and str(getattr(row, "approved_by", "") or "").strip()
+                and _approval_timestamp_valid(
+                    getattr(row, "approved_at", None)
+                )
+                and getattr(row, "parameter_set_status", None) == "released"
+                and str(
+                    getattr(row, "canonical_release_id", "") or ""
+                ).strip()
+                and int(getattr(row, "release_count", 0) or 0) == 1
+                and str(getattr(row, "apply_operation_id", "") or "").strip()
+                and _release_apply_timestamp_valid(
+                    getattr(row, "release_applied_at", None),
+                    getattr(row, "release_created_at", None),
+                )
+                and int(getattr(row, "lineage_count", 0) or 0) == 1
+            )
+            if not lineage_valid:
+                quarantined[combo_key] = "active_parameter_lineage_invalid"
+                active_sets.pop(combo_key, None)
+                continue
+            if type(row.param_values) is not dict:
+                quarantined[combo_key] = "active_parameter_values_not_object"
+                active_sets.pop(combo_key, None)
                 continue
             active_sets[combo_key] = {
-                "parameter_set_id": row.parameter_set_id,
-                "family": row.family,
-                "timeframe": row.timeframe,
-                "values": row.param_values,
+                "parameter_set_id": active_parameter_set_id,
+                "family": family,
+                "timeframe": timeframe,
+                "values": deepcopy(row.param_values),
+                "source_round_id": active_source_round_id,
+                "approval_recommendation_id": active_recommendation_id,
+                "applied_by": row.applied_by,
+                "applied_at": (
+                    row.applied_at.isoformat()
+                    if getattr(row.applied_at, "isoformat", None)
+                    else row.applied_at
+                ),
             }
 
-        if skipped_paused:
-            log.info(
-                "active_parameter_governance_paused: 跳过 %d 个被治理层暂停的 combo: %s",
-                len(skipped_paused), ", ".join(sorted(skipped_paused)),
+        # Validate the reverse edge as well.  Driving the registry only from
+        # active_parameter_sets makes a missing/partially migrated active row
+        # indistinguishable from an intentional pause and silently restores
+        # profile defaults.  Every decision that can keep runtime trading must
+        # own exactly one canonical active row in the same snapshot.  Only an
+        # explicit, unambiguous ``pause`` decision is allowed without one.
+        for combo_key, decision_values in decision_statuses.items():
+            if combo_key in seen_active_combos:
+                continue
+            if len(decision_values) != 1:
+                quarantined[combo_key] = (
+                    "decision_without_active_set_ambiguous:"
+                    f"count={len(decision_values)}"
+                )
+                continue
+            decision_status = decision_values[0]
+            if decision_status in allowed_decision_statuses:
+                quarantined[combo_key] = (
+                    "apply_capable_decision_missing_active_set"
+                )
+            elif decision_status != "pause":
+                quarantined[combo_key] = (
+                    "decision_without_active_set_invalid_status:"
+                    f"{decision_status if isinstance(decision_status, str) else 'invalid_type'}"
+                )
+
+        if not decision_statuses and not seen_active_combos:
+            quarantined["__governance__"] = "managed_decision_state_empty"
+
+        if quarantined:
+            log.warning(
+                "active_parameter_governance_quarantine: 隔离 %d 个 combo: %s",
+                len(quarantined),
+                ", ".join(
+                    f"{combo}={reason}"
+                    for combo, reason in sorted(quarantined.items())
+                ),
             )
         log.info(
             "从数据库加载 active parameter registry (%d active sets, governance_managed=%s, paused=%d)",
@@ -444,15 +769,15 @@ def _try_load_from_db(db_url: str | None = None) -> dict[str, Any] | None:
             "active_sets": active_sets,
             "governance_managed": governance_managed,
             "paused_combos": sorted(paused_combos),
+            "quarantined_combos": quarantined,
         }
 
     except Exception as exc:
-        # DB URL 已配置但连接/查询失败 —— 这是生产环境的实质性降级：
-        # 系统将回退到 profile 默认参数而非用户调优后的 active set。
-        # 提升日志级别到 error 确保运维能在日志聚合中立即看到。
+        # DB 连接/查询失败。调用方会根据是否存在 managed DB 配置决定：
+        # managed runtime 必须 fail-closed；纯离线开发才可保留 profile 默认值。
         log.error(
             "active_parameter_db_load_failed: 数据库加载 active parameters 失败，"
-            "系统将退化为 profile 默认参数。DB URL 已配置但不可达。err=%s",
+            "无法取得 canonical governance truth。err=%s",
             exc,
         )
         return None
@@ -468,7 +793,8 @@ def load_active_parameter_registry(
     """加载 active parameter registry.
 
     唯一数据来源: PostgreSQL governance.active_parameter_sets。
-    DB 不可用时 fail-soft 返回空 registry，不中断主系统。
+    显式 managed DB 不可用时返回 ``db_load_failed``，启动注入路径必须
+    fail-closed；只有未配置 governance DB 的离线开发环境可使用默认配置。
 
     Parameters
     ----------
@@ -507,18 +833,24 @@ def load_active_parameter_registry(
     if db_result is not None:
         return db_result
 
-    # DB 不可用时 fail-soft，但需区分 "没配置 DB"（开发/测试）和
-    # "配置了 DB 但连接失败"（生产实质性降级）。
-    effective_url = db_url or os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
-    if effective_url:
+    # DB 不可用时需区分 "没配置 DB"（离线开发）和 managed truth outage。
+    # has_explicit... 覆盖 AATS_ACTIVE_PARAMETER_DB_URL、RDP_DATABASE_URL、
+    # 非默认 settings URL 与项目 .env.research marker，但不会读取/打印凭证。
+    explicit_db = bool(str(db_url or "").strip())
+    managed_db = explicit_db or has_explicit_governance_db_configuration(
+        Path(project_root) if project_root is not None else None
+    )
+    if managed_db:
         log.error(
             "active_parameter_registry_degraded: DB URL 已配置但加载失败，"
-            "返回空 registry。策略将运行在 profile 默认参数上，可能与期望不符。",
+            "拒绝回退 profile 默认参数。",
         )
         return {
             "generated_at": None,
             "active_sets": {},
+            "governance_managed": True,
             "db_load_failed": True,
+            "quarantined_combos": {},
         }
     log.info("active parameter registry: DB 未配置，返回空 registry（使用默认配置）")
     return {"generated_at": None, "active_sets": {}}
@@ -756,9 +1088,25 @@ def build_settings_overrides(
         project_root=project_root, db_url=db_url,
     )
     all_sets_raw = registry.get("active_sets", {})
+    quarantined = registry.get("quarantined_combos", {})
+    if registry.get("db_load_failed") is True:
+        raise ActiveParameterSafetyError(
+            "active parameter DB truth unavailable; refusing profile-default fallback"
+        )
+    if isinstance(quarantined, dict) and quarantined:
+        details = ", ".join(
+            f"{combo}={reason}"
+            for combo, reason in sorted(quarantined.items())
+        )
+        raise ActiveParameterSafetyError(
+            "active parameter governance quarantine requires reconciliation: "
+            f"{details}"
+        )
 
-    # 治理层是否已接管参数管理（DB 查询时同步获取）
-    governance_managed = registry.get("governance_managed", False)
+    # 治理层是否已接管参数管理（DB 查询时同步获取）。managed truth 不能容忍
+    # partial/default merge：每个生产可消费字段都必须来自一份完整、可验证的
+    # immutable parameter set；否则启动时直接失败关闭。
+    governance_managed = registry.get("governance_managed") is True
 
     if all_sets_raw:
         all_sets: dict[str, dict[str, Any]] = {}
@@ -781,6 +1129,13 @@ def build_settings_overrides(
         return {}
 
     overrides: dict[str, Any] = {}
+    # AATSSettings is currently a flat runtime contract: it has no timeframe
+    # dimension.  Two active combos may therefore map to the same field.  A
+    # last-writer-wins merge would make runtime behaviour depend on DB row
+    # ordering while claiming that both parameter sets were applied.  Keep the
+    # first writer and fail closed when another combo proposes a different
+    # value.  Identical values are safe and preserve both lineage identifiers.
+    override_sources: dict[str, tuple[Any, str]] = {}
     applied_combos: list[str] = []
     # combo_key -> required 子集中缺映射的 key（fail-close 场景,ERROR 级）
     missing_required_by_combo: dict[str, list[str]] = {}
@@ -790,6 +1145,10 @@ def build_settings_overrides(
     for combo_key, data in all_sets.items():
         parts = combo_key.rsplit("_", 1)
         if len(parts) != 2:
+            if governance_managed:
+                raise ActiveParameterSafetyError(
+                    f"managed active parameter combo key is invalid: {combo_key!r}"
+                )
             continue
         family, timeframe = parts
 
@@ -798,9 +1157,42 @@ def build_settings_overrides(
         if timeframes and timeframe.lower() not in [t.lower() for t in timeframes]:
             continue
 
+        if governance_managed and (
+            family not in FAMILY_PARAMETER_MAPPINGS
+            or family not in _RDP_CORE_RESEARCH_PARAMS_BY_FAMILY
+        ):
+            raise ActiveParameterSafetyError(
+                f"managed active parameter family has no production contract: {family!r}"
+            )
         mapping = FAMILY_PARAMETER_MAPPINGS.get(family, {})
         required = _RDP_CORE_RESEARCH_PARAMS_BY_FAMILY.get(family, frozenset())
         values = data.get("values", {})
+        if type(values) is not dict:
+            raise ActiveParameterSafetyError(
+                f"managed active parameter values must be an object: {combo_key}"
+            )
+
+        production_mapped = set(mapping).difference(_RDP_REPLAY_ONLY_PARAMS)
+        required_production_mapped = production_mapped
+        if governance_managed:
+            missing_contract_values = sorted(
+                required_production_mapped.difference(values)
+            )
+            missing_mapping = sorted(required.difference(mapping))
+            if missing_contract_values or missing_mapping:
+                details: list[str] = []
+                if missing_contract_values:
+                    details.append(
+                        "missing_values=" + ",".join(missing_contract_values)
+                    )
+                if missing_mapping:
+                    details.append(
+                        "missing_mapping=" + ",".join(missing_mapping)
+                    )
+                raise ActiveParameterSafetyError(
+                    f"managed active parameter contract incomplete [{combo_key}]: "
+                    + "; ".join(details)
+                )
 
         # ── 分三类：required 缺映射 / 非 required 未映射 / 已映射 ──
         missing_required: list[str] = []
@@ -838,17 +1230,61 @@ def build_settings_overrides(
             if rdp_param not in values:
                 continue
             if values[rdp_param] is None:
+                if governance_managed and rdp_param in required_production_mapped:
+                    raise ActiveParameterSafetyError(
+                        "managed active parameter contains null production value "
+                        f"[{combo_key}]: {rdp_param}"
+                    )
                 log.warning(
                     "Active parameter skipped None value [%s]: %s",
                     combo_key,
                     rdp_param,
                 )
                 continue
-            overrides[settings_field] = values[rdp_param]
+            if governance_managed:
+                from pydantic import TypeAdapter, ValidationError
+
+                from aats.bootstrap.settings import AATSSettings
+
+                settings_model_field = AATSSettings.model_fields.get(settings_field)
+                if settings_model_field is None:
+                    raise ActiveParameterSafetyError(
+                        "managed active parameter maps to unknown AATSSettings field "
+                        f"[{combo_key}]: {rdp_param}->{settings_field}"
+                    )
+                try:
+                    TypeAdapter(settings_model_field.annotation).validate_python(
+                        values[rdp_param], strict=True
+                    )
+                except ValidationError as exc:
+                    raise ActiveParameterSafetyError(
+                        "managed active parameter value failed strict settings validation "
+                        f"[{combo_key}]: {rdp_param}->{settings_field}"
+                    ) from exc
+            candidate_value = values[rdp_param]
+            previous = override_sources.get(settings_field)
+            if previous is not None and previous[0] != candidate_value:
+                previous_value, previous_combo = previous
+                raise ActiveParameterSafetyError(
+                    "active parameter settings collision: flat runtime field "
+                    f"{settings_field!r} receives conflicting values from "
+                    f"{previous_combo!r} ({previous_value!r}) and "
+                    f"{combo_key!r} ({candidate_value!r}); enable only one "
+                    "timeframe or introduce a timeframe-aware runtime contract"
+                )
+            overrides[settings_field] = candidate_value
+            override_sources.setdefault(
+                settings_field,
+                (candidate_value, combo_key),
+            )
             mapped_value_applied = True
 
         if mapped_value_applied:
             applied_combos.append(combo_key)
+        elif governance_managed:
+            raise ActiveParameterSafetyError(
+                f"managed active parameter produced no settings overrides: {combo_key}"
+            )
 
     if applied_combos:
         overrides["active_parameter_set_ids"] = {
@@ -933,6 +1369,8 @@ def apply_active_parameters_to_settings(
             db_url=db_url,
             timeframes=active_timeframes,
         )
+    except ActiveParameterSafetyError:
+        raise
     except Exception as exc:
         log.warning(
             "Active parameter 加载失败（fallback 原配置）: %s", exc,
@@ -1024,9 +1462,31 @@ def get_active_parameter_summary(
         })
 
     active_combo_set = {s["combo_key"] for s in summary_items}
+    quarantined_combos = dict(registry.get("quarantined_combos") or {})
+    db_load_failed = registry.get("db_load_failed") is True
+    governance_managed = bool(registry.get("governance_managed", False))
+    audit_only = db_load_failed or bool(quarantined_combos)
+    if db_load_failed:
+        reason_code = "governance_unavailable"
+        runtime_source = "governance_unavailable"
+    elif quarantined_combos:
+        reason_code = "governance_quarantine"
+        runtime_source = "governance_quarantine"
+    elif governance_managed:
+        reason_code = None
+        runtime_source = "active_parameters"
+    else:
+        reason_code = None
+        runtime_source = "profile_defaults"
     return {
         "generated_at": registry.get("generated_at"),
-        "governance_managed": bool(registry.get("governance_managed", False)),
+        "available": not db_load_failed,
+        "audit_only": audit_only,
+        "reason_code": reason_code,
+        "runtime_source": runtime_source,
+        "db_load_failed": db_load_failed,
+        "governance_managed": governance_managed,
+        "quarantined_combos": quarantined_combos,
         "paused_combos": sorted(registry.get("paused_combos", [])),
         "total_active_sets": len(summary_items),
         "known_combos": [c["key"] for c in KNOWN_COMBOS],

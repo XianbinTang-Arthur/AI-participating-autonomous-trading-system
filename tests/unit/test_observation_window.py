@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from aats.data_platform.production_workflow.observation_window import (
     run_observation,
@@ -20,7 +20,11 @@ def test_run_observation_dry_run_does_not_update_release_history() -> None:
         "family": "independent",
         "timeframe": "15m",
         "created_at": created_at,
+        "applied_at": created_at,
+        "apply_operation_id": "apply_obs_1",
+        "apply_result": "success",
         "observation_status": "observing",
+        "observation_window_hours": 24,
     }
     history = {"releases": [release]}
 
@@ -71,3 +75,74 @@ def test_run_observation_dry_run_does_not_update_release_history() -> None:
     save_observation_mock.assert_not_called()
     update_release_status_mock.assert_not_called()
     save_release_history_mock.assert_not_called()
+
+
+def test_observation_rejects_wrong_release_combo_without_writes() -> None:
+    release = {
+        "release_id": "rel_obs_wrong_combo",
+        "family": "independent",
+        "timeframe": "15m",
+        "apply_result": "success",
+    }
+    save_observation = MagicMock()
+    save_release = MagicMock()
+    with (
+        patch(
+            "aats.data_platform.production_workflow.release_registry."
+            "load_release_history",
+            return_value={"releases": [release]},
+        ),
+        patch(
+            "aats.data_platform.production_workflow.observation_window."
+            "_save_observation",
+            save_observation,
+        ),
+        patch(
+            "aats.data_platform.production_workflow.release_registry."
+            "save_release_record",
+            save_release,
+        ),
+    ):
+        result = run_observation(
+            Path("."),
+            release_id="rel_obs_wrong_combo",
+            family="directional",
+            timeframe="1h",
+        )
+
+    assert result["ok"] is False
+    assert result["reason"] == "release_identity_mismatch"
+    save_observation.assert_not_called()
+    save_release.assert_not_called()
+
+
+def test_observation_rejects_non_success_release_without_writes() -> None:
+    release = {
+        "release_id": "rel_obs_failed",
+        "family": "independent",
+        "timeframe": "15m",
+        "apply_result": "failed",
+    }
+    save_observation = MagicMock()
+    with (
+        patch(
+            "aats.data_platform.production_workflow.release_registry."
+            "load_release_history",
+            return_value={"releases": [release]},
+        ),
+        patch(
+            "aats.data_platform.production_workflow.observation_window."
+            "_save_observation",
+            save_observation,
+        ),
+    ):
+        result = run_observation(
+            Path("."),
+            release_id="rel_obs_failed",
+            family="independent",
+            timeframe="15m",
+        )
+
+    assert result["ok"] is False
+    assert result["reason"] == "release_not_applied"
+    save_observation.assert_not_called()

@@ -1,9 +1,10 @@
 # AATS 当前代码库全景说明与代码审阅手册
 
+> 文档状态：现行代码导航，包含明确标注的历史静态快照
 > 文档性质：当前实现说明、代码导航、运行与安全边界、维护手册
 > 原始全景审阅基线：Git `be9179ead5be6aba22fbe94e3baf72b9f46eedc3`（`main`，2026-05-19）
-> 整改覆盖层最后复核：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`；Phase 3A–3W 与收益证据/模拟漏斗整改，以本文档所在 HEAD 为准）
-> 适用边界：正文原始全景数量仍是带基线的静态快照；2026-08-24/25 明确标注的 FS 整改段描述当前分支代码，不证明任何 live runtime 状态
+> 当前覆盖层最后复核：2026-08-27（静态起始 HEAD `main@9c4112c6d769735f171971c8fa4f2cae5a03a824`；包含尚未部署的 RDP 控制面收口候选，以本文档所在最终 HEAD 为准）
+> 核对范围：当前 RDP schema/API/参数控制面、derivatives 模拟拓扑及原始全景导航；原始审阅规模、附录 A/C 和带日期的运行记录保留为历史快照，不证明当前 runtime 或 live 状态
 > 适用对象：重新接手项目的维护者、代码审阅者、交易与风控负责人、Operator
 > 事实优先级：固定行为以当前可执行代码为准；有效运行值以现场 runtime/数据库为准；自动化测试用于交叉验证；历史设计文档仅作背景
 
@@ -29,13 +30,13 @@ AATS（AI Participating Autonomous Trading System）不是一个简单的“策�
 5. **成交是财务投影的核心事实输入。** `FillEvent` 驱动组合、余额、费用、已实现盈亏、lot、ledger、settlement 与 reconciliation；费用在系统内按正成本记录，并从余额/盈亏扣除。
 6. **四进程运行依赖 NATS 与 Redis。** exchange-coupled 的四进程模式若仍使用纯内存事件总线或纯内存热状态，启动会失败，而不是带着错误拓扑继续运行。
 7. **RDP 的研究结论默认不能直接改实盘。** Research Factory 明确禁止 runtime mutation、active parameter write、runtime config write 和 OKX write；研究产物先形成证据、verdict、recommendation，再进入审批、gate、发布和观察链路。
-8. **当前代码与若干旧文档存在漂移。** Phase 3Q 已把失效的 `scripts/run_local.py` 收口为明确迁移失败入口；Phase 3R 又修复 replay short-bias gate，并重写已漂移的参数映射参考；Phase 3S 增加基础 CI/warning gate，Phase 3T 再加入 Python hashed lock 与外部镜像 digest，但远端 required check、integration 和完整供应链扫描仍未启用；本次新增三张收益治理表后，RDP ORM 元数据是 81 张表；JetStream 主事件流当前代码默认 1 天而部分旧注释仍写 7 天。最新收益复核证明历史、OHLCV/funding 和微观结构三阶段累计 10/10 个唯一候选全部失败，当前项目不能因模拟部署健康而被描述为“接近盈利上线”。具体见第 26 章与[真实收益差距评估](profitability_gap_assessment_2026_08_25.md)。
+8. **当前代码与若干旧文档存在漂移。** Phase 3Q 已把失效的 `scripts/run_local.py` 收口为明确迁移失败入口；Phase 3R 又修复 replay short-bias gate，并重写已漂移的参数映射参考；Phase 3S 增加基础 CI/warning gate，Phase 3T 再加入 Python hashed lock 与外部镜像 digest，但远端 required check、integration 和完整供应链扫描仍未启用；当前 RDP ORM 元数据是 102 张表；JetStream 主事件流当前代码默认 1 天而部分旧注释仍写 7 天。最新收益复核证明历史、OHLCV/funding 和微观结构三阶段累计 10/10 个唯一候选全部失败，当前项目不能因模拟部署健康而被描述为“接近盈利上线”。具体见第 26 章与[真实收益差距评估](profitability_gap_assessment_2026_08_25.md)。
 
 ## 1. 文档范围、方法与可信边界
 
-### 1.1 本次审阅覆盖了什么
+### 1.1 原始全景审阅覆盖了什么（历史静态快照）
 
-本次审阅以 Git 跟踪文件为范围，对仓库进行了机械盘点，并人工追踪关键控制流。审阅时仓库约有：
+以下数字来自 `be9179e` 原始全景审阅，保留用于说明当时的覆盖规模，不能作为当前计数。当前 RDP 与 API 精确计数见第 19、20、26 章及 [`docs/rdp/module_reference.md`](../rdp/module_reference.md)。原始审阅时仓库约有：
 
 | 范围 | 规模 |
 | --- | ---: |
@@ -985,12 +986,12 @@ JSON 查询使用 SQLAlchemy 2.0 `.as_string()`，不得恢复已弃用的 `.ast
 
 ### 19.1 API 总览
 
-当前 FastAPI app 有 193 条路由。业务 API 主要分为：
+当前 FastAPI registry 有 200 个 method/path operation、196 个唯一 URL path。业务 API 主要分为：
 
 | 前缀 | 数量 | 作用 |
 | --- | ---: | --- |
 | `/system` | 27 | health、mode、runtime、blocker、recovery、guard、人工动作 |
-| `/rdp` | 50 | 研究治理、参数、recommendation、release、workbench、task |
+| `/rdp` | 57 | 研究治理、参数、recommendation、release、workbench、task；对应 56 个唯一 URL path |
 | `/reports` | 17 | 执行质量、盈利、归因、trial、forward validation |
 | `/auth` | 9 | 登录、session、provider、用户管理 |
 | `/strategy-profiles` | 8 | profile 列表、激活、自动控制、历史与优化 |
@@ -1102,19 +1103,19 @@ RDP 与主交易库分离，负责：
 
 它不是主交易订单执行器。RDP 生成的研究候选不能直接调用 OKX。
 
-### 20.2 七个 schema、81 张表
+### 20.2 七个 schema、102 张表
 
 | Schema | 数量 | 作用 |
 | --- | ---: | --- |
-| `staging` | 11 | 原始/临时采集，保留上游形态 |
-| `bronze` | 17 | 标准化原始行情与微观结构 |
-| `silver` | 14 | 清洗、对齐、聚合的分析数据 |
-| `gold` | 8 | replay-ready bar |
-| `meta` | 6 | ingest、manifest、quality、raw source metadata |
+| `staging` | 13 | 原始/临时采集，保留上游形态 |
+| `bronze` | 21 | 标准化原始行情与微观结构 |
+| `silver` | 16 | 清洗、对齐、聚合的分析数据 |
+| `gold` | 9 | replay-ready bar 与历史 replay 绑定 |
+| `meta` | 14 | ingest、manifest、quality、archive、campaign 与 source metadata |
 | `research` | 3 | experiments、summary、scan run |
-| `governance` | 22 | parameter、recommendation、release、observation、task、holdout、activation、runtime status |
+| `governance` | 26 | parameter、recommendation、release、observation、task、holdout、activation、runtime status 与效果动作证明 |
 
-完整表名见附录 C。
+附录 C 保留原始 81 表历史快照；当前精确分布以 ORM metadata 与 [`docs/rdp/module_reference.md`](../rdp/module_reference.md) 为准，避免维护第二份易漂移的完整表清单。
 
 ### 20.3 数据链
 
@@ -1156,6 +1157,11 @@ flowchart LR
 > `PARTIALLY REMEDIATED / OHLCV CONTAINED / L2 CALIBRATION OPEN`。见
 > [`fs_014_ohlcv_fill_realism_containment_sow_2026_08_24.md`](../task/fs_014_ohlcv_fill_realism_containment_sow_2026_08_24.md)
 > 与 [`34-fs-014-ohlcv-fill-realism-containment.md`](../../audit/full_system_2026_08_24/34-fs-014-ohlcv-fill-realism-containment.md)。
+
+> 当前覆盖层补充：上述 `ohlcv_participation_cap_v2` 是 2026-08-24 的历史记录，已被
+> `ohlcv_participation_cap_contract_v3` 取代。v3 增加显式 InstrumentContract、SPOT
+> 买入手续费资产、量价精度与 observation-volume 因果边界；它仍不等于 L2 depth、queue、
+> impact、真实延迟或 live 容量证明。
 
 > 2026-08-25 未提交整改工作区补充（FS-017/018 / Phase 3O）：Dashboard 详情
 > 抽屉已由视觉-only `<aside>` 改为原生 modal `<dialog>`，所有异步详情入口显式
@@ -1214,7 +1220,7 @@ gateway 通过 `governance.rdp_task_queue` 给 daemon 发任务。其并发语�
 - daemon 执行前再次拒绝；
 - 自动 retry 也跳过。
 
-这是“保留实现、冻结自动路径”，不是删除功能。Operator API 仍有显式 approve、gate、release、apply、rollback 路径。所有写路径受权限/状态机约束；前向路径受 Step2 integrity/gate。直接 `/parameters/apply` 与 rollback 额外要求 action-bound token，但 `/releases/create` 和 `approve-and-release` 当前没有 token 依赖，这是现行策略差异。
+这是“保留实现、冻结自动路径”，不是删除功能。Operator API 仍有显式 approve、gate、release、apply、rollback 路径。所有写路径受权限/状态机约束；前向路径受 Step2 integrity、精确 promotion qualification 与 pre-apply gate。直接 `POST /rdp/parameters/apply` 已在所有环境退役，固定以 `release_required` 无写入失败。当前两条人工前向入口 `/releases/create` 与 `approve-and-release` 在 `skip_apply=false` 时都要求 action-bound apply token；Operator rollback 要求 rollback token。observation cycle 的内部风险收敛不伪造 Operator token，只能依靠 canonical DB 状态、精确历史/active 校验和 application insert-once action proof 完成。
 
 ### 20.7 Research Factory
 
@@ -1401,7 +1407,7 @@ OTel trace context 随 EventEnvelope 跨进程传播；Jaeger 接收 OTLP。Prom
 | Active parameter | mapping 完整性；安全不变量；DB unavailable；provenance |
 | Recovery | unknown submission；orphan intent；lot rebuild；clean recon 才恢复 |
 | Operator action | role；actor；audit；跨进程 proxy；cache invalidation |
-| RDP release | Step2 integrity；gate；组合入口与直接 apply 的 token 策略差异；状态机；observation；rollback evidence |
+| RDP release | Step2 integrity；精确 promotion qualification；gate；两条 release 入口的 apply token；退役 direct apply 无写入；状态机；observation；rollback evidence 与 action proof |
 
 ## 23. 重新接手项目的推荐阅读顺序
 
@@ -1544,7 +1550,7 @@ Phase 3E 工作区已把 root/RDP schema 所有权收口到部署期显式 job�
 
 ### 26.5 RDP 表数量旧说明已过时
 
-当前 `RdpBase.metadata` 是 81 张表、7 个 schema；旧 README/设计中出现的 48/78 等数量只能代表历史阶段。
+当前 `RdpBase.metadata` 是 102 张表、7 个 schema，分布为 `13/21/16/9/14/3/26`；旧 README/设计中出现的 48/78/81/84/98/101 等数量只能代表历史阶段。
 
 ### 26.6 JetStream 旧注释漂移（已在 2026-08-22 文档修复中更正）
 
@@ -1740,9 +1746,9 @@ signal cache。最终模拟 UI 显示 trial guard“监控中”、净空仓强�
 
 ---
 
-## 附录 A：业务 API 路由
+## 附录 A：原始全景基线业务 API 路由快照
 
-以下清单来自当前 FastAPI app 的实际 route registry，不含 Swagger/Redoc/OpenAPI 和大部分静态资源细节。
+以下清单来自 `be9179e` 原始全景基线，不含 Swagger/Redoc/OpenAPI 和大部分静态资源细节，不再声称是当前完整 registry。当前精确总量为 200 个 operation、196 个唯一 URL path；RDP 为 57/56。逐条现行契约应以当前 OpenAPI registry、路由代码与 [`docs/rdp/module_reference.md`](../rdp/module_reference.md) 交叉核对。
 
 ### A.1 Auth
 
@@ -2035,7 +2041,9 @@ strategy_sleeve_intents
 strategy_sleeves
 ```
 
-## 附录 C：RDP 81 张表
+## 附录 C：RDP 81 表历史快照（原始全景基线）
+
+以下完整清单属于 `be9179e`，不得作为当前 schema 迁移目标。当前 ORM 为 102 张表，分布为 `staging=13 / bronze=21 / silver=16 / gold=9 / meta=14 / research=3 / governance=26`；现行数量与职责见 [`docs/rdp/module_reference.md`](../rdp/module_reference.md)，部署时仍必须以 ORM metadata、migration ledger 和目标数据库核验。
 
 ### C.1 `staging`（11）
 

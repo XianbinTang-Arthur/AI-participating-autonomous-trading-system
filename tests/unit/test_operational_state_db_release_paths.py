@@ -23,10 +23,15 @@ Python 侧的 SQL 构造路径 / 归一化逻辑 / 返回值语义。
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
+
+import pytest
 
 
 from aats.data_platform.governance.operational_state_db import (
+    _merge_release_effectiveness_state,
+    db_get_completed_operator_rollback_fact,
     db_set_gate_result_release_id,
     db_update_parameter_release_status,
     db_upsert_observation_result,
@@ -72,12 +77,82 @@ class _FakeSession:
         self.gate_rows: dict[str, dict[str, Any]] = {}
         # release_id -> row
         self.release_rows: dict[str, dict[str, Any]] = {}
+        self.effectiveness_rows: dict[str, dict[str, Any]] = {}
+        self.apply_proof: dict[str, Any] | None = None
+        self.rollback_proof: dict[str, Any] | None = None
+        self.effectiveness_capital_proof: dict[str, Any] | None = None
+        self.effectiveness_action_proofs: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------
 
     def execute(self, statement: Any, params: dict[str, Any] | None = None) -> _FakeResult:
         sql = str(statement).strip()
         self.statements.append((sql, dict(params or {})))
+
+        if "AS lifecycle_matches" in sql and "AS history_matches" in sql:
+            return _FakeResult(
+                [_FakeRow(self.apply_proof)] if self.apply_proof is not None else []
+            )
+
+        if (
+            "AS active_matches" in sql
+            and "AS history_matches" in sql
+            and "AS lifecycle_matches" not in sql
+        ):
+            return _FakeResult(
+                [_FakeRow(self.rollback_proof)]
+                if self.rollback_proof is not None
+                else []
+            )
+
+        if "release_apply_result" in sql and "history_actor" in sql:
+            return _FakeResult(
+                [_FakeRow(self.effectiveness_capital_proof)]
+                if self.effectiveness_capital_proof is not None
+                else []
+            )
+
+        if sql.startswith(
+            "INSERT INTO governance.release_effectiveness_action_proofs"
+        ):
+            proof = dict(params or {})
+            self.effectiveness_action_proofs.append(proof)
+            return _FakeResult([_FakeRow({"release_id": proof["release_id"]})])
+
+        if (
+            "FROM governance.parameter_releases" in sql
+            and "FOR UPDATE" in sql
+        ):
+            release_id = (params or {}).get("release_id")
+            stored = self.release_rows.get(release_id)
+            if stored is None:
+                return _FakeResult([])
+            payload = stored.get("payload")
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            return _FakeResult([_FakeRow({
+                **stored,
+                "payload": payload or {},
+                "created_at": stored.get("created_at"),
+                "updated_at": stored.get("updated_at"),
+            })])
+
+        if (
+            "FROM governance.release_effectiveness" in sql
+            and "FOR UPDATE" in sql
+        ):
+            release_id = (params or {}).get("release_id")
+            stored = self.effectiveness_rows.get(release_id)
+            if stored is None:
+                return _FakeResult([])
+            payload = stored.get("payload")
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            return _FakeResult([_FakeRow({
+                **stored,
+                "payload": payload or {},
+                "updated_at": stored.get("updated_at"),
+            })])
 
         if sql.startswith("SELECT release_id"):
             gate_run_id = (params or {}).get("gate_run_id")
@@ -105,6 +180,8 @@ class _FakeSession:
             return _FakeResult([])
 
         if sql.startswith("INSERT INTO governance.release_effectiveness"):
+            release_id = (params or {}).get("release_id")
+            self.effectiveness_rows[release_id] = dict(params or {})
             return _FakeResult([])
 
         if sql.startswith("SELECT 1 AS present"):
@@ -118,6 +195,9 @@ class _FakeSession:
             row = self.release_rows.get(release_id)
             if row is None:
                 return _FakeResult([])
+            if "payload = CAST(:payload AS jsonb)" in sql:
+                row.update(dict(params or {}))
+                return _FakeResult([])
             # 模拟 jsonb_set：把 apply_result / observation_status 就地更新
             apply_result = (params or {}).get("apply_result")
             obs_status = (params or {}).get("observation_status")
@@ -127,6 +207,14 @@ class _FakeSession:
                 row["observation_status"] = obs_status
             row["updated_at"] = (params or {}).get("updated_at")
             return _FakeResult([_FakeRow({"release_id": release_id})])
+
+        if sql.startswith("UPDATE governance.release_effectiveness"):
+            release_id = (params or {}).get("release_id")
+            row = self.effectiveness_rows.get(release_id)
+            if row is None:
+                return _FakeResult([])
+            row.update(dict(params or {}))
+            return _FakeResult([])
 
         raise AssertionError(f"Unexpected SQL: {sql[:80]}...")
 
@@ -269,17 +357,108 @@ def test_m5_combo_key_inferred_from_family_timeframe_when_missing() -> None:
     assert payload["combo_key"] == "independent_15m"
 
 
+def _seed_successful_release(session: _FakeSession, release_id: str) -> None:
+    created_at = datetime(2026, 8, 27, 9, 0, tzinfo=timezone.utc)
+    payload = {
+        "release_id": release_id,
+        "family": "independent",
+        "timeframe": "15m",
+        "combo_key": "independent_15m",
+        "recommendation_id": "rec_release",
+        "parameter_set_id": "ps_release",
+        "previous_parameter_set_id": "ps_previous",
+        "actor": "operator",
+        "gate_result_ref": "gate_release",
+        "gate_status": "pass",
+        "apply_result": "success",
+        "apply_operation_id": "op_apply_release",
+        "applied_at": "2026-08-27T09:01:00+00:00",
+        "observation_status": "observing",
+        "observation_window_hours": 24,
+        "created_at": created_at.isoformat(),
+    }
+    session.release_rows[release_id] = {
+        **payload,
+        "payload": payload,
+        "notes": None,
+        "created_at": created_at,
+        "updated_at": created_at,
+    }
+
+
+def test_release_rollback_attestation_is_owned_by_proof_writer() -> None:
+    session = _FakeSession()
+    release_id = "rel_release_proven"
+    _seed_successful_release(session, release_id)
+    session.rollback_proof = {"active_matches": True, "history_matches": True}
+
+    merged = db_upsert_parameter_release(
+        session,
+        {
+            "release_id": release_id,
+            "family": "independent",
+            "timeframe": "15m",
+            "combo_key": "independent_15m",
+            "recommendation_id": "rec_release",
+            "parameter_set_id": "ps_release",
+            "previous_parameter_set_id": "ps_previous",
+            "apply_result": "success",
+            "observation_status": "rolled_back",
+            "rolled_back_at": "2026-08-27T10:03:00+00:00",
+            "rollback_to_parameter_set_id": "ps_previous",
+            "rollback_operation_id": "op_rollback_release",
+            # Caller claims are stripped; only the successful DB proof below
+            # may add these exact values.
+            "rollback_capital_proof_version": "forged/v9",
+            "rollback_capital_proof_verified": True,
+        },
+        allow_rollback_transition=True,
+    )
+
+    assert merged["rollback_capital_proof_version"] == (
+        "rdp-release-rollback-capital-proof/v1"
+    )
+    assert merged["rollback_capital_proof_verified"] is True
+
+
+def test_release_rollback_forged_attestation_cannot_bypass_capital_proof() -> None:
+    session = _FakeSession()
+    release_id = "rel_release_forged"
+    _seed_successful_release(session, release_id)
+    session.rollback_proof = {"active_matches": False, "history_matches": False}
+
+    with pytest.raises(ValueError, match="exact canonical capital lineage"):
+        db_upsert_parameter_release(
+            session,
+            {
+                "release_id": release_id,
+                "family": "independent",
+                "timeframe": "15m",
+                "combo_key": "independent_15m",
+                "recommendation_id": "rec_release",
+                "parameter_set_id": "ps_release",
+                "previous_parameter_set_id": "ps_previous",
+                "apply_result": "success",
+                "observation_status": "rolled_back",
+                "rolled_back_at": "2026-08-27T10:03:00+00:00",
+                "rollback_to_parameter_set_id": "ps_previous",
+                "rollback_operation_id": "op_rollback_release",
+                "rollback_capital_proof_version": (
+                    "rdp-release-rollback-capital-proof/v1"
+                ),
+                "rollback_capital_proof_verified": True,
+            },
+            allow_rollback_transition=True,
+        )
+
+
 # =====================================================================
-# M6：db_update_parameter_release_status → UPDATE RETURNING
+# M6：legacy partial status writer is read-only
 # =====================================================================
 
 
-def test_m6_update_with_both_fields_emits_single_update_returning() -> None:
-    """apply_result + observation_status 都给 → 一条 UPDATE ... RETURNING 就够。
-
-    旧实现是 SELECT → 整行重写（INSERT ... ON CONFLICT）两条 SQL + 全列覆盖。
-    新实现必须只发一条 UPDATE；确保 statements 里只有这一条、且命中返回 True。
-    """
+def test_m6_partial_status_mutation_is_rejected_without_sql() -> None:
+    """Capital lifecycle state cannot bypass proof-bearing writers."""
     session = _FakeSession()
     session.release_rows["rel_1"] = {
         "release_id": "rel_1",
@@ -287,32 +466,25 @@ def test_m6_update_with_both_fields_emits_single_update_returning() -> None:
         "observation_status": "pending",
     }
 
-    ok = db_update_parameter_release_status(
-        session, "rel_1",
-        apply_result="success",
-        observation_status="rollback_recommended",
-    )
-
-    assert ok is True
-    # 整个调用只应发一条 UPDATE，无 SELECT、无 INSERT
-    sql_types = [sql.split()[0] for sql, _ in session.statements]
-    assert sql_types == ["UPDATE"], (
-        f"命中路径必须只发一条 UPDATE ... RETURNING，实际: {sql_types}"
-    )
-    # 行被 in-place 更新，而不是整行覆盖
-    assert session.release_rows["rel_1"]["apply_result"] == "success"
-    assert session.release_rows["rel_1"]["observation_status"] == "rollback_recommended"
+    with pytest.raises(ValueError, match="partial parameter release"):
+        db_update_parameter_release_status(
+            session,
+            "rel_1",
+            apply_result="success",
+            observation_status="rollback_recommended",
+        )
+    assert session.statements == []
 
 
-def test_m6_update_not_found_returns_false() -> None:
-    """release_id 不存在 → UPDATE 没有 RETURNING → False。"""
+def test_m6_partial_status_mutation_missing_row_is_still_rejected() -> None:
+    """Absence of a row does not turn the compatibility API into a writer."""
     session = _FakeSession()
 
-    ok = db_update_parameter_release_status(
-        session, "rel_missing", apply_result="success",
-    )
-
-    assert ok is False
+    with pytest.raises(ValueError, match="partial parameter release"):
+        db_update_parameter_release_status(
+            session, "rel_missing", apply_result="success",
+        )
+    assert session.statements == []
 
 
 def test_m6_noop_call_does_not_emit_update() -> None:
@@ -374,8 +546,8 @@ def test_m5_observation_result_timeframe_and_combo_key_normalized() -> None:
             "recommendation": "review",
             "observation_window_hours": 24,
             "window_active": True,
-            "started_at": None,
-            "evaluated_at": None,
+            "started_at": "2026-08-27T10:00:00+00:00",
+            "evaluated_at": "2026-08-27T10:05:00+00:00",
         },
     )
 
@@ -402,6 +574,10 @@ def test_m5_observation_result_combo_key_inferred_when_missing() -> None:
             "timeframe": "15M",
             "status": "observing",
             "recommendation": "review",
+            "observation_window_hours": 24,
+            "window_active": True,
+            "started_at": "2026-08-27T10:00:00+00:00",
+            "evaluated_at": "2026-08-27T10:05:00+00:00",
         },
     )
 
@@ -425,6 +601,7 @@ def test_m5_rollback_recommendation_timeframe_and_combo_key_normalized() -> None
             "rollback_recommended": True,
             "severity": "high",
             "suggested_target_parameter_set_id": "ps_prev",
+            "evaluated_at": "2026-08-27T10:05:00+00:00",
         },
     )
 
@@ -447,6 +624,7 @@ def test_m5_rollback_recommendation_combo_key_inferred_when_missing() -> None:
             "timeframe": "30M",
             "rollback_recommended": False,
             "severity": "none",
+            "evaluated_at": "2026-08-27T10:05:00+00:00",
         },
     )
 
@@ -504,3 +682,544 @@ def test_m5_release_effectiveness_blank_timeframe_becomes_null_column() -> None:
         "caller 没传 timeframe 时列应保持 NULL，不要改成 '' "
         "否则 UNIQUE index 语义和历史兼容被破坏"
     )
+
+
+def test_effectiveness_in_progress_same_attempt_cannot_regress_to_pending() -> None:
+    existing = {
+        "evaluation_id": "eval_in_progress",
+        "release_id": "rel_in_progress",
+        "family": "independent",
+        "timeframe": "15m",
+        "conclusion": "rollback_triggered",
+        "rollback_enforcement_status": "in_progress",
+        "rollback_enforcement_attempt_id": "attempt_a",
+        "rollback_enforcement_started_at": "2026-08-27T10:00:00+00:00",
+    }
+    incoming = {
+        **existing,
+        "rollback_enforcement_status": "pending",
+    }
+
+    merged = _merge_release_effectiveness_state(existing, incoming)
+
+    assert merged["rollback_enforcement_status"] == "in_progress"
+    assert merged["rollback_enforcement_attempt_id"] == "attempt_a"
+    assert (
+        merged["rollback_enforcement_started_at"]
+        == "2026-08-27T10:00:00+00:00"
+    )
+
+
+def test_effectiveness_legacy_null_identity_is_backfilled_by_canonical_update() -> None:
+    existing = {
+        "evaluation_id": "eval_legacy",
+        "release_id": "rel_legacy",
+        "family": None,
+        "timeframe": None,
+        "conclusion": "rollback_triggered",
+        "rollback_enforcement_status": "pending",
+    }
+    incoming = {
+        **existing,
+        "family": "independent",
+        "timeframe": "15m",
+    }
+
+    merged = _merge_release_effectiveness_state(existing, incoming)
+
+    assert merged["family"] == "independent"
+    assert merged["timeframe"] == "15m"
+    assert merged["conclusion"] == "rollback_triggered"
+    assert merged["rollback_enforcement_status"] == "pending"
+
+
+def test_effectiveness_unscoped_rollback_obligation_requires_reconciliation() -> None:
+    merged = _merge_release_effectiveness_state(
+        {},
+        {
+            "evaluation_id": "eval_orphan",
+            "release_id": "rel_orphan",
+            "conclusion": "rollback_triggered",
+        },
+    )
+
+    assert merged["rollback_enforcement_status"] == "reconciliation_required"
+    assert merged["rollback_reconciliation_reason"] == "rollback_identity_missing"
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("rollback_enforced", "true"),
+        ("rollback_cancelled", 1),
+        ("rollback_enforced", None),
+    ],
+)
+def test_effectiveness_rejects_non_boolean_rollback_flags(
+    flag: str,
+    value: object,
+) -> None:
+    incoming = {
+        "evaluation_id": "eval_bad_flag",
+        "release_id": "rel_bad_flag",
+        "family": "independent",
+        "timeframe": "15m",
+        "conclusion": "rollback_triggered",
+        flag: value,
+    }
+
+    with pytest.raises(ValueError, match="exact bool"):
+        _merge_release_effectiveness_state({}, incoming)
+
+
+def test_effectiveness_legacy_failed_attempt_is_quarantined() -> None:
+    merged = _merge_release_effectiveness_state(
+        {},
+        {
+            "evaluation_id": "eval_legacy_failed",
+            "release_id": "rel_legacy_failed",
+            "family": "independent",
+            "timeframe": "15m",
+            "conclusion": "rollback_triggered",
+            "rollback_attempts": 1,
+            "last_rollback_error": "timeout",
+        },
+    )
+
+    assert merged["rollback_enforcement_status"] == "reconciliation_required"
+
+
+def test_effectiveness_rejects_cancelled_with_unpersisted_soft_pause() -> None:
+    with pytest.raises(ValueError, match="unproven soft-pause"):
+        _merge_release_effectiveness_state(
+            {},
+            {
+                "evaluation_id": "eval_unpersisted_pause",
+                "release_id": "rel_unpersisted_pause",
+                "family": "independent",
+                "timeframe": "15m",
+                "conclusion": "rollback_triggered",
+                "rollback_cancelled": True,
+                "rollback_soft_pause_applied": False,
+                "rollback_cancelled_reason": (
+                    "soft_paused_no_valid_rollback_target: timeout"
+                ),
+            },
+        )
+
+
+@pytest.mark.parametrize("status", ["enforced", "cancelled"])
+def test_effectiveness_new_row_cannot_forge_terminal_action(status: str) -> None:
+    finished_at = "2026-08-27T10:05:00+00:00"
+    incoming = {
+        "evaluation_id": "eval_forged_terminal",
+        "release_id": "rel_forged_terminal",
+        "family": "independent",
+        "timeframe": "15m",
+        "conclusion": "rollback_triggered",
+        "rollback_enforcement_status": status,
+        "rollback_enforcement_attempt_id": "attempt_forged",
+        "rollback_enforcement_started_at": "2026-08-27T10:00:00+00:00",
+        "rollback_enforcement_finished_at": finished_at,
+    }
+    if status == "enforced":
+        incoming.update({
+            "rollback_enforced": True,
+            "rollback_enforced_at": finished_at,
+            "rollback_to_parameter_set_id": "ps_previous",
+        })
+    else:
+        incoming.update({
+            "rollback_cancelled": True,
+            "rollback_cancelled_at": finished_at,
+            "rollback_cancelled_reason": "active parameter changed",
+        })
+
+    with pytest.raises(ValueError, match="cannot start with an action outcome"):
+        _merge_release_effectiveness_state({}, incoming)
+
+
+def test_effectiveness_pending_cannot_skip_claim_to_terminal() -> None:
+    pending = _merge_release_effectiveness_state(
+        {},
+        {
+            "evaluation_id": "eval_pending",
+            "release_id": "rel_pending",
+            "family": "independent",
+            "timeframe": "15m",
+            "conclusion": "rollback_triggered",
+        },
+    )
+    forged = {
+        **pending,
+        "rollback_enforcement_status": "enforced",
+        "rollback_enforcement_attempt_id": "attempt_forged",
+        "rollback_enforcement_started_at": "2026-08-27T10:00:00+00:00",
+        "rollback_enforcement_finished_at": "2026-08-27T10:05:00+00:00",
+        "rollback_enforced": True,
+        "rollback_enforced_at": "2026-08-27T10:05:00+00:00",
+        "rollback_to_parameter_set_id": "ps_previous",
+    }
+
+    with pytest.raises(ValueError, match="directly to terminal"):
+        _merge_release_effectiveness_state(pending, forged)
+
+
+def test_effectiveness_claim_then_same_attempt_can_resolve_enforced() -> None:
+    pending = _merge_release_effectiveness_state(
+        {},
+        {
+            "evaluation_id": "eval_valid_action",
+            "release_id": "rel_valid_action",
+            "family": "independent",
+            "timeframe": "15m",
+            "conclusion": "rollback_triggered",
+        },
+    )
+    claim = _merge_release_effectiveness_state(
+        pending,
+        {
+            **pending,
+            "rollback_enforcement_status": "in_progress",
+            "rollback_enforcement_attempt_id": "attempt_valid",
+            "rollback_enforcement_started_at": "2026-08-27T10:00:00+00:00",
+        },
+    )
+    resolved = _merge_release_effectiveness_state(
+        claim,
+        {
+            **claim,
+            "rollback_enforcement_status": "enforced",
+            "rollback_enforcement_finished_at": "2026-08-27T10:05:00+00:00",
+            "rollback_enforced": True,
+            "rollback_enforced_at": "2026-08-27T10:05:00+00:00",
+            "rollback_to_parameter_set_id": "ps_previous",
+            "rollback_soft_pause_applied": False,
+            "rollback_capital_proof_version": "rdp-rollback-capital-proof/v1",
+            "rollback_capital_proof_kind": "rollback",
+            "rollback_capital_operation_id": "op_rollback_valid",
+        },
+    )
+
+    assert resolved["rollback_enforcement_status"] == "enforced"
+    assert resolved["rollback_enforcement_attempt_id"] == "attempt_valid"
+    assert "rollback_capital_proof_verified" not in resolved
+
+
+def _seed_in_progress_effectiveness(session: _FakeSession, release_id: str) -> None:
+    evaluated_at = datetime(2026, 8, 27, 9, 30, tzinfo=timezone.utc)
+    payload = {
+        "evaluation_id": f"eval_{release_id}",
+        "release_id": release_id,
+        "family": "independent",
+        "timeframe": "15m",
+        "combo_key": "independent_15m",
+        "conclusion": "rollback_triggered",
+        "evaluated_at": evaluated_at.isoformat(),
+        "rollback_enforcement_status": "in_progress",
+        "rollback_enforcement_attempt_id": "attempt_capital_truth",
+        "rollback_enforcement_started_at": "2026-08-27T10:00:00+00:00",
+    }
+    session.effectiveness_rows[release_id] = {
+        "evaluation_id": payload["evaluation_id"],
+        "release_id": release_id,
+        "family": "independent",
+        "timeframe": "15m",
+        "conclusion": "rollback_triggered",
+        "evaluated_at": evaluated_at,
+        "payload": payload,
+        "updated_at": evaluated_at,
+    }
+
+
+def _enforced_terminal_candidate(release_id: str) -> dict[str, Any]:
+    finished_at = "2026-08-27T10:05:00+00:00"
+    return {
+        "evaluation_id": f"eval_{release_id}",
+        "release_id": release_id,
+        "family": "independent",
+        "timeframe": "15m",
+        "combo_key": "independent_15m",
+        "conclusion": "rollback_triggered",
+        "evaluated_at": "2026-08-27T09:30:00+00:00",
+        "rollback_enforcement_status": "enforced",
+        "rollback_enforcement_attempt_id": "attempt_capital_truth",
+        "rollback_enforcement_started_at": "2026-08-27T10:00:00+00:00",
+        "rollback_enforcement_finished_at": finished_at,
+        "rollback_enforced": True,
+        "rollback_enforced_at": finished_at,
+        "rollback_to_parameter_set_id": "ps_previous",
+        "rollback_soft_pause_applied": False,
+        "rollback_capital_proof_version": "rdp-rollback-capital-proof/v1",
+        "rollback_capital_proof_kind": "rollback",
+        "rollback_capital_operation_id": "op_rollback_exact",
+        # A caller must not be able to self-attest this flag.
+        "rollback_capital_proof_verified": True,
+    }
+
+
+def _exact_enforced_capital_truth() -> dict[str, Any]:
+    return {
+        "release_apply_result": "success",
+        "release_observation_status": "rolled_back",
+        "release_parameter_set_id": "ps_release",
+        "release_rollback_target": "ps_previous",
+        "release_rollback_operation_id": "op_rollback_exact",
+        "release_combo_key": "independent_15m",
+        "active_parameter_set_id": "ps_previous",
+        "history_operation_type": "rollback",
+        "history_family": "independent",
+        "history_timeframe": "15m",
+        "history_from_parameter_set_id": "ps_release",
+        "history_to_parameter_set_id": "ps_previous",
+        "history_actor": "release_effectiveness_auto_rollback",
+        "history_created_at": datetime(
+            2026, 8, 27, 10, 3, tzinfo=timezone.utc
+        ),
+        "decision_status": None,
+        "decision_updated_at": None,
+        "decision_notes": None,
+    }
+
+
+def test_effectiveness_terminal_writer_adds_attestation_after_exact_db_proof() -> None:
+    session = _FakeSession()
+    _seed_in_progress_effectiveness(session, "rel_proven")
+    session.effectiveness_capital_proof = _exact_enforced_capital_truth()
+
+    merged = db_upsert_release_effectiveness(
+        session,
+        _enforced_terminal_candidate("rel_proven"),
+    )
+
+    assert merged["rollback_enforcement_status"] == "enforced"
+    assert merged["rollback_capital_proof_verified"] is True
+    assert merged["rollback_enforcement_finished_at"] == (
+        "2026-08-27T10:03:00+00:00"
+    )
+    assert session.effectiveness_action_proofs[0]["attempt_id"] == (
+        "attempt_capital_truth"
+    )
+    proof_queries = [
+        sql for sql, _params in session.statements if "release_apply_result" in sql
+    ]
+    assert len(proof_queries) == 1
+
+
+def test_effectiveness_terminal_writer_accepts_exact_operator_rollback() -> None:
+    """Actor changes proof provenance, not the rollback terminal outcome."""
+    session = _FakeSession()
+    release_id = "rel_operator_rollback"
+    _seed_in_progress_effectiveness(session, release_id)
+    session.effectiveness_capital_proof = {
+        **_exact_enforced_capital_truth(),
+        "history_actor": "operator_alice",
+    }
+
+    merged = db_upsert_release_effectiveness(
+        session,
+        _enforced_terminal_candidate(release_id),
+    )
+
+    assert merged["rollback_enforcement_status"] == "enforced"
+    assert merged["rollback_capital_proof_kind"] == "rollback"
+    assert merged["rollback_capital_proof_verified"] is True
+
+
+def test_completed_operator_rollback_fact_requires_exact_capital_lineage() -> None:
+    session = _FakeSession()
+    session.effectiveness_capital_proof = {
+        **_exact_enforced_capital_truth(),
+        "history_actor": "operator_alice",
+    }
+
+    fact = db_get_completed_operator_rollback_fact(
+        session,
+        release_id="rel_operator_rollback",
+        family="independent",
+        timeframe="15m",
+    )
+
+    assert fact is not None
+    assert fact["operation_id"] == "op_rollback_exact"
+    assert fact["target_parameter_set_id"] == "ps_previous"
+    assert fact["fact_observed_at"] == datetime(
+        2026, 8, 27, 10, 3, tzinfo=timezone.utc
+    )
+
+    session.effectiveness_capital_proof = {
+        **session.effectiveness_capital_proof,
+        "active_parameter_set_id": "ps_unrelated",
+    }
+    assert db_get_completed_operator_rollback_fact(
+        session,
+        release_id="rel_operator_rollback",
+        family="independent",
+        timeframe="15m",
+    ) is None
+
+
+def test_effectiveness_terminal_writer_rejects_forged_verified_flag() -> None:
+    session = _FakeSession()
+    _seed_in_progress_effectiveness(session, "rel_forged_verified")
+    # No canonical proof row: the incoming verified=true must be stripped and
+    # cannot authorize the terminal transition.
+    session.effectiveness_capital_proof = None
+
+    with pytest.raises(ValueError, match="no canonical release"):
+        db_upsert_release_effectiveness(
+            session,
+            _enforced_terminal_candidate("rel_forged_verified"),
+        )
+
+    stored_payload = session.effectiveness_rows["rel_forged_verified"]["payload"]
+    assert stored_payload["rollback_enforcement_status"] == "in_progress"
+
+
+def test_effectiveness_enforced_rejects_wrong_current_active_target() -> None:
+    session = _FakeSession()
+    _seed_in_progress_effectiveness(session, "rel_wrong_active")
+    session.effectiveness_capital_proof = {
+        **_exact_enforced_capital_truth(),
+        "active_parameter_set_id": "ps_release",
+    }
+
+    with pytest.raises(ValueError, match="exact canonical capital lineage"):
+        db_upsert_release_effectiveness(
+            session,
+            _enforced_terminal_candidate("rel_wrong_active"),
+        )
+
+
+def _cancelled_terminal_candidate(
+    release_id: str,
+    *,
+    proof_kind: str,
+) -> dict[str, Any]:
+    finished_at = "2026-08-27T10:05:00+00:00"
+    candidate = {
+        "evaluation_id": f"eval_{release_id}",
+        "release_id": release_id,
+        "family": "independent",
+        "timeframe": "15m",
+        "combo_key": "independent_15m",
+        "conclusion": "rollback_triggered",
+        "evaluated_at": "2026-08-27T09:30:00+00:00",
+        "rollback_enforcement_status": "cancelled",
+        "rollback_enforcement_attempt_id": "attempt_capital_truth",
+        "rollback_enforcement_started_at": "2026-08-27T10:00:00+00:00",
+        "rollback_enforcement_finished_at": finished_at,
+        "rollback_cancelled": True,
+        "rollback_cancelled_at": finished_at,
+        "rollback_capital_proof_version": "rdp-rollback-capital-proof/v1",
+        "rollback_capital_proof_kind": proof_kind,
+    }
+    if proof_kind == "active_parameter_changed":
+        candidate.update({
+            "rollback_cancelled_reason": (
+                "active_parameter_set_changed_before_rollback: proven"
+            ),
+            "rollback_soft_pause_applied": False,
+            "rollback_capital_proof_active_parameter_set_id": "ps_other",
+        })
+    else:
+        candidate.update({
+            "rollback_cancelled_reason": (
+                "soft_paused_no_valid_rollback_target: no target"
+            ),
+            "rollback_soft_pause_applied": True,
+            "rollback_capital_proof_decision_status": "pause",
+        })
+    return candidate
+
+
+def test_effectiveness_active_change_writes_immutable_observation_proof() -> None:
+    session = _FakeSession()
+    release_id = "rel_active_changed"
+    _seed_in_progress_effectiveness(session, release_id)
+    session.effectiveness_capital_proof = {
+        **_exact_enforced_capital_truth(),
+        "release_observation_status": "observing",
+        "active_parameter_set_id": "ps_other",
+    }
+
+    merged = db_upsert_release_effectiveness(
+        session,
+        _cancelled_terminal_candidate(
+            release_id,
+            proof_kind="active_parameter_changed",
+        ),
+    )
+
+    assert merged["rollback_capital_proof_verified"] is True
+    assert session.effectiveness_action_proofs[0][
+        "observed_active_parameter_set_id"
+    ] == "ps_other"
+    assert session.effectiveness_action_proofs[0]["operation_id"] is None
+
+
+def test_effectiveness_active_change_rejects_release_still_active() -> None:
+    session = _FakeSession()
+    release_id = "rel_still_active"
+    _seed_in_progress_effectiveness(session, release_id)
+    session.effectiveness_capital_proof = {
+        **_exact_enforced_capital_truth(),
+        "release_observation_status": "observing",
+        "active_parameter_set_id": "ps_release",
+    }
+
+    with pytest.raises(ValueError, match="active-change cancellation lacks"):
+        db_upsert_release_effectiveness(
+            session,
+            _cancelled_terminal_candidate(
+                release_id,
+                proof_kind="active_parameter_changed",
+            ),
+        )
+
+
+def test_effectiveness_soft_pause_binds_decision_time_to_attempt() -> None:
+    session = _FakeSession()
+    release_id = "rel_soft_pause"
+    _seed_in_progress_effectiveness(session, release_id)
+    session.effectiveness_capital_proof = {
+        **_exact_enforced_capital_truth(),
+        "release_observation_status": "observing",
+        "active_parameter_set_id": "ps_release",
+        "decision_status": "pause",
+        "decision_updated_at": datetime(
+            2026, 8, 27, 10, 3, tzinfo=timezone.utc
+        ),
+        "decision_notes": (
+            "soft_pause_auto_rollback_no_valid_target: "
+            f"release={release_id} reason=no target"
+        ),
+    }
+
+    merged = db_upsert_release_effectiveness(
+        session,
+        _cancelled_terminal_candidate(release_id, proof_kind="soft_pause"),
+    )
+
+    assert merged["rollback_enforcement_finished_at"] == (
+        "2026-08-27T10:03:00+00:00"
+    )
+    assert session.effectiveness_action_proofs[0]["decision_status"] == "pause"
+
+
+def test_effectiveness_rejects_fact_timestamp_after_claimed_finish() -> None:
+    session = _FakeSession()
+    release_id = "rel_late_history"
+    _seed_in_progress_effectiveness(session, release_id)
+    session.effectiveness_capital_proof = {
+        **_exact_enforced_capital_truth(),
+        "history_created_at": datetime(
+            2026, 8, 27, 10, 6, tzinfo=timezone.utc
+        ),
+    }
+
+    with pytest.raises(ValueError, match="outside the action attempt"):
+        db_upsert_release_effectiveness(
+            session,
+            _enforced_terminal_candidate(release_id),
+        )

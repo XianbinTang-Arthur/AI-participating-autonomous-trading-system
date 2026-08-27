@@ -8,19 +8,55 @@ registry-like payload shapes; this module only persists and restores them.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+import hashlib
+import json
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ._db_util import ADVISORY_LOCK_KEYS, json_dumps, parse_dt
+from ._time_util import parse_iso_datetime_utc
 
 log = logging.getLogger(__name__)
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _strict_evidence_timestamp(value: Any, *, context: str) -> datetime:
+    """Parse an exact UTC, timezone-aware evidence timestamp."""
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(f"{context} must be timezone-aware")
+    elif isinstance(value, str):
+        token = value.strip()
+        if not token or not (token.endswith("Z") or token.endswith("+00:00")):
+            raise ValueError(f"{context} must use canonical UTC offset")
+    else:
+        raise ValueError(f"{context} is required")
+    parsed = parse_iso_datetime_utc(value, context=context)
+    if parsed is None:
+        raise ValueError(f"{context} is required")
+    parsed = parsed.astimezone(timezone.utc)
+    if parsed > _utcnow() + timedelta(minutes=5):
+        raise ValueError(f"{context} is implausibly in the future")
+    return parsed
+
+
+def _evidence_fingerprint(payload: dict[str, Any]) -> str:
+    canonical = dict(payload)
+    canonical.pop("evidence_fingerprint", None)
+    encoded = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _normalize_combo_fields(
@@ -146,6 +182,881 @@ def _with_payload(payload: Any, **fields: Any) -> dict[str, Any]:
     return result
 
 
+def _with_authoritative_columns(payload: Any, **columns: Any) -> dict[str, Any]:
+    """Overlay normalized DB columns on an embedded JSON payload.
+
+    Operational tables intentionally retain the original report/result JSON for
+    audit detail, but their promoted scalar columns are the queryable state
+    truth.  Unlike :func:`_with_payload`, this helper must also copy ``None``:
+    a nullable canonical column (for example ``release_id``) must be able to
+    clear a stale value that remains in an older payload.
+    """
+    result: dict[str, Any] = {}
+    if isinstance(payload, dict):
+        result.update(payload)
+    result.update(columns)
+    return result
+
+
+def _isoformat_or_none(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+_RELEASE_APPLY_STATUSES = {
+    "pending",
+    "blocked_by_gate",
+    "success",
+    "failed",
+}
+_RELEASE_APPLY_TERMINAL = {"blocked_by_gate", "success", "failed"}
+_RELEASE_OBSERVATION_RANK = {
+    "pending": 0,
+    "observing": 1,
+    "completed": 2,
+    "rollback_recommended": 3,
+    "rolled_back": 4,
+}
+_RELEASE_IDENTITY_FIELDS = (
+    "release_id",
+    "family",
+    "timeframe",
+    "combo_key",
+    "recommendation_id",
+    "parameter_set_id",
+    "actor",
+    "gate_result_ref",
+    "created_at",
+)
+_RELEASE_ROLLBACK_AUDIT_FIELDS = (
+    "rolled_back_at",
+    "rollback_to_parameter_set_id",
+    "rollback_operation_id",
+    "rollback_capital_proof_version",
+    "rollback_capital_proof_verified",
+)
+_RELEASE_ROLLBACK_CAPITAL_PROOF_VERSION = (
+    "rdp-release-rollback-capital-proof/v1"
+)
+_RELEASE_APPLY_RECONCILIATION_FIELDS = (
+    "apply_reconciliation_required",
+    "apply_reconciliation_reason",
+)
+_RELEASE_APPLY_AUDIT_FIELDS = ("apply_operation_id", "applied_at")
+
+
+def _merge_parameter_release_state(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge one release under a row lock without allowing state regression.
+
+    Release/history files are audit snapshots and may be stale.  This helper is
+    deliberately conservative: identity is immutable, apply terminal states do
+    not change, observation state can only move forward, and the first rollback
+    audit anchor wins.
+    """
+    for label, record in (("stored", existing), ("incoming", incoming)):
+        if "apply_reconciliation_required" in record and type(
+            record.get("apply_reconciliation_required")
+        ) is not bool:
+            raise ValueError(
+                f"{label} apply_reconciliation_required must be exact boolean"
+            )
+        if (
+            record.get("apply_reconciliation_reason") is not None
+            and record.get("apply_reconciliation_required") is not True
+        ):
+            raise ValueError(
+                f"{label} reconciliation reason requires exact true flag"
+            )
+        if (
+            str(record.get("apply_result") or "pending") == "pending"
+            and record.get("apply_operation_id") is not None
+        ):
+            raise ValueError(
+                f"{label} pending release cannot already have apply_operation_id"
+            )
+    for field in _RELEASE_IDENTITY_FIELDS:
+        old = existing.get(field)
+        new = incoming.get(field)
+        if old is not None and new is not None and old != new:
+            raise ValueError(
+                f"parameter release immutable field changed: {field}"
+            )
+
+    current_apply = str(existing.get("apply_result") or "pending")
+    next_apply = str(incoming.get("apply_result") or current_apply)
+    if current_apply not in _RELEASE_APPLY_STATUSES:
+        raise ValueError(f"invalid stored release apply_result: {current_apply}")
+    if next_apply not in _RELEASE_APPLY_STATUSES:
+        raise ValueError(f"invalid incoming release apply_result: {next_apply}")
+    if current_apply == "success":
+        operation_id = existing.get("apply_operation_id")
+        if not isinstance(operation_id, str) or not operation_id.strip():
+            raise ValueError(
+                "stored successful release is missing apply_operation_id"
+            )
+        applied_at = _strict_evidence_timestamp(
+            existing.get("applied_at"),
+            context="stored_parameter_release.applied_at",
+        )
+        created_at = _strict_evidence_timestamp(
+            existing.get("created_at"),
+            context="stored_parameter_release.created_at",
+        )
+        if applied_at < created_at:
+            raise ValueError(
+                "stored successful release applied_at precedes created_at"
+            )
+
+    current_observation = str(existing.get("observation_status") or "pending")
+    next_observation = str(
+        incoming.get("observation_status") or current_observation
+    )
+    if current_observation not in _RELEASE_OBSERVATION_RANK:
+        raise ValueError(
+            "invalid stored release observation_status: "
+            f"{current_observation}"
+        )
+    if next_observation not in _RELEASE_OBSERVATION_RANK:
+        raise ValueError(
+            "invalid incoming release observation_status: "
+            f"{next_observation}"
+        )
+
+    merged = dict(existing)
+    for field in _RELEASE_IDENTITY_FIELDS:
+        if merged.get(field) is None and incoming.get(field) is not None:
+            merged[field] = incoming[field]
+
+    reconciliation_locked = (
+        existing.get("apply_reconciliation_required") is True
+    )
+    if current_apply in _RELEASE_APPLY_TERMINAL or reconciliation_locked:
+        resolved_apply = current_apply
+    else:
+        resolved_apply = next_apply
+    merged["apply_result"] = resolved_apply
+
+    if current_apply == "pending" and not reconciliation_locked:
+        if resolved_apply == "success":
+            # Only the combo-locked apply transaction may supply this value.
+            operation_id = incoming.get("apply_operation_id")
+            if not isinstance(operation_id, str) or not operation_id.strip():
+                raise ValueError(
+                    "successful release transition requires apply_operation_id"
+                )
+            applied_at = _strict_evidence_timestamp(
+                incoming.get("applied_at"),
+                context="parameter_release.applied_at",
+            )
+            created_at = _strict_evidence_timestamp(
+                existing.get("created_at"),
+                context="parameter_release.created_at",
+            )
+            if applied_at < created_at:
+                raise ValueError(
+                    "parameter release applied_at cannot precede created_at"
+                )
+            merged["previous_parameter_set_id"] = incoming.get(
+                "previous_parameter_set_id"
+            )
+            merged["apply_operation_id"] = operation_id
+            merged["applied_at"] = applied_at.isoformat()
+        for field in _RELEASE_APPLY_RECONCILIATION_FIELDS:
+            if field in incoming:
+                merged[field] = incoming[field]
+    if reconciliation_locked:
+        merged["apply_reconciliation_required"] = True
+        if existing.get("apply_reconciliation_reason") is not None:
+            merged["apply_reconciliation_reason"] = existing[
+                "apply_reconciliation_reason"
+            ]
+    if current_apply == "success":
+        for field in _RELEASE_APPLY_AUDIT_FIELDS:
+            old = existing.get(field)
+            new = incoming.get(field)
+            if old is not None and new is not None and old != new:
+                raise ValueError(
+                    f"parameter release immutable apply audit field changed: {field}"
+                )
+            if old is not None:
+                merged[field] = old
+
+    if (
+        _RELEASE_OBSERVATION_RANK[next_observation]
+        >= _RELEASE_OBSERVATION_RANK[current_observation]
+    ):
+        resolved_observation = next_observation
+    else:
+        resolved_observation = current_observation
+    merged["observation_status"] = resolved_observation
+
+    if (
+        resolved_observation == "rolled_back"
+        and current_observation != "rolled_back"
+    ):
+        for field in _RELEASE_ROLLBACK_AUDIT_FIELDS:
+            if incoming.get(field) is not None:
+                merged[field] = incoming[field]
+    elif current_observation == "rolled_back":
+        for field in _RELEASE_ROLLBACK_AUDIT_FIELDS:
+            if existing.get(field) is not None:
+                merged[field] = existing[field]
+
+    # Non-state metadata is first-write-wins.  Mutable lifecycle data must use
+    # the explicit transitions above instead of replaying an arbitrary payload.
+    for field in ("gate_status", "observation_window_hours", "notes"):
+        if merged.get(field) is None and incoming.get(field) is not None:
+            merged[field] = incoming[field]
+    return merged
+
+
+_EFFECTIVENESS_ACTION_STATUSES = {
+    "pending",
+    "in_progress",
+    "enforced",
+    "cancelled",
+    "reconciliation_required",
+}
+_EFFECTIVENESS_ACTION_TERMINAL = {
+    "enforced",
+    "cancelled",
+    "reconciliation_required",
+}
+_EFFECTIVENESS_CAPITAL_PROOF_VERSION = "rdp-rollback-capital-proof/v1"
+_EFFECTIVENESS_ACTION_FIELDS = (
+    "rollback_enforced",
+    "rollback_enforced_at",
+    "rollback_to_parameter_set_id",
+    "rollback_cancelled",
+    "rollback_cancelled_at",
+    "rollback_cancelled_reason",
+    "rollback_enforcement_status",
+    "rollback_enforcement_attempt_id",
+    "rollback_enforcement_started_at",
+    "rollback_enforcement_finished_at",
+    "rollback_reconciliation_reason",
+    "rollback_attempts",
+    "last_rollback_error",
+    "rollback_soft_pause_applied",
+    "rollback_capital_proof_version",
+    "rollback_capital_proof_kind",
+    "rollback_capital_operation_id",
+    "rollback_capital_proof_active_parameter_set_id",
+    "rollback_capital_proof_decision_status",
+    "rollback_capital_proof_verified",
+)
+_EFFECTIVENESS_PRIOR_ACTION_ANCHORS = (
+    "rollback_enforcement_attempt_id",
+    "rollback_enforcement_started_at",
+    "rollback_enforcement_finished_at",
+    "rollback_enforced_at",
+    "rollback_cancelled_at",
+    "rollback_cancelled_reason",
+    "rollback_to_parameter_set_id",
+    "last_rollback_error",
+    "rollback_reconciliation_reason",
+    "rollback_capital_proof_version",
+    "rollback_capital_proof_kind",
+    "rollback_capital_operation_id",
+    "rollback_capital_proof_active_parameter_set_id",
+    "rollback_capital_proof_decision_status",
+)
+
+
+def _effectiveness_has_prior_action_anchor(evaluation: dict[str, Any]) -> bool:
+    if "rollback_attempts" in evaluation:
+        attempts = evaluation.get("rollback_attempts")
+        if type(attempts) is not int or attempts != 0:
+            return True
+    if evaluation.get("rollback_soft_pause_applied", False) is True:
+        return True
+    return any(
+        evaluation.get(key) is not None and evaluation.get(key) != ""
+        for key in _EFFECTIVENESS_PRIOR_ACTION_ANCHORS
+    )
+
+
+def _effectiveness_action_status(evaluation: dict[str, Any]) -> str:
+    invalid_flags = [
+        key
+        for key in (
+            "rollback_enforced",
+            "rollback_cancelled",
+            "rollback_soft_pause_applied",
+        )
+        if key in evaluation and type(evaluation[key]) is not bool
+    ]
+    if invalid_flags:
+        raise ValueError(
+            "effectiveness rollback flag must be an exact bool: "
+            + ",".join(sorted(invalid_flags))
+        )
+    raw = evaluation.get("rollback_enforcement_status")
+    if raw is not None and type(raw) is not str:
+        raise ValueError(
+            "rollback_enforcement_status must be a string or null"
+        )
+    enforced = evaluation.get("rollback_enforced", False)
+    cancelled = evaluation.get("rollback_cancelled", False)
+    soft_pause_applied = evaluation.get("rollback_soft_pause_applied", False)
+    cancelled_reason = evaluation.get("rollback_cancelled_reason")
+    soft_pause_reason = (
+        isinstance(cancelled_reason, str)
+        and cancelled_reason.startswith("soft_paused_")
+    )
+    if enforced and cancelled:
+        raise ValueError("effectiveness action cannot be enforced and cancelled")
+    enforced_is_consistent = (
+        enforced is True
+        and cancelled is False
+        and soft_pause_applied is False
+        and not soft_pause_reason
+    )
+    cancelled_is_consistent = (
+        cancelled is True
+        and enforced is False
+        and (
+            (soft_pause_applied is True and soft_pause_reason)
+            or (soft_pause_applied is False and not soft_pause_reason)
+        )
+    )
+    if raw is None:
+        # A pre-contract row that carries only a terminal boolean has no
+        # attempt/timestamp/capital lineage.  It is an unresolved legacy claim,
+        # never a compatibility terminal: treating it as resolved can reopen
+        # the combo for a new capital mutation without proving the old action.
+        if enforced:
+            if not enforced_is_consistent:
+                raise ValueError("enforced action has inconsistent soft-pause audit")
+            return "reconciliation_required"
+        if cancelled:
+            if not cancelled_is_consistent:
+                raise ValueError("cancelled action has unproven soft-pause audit")
+            return "reconciliation_required"
+        return "pending"
+    status = str(raw).strip().lower()
+    if status not in _EFFECTIVENESS_ACTION_STATUSES:
+        raise ValueError(f"invalid rollback_enforcement_status: {status}")
+    if status == "enforced" and not enforced_is_consistent:
+        raise ValueError("enforced action requires only rollback_enforced=true")
+    if status == "cancelled" and not cancelled_is_consistent:
+        raise ValueError("cancelled action requires only rollback_cancelled=true")
+    if status not in {"enforced", "cancelled"} and (enforced or cancelled):
+        raise ValueError(
+            f"{status} action cannot carry resolved rollback boolean flags"
+        )
+    return status
+
+
+def validate_effectiveness_terminal_proof_shape(
+    evaluation: dict[str, Any],
+    *,
+    status: str,
+    require_db_verified: bool,
+) -> None:
+    """Validate the versioned terminal-action audit contract.
+
+    This is the structural half of the proof.  The DB writer additionally
+    re-derives the claimed capital outcome from canonical tables while holding
+    the combo mutation lock, and only that writer may add
+    ``rollback_capital_proof_verified=true``.
+    """
+
+    if status not in {"enforced", "cancelled"}:
+        raise ValueError("capital proof is only valid for terminal actions")
+    if (
+        evaluation.get("rollback_capital_proof_version")
+        != _EFFECTIVENESS_CAPITAL_PROOF_VERSION
+    ):
+        raise ValueError("terminal rollback is missing the capital proof contract")
+    if require_db_verified and evaluation.get(
+        "rollback_capital_proof_verified"
+    ) is not True:
+        raise ValueError("terminal rollback lacks canonical DB verification")
+
+    attempt_id = evaluation.get("rollback_enforcement_attempt_id")
+    if not isinstance(attempt_id, str) or not attempt_id.strip():
+        raise ValueError("terminal rollback is missing attempt id")
+    started_at = _effectiveness_action_timestamp(
+        evaluation, "rollback_enforcement_started_at"
+    )
+    finished_at = _effectiveness_action_timestamp(
+        evaluation, "rollback_enforcement_finished_at"
+    )
+    if finished_at < started_at:
+        raise ValueError("terminal rollback finished before it started")
+
+    proof_kind = evaluation.get("rollback_capital_proof_kind")
+    operation_id = evaluation.get("rollback_capital_operation_id")
+    active_parameter_set_id = evaluation.get(
+        "rollback_capital_proof_active_parameter_set_id"
+    )
+    decision_status = evaluation.get("rollback_capital_proof_decision_status")
+    if status == "enforced":
+        enforced_at = _effectiveness_action_timestamp(
+            evaluation, "rollback_enforced_at"
+        )
+        target = evaluation.get("rollback_to_parameter_set_id")
+        if enforced_at != finished_at:
+            raise ValueError("enforced rollback audit time must equal finished_at")
+        if not isinstance(target, str) or not target.strip():
+            raise ValueError("enforced rollback is missing target parameter set")
+        if proof_kind != "rollback":
+            raise ValueError("enforced rollback has invalid capital proof kind")
+        if not isinstance(operation_id, str) or not operation_id.strip():
+            raise ValueError("enforced rollback is missing capital operation id")
+        if evaluation.get("rollback_soft_pause_applied") is not False:
+            raise ValueError("enforced rollback requires explicit soft-pause=false")
+        if active_parameter_set_id is not None or decision_status is not None:
+            raise ValueError("enforced rollback carries incompatible proof fields")
+        return
+
+    cancelled_at = _effectiveness_action_timestamp(
+        evaluation, "rollback_cancelled_at"
+    )
+    reason = evaluation.get("rollback_cancelled_reason")
+    if cancelled_at != finished_at:
+        raise ValueError("cancelled rollback audit time must equal finished_at")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("cancelled rollback is missing reason")
+    if operation_id is not None:
+        raise ValueError("cancelled rollback cannot claim a capital operation")
+    if reason.startswith("active_parameter_set_changed_before_rollback:"):
+        if proof_kind != "active_parameter_changed":
+            raise ValueError("active-change cancellation has invalid proof kind")
+        if (
+            not isinstance(active_parameter_set_id, str)
+            or not active_parameter_set_id.strip()
+        ):
+            raise ValueError("active-change cancellation lacks observed active set")
+        if evaluation.get("rollback_soft_pause_applied") is not False:
+            raise ValueError(
+                "active-change cancellation requires explicit soft-pause=false"
+            )
+        if decision_status is not None:
+            raise ValueError("active-change cancellation carries decision proof")
+        return
+    if reason.startswith("soft_paused_no_valid_rollback_target:"):
+        if proof_kind != "soft_pause":
+            raise ValueError("soft-pause cancellation has invalid proof kind")
+        if evaluation.get("rollback_soft_pause_applied") is not True:
+            raise ValueError("soft-pause cancellation lacks applied=true")
+        if decision_status != "pause":
+            raise ValueError("soft-pause cancellation lacks pause decision proof")
+        if active_parameter_set_id is not None:
+            raise ValueError("soft-pause cancellation carries active-change proof")
+        return
+    raise ValueError("cancelled rollback reason has no canonical proof semantics")
+
+
+def _effectiveness_action_timestamp(
+    record: dict[str, Any],
+    field: str,
+) -> datetime:
+    return _strict_evidence_timestamp(
+        record.get(field),
+        context=f"release_effectiveness.{field}",
+    )
+
+
+def _validate_effectiveness_action_transition(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+    *,
+    current_status: str,
+    incoming_status: str,
+) -> None:
+    """Validate proof-bearing rollback-action state transitions.
+
+    Effectiveness evaluation is a general evidence writer; it must never be
+    able to fabricate a terminal capital outcome.  A terminal state is valid
+    only after the same persisted ``in_progress`` attempt resolves with a
+    complete, ordered audit trail.
+    """
+
+    current_attempt = existing.get("rollback_enforcement_attempt_id")
+    incoming_attempt = incoming.get("rollback_enforcement_attempt_id")
+
+    if not existing:
+        if incoming_status in {"in_progress", "enforced", "cancelled"}:
+            raise ValueError(
+                "new effectiveness row cannot start with an action outcome"
+            )
+        if incoming_status == "reconciliation_required" and not str(
+            incoming.get("rollback_reconciliation_reason") or ""
+        ).strip():
+            raise ValueError(
+                "reconciliation_required effectiveness needs a reason"
+            )
+        return
+
+    if current_status == "pending":
+        if incoming_status in {"enforced", "cancelled"}:
+            raise ValueError(
+                "pending rollback action cannot transition directly to terminal"
+            )
+        if incoming_status == "in_progress":
+            if (
+                existing.get("conclusion") != "rollback_triggered"
+                or not isinstance(incoming_attempt, str)
+                or not incoming_attempt.strip()
+            ):
+                raise ValueError(
+                    "rollback claim requires an open obligation and attempt id"
+                )
+            _effectiveness_action_timestamp(
+                incoming, "rollback_enforcement_started_at"
+            )
+            if incoming.get("rollback_enforcement_finished_at") is not None:
+                raise ValueError("new rollback claim cannot already be finished")
+        if incoming_status == "reconciliation_required" and not str(
+            incoming.get("rollback_reconciliation_reason") or ""
+        ).strip():
+            raise ValueError(
+                "reconciliation_required effectiveness needs a reason"
+            )
+        return
+
+    if current_status == "in_progress":
+        if not isinstance(current_attempt, str) or not current_attempt.strip():
+            raise ValueError("stored in-progress rollback is missing attempt id")
+        started_at = _effectiveness_action_timestamp(
+            existing, "rollback_enforcement_started_at"
+        )
+        if incoming_status == "pending":
+            return
+        if incoming_attempt != current_attempt:
+            raise ValueError(
+                "rollback action transition must retain the claimed attempt id"
+            )
+        incoming_started_at = _effectiveness_action_timestamp(
+            incoming, "rollback_enforcement_started_at"
+        )
+        if incoming_started_at != started_at:
+            raise ValueError("rollback action started_at is immutable")
+        if incoming_status == "in_progress":
+            return
+        if incoming_status == "reconciliation_required":
+            if not str(
+                incoming.get("rollback_reconciliation_reason") or ""
+            ).strip():
+                raise ValueError(
+                    "reconciliation_required effectiveness needs a reason"
+                )
+            finished_at = _effectiveness_action_timestamp(
+                incoming, "rollback_enforcement_finished_at"
+            )
+            if finished_at < started_at:
+                raise ValueError("rollback action finished before it started")
+            return
+        if incoming_status not in {"enforced", "cancelled"}:
+            raise ValueError(
+                f"unsupported rollback action transition: {incoming_status}"
+            )
+        finished_at = _effectiveness_action_timestamp(
+            incoming, "rollback_enforcement_finished_at"
+        )
+        if finished_at < started_at:
+            raise ValueError("rollback action finished before it started")
+        if incoming_status == "enforced":
+            enforced_at = _effectiveness_action_timestamp(
+                incoming, "rollback_enforced_at"
+            )
+            target = incoming.get("rollback_to_parameter_set_id")
+            if (
+                enforced_at != finished_at
+                or not isinstance(target, str)
+                or not target.strip()
+            ):
+                raise ValueError(
+                    "enforced rollback requires matching finish time and target"
+                )
+        else:
+            cancelled_at = _effectiveness_action_timestamp(
+                incoming, "rollback_cancelled_at"
+            )
+            reason = incoming.get("rollback_cancelled_reason")
+            if (
+                cancelled_at != finished_at
+                or not isinstance(reason, str)
+                or not reason.strip()
+            ):
+                raise ValueError(
+                    "cancelled rollback requires matching finish time and reason"
+                )
+        validate_effectiveness_terminal_proof_shape(
+            incoming,
+            status=incoming_status,
+            require_db_verified=False,
+        )
+        return
+
+    # Existing terminal state is immutable, but it must itself be provable.
+    if current_status in {"enforced", "cancelled"}:
+        if not isinstance(current_attempt, str) or not current_attempt.strip():
+            raise ValueError("stored terminal rollback is missing attempt id")
+        started_at = _effectiveness_action_timestamp(
+            existing, "rollback_enforcement_started_at"
+        )
+        finished_at = _effectiveness_action_timestamp(
+            existing, "rollback_enforcement_finished_at"
+        )
+        if finished_at < started_at:
+            raise ValueError("stored rollback action finished before it started")
+        audit_field = (
+            "rollback_enforced_at"
+            if current_status == "enforced"
+            else "rollback_cancelled_at"
+        )
+        if _effectiveness_action_timestamp(existing, audit_field) != finished_at:
+            raise ValueError("stored terminal rollback audit time is inconsistent")
+        if current_status == "enforced" and not str(
+            existing.get("rollback_to_parameter_set_id") or ""
+        ).strip():
+            raise ValueError("stored enforced rollback is missing target")
+        if current_status == "cancelled" and not str(
+            existing.get("rollback_cancelled_reason") or ""
+        ).strip():
+            raise ValueError("stored cancelled rollback is missing reason")
+        validate_effectiveness_terminal_proof_shape(
+            existing,
+            status=current_status,
+            require_db_verified=True,
+        )
+
+
+def _merge_release_effectiveness_state(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge an effectiveness row with monotonic rollback-action semantics."""
+    for field in ("release_id", "family", "timeframe"):
+        old = existing.get(field)
+        new = incoming.get(field)
+        if old is not None and new is not None and old != new:
+            raise ValueError(
+                f"release effectiveness immutable field changed: {field}"
+            )
+
+    current_status = _effectiveness_action_status(existing)
+    incoming_status = _effectiveness_action_status(incoming)
+    _validate_effectiveness_action_transition(
+        existing,
+        incoming,
+        current_status=current_status,
+        incoming_status=incoming_status,
+    )
+    current_attempt = existing.get("rollback_enforcement_attempt_id")
+    incoming_attempt = incoming.get("rollback_enforcement_attempt_id")
+    same_attempt = bool(
+        current_attempt
+        and incoming_attempt
+        and current_attempt == incoming_attempt
+    )
+    if current_status in _EFFECTIVENESS_ACTION_TERMINAL:
+        resolved_status = current_status
+    elif current_status == "in_progress":
+        # A persisted in-progress intent is an idempotency anchor.  Even its
+        # owner cannot move it back to pending: doing so would let the enforcer
+        # allocate a new attempt and replay a capital action whose outcome is
+        # unknown.  The same attempt may only retain ownership or resolve.
+        resolved_status = (
+            incoming_status
+            if same_attempt and incoming_status != "pending"
+            else current_status
+        )
+    else:
+        resolved_status = incoming_status
+
+    current_evaluated_at = parse_dt(existing.get("evaluated_at"))
+    incoming_evaluated_at = parse_dt(incoming.get("evaluated_at"))
+    incoming_is_newer = (
+        current_evaluated_at is None
+        or (
+            incoming_evaluated_at is not None
+            and incoming_evaluated_at >= current_evaluated_at
+        )
+    )
+
+    # A fresh evaluation may replace a still-pending conclusion.  Once a
+    # rollback action starts, the original rollback-triggered evidence remains
+    # pinned and only action-owned fields may advance.
+    rollback_obligation_open = (
+        existing.get("conclusion") == "rollback_triggered"
+    )
+    if (
+        current_status == "pending"
+        and incoming_is_newer
+        and not rollback_obligation_open
+    ):
+        merged = dict(existing)
+        merged.update(incoming)
+    else:
+        merged = dict(existing)
+
+    # Legacy rows may predate promoted family/timeframe columns.  Identity is
+    # immutable once known, but a canonical incoming evaluation is allowed to
+    # backfill a missing value under this row lock.
+    for field in ("release_id", "family", "timeframe"):
+        if merged.get(field) is None and incoming.get(field) is not None:
+            merged[field] = incoming[field]
+
+    action_transition_owned = (
+        current_status == "pending"
+        or (
+            current_status == "in_progress"
+            and same_attempt
+            and incoming_status != "pending"
+        )
+    )
+    if action_transition_owned:
+        for field in _EFFECTIVENESS_ACTION_FIELDS:
+            if field in incoming:
+                merged[field] = incoming[field]
+    else:
+        for field in _EFFECTIVENESS_ACTION_FIELDS:
+            if field in existing:
+                merged[field] = existing[field]
+
+    if (
+        merged.get("conclusion") == "rollback_triggered"
+        and resolved_status == "pending"
+        and _effectiveness_has_prior_action_anchor(merged)
+    ):
+        resolved_status = "reconciliation_required"
+        merged["rollback_reconciliation_reason"] = (
+            "rollback_prior_action_anchor_present"
+        )
+
+    if (
+        merged.get("conclusion") == "rollback_triggered"
+        and resolved_status not in {"enforced", "cancelled"}
+        and (not merged.get("family") or not merged.get("timeframe"))
+    ):
+        # An unresolved rollback with no combo identity cannot be safely scoped
+        # to one apply.  Quarantine it for reconciliation; the pending lookup
+        # also treats such orphan rows as a global veto.
+        resolved_status = "reconciliation_required"
+        merged["rollback_reconciliation_reason"] = "rollback_identity_missing"
+
+    merged["rollback_enforcement_status"] = resolved_status
+    if (
+        current_status == "reconciliation_required"
+        and existing.get("rollback_enforcement_status") is None
+        and (
+            existing.get("rollback_enforced") is True
+            or existing.get("rollback_cancelled") is True
+        )
+        and not str(merged.get("rollback_reconciliation_reason") or "").strip()
+    ):
+        merged["rollback_reconciliation_reason"] = (
+            "legacy_terminal_without_canonical_capital_proof"
+        )
+    if current_status != "pending" or rollback_obligation_open:
+        merged["conclusion"] = existing.get("conclusion")
+        merged["evaluation_id"] = existing.get("evaluation_id")
+        merged["evaluated_at"] = existing.get("evaluated_at")
+    return merged
+
+
+def _workflow_run_from_row(row: Any) -> dict[str, Any]:
+    return _with_authoritative_columns(
+        row.report,
+        run_id=row.run_id,
+        workflow=row.workflow,
+        overall_status=row.overall_status,
+        description=row.description,
+        started_at=_isoformat_or_none(row.started_at),
+        finished_at=_isoformat_or_none(row.finished_at),
+        created_at=_isoformat_or_none(row.created_at),
+        updated_at=_isoformat_or_none(row.updated_at),
+    )
+
+
+def _pre_apply_gate_result_from_row(row: Any) -> dict[str, Any]:
+    return _with_authoritative_columns(
+        row.payload,
+        gate_run_id=row.gate_run_id,
+        recommendation_id=row.recommendation_id,
+        release_id=row.release_id,
+        allow_apply=row.allow_apply,
+        gate_status=row.gate_status,
+        total_checks=row.total_checks,
+        passed_checks=row.passed_checks,
+        created_at=_isoformat_or_none(row.created_at),
+        updated_at=_isoformat_or_none(row.updated_at),
+    )
+
+
+def _parameter_release_from_row(row: Any) -> dict[str, Any]:
+    return _with_authoritative_columns(
+        row.payload,
+        release_id=row.release_id,
+        family=row.family,
+        timeframe=row.timeframe,
+        combo_key=row.combo_key,
+        recommendation_id=row.recommendation_id,
+        parameter_set_id=row.parameter_set_id,
+        previous_parameter_set_id=row.previous_parameter_set_id,
+        actor=row.actor,
+        gate_result_ref=row.gate_result_ref,
+        gate_status=row.gate_status,
+        apply_result=row.apply_result,
+        observation_status=row.observation_status,
+        observation_window_hours=row.observation_window_hours,
+        notes=row.notes,
+        created_at=_isoformat_or_none(row.created_at),
+        updated_at=_isoformat_or_none(row.updated_at),
+    )
+
+
+def _observation_result_from_row(row: Any) -> dict[str, Any]:
+    return _with_authoritative_columns(
+        row.payload,
+        release_id=row.release_id,
+        family=row.family,
+        timeframe=row.timeframe,
+        combo_key=row.combo_key,
+        status=row.status,
+        recommendation=row.recommendation,
+        observation_window_hours=row.observation_window_hours,
+        window_active=row.window_active,
+        started_at=_isoformat_or_none(row.started_at),
+        evaluated_at=_isoformat_or_none(row.evaluated_at),
+        updated_at=_isoformat_or_none(row.updated_at),
+    )
+
+
+def _rollback_recommendation_from_row(row: Any) -> dict[str, Any]:
+    return _with_authoritative_columns(
+        row.payload,
+        release_id=row.release_id,
+        family=row.family,
+        timeframe=row.timeframe,
+        combo_key=row.combo_key,
+        rollback_recommended=row.rollback_recommended,
+        severity=row.severity,
+        suggested_target_parameter_set_id=row.suggested_target_parameter_set_id,
+        evaluated_at=_isoformat_or_none(row.evaluated_at),
+        updated_at=_isoformat_or_none(row.updated_at),
+    )
+
+
+def _release_effectiveness_from_row(row: Any) -> dict[str, Any]:
+    return _with_authoritative_columns(
+        row.payload,
+        evaluation_id=row.evaluation_id,
+        release_id=row.release_id,
+        family=row.family,
+        timeframe=row.timeframe,
+        conclusion=row.conclusion,
+        evaluated_at=_isoformat_or_none(row.evaluated_at),
+        updated_at=_isoformat_or_none(row.updated_at),
+    )
+
+
 def db_upsert_workflow_run_report(session: Session, report: dict[str, Any]) -> None:
     session.execute(
         text(
@@ -184,7 +1095,8 @@ def db_load_latest_workflow_runs(session: Session) -> dict[str, dict[str, Any]]:
         text(
             """
             SELECT DISTINCT ON (workflow)
-                workflow, report, started_at, finished_at
+                run_id, workflow, overall_status, description, report,
+                started_at, finished_at, created_at, updated_at
             FROM governance.workflow_run_reports
             ORDER BY workflow, finished_at DESC NULLS LAST, started_at DESC NULLS LAST
             """
@@ -192,12 +1104,7 @@ def db_load_latest_workflow_runs(session: Session) -> dict[str, dict[str, Any]]:
     ).fetchall()
     latest: dict[str, dict[str, Any]] = {}
     for row in rows:
-        payload = _with_payload(
-            row.report,
-            workflow=row.workflow,
-            started_at=row.started_at.isoformat() if row.started_at else None,
-            finished_at=row.finished_at.isoformat() if row.finished_at else None,
-        )
+        payload = _workflow_run_from_row(row)
         latest[str(row.workflow)] = payload
     return latest
 
@@ -220,7 +1127,8 @@ def db_list_workflow_runs(
     rows = session.execute(
         text(
             f"""
-            SELECT workflow, report, started_at, finished_at
+            SELECT run_id, workflow, overall_status, description, report,
+                   started_at, finished_at, created_at, updated_at
             FROM governance.workflow_run_reports
             {where_sql}
             ORDER BY COALESCE(started_at, finished_at, created_at) DESC
@@ -229,15 +1137,7 @@ def db_list_workflow_runs(
         ),
         params,
     ).fetchall()
-    return [
-        _with_payload(
-            row.report,
-            workflow=row.workflow,
-            started_at=row.started_at.isoformat() if row.started_at else None,
-            finished_at=row.finished_at.isoformat() if row.finished_at else None,
-        )
-        for row in rows
-    ]
+    return [_workflow_run_from_row(row) for row in rows]
 
 
 # sentinel workflow 名，用于在 workflow_scheduler_state 表里存放根级
@@ -464,7 +1364,9 @@ def db_list_pre_apply_gate_results(session: Session, *, limit: int = 8) -> list[
     rows = session.execute(
         text(
             """
-            SELECT payload, created_at
+            SELECT gate_run_id, recommendation_id, release_id, allow_apply,
+                   gate_status, total_checks, passed_checks, payload,
+                   created_at, updated_at
             FROM governance.pre_apply_gate_results
             ORDER BY created_at DESC
             LIMIT :limit
@@ -472,10 +1374,7 @@ def db_list_pre_apply_gate_results(session: Session, *, limit: int = 8) -> list[
         ),
         {"limit": limit},
     ).fetchall()
-    return [
-        _with_payload(row.payload, created_at=row.created_at.isoformat() if row.created_at else None)
-        for row in rows
-    ]
+    return [_pre_apply_gate_result_from_row(row) for row in rows]
 
 
 # ── P0-2 新增：按业务维度查询 pre-apply gate 结果 ──────────────────
@@ -504,7 +1403,9 @@ def db_get_gate_result_by_run_id(
     row = session.execute(
         text(
             """
-            SELECT payload, created_at
+            SELECT gate_run_id, recommendation_id, release_id, allow_apply,
+                   gate_status, total_checks, passed_checks, payload,
+                   created_at, updated_at
             FROM governance.pre_apply_gate_results
             WHERE gate_run_id = :gate_run_id
             """
@@ -513,10 +1414,7 @@ def db_get_gate_result_by_run_id(
     ).fetchone()
     if row is None:
         return None
-    return _with_payload(
-        row.payload,
-        created_at=row.created_at.isoformat() if row.created_at else None,
-    )
+    return _pre_apply_gate_result_from_row(row)
 
 
 def db_get_latest_gate_result(
@@ -531,7 +1429,9 @@ def db_get_latest_gate_result(
     row = session.execute(
         text(
             """
-            SELECT payload, created_at
+            SELECT gate_run_id, recommendation_id, release_id, allow_apply,
+                   gate_status, total_checks, passed_checks, payload,
+                   created_at, updated_at
             FROM governance.pre_apply_gate_results
             WHERE recommendation_id = :rec_id
             ORDER BY created_at DESC
@@ -542,10 +1442,7 @@ def db_get_latest_gate_result(
     ).fetchone()
     if row is None:
         return None
-    return _with_payload(
-        row.payload,
-        created_at=row.created_at.isoformat() if row.created_at else None,
-    )
+    return _pre_apply_gate_result_from_row(row)
 
 
 def db_list_gate_results_for_recommendation(
@@ -558,7 +1455,9 @@ def db_list_gate_results_for_recommendation(
     rows = session.execute(
         text(
             """
-            SELECT payload, created_at
+            SELECT gate_run_id, recommendation_id, release_id, allow_apply,
+                   gate_status, total_checks, passed_checks, payload,
+                   created_at, updated_at
             FROM governance.pre_apply_gate_results
             WHERE recommendation_id = :rec_id
             ORDER BY created_at DESC
@@ -567,13 +1466,7 @@ def db_list_gate_results_for_recommendation(
         ),
         {"rec_id": recommendation_id, "limit": limit},
     ).fetchall()
-    return [
-        _with_payload(
-            row.payload,
-            created_at=row.created_at.isoformat() if row.created_at else None,
-        )
-        for row in rows
-    ]
+    return [_pre_apply_gate_result_from_row(row) for row in rows]
 
 
 def db_list_gate_results_for_release(
@@ -592,7 +1485,9 @@ def db_list_gate_results_for_release(
     rows = session.execute(
         text(
             """
-            SELECT payload, created_at
+            SELECT gate_run_id, recommendation_id, release_id, allow_apply,
+                   gate_status, total_checks, passed_checks, payload,
+                   created_at, updated_at
             FROM governance.pre_apply_gate_results
             WHERE release_id = :release_id
             ORDER BY created_at DESC
@@ -601,25 +1496,78 @@ def db_list_gate_results_for_release(
         ),
         {"release_id": release_id, "limit": limit},
     ).fetchall()
-    return [
-        _with_payload(
-            row.payload,
-            created_at=row.created_at.isoformat() if row.created_at else None,
-        )
-        for row in rows
-    ]
+    return [_pre_apply_gate_result_from_row(row) for row in rows]
 
 
-def db_upsert_parameter_release(session: Session, release: dict[str, Any]) -> None:
+def db_upsert_parameter_release(
+    session: Session,
+    release: dict[str, Any],
+    *,
+    allow_apply_success_transition: bool = False,
+    allow_rollback_transition: bool = False,
+) -> dict[str, Any]:
     # M5：column 与 payload JSON 必须归一到同一份 timeframe / combo_key。
     # 统一走 ``_normalize_combo_fields`` 与 observation_results /
     # rollback_recommendations / release_effectiveness 三张表共享同一份归一化路径。
-    timeframe_norm, combo_key_norm, release_for_payload = _normalize_combo_fields(release)
-    family_norm = str(release.get("family") or "")
+    release_id = str(release.get("release_id") or "").strip()
+    if not release_id:
+        raise ValueError("parameter release requires release_id")
+    timeframe_norm, combo_key_norm, release_for_payload = _normalize_combo_fields(
+        release
+    )
+    release_for_payload["release_id"] = release_id
+    # These fields attest to checks performed by this DB writer and cannot be
+    # supplied by a registry/file caller.
+    release_for_payload.pop("rollback_capital_proof_version", None)
+    release_for_payload.pop("rollback_capital_proof_verified", None)
+    release_for_payload.setdefault("apply_result", "pending")
+    release_for_payload.setdefault("observation_status", "pending")
 
-    session.execute(
+    row = session.execute(
         text(
             """
+            SELECT release_id, family, timeframe, combo_key, recommendation_id,
+                   parameter_set_id, previous_parameter_set_id, actor,
+                   gate_result_ref, gate_status, apply_result,
+                   observation_status, observation_window_hours, notes,
+                   payload, created_at, updated_at
+            FROM governance.parameter_releases
+            WHERE release_id = :release_id
+            FOR UPDATE
+            """
+        ),
+        {"release_id": release_id},
+    ).fetchone()
+
+    if row is None:
+        # A new row is only an authorization anchor.  Every later lifecycle
+        # state must be a row-locked transition with capital/evidence proof;
+        # accepting terminal/audit fields here would permit two-step forgery.
+        if (
+            str(release_for_payload.get("apply_result") or "pending")
+            != "pending"
+            or str(
+                release_for_payload.get("observation_status") or "pending"
+            )
+            != "pending"
+        ):
+            raise ValueError(
+                "new parameter release must be a pending authorization anchor"
+            )
+        forbidden_anchor_fields = (
+            *_RELEASE_APPLY_AUDIT_FIELDS,
+            *_RELEASE_ROLLBACK_AUDIT_FIELDS,
+            *_RELEASE_APPLY_RECONCILIATION_FIELDS,
+        )
+        if any(
+            release_for_payload.get(field) is not None
+            for field in forbidden_anchor_fields
+        ):
+            raise ValueError(
+                "new pending release cannot contain lifecycle audit fields"
+            )
+        merged = release_for_payload
+        statement = """
             INSERT INTO governance.parameter_releases
                 (release_id, family, timeframe, combo_key, recommendation_id,
                  parameter_set_id, previous_parameter_set_id, actor, gate_result_ref,
@@ -630,51 +1578,178 @@ def db_upsert_parameter_release(session: Session, release: dict[str, Any]) -> No
                  :parameter_set_id, :previous_parameter_set_id, :actor, :gate_result_ref,
                  :gate_status, :apply_result, :observation_status, :observation_window_hours,
                  :notes, CAST(:payload AS jsonb), :created_at, :updated_at)
-            ON CONFLICT (release_id) DO UPDATE SET
-                family = EXCLUDED.family,
-                timeframe = EXCLUDED.timeframe,
-                combo_key = EXCLUDED.combo_key,
-                recommendation_id = EXCLUDED.recommendation_id,
-                parameter_set_id = EXCLUDED.parameter_set_id,
-                previous_parameter_set_id = EXCLUDED.previous_parameter_set_id,
-                actor = EXCLUDED.actor,
-                gate_result_ref = EXCLUDED.gate_result_ref,
-                gate_status = EXCLUDED.gate_status,
-                apply_result = EXCLUDED.apply_result,
-                observation_status = EXCLUDED.observation_status,
-                observation_window_hours = EXCLUDED.observation_window_hours,
-                notes = EXCLUDED.notes,
-                payload = EXCLUDED.payload,
-                updated_at = EXCLUDED.updated_at
-            """
-        ),
-        {
-            "release_id": release.get("release_id"),
-            "family": family_norm or release.get("family"),
-            "timeframe": timeframe_norm,
-            "combo_key": combo_key_norm or release.get("combo_key"),
-            "recommendation_id": release.get("recommendation_id"),
-            "parameter_set_id": release.get("parameter_set_id"),
-            "previous_parameter_set_id": release.get("previous_parameter_set_id"),
-            "actor": release.get("actor", "operator"),
-            "gate_result_ref": release.get("gate_result_ref"),
-            "gate_status": release.get("gate_status"),
-            "apply_result": release.get("apply_result", "pending"),
-            "observation_status": release.get("observation_status", "pending"),
-            "observation_window_hours": int(release.get("observation_window_hours") or 24),
-            "notes": release.get("notes"),
-            "payload": json_dumps(release_for_payload),
-            "created_at": parse_dt(release.get("created_at")) or _utcnow(),
-            "updated_at": _utcnow(),
-        },
+        """
+    else:
+        stored_release = _parameter_release_from_row(row)
+        apply_success_transition = (
+            str(stored_release.get("apply_result") or "pending") == "pending"
+            and str(release_for_payload.get("apply_result") or "pending")
+            == "success"
+        )
+        rollback_transition = (
+            stored_release.get("observation_status") != "rolled_back"
+            and release_for_payload.get("observation_status") == "rolled_back"
+        )
+        if apply_success_transition and not allow_apply_success_transition:
+            raise ValueError(
+                "apply success transition is restricted to the capital transaction"
+            )
+        if rollback_transition and not allow_rollback_transition:
+            raise ValueError(
+                "rolled_back transition is restricted to the capital transaction"
+            )
+        merged = _merge_parameter_release_state(
+            stored_release,
+            release_for_payload,
+        )
+        if apply_success_transition:
+            proof = session.execute(
+                text(
+                    """
+                    SELECT
+                        (SELECT COUNT(*) = 1
+                         FROM governance.active_parameter_sets AS a
+                         WHERE lower(btrim(a.family)) = lower(btrim(:family))
+                           AND lower(btrim(a.timeframe)) = lower(btrim(:timeframe))
+                           AND a.parameter_set_id = :parameter_set_id
+                           AND a.approval_recommendation_id = :recommendation_id
+                        ) AS active_matches,
+                        (SELECT COUNT(*) = 1
+                         FROM governance.parameter_apply_history AS h
+                         WHERE h.operation_id = :operation_id
+                           AND h.operation_type = 'apply'
+                           AND lower(btrim(h.family)) = lower(btrim(:family))
+                           AND lower(btrim(h.timeframe)) = lower(btrim(:timeframe))
+                           AND h.to_parameter_set_id = :parameter_set_id
+                           AND h.recommendation_id = :recommendation_id
+                        ) AS history_matches,
+                        (SELECT COUNT(*) = 1
+                         FROM governance.parameter_sets AS p
+                         WHERE p.parameter_set_id = :parameter_set_id
+                           AND p.status = 'released'
+                        ) AS lifecycle_matches
+                    """
+                ),
+                {
+                    "family": merged.get("family"),
+                    "timeframe": merged.get("timeframe"),
+                    "parameter_set_id": merged.get("parameter_set_id"),
+                    "recommendation_id": merged.get("recommendation_id"),
+                    "operation_id": merged.get("apply_operation_id"),
+                },
+            ).fetchone()
+            if not (
+                proof is not None
+                and getattr(proof, "active_matches", None) is True
+                and getattr(proof, "history_matches", None) is True
+                and getattr(proof, "lifecycle_matches", None) is True
+            ):
+                raise ValueError(
+                    "apply success transition lacks exact canonical capital lineage"
+                )
+        if rollback_transition:
+            rollback_proof = session.execute(
+                text(
+                    """
+                    SELECT
+                        (SELECT COUNT(*) = 1
+                         FROM governance.active_parameter_sets AS a
+                         WHERE lower(btrim(a.family)) = lower(btrim(:family))
+                           AND lower(btrim(a.timeframe)) = lower(btrim(:timeframe))
+                           AND a.parameter_set_id = :rollback_target
+                        ) AS active_matches,
+                        (SELECT COUNT(*) = 1
+                         FROM governance.parameter_apply_history AS h
+                         WHERE h.operation_id = :rollback_operation_id
+                           AND h.operation_type = 'rollback'
+                           AND lower(btrim(h.family)) = lower(btrim(:family))
+                           AND lower(btrim(h.timeframe)) = lower(btrim(:timeframe))
+                           AND h.from_parameter_set_id = :parameter_set_id
+                           AND h.to_parameter_set_id = :rollback_target
+                        ) AS history_matches
+                    """
+                ),
+                {
+                    "family": merged.get("family"),
+                    "timeframe": merged.get("timeframe"),
+                    "parameter_set_id": merged.get("parameter_set_id"),
+                    "rollback_target": merged.get(
+                        "rollback_to_parameter_set_id"
+                    ),
+                    "rollback_operation_id": merged.get(
+                        "rollback_operation_id"
+                    ),
+                },
+            ).fetchone()
+            if not (
+                rollback_proof is not None
+                and getattr(rollback_proof, "active_matches", None) is True
+                and getattr(rollback_proof, "history_matches", None) is True
+            ):
+                raise ValueError(
+                    "rolled_back transition lacks exact canonical capital lineage"
+                )
+            merged["rollback_capital_proof_version"] = (
+                _RELEASE_ROLLBACK_CAPITAL_PROOF_VERSION
+            )
+            merged["rollback_capital_proof_verified"] = True
+        statement = """
+            UPDATE governance.parameter_releases
+            SET family = :family,
+                timeframe = :timeframe,
+                combo_key = :combo_key,
+                recommendation_id = :recommendation_id,
+                parameter_set_id = :parameter_set_id,
+                previous_parameter_set_id = :previous_parameter_set_id,
+                actor = :actor,
+                gate_result_ref = :gate_result_ref,
+                gate_status = :gate_status,
+                apply_result = :apply_result,
+                observation_status = :observation_status,
+                observation_window_hours = :observation_window_hours,
+                notes = :notes,
+                payload = CAST(:payload AS jsonb),
+                updated_at = :updated_at
+            WHERE release_id = :release_id
+        """
+
+    merged_timeframe, merged_combo_key, merged_payload = _normalize_combo_fields(
+        merged
     )
+    params = {
+        "release_id": release_id,
+        "family": str(merged.get("family") or ""),
+        "timeframe": merged_timeframe,
+        "combo_key": merged_combo_key,
+        "recommendation_id": merged.get("recommendation_id"),
+        "parameter_set_id": merged.get("parameter_set_id"),
+        "previous_parameter_set_id": merged.get("previous_parameter_set_id"),
+        "actor": merged.get("actor", "operator"),
+        "gate_result_ref": merged.get("gate_result_ref"),
+        "gate_status": merged.get("gate_status"),
+        "apply_result": merged.get("apply_result", "pending"),
+        "observation_status": merged.get("observation_status", "pending"),
+        "observation_window_hours": int(
+            merged.get("observation_window_hours") or 24
+        ),
+        "notes": merged.get("notes"),
+        "payload": json_dumps(merged_payload),
+        "created_at": parse_dt(merged.get("created_at")) or _utcnow(),
+        "updated_at": _utcnow(),
+    }
+    session.execute(text(statement), params)
+    return merged_payload
 
 
 def db_load_release_history(session: Session) -> dict[str, Any]:
     rows = session.execute(
         text(
             """
-            SELECT payload, created_at
+            SELECT release_id, family, timeframe, combo_key, recommendation_id,
+                   parameter_set_id, previous_parameter_set_id, actor,
+                   gate_result_ref, gate_status, apply_result,
+                   observation_status, observation_window_hours, notes,
+                   payload, created_at, updated_at
             FROM governance.parameter_releases
             ORDER BY created_at ASC
             """
@@ -683,7 +1758,7 @@ def db_load_release_history(session: Session) -> dict[str, Any]:
     return {
         "generated_at": _utcnow().isoformat(),
         "releases": [
-            _with_payload(row.payload, created_at=row.created_at.isoformat() if row.created_at else None)
+            _parameter_release_from_row(row)
             for row in rows
         ],
     }
@@ -693,7 +1768,11 @@ def db_find_parameter_release(session: Session, release_id: str) -> dict[str, An
     row = session.execute(
         text(
             """
-            SELECT payload, created_at
+            SELECT release_id, family, timeframe, combo_key, recommendation_id,
+                   parameter_set_id, previous_parameter_set_id, actor,
+                   gate_result_ref, gate_status, apply_result,
+                   observation_status, observation_window_hours, notes,
+                   payload, created_at, updated_at
             FROM governance.parameter_releases
             WHERE release_id = :release_id
             """
@@ -702,7 +1781,47 @@ def db_find_parameter_release(session: Session, release_id: str) -> dict[str, An
     ).fetchone()
     if row is None:
         return None
-    return _with_payload(row.payload, created_at=row.created_at.isoformat() if row.created_at else None)
+    return _parameter_release_from_row(row)
+
+
+def db_get_parameter_release_for_update(
+    session: Session,
+    *,
+    release_id: str,
+    family: str,
+    timeframe: str,
+    recommendation_id: str,
+    parameter_set_id: str,
+) -> dict[str, Any] | None:
+    """Lock and return one canonical release inside a caller-owned transaction."""
+    row = session.execute(
+        text(
+            """
+            SELECT release_id, family, timeframe, combo_key, recommendation_id,
+                   parameter_set_id, previous_parameter_set_id, actor,
+                   gate_result_ref, gate_status, apply_result,
+                   observation_status, observation_window_hours, notes,
+                   payload, created_at, updated_at
+            FROM governance.parameter_releases
+            WHERE release_id = :release_id
+              AND lower(btrim(family)) = lower(btrim(:family))
+              AND lower(btrim(timeframe)) = lower(btrim(:timeframe))
+              AND recommendation_id = :recommendation_id
+              AND parameter_set_id = :parameter_set_id
+            FOR UPDATE
+            """
+        ),
+        {
+            "release_id": release_id,
+            "family": family,
+            "timeframe": timeframe,
+            "recommendation_id": recommendation_id,
+            "parameter_set_id": parameter_set_id,
+        },
+    ).fetchone()
+    if row is None:
+        return None
+    return _parameter_release_from_row(row)
 
 
 def db_update_parameter_release_status(
@@ -712,14 +1831,11 @@ def db_update_parameter_release_status(
     apply_result: str | None = None,
     observation_status: str | None = None,
 ) -> bool:
-    """按 release_id 更新 apply_result / observation_status，并同步 payload JSON。
+    """Compatibility presence check; lifecycle mutation is intentionally denied.
 
-    M6：历史上这里跑 SELECT → Python 拼 → 走 ``db_upsert_parameter_release``
-    的 INSERT ... ON CONFLICT，等于"读 + 整行重写 + 重算所有 EXCLUDED 字段"，
-    2 次往返 + 一次全列覆盖。现在改用单条 UPDATE ... RETURNING：
-      * 仅更新需要变的列 + payload JSON（用 jsonb_set 就地打 patch）
-      * RETURNING release_id 让我们直接拿到"行是否存在"的信号
-      * 一次往返，事务也更短
+    Apply/observation/rollback states carry capital meaning and must use the
+    row-locked, proof-bearing writers above.  This legacy partial UPDATE had no
+    identity, monotonicity, or lineage proof and is therefore read-only now.
     """
     if apply_result is None and observation_status is None:
         # caller 没给任何变更，不必打 DB
@@ -735,38 +1851,10 @@ def db_update_parameter_release_status(
         ).fetchone()
         return row is not None
 
-    # jsonb_set 是原子 patch：即使 apply_result / observation_status 并发被其他
-    # 写路径覆盖，也不会整行回滚——我们只修两把 key，其余字段原样保留。
-    # 使用两层 jsonb_set（COALESCE 兼容旧行 payload 为 NULL 的边界情况）。
-    sql = """
-        UPDATE governance.parameter_releases
-           SET apply_result = COALESCE(:apply_result, apply_result),
-               observation_status = COALESCE(:observation_status, observation_status),
-               payload = jsonb_set(
-                   jsonb_set(
-                       COALESCE(payload, '{}'::jsonb),
-                       '{apply_result}',
-                       to_jsonb(COALESCE(:apply_result, payload->>'apply_result')),
-                       true
-                   ),
-                   '{observation_status}',
-                   to_jsonb(COALESCE(:observation_status, payload->>'observation_status')),
-                   true
-               ),
-               updated_at = :updated_at
-         WHERE release_id = :release_id
-         RETURNING release_id
-    """
-    row = session.execute(
-        text(sql),
-        {
-            "release_id": release_id,
-            "apply_result": apply_result,
-            "observation_status": observation_status,
-            "updated_at": _utcnow(),
-        },
-    ).fetchone()
-    return row is not None
+    raise ValueError(
+        "partial parameter release status mutation is disabled; use a "
+        "proof-bearing lifecycle transition"
+    )
 
 
 def db_get_latest_release_for_combo(
@@ -778,7 +1866,11 @@ def db_get_latest_release_for_combo(
     row = session.execute(
         text(
             """
-            SELECT payload, created_at
+            SELECT release_id, family, timeframe, combo_key, recommendation_id,
+                   parameter_set_id, previous_parameter_set_id, actor,
+                   gate_result_ref, gate_status, apply_result,
+                   observation_status, observation_window_hours, notes,
+                   payload, created_at, updated_at
             FROM governance.parameter_releases
             WHERE family = :family AND timeframe = :timeframe
             ORDER BY created_at DESC
@@ -789,7 +1881,7 @@ def db_get_latest_release_for_combo(
     ).fetchone()
     if row is None:
         return None
-    return _with_payload(row.payload, created_at=row.created_at.isoformat() if row.created_at else None)
+    return _parameter_release_from_row(row)
 
 
 def db_upsert_observation_result(session: Session, result: dict[str, Any]) -> None:
@@ -807,6 +1899,60 @@ def db_upsert_observation_result(session: Session, result: dict[str, Any]) -> No
             "db_upsert_observation_result: status must be one of "
             f"{{'observing','completed','rollback_recommended'}}; got {status_val!r}"
         )
+    release_id = str(result.get("release_id") or "").strip()
+    family = str(result.get("family") or "").strip()
+    if not release_id or not family or not timeframe_norm:
+        raise ValueError(
+            "db_upsert_observation_result: release/family/timeframe are required"
+        )
+    if type(result.get("window_active")) is not bool:
+        raise ValueError(
+            "db_upsert_observation_result: window_active must be exact boolean"
+        )
+    window_hours = result.get("observation_window_hours")
+    if type(window_hours) is not int or window_hours <= 0:
+        raise ValueError(
+            "db_upsert_observation_result: observation_window_hours must be "
+            "a positive integer"
+        )
+    recommendation = result.get("recommendation")
+    if not isinstance(recommendation, str) or not recommendation.strip():
+        raise ValueError(
+            "db_upsert_observation_result: recommendation is required"
+        )
+    if (status_val == "rollback_recommended") != (
+        recommendation == "rollback_recommended"
+    ):
+        raise ValueError(
+            "db_upsert_observation_result: rollback status/recommendation mismatch"
+        )
+    started_at = _strict_evidence_timestamp(
+        result.get("started_at"),
+        context="observation_result.started_at",
+    )
+    evaluated_at = _strict_evidence_timestamp(
+        result.get("evaluated_at"),
+        context="observation_result.evaluated_at",
+    )
+    if evaluated_at < started_at:
+        raise ValueError(
+            "db_upsert_observation_result: evaluated_at precedes started_at"
+        )
+    result_for_payload.update(
+        {
+            "release_id": release_id,
+            "family": family,
+            "started_at": started_at.isoformat(),
+            "evaluated_at": evaluated_at.isoformat(),
+            "window_active": result["window_active"],
+            "observation_window_hours": window_hours,
+            "status": status_val,
+            "recommendation": recommendation,
+        }
+    )
+    result_for_payload["evidence_fingerprint"] = _evidence_fingerprint(
+        result_for_payload
+    )
     session.execute(
         text(
             """
@@ -830,19 +1976,33 @@ def db_upsert_observation_result(session: Session, result: dict[str, Any]) -> No
                 evaluated_at = EXCLUDED.evaluated_at,
                 payload = EXCLUDED.payload,
                 updated_at = EXCLUDED.updated_at
+            WHERE
+                observation_results.status <> 'rollback_recommended'
+                AND (
+                    EXCLUDED.status = 'rollback_recommended'
+                    OR EXCLUDED.evaluated_at > observation_results.evaluated_at
+                    OR (
+                        EXCLUDED.evaluated_at = observation_results.evaluated_at
+                        AND COALESCE(EXCLUDED.payload ->> 'evidence_fingerprint', '')
+                            > COALESCE(
+                                observation_results.payload ->> 'evidence_fingerprint',
+                                ''
+                            )
+                    )
+                )
             """
         ),
         {
-            "release_id": result.get("release_id"),
-            "family": result.get("family"),
+            "release_id": release_id,
+            "family": family,
             "timeframe": timeframe_norm,
             "combo_key": combo_key_norm or result.get("combo_key"),
             "status": status_val,
-            "recommendation": result.get("recommendation", "review"),
-            "observation_window_hours": int(result.get("observation_window_hours") or 24),
-            "window_active": bool(result.get("window_active")),
-            "started_at": parse_dt(result.get("started_at")),
-            "evaluated_at": parse_dt(result.get("evaluated_at")) or _utcnow(),
+            "recommendation": recommendation,
+            "observation_window_hours": window_hours,
+            "window_active": result["window_active"],
+            "started_at": started_at,
+            "evaluated_at": evaluated_at,
             "payload": json_dumps(result_for_payload),
             "updated_at": _utcnow(),
         },
@@ -853,7 +2013,9 @@ def db_get_observation_result(session: Session, release_id: str) -> dict[str, An
     row = session.execute(
         text(
             """
-            SELECT payload, evaluated_at
+            SELECT release_id, family, timeframe, combo_key, status,
+                   recommendation, observation_window_hours, window_active,
+                   started_at, evaluated_at, payload, updated_at
             FROM governance.observation_results
             WHERE release_id = :release_id
             """
@@ -862,21 +2024,23 @@ def db_get_observation_result(session: Session, release_id: str) -> dict[str, An
     ).fetchone()
     if row is None:
         return None
-    return _with_payload(row.payload, evaluated_at=row.evaluated_at.isoformat() if row.evaluated_at else None)
+    return _observation_result_from_row(row)
 
 
 def db_list_observation_results(session: Session) -> list[dict[str, Any]]:
     rows = session.execute(
         text(
             """
-            SELECT payload, evaluated_at
+            SELECT release_id, family, timeframe, combo_key, status,
+                   recommendation, observation_window_hours, window_active,
+                   started_at, evaluated_at, payload, updated_at
             FROM governance.observation_results
             ORDER BY evaluated_at DESC
             """
         ),
     ).fetchall()
     return [
-        _with_payload(row.payload, evaluated_at=row.evaluated_at.isoformat() if row.evaluated_at else None)
+        _observation_result_from_row(row)
         for row in rows
     ]
 
@@ -885,6 +2049,44 @@ def db_upsert_rollback_recommendation(session: Session, result: dict[str, Any]) 
     # M5 归一：同 observation_results 的修复动机，避免 column 与 payload 的
     # timeframe / combo_key 大小写不一致。
     timeframe_norm, combo_key_norm, result_for_payload = _normalize_combo_fields(result)
+    release_id = str(result.get("release_id") or "").strip()
+    family = str(result.get("family") or "").strip()
+    if not release_id or not family or not timeframe_norm:
+        raise ValueError(
+            "db_upsert_rollback_recommendation: release/family/timeframe are required"
+        )
+    rollback_recommended = result.get("rollback_recommended")
+    if type(rollback_recommended) is not bool:
+        raise ValueError(
+            "db_upsert_rollback_recommendation: rollback_recommended must be "
+            "exact boolean"
+        )
+    severity = result.get("severity")
+    if severity not in {"none", "medium", "high"}:
+        raise ValueError(
+            "db_upsert_rollback_recommendation: invalid severity"
+        )
+    if rollback_recommended is False and severity != "none":
+        raise ValueError(
+            "db_upsert_rollback_recommendation: non-risk evidence must use "
+            "severity=none"
+        )
+    evaluated_at = _strict_evidence_timestamp(
+        result.get("evaluated_at"),
+        context="rollback_recommendation.evaluated_at",
+    )
+    result_for_payload.update(
+        {
+            "release_id": release_id,
+            "family": family,
+            "rollback_recommended": rollback_recommended,
+            "severity": severity,
+            "evaluated_at": evaluated_at.isoformat(),
+        }
+    )
+    result_for_payload["evidence_fingerprint"] = _evidence_fingerprint(
+        result_for_payload
+    )
     session.execute(
         text(
             """
@@ -906,17 +2108,42 @@ def db_upsert_rollback_recommendation(session: Session, result: dict[str, Any]) 
                 evaluated_at = EXCLUDED.evaluated_at,
                 payload = EXCLUDED.payload,
                 updated_at = EXCLUDED.updated_at
+            WHERE
+                (
+                    rollback_recommendations.rollback_recommended IS FALSE
+                    AND EXCLUDED.rollback_recommended IS TRUE
+                )
+                OR (
+                    rollback_recommendations.rollback_recommended IS FALSE
+                    AND EXCLUDED.rollback_recommended IS FALSE
+                    AND (
+                        EXCLUDED.evaluated_at
+                            > rollback_recommendations.evaluated_at
+                        OR (
+                            EXCLUDED.evaluated_at
+                                = rollback_recommendations.evaluated_at
+                            AND COALESCE(
+                                EXCLUDED.payload ->> 'evidence_fingerprint',
+                                ''
+                            ) > COALESCE(
+                                rollback_recommendations.payload
+                                    ->> 'evidence_fingerprint',
+                                ''
+                            )
+                        )
+                    )
+                )
             """
         ),
         {
-            "release_id": result.get("release_id"),
-            "family": result.get("family"),
+            "release_id": release_id,
+            "family": family,
             "timeframe": timeframe_norm,
             "combo_key": combo_key_norm or result.get("combo_key"),
-            "rollback_recommended": bool(result.get("rollback_recommended")),
-            "severity": result.get("severity", "none"),
+            "rollback_recommended": rollback_recommended,
+            "severity": severity,
             "suggested_target_parameter_set_id": result.get("suggested_target_parameter_set_id"),
-            "evaluated_at": parse_dt(result.get("evaluated_at")) or _utcnow(),
+            "evaluated_at": evaluated_at,
             "payload": json_dumps(result_for_payload),
             "updated_at": _utcnow(),
         },
@@ -927,7 +2154,10 @@ def db_get_rollback_recommendation(session: Session, release_id: str) -> dict[st
     row = session.execute(
         text(
             """
-            SELECT payload, evaluated_at
+            SELECT release_id, family, timeframe, combo_key,
+                   rollback_recommended, severity,
+                   suggested_target_parameter_set_id, evaluated_at,
+                   payload, updated_at
             FROM governance.rollback_recommendations
             WHERE release_id = :release_id
             """
@@ -936,51 +2166,432 @@ def db_get_rollback_recommendation(session: Session, release_id: str) -> dict[st
     ).fetchone()
     if row is None:
         return None
-    return _with_payload(row.payload, evaluated_at=row.evaluated_at.isoformat() if row.evaluated_at else None)
+    return _rollback_recommendation_from_row(row)
 
 
-def db_upsert_release_effectiveness(session: Session, evaluation: dict[str, Any]) -> None:
+def _load_effectiveness_capital_truth_row(
+    session: Session,
+    *,
+    release_id: str,
+    family: str,
+    timeframe: str,
+) -> Any:
+    """Load one release's canonical capital truth for terminal verification."""
+
+    return session.execute(
+        text(
+            """
+            SELECT
+                r.apply_result AS release_apply_result,
+                r.observation_status AS release_observation_status,
+                r.parameter_set_id AS release_parameter_set_id,
+                r.payload ->> 'rollback_to_parameter_set_id'
+                    AS release_rollback_target,
+                r.payload ->> 'rollback_operation_id'
+                    AS release_rollback_operation_id,
+                r.combo_key AS release_combo_key,
+                a.parameter_set_id AS active_parameter_set_id,
+                h.operation_type AS history_operation_type,
+                h.family AS history_family,
+                h.timeframe AS history_timeframe,
+                h.from_parameter_set_id AS history_from_parameter_set_id,
+                h.to_parameter_set_id AS history_to_parameter_set_id,
+                h.actor AS history_actor,
+                h.created_at AS history_created_at,
+                d.current_status AS decision_status,
+                d.last_updated_at AS decision_updated_at,
+                d.notes AS decision_notes
+            FROM governance.parameter_releases AS r
+            LEFT JOIN governance.active_parameter_sets AS a
+              ON lower(btrim(a.family)) = lower(btrim(r.family))
+             AND lower(btrim(a.timeframe)) = lower(btrim(r.timeframe))
+            LEFT JOIN governance.parameter_apply_history AS h
+              ON h.operation_id = r.payload ->> 'rollback_operation_id'
+            LEFT JOIN governance.active_decisions AS d
+              ON lower(btrim(d.family)) = lower(btrim(r.family))
+             AND lower(btrim(d.timeframe)) = lower(btrim(r.timeframe))
+            WHERE r.release_id = :release_id
+              AND lower(btrim(r.family)) = lower(btrim(:family))
+              AND lower(btrim(r.timeframe)) = lower(btrim(:timeframe))
+            """
+        ),
+        {
+            "release_id": release_id,
+            "family": family,
+            "timeframe": timeframe,
+        },
+    ).fetchone()
+
+
+def _canonical_completed_rollback_fact(
+    row: Any,
+    *,
+    family: str,
+    timeframe: str,
+) -> dict[str, Any] | None:
+    """Return exact committed rollback lineage, independent of its actor."""
+
+    if row is None:
+        return None
+    canonical_combo = f"{family}_{timeframe}".lower()
+    release_parameter_set_id = str(
+        getattr(row, "release_parameter_set_id", "") or ""
+    ).strip()
+    target = str(getattr(row, "release_rollback_target", "") or "").strip()
+    operation_id = str(
+        getattr(row, "release_rollback_operation_id", "") or ""
+    ).strip()
+    active_parameter_set_id = str(
+        getattr(row, "active_parameter_set_id", "") or ""
+    ).strip()
+    actor = str(getattr(row, "history_actor", "") or "").strip()
+    if not (
+        getattr(row, "release_apply_result", None) == "success"
+        and getattr(row, "release_observation_status", None) == "rolled_back"
+        and str(getattr(row, "release_combo_key", "") or "").strip().lower()
+        == canonical_combo
+        and release_parameter_set_id
+        and target
+        and operation_id
+        and active_parameter_set_id == target
+        and getattr(row, "history_operation_type", None) == "rollback"
+        and str(getattr(row, "history_family", "") or "").strip().lower()
+        == family.lower()
+        and str(getattr(row, "history_timeframe", "") or "").strip().lower()
+        == timeframe
+        and getattr(row, "history_from_parameter_set_id", None)
+        == release_parameter_set_id
+        and getattr(row, "history_to_parameter_set_id", None) == target
+        and actor
+    ):
+        return None
+    fact_observed_at = parse_dt(getattr(row, "history_created_at", None))
+    if fact_observed_at is None:
+        return None
+    return {
+        "operation_id": operation_id,
+        "target_parameter_set_id": target,
+        "actor": actor,
+        "fact_observed_at": fact_observed_at.astimezone(timezone.utc),
+    }
+
+
+def db_get_completed_operator_rollback_fact(
+    session: Session,
+    *,
+    release_id: str,
+    family: str,
+    timeframe: str,
+) -> dict[str, Any] | None:
+    """Return a canonical rollback completed outside the auto enforcer.
+
+    The result is intentionally limited to exact release/history/active
+    lineage.  It lets the effectiveness state machine attest an Operator
+    action as an enforced rollback instead of mislabelling it as an unrelated
+    active-set change.  Auto-enforcer history is excluded because an
+    interrupted automatic attempt must remain fail-closed for reconciliation.
+    """
+
+    normalized_family = str(family or "").strip()
+    normalized_timeframe = str(timeframe or "").strip().lower()
+    normalized_release_id = str(release_id or "").strip()
+    if not normalized_family or not normalized_timeframe or not normalized_release_id:
+        raise ValueError("operator rollback fact requires release/family/timeframe")
+    row = _load_effectiveness_capital_truth_row(
+        session,
+        release_id=normalized_release_id,
+        family=normalized_family,
+        timeframe=normalized_timeframe,
+    )
+    fact = _canonical_completed_rollback_fact(
+        row,
+        family=normalized_family,
+        timeframe=normalized_timeframe,
+    )
+    if fact is None or fact["actor"] == "release_effectiveness_auto_rollback":
+        return None
+    return fact
+
+
+def _verify_effectiveness_terminal_capital_truth(
+    session: Session,
+    evaluation: dict[str, Any],
+) -> dict[str, Any]:
+    """Re-derive a terminal effectiveness action from canonical DB state.
+
+    The caller already holds the per-combo mutation lock.  This query and the
+    effectiveness write therefore observe one serial capital state.  JSON
+    proof fields are only selectors; they never prove themselves.
+    """
+
+    status = _effectiveness_action_status(evaluation)
+    validate_effectiveness_terminal_proof_shape(
+        evaluation,
+        status=status,
+        require_db_verified=False,
+    )
+    family = str(evaluation.get("family") or "").strip()
+    timeframe = str(evaluation.get("timeframe") or "").strip().lower()
+    release_id = str(evaluation.get("release_id") or "").strip()
+    if not family or not timeframe or not release_id:
+        raise ValueError("terminal rollback proof is missing canonical identity")
+    row = _load_effectiveness_capital_truth_row(
+        session,
+        release_id=release_id,
+        family=family,
+        timeframe=timeframe,
+    )
+    if row is None:
+        raise ValueError("terminal rollback proof has no canonical release")
+    canonical_combo = f"{family}_{timeframe}".lower()
+    if (
+        getattr(row, "release_apply_result", None) != "success"
+        or str(getattr(row, "release_combo_key", "") or "").strip().lower()
+        != canonical_combo
+    ):
+        raise ValueError("terminal rollback proof release lineage is invalid")
+
+    release_parameter_set_id = str(
+        getattr(row, "release_parameter_set_id", "") or ""
+    ).strip()
+    active_parameter_set_id = str(
+        getattr(row, "active_parameter_set_id", "") or ""
+    ).strip()
+    started_at = _effectiveness_action_timestamp(
+        evaluation, "rollback_enforcement_started_at"
+    )
+    claimed_finished_at = _effectiveness_action_timestamp(
+        evaluation, "rollback_enforcement_finished_at"
+    )
+    if status == "enforced":
+        target = str(evaluation.get("rollback_to_parameter_set_id") or "").strip()
+        operation_id = str(
+            evaluation.get("rollback_capital_operation_id") or ""
+        ).strip()
+        rollback_fact = _canonical_completed_rollback_fact(
+            row,
+            family=family,
+            timeframe=timeframe,
+        )
+        if not (
+            rollback_fact is not None
+            and rollback_fact["target_parameter_set_id"] == target
+            and rollback_fact["operation_id"] == operation_id
+        ):
+            raise ValueError(
+                "enforced rollback lacks exact canonical capital lineage"
+            )
+        fact_observed_at = rollback_fact["fact_observed_at"]
+        if not (started_at <= fact_observed_at <= claimed_finished_at):
+            raise ValueError("rollback history time is outside the action attempt")
+        return {"fact_observed_at": fact_observed_at}
+
+    proof_kind = evaluation.get("rollback_capital_proof_kind")
+    if proof_kind == "active_parameter_changed":
+        observed = str(
+            evaluation.get("rollback_capital_proof_active_parameter_set_id") or ""
+        ).strip()
+        if not (
+            getattr(row, "release_observation_status", None) != "rolled_back"
+            and active_parameter_set_id
+            and active_parameter_set_id == observed
+            and active_parameter_set_id != release_parameter_set_id
+        ):
+            raise ValueError(
+                "active-change cancellation lacks canonical capital-state proof"
+            )
+        fact_observed_at = _utcnow()
+        if fact_observed_at < started_at:
+            raise ValueError("active-change proof precedes the action attempt")
+        return {"fact_observed_at": fact_observed_at}
+
+    decision_updated_at = parse_dt(getattr(row, "decision_updated_at", None))
+    expected_notes_prefix = (
+        "soft_pause_auto_rollback_no_valid_target: "
+        f"release={release_id} "
+    )
+    if not (
+        proof_kind == "soft_pause"
+        and getattr(row, "decision_status", None) == "pause"
+        and decision_updated_at is not None
+        and decision_updated_at.astimezone(timezone.utc) >= started_at
+        and decision_updated_at.astimezone(timezone.utc) <= claimed_finished_at
+        and str(getattr(row, "decision_notes", "") or "").startswith(
+            expected_notes_prefix
+        )
+    ):
+        raise ValueError("soft-pause cancellation lacks canonical decision proof")
+    return {"fact_observed_at": decision_updated_at.astimezone(timezone.utc)}
+
+
+def _insert_effectiveness_action_proof(
+    session: Session,
+    evaluation: dict[str, Any],
+    *,
+    fact_observed_at: datetime,
+) -> None:
+    """Insert the application-owned proof anchor for one terminal attempt."""
+
+    row = session.execute(
+        text(
+            """
+            INSERT INTO governance.release_effectiveness_action_proofs
+                (release_id, attempt_id, outcome, proof_kind,
+                 started_at_utc, finished_at_utc,
+                 operation_id, target_parameter_set_id,
+                 observed_active_parameter_set_id, decision_status,
+                 fact_observed_at, created_at)
+            VALUES
+                (:release_id, :attempt_id, :outcome, :proof_kind,
+                 :started_at_utc, :finished_at_utc,
+                 :operation_id, :target_parameter_set_id,
+                 :observed_active_parameter_set_id, :decision_status,
+                 :fact_observed_at, :created_at)
+            RETURNING release_id
+            """
+        ),
+        {
+            "release_id": evaluation.get("release_id"),
+            "attempt_id": evaluation.get("rollback_enforcement_attempt_id"),
+            "outcome": evaluation.get("rollback_enforcement_status"),
+            "proof_kind": evaluation.get("rollback_capital_proof_kind"),
+            "started_at_utc": evaluation.get("rollback_enforcement_started_at"),
+            "finished_at_utc": evaluation.get("rollback_enforcement_finished_at"),
+            "operation_id": evaluation.get("rollback_capital_operation_id"),
+            "target_parameter_set_id": evaluation.get(
+                "rollback_to_parameter_set_id"
+            ),
+            "observed_active_parameter_set_id": evaluation.get(
+                "rollback_capital_proof_active_parameter_set_id"
+            ),
+            "decision_status": evaluation.get(
+                "rollback_capital_proof_decision_status"
+            ),
+            "fact_observed_at": fact_observed_at,
+            "created_at": _utcnow(),
+        },
+    ).fetchone()
+    if row is None or getattr(row, "release_id", None) != evaluation.get(
+        "release_id"
+    ):
+        raise ValueError("terminal rollback immutable proof was not persisted")
+
+
+def db_upsert_release_effectiveness(
+    session: Session,
+    evaluation: dict[str, Any],
+) -> dict[str, Any]:
     # M5 归一：该表列里没有 combo_key，但 payload 归一仍有价值——下游读 JSON
     # 时会拿到一致的 timeframe。_normalize_combo_fields 会同时计算 combo_key，
     # 这里只使用 timeframe 部分。
-    timeframe_norm, _combo_key_norm, eval_for_payload = _normalize_combo_fields(evaluation)
-    session.execute(
+    release_id = str(evaluation.get("release_id") or "").strip()
+    if not release_id:
+        raise ValueError("release effectiveness requires release_id")
+    timeframe_norm, _combo_key_norm, eval_for_payload = _normalize_combo_fields(
+        evaluation
+    )
+    eval_for_payload["release_id"] = release_id
+    # This attestation is DB-writer-owned.  Callers (including an offline file
+    # mirror) cannot assert that canonical capital truth was verified.
+    eval_for_payload.pop("rollback_capital_proof_verified", None)
+    eval_for_payload["rollback_enforcement_status"] = (
+        _effectiveness_action_status(eval_for_payload)
+    )
+
+    row = session.execute(
         text(
             """
+            SELECT evaluation_id, release_id, family, timeframe, conclusion,
+                   evaluated_at, payload, updated_at
+            FROM governance.release_effectiveness
+            WHERE release_id = :release_id
+            FOR UPDATE
+            """
+        ),
+        {"release_id": release_id},
+    ).fetchone()
+    current_status = "pending"
+    incoming_status = _effectiveness_action_status(eval_for_payload)
+    if row is None:
+        # Run new rows through the same validator/normalizer as updates.  In
+        # particular, a rollback obligation without combo identity must enter
+        # reconciliation immediately instead of becoming an unscoped pending
+        # action that per-combo veto queries cannot see.
+        merged = _merge_release_effectiveness_state({}, eval_for_payload)
+        statement = """
             INSERT INTO governance.release_effectiveness
                 (evaluation_id, release_id, family, timeframe, conclusion,
                  evaluated_at, payload, updated_at)
             VALUES
                 (:evaluation_id, :release_id, :family, :timeframe, :conclusion,
                  :evaluated_at, CAST(:payload AS jsonb), :updated_at)
-            ON CONFLICT (release_id) DO UPDATE SET
-                evaluation_id = EXCLUDED.evaluation_id,
-                family = EXCLUDED.family,
-                timeframe = EXCLUDED.timeframe,
-                conclusion = EXCLUDED.conclusion,
-                evaluated_at = EXCLUDED.evaluated_at,
-                payload = EXCLUDED.payload,
-                updated_at = EXCLUDED.updated_at
-            """
-        ),
-        {
-            "evaluation_id": evaluation.get("evaluation_id"),
-            "release_id": evaluation.get("release_id"),
-            "family": evaluation.get("family"),
-            "timeframe": timeframe_norm or None,
-            "conclusion": evaluation.get("conclusion", "unknown"),
-            "evaluated_at": parse_dt(evaluation.get("evaluated_at")) or _utcnow(),
-            "payload": json_dumps(eval_for_payload),
-            "updated_at": _utcnow(),
-        },
+        """
+    else:
+        stored = _release_effectiveness_from_row(row)
+        current_status = _effectiveness_action_status(stored)
+        merged = _merge_release_effectiveness_state(
+            stored,
+            eval_for_payload,
+        )
+        statement = """
+            UPDATE governance.release_effectiveness
+            SET evaluation_id = :evaluation_id,
+                family = :family,
+                timeframe = :timeframe,
+                conclusion = :conclusion,
+                evaluated_at = :evaluated_at,
+                payload = CAST(:payload AS jsonb),
+                updated_at = :updated_at
+            WHERE release_id = :release_id
+        """
+
+    if (
+        current_status == "in_progress"
+        and incoming_status in {"enforced", "cancelled"}
+    ):
+        proof = _verify_effectiveness_terminal_capital_truth(session, merged)
+        fact_observed_at = proof["fact_observed_at"].astimezone(timezone.utc)
+        fact_time = fact_observed_at.isoformat()
+        merged["rollback_enforcement_finished_at"] = fact_time
+        if incoming_status == "enforced":
+            merged["rollback_enforced_at"] = fact_time
+        else:
+            merged["rollback_cancelled_at"] = fact_time
+        validate_effectiveness_terminal_proof_shape(
+            merged,
+            status=incoming_status,
+            require_db_verified=False,
+        )
+        _insert_effectiveness_action_proof(
+            session,
+            merged,
+            fact_observed_at=fact_observed_at,
+        )
+        merged["rollback_capital_proof_verified"] = True
+
+    merged_timeframe, _merged_combo_key, merged_payload = _normalize_combo_fields(
+        merged
     )
+    params = {
+        "evaluation_id": merged.get("evaluation_id"),
+        "release_id": release_id,
+        "family": merged.get("family"),
+        "timeframe": merged_timeframe or None,
+        "conclusion": merged.get("conclusion", "unknown"),
+        "evaluated_at": parse_dt(merged.get("evaluated_at")) or _utcnow(),
+        "payload": json_dumps(merged_payload),
+        "updated_at": _utcnow(),
+    }
+    session.execute(text(statement), params)
+    return merged_payload
 
 
 def db_load_effectiveness_registry(session: Session) -> dict[str, Any]:
     rows = session.execute(
         text(
             """
-            SELECT payload, evaluated_at
+            SELECT evaluation_id, release_id, family, timeframe, conclusion,
+                   evaluated_at, payload, updated_at
             FROM governance.release_effectiveness
             ORDER BY evaluated_at ASC
             """
@@ -989,7 +2600,7 @@ def db_load_effectiveness_registry(session: Session) -> dict[str, Any]:
     return {
         "generated_at": _utcnow().isoformat(),
         "evaluations": [
-            _with_payload(row.payload, evaluated_at=row.evaluated_at.isoformat() if row.evaluated_at else None)
+            _release_effectiveness_from_row(row)
             for row in rows
         ],
     }
@@ -999,7 +2610,8 @@ def db_find_release_effectiveness(session: Session, release_id: str) -> dict[str
     row = session.execute(
         text(
             """
-            SELECT payload, evaluated_at
+            SELECT evaluation_id, release_id, family, timeframe, conclusion,
+                   evaluated_at, payload, updated_at
             FROM governance.release_effectiveness
             WHERE release_id = :release_id
             """
@@ -1008,7 +2620,7 @@ def db_find_release_effectiveness(session: Session, release_id: str) -> dict[str
     ).fetchone()
     if row is None:
         return None
-    return _with_payload(row.payload, evaluated_at=row.evaluated_at.isoformat() if row.evaluated_at else None)
+    return _release_effectiveness_from_row(row)
 
 
 def db_upsert_decision_evidence_bundle(session: Session, entry: dict[str, Any]) -> None:

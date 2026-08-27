@@ -19,6 +19,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import json
 import pathlib
 from contextlib import ExitStack
@@ -131,17 +133,54 @@ def _patch_stack(
         "aats.data_platform.decision_system.recommendation_registry.try_governance_db",
         lambda: (None, False),
     ))
+    stack.enter_context(patch(
+        "aats.data_platform.decision_system.recommendation_registry.has_explicit_governance_db_configuration",
+        lambda *_args, **_kwargs: False,
+    ))
     # Step2 integrity gate
     stack.enter_context(patch(
         "aats.api.rdp_routes._step2_integrity_blocking_reason",
         lambda _root: integrity_block,
     ))
-    # Registry 写路径：_db_update_rec_status 默认 True（DB CAS 通过），
-    # 除非测试显式要求 CAS 冲突。
-    db_return_value = False if db_cas_conflict else True
+    # 用内存字典模拟 DB CAS + canonical readback，使 API 测试仍然走真实
+    # 的“提交后重读整份 DB registry 再刷新镜像” helper，而不是用
+    # 请求快照直接写文件。
+    committed_records: dict[str, dict] = {}
+
+    def _update_test_db(rec, **_kwargs):
+        if db_cas_conflict:
+            return False
+        committed_records[str(rec["recommendation_id"])] = dict(rec)
+        return True
+
     stack.enter_context(patch(
         "aats.data_platform.decision_system.recommendation_registry._db_update_rec_status",
-        lambda *_a, **_kw: db_return_value,
+        _update_test_db,
+    ))
+
+    def _readback_test_db(path):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        for item in payload.get("recommendations", []):
+            committed = committed_records.get(str(item.get("recommendation_id")))
+            if committed is not None:
+                item.clear()
+                item.update(committed)
+        return payload
+
+    stack.enter_context(patch(
+        "aats.data_platform.decision_system.recommendation_registry."
+        "_load_canonical_recommendation_registry_for_audit_mirror",
+        _readback_test_db,
+    ))
+    # These route-shape tests isolate approve/release orchestration. Exact-round
+    # qualification behavior has dedicated control-plane tests.
+    stack.enter_context(patch(
+        "aats.data_platform.decision_system.promotion_guard.require_promotion_qualification",
+        lambda *_a, **_kw: None,
+    ))
+    stack.enter_context(patch(
+        "aats.data_platform.decision_system.promotion_guard.issue_promotion_authorization",
+        lambda *_a, **_kw: object(),
     ))
     if release_result is not None:
         stack.enter_context(patch(
@@ -311,6 +350,12 @@ def test_approve_and_release_gate_blocks_keeps_approval(
 
     fake_release = {
         "ok": False,
+        "code": "synthetic_structured_block",
+        "promotion_qualification": {
+            "required": True,
+            "eligible": False,
+            "reason_code": "synthetic_block",
+        },
         "release": {
             "release_id": "rel_gate_block_1",
             "apply_result": "blocked_by_gate",
@@ -333,6 +378,8 @@ def test_approve_and_release_gate_blocks_keeps_approval(
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is False
+    assert payload["code"] == "synthetic_structured_block"
+    assert payload["promotion_qualification"]["reason_code"] == "synthetic_block"
     assert payload["release"]["apply_result"] == "blocked_by_gate"
     assert payload["gate_result"]["allow_apply"] is False
 
@@ -551,7 +598,90 @@ def test_approve_and_release_binds_actor_to_session_when_auth_enabled(
     assert persisted["recommendations"][0]["approved_by"] == "alice"
 
 
-# ── 12. Integrity block 发生在 approve 之前（顺序保证）────────────────────
+# ── 12. 资格 TOCTOU 发生在首写之前 ──────────────────────────────────────
+
+
+def test_approve_and_release_second_prewrite_qualification_failure_is_zero_write(
+    tmp_path: pathlib.Path,
+) -> None:
+    """授权校验通过后，审批 helper 的最后预写校验失败仍必须保持零写。"""
+    from aats.data_platform.decision_system.promotion_qualification import (
+        PromotionQualificationVerdict,
+    )
+
+    app = _build_app()
+    round_id = "20260827_120000_deadbeef"
+    rec = {
+        **_draft_rec("rec_qualification_toctou"),
+        "source_round_id": "research_round_1",
+        "evidence_bundle_ref": round_id,
+    }
+    _write_rec_registry(tmp_path, [rec])
+    eligible = PromotionQualificationVerdict(
+        required=True,
+        eligible=True,
+        reason_code="qualified",
+        evidence_bundle_ref=round_id,
+        source_round_id="research_round_1",
+        qualified_round_id=round_id,
+        detail="qualified before write",
+        qualified_finished_at=datetime.now(timezone.utc).isoformat(),
+    )
+    blocked = PromotionQualificationVerdict(
+        required=True,
+        eligible=False,
+        reason_code="promotion_policy_unsupported",
+        evidence_bundle_ref=round_id,
+        source_round_id="research_round_1",
+        qualified_round_id=None,
+        detail="evidence changed before approval",
+    )
+    db_update = MagicMock(return_value=True)
+    create_release = MagicMock()
+
+    with (
+        patch("aats.api.rdp_routes._project_root", return_value=tmp_path),
+        patch("aats.api.rdp_routes._step2_integrity_blocking_reason", return_value=None),
+        patch(
+            "aats.data_platform.decision_system.recommendation_registry.try_governance_db",
+            return_value=(None, False),
+        ),
+        patch(
+            "aats.data_platform.decision_system.recommendation_registry.has_explicit_governance_db_configuration",
+            return_value=False,
+        ),
+        patch(
+            "aats.data_platform.decision_system.recommendation_registry._db_update_rec_status",
+            db_update,
+        ),
+        patch(
+            "aats.data_platform.decision_system.promotion_qualification.evaluate_promotion_qualification",
+            side_effect=[eligible, blocked],
+        ),
+        patch(
+            "aats.data_platform.production_workflow.release_registry.create_parameter_release",
+            create_release,
+        ),
+    ):
+        response = TestClient(app, headers=_apply_headers()).post(
+            "/rdp/recommendations/rec_qualification_toctou/approve-and-release",
+            json={"actor": "operator"},
+        )
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "promotion_qualification_blocked"
+    assert detail["promotion_qualification"]["reason_code"] == (
+        "promotion_policy_unsupported"
+    )
+    assert _read_rec_registry(tmp_path)["recommendations"][0]["status"] == "draft"
+    db_update.assert_not_called()
+    create_release.assert_not_called()
+    assert not (tmp_path / "artifacts/production_workflow").exists()
+    assert not (tmp_path / "artifacts/active_parameters").exists()
+
+
+# ── 13. Integrity block 发生在 approve 之前（顺序保证）────────────────────
 
 
 def test_approve_and_release_integrity_check_runs_before_approve(
@@ -586,3 +716,174 @@ def test_approve_and_release_integrity_check_runs_before_approve(
     assert response.json()["integrity_blocked"] is True
     # DB 写路径（approve 内部的 CAS UPDATE）不应被触发
     assert db_update_spy.call_count == 0
+
+
+# ── 14. DB canonical transition 与 JSON 审计镜像隔离 ────────────────
+
+
+@pytest.mark.parametrize(
+    ("action", "expected_status"),
+    [
+        ("approve", "approved"),
+        ("reject", "rejected"),
+        ("supersede", "superseded"),
+    ],
+)
+def test_recommendation_transition_keeps_db_success_when_json_mirror_io_fails(
+    tmp_path: pathlib.Path,
+    action: str,
+    expected_status: str,
+) -> None:
+    """DB CAS 已提交后，审计 JSON I/O 失败只降级，不得返回 500。"""
+    app = _build_app()
+    rec_id = f"rec_mirror_io_{action}"
+    _write_rec_registry(tmp_path, [_draft_rec(rec_id)])
+    db_update = MagicMock(return_value=True)
+
+    canonical_rec = _draft_rec(rec_id)
+    canonical_rec["status"] = expected_status
+    canonical_registry = {
+        "version": 1,
+        "recommendations": [canonical_rec],
+    }
+
+    with (
+        _patch_stack(tmp_path),
+        patch(
+            "aats.data_platform.decision_system.recommendation_registry."
+            "_db_update_rec_status",
+            db_update,
+        ),
+        patch(
+            "aats.data_platform.decision_system.recommendation_registry."
+            "_load_canonical_recommendation_registry_for_audit_mirror",
+            return_value=canonical_registry,
+        ),
+        patch(
+            "aats.data_platform.governance._atomic_io.atomic_json_write",
+            side_effect=OSError("synthetic mirror write failure"),
+        ),
+    ):
+        response = TestClient(app).post(
+            f"/rdp/recommendations/{rec_id}/{action}",
+            json={"actor": "operator", "notes": "mirror fault injection"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["recommendation"]["status"] == expected_status
+    assert payload["recommendation_mirror_refreshed"] is False
+    assert payload["recommendation_mirror_status"] == "degraded"
+    assert payload["degraded"] is True
+    assert payload["recommendation_mirror_degradation_reason"] == (
+        "recommendation_audit_mirror_refresh_failed"
+    )
+    db_update.assert_called_once()
+
+    # 故障注入下文件仍是旧 draft；这反而证明 HTTP 成功来自已提交
+    # 的 DB canonical transition，而不是测试意外把 JSON 当了真源。
+    assert _read_rec_registry(tmp_path)["recommendations"][0]["status"] == "draft"
+
+
+def test_approve_and_release_continues_after_json_mirror_cas_conflict(
+    tmp_path: pathlib.Path,
+) -> None:
+    """approve DB 提交后发生镜像 CAS 竞态，仍必须继续创建 release。"""
+    app = _build_app()
+    rec_id = "rec_mirror_cas_composite"
+    _write_rec_registry(tmp_path, [_draft_rec(rec_id)])
+
+    def _commit_then_advance_disk_version(*_args, **_kwargs) -> bool:
+        on_disk = _read_rec_registry(tmp_path)
+        on_disk["version"] = int(on_disk["version"]) + 1
+        path = (
+            tmp_path
+            / "artifacts"
+            / "decision_system"
+            / "recommendation_registry.json"
+        )
+        path.write_text(json.dumps(on_disk), encoding="utf-8")
+        return True
+
+    create_release = MagicMock(return_value={
+        "ok": True,
+        "release": {"release_id": "rel_after_mirror_cas", "apply_result": "success"},
+        "gate_result": {"allow_apply": True},
+        "apply_result": {"ok": True},
+        "message": "release created from canonical DB recommendation",
+    })
+    canonical_rec = _draft_rec(rec_id)
+    canonical_rec["status"] = "approved"
+    canonical_registry = {
+        # DB readback 发生在另一 mirror writer 抢先推进磁盘之前，
+        # 因此这份快照仍绑定 base v1；落盘时必须命中 CAS 冲突。
+        "version": 1,
+        "recommendations": [canonical_rec],
+    }
+
+    with (
+        _patch_stack(tmp_path),
+        patch(
+            "aats.data_platform.decision_system.recommendation_registry."
+            "_db_update_rec_status",
+            side_effect=_commit_then_advance_disk_version,
+        ),
+        patch(
+            "aats.data_platform.decision_system.recommendation_registry."
+            "_load_canonical_recommendation_registry_for_audit_mirror",
+            return_value=canonical_registry,
+        ),
+        patch(
+            "aats.data_platform.production_workflow.release_registry."
+            "create_parameter_release",
+            create_release,
+        ),
+    ):
+        response = TestClient(app, headers=_apply_headers()).post(
+            f"/rdp/recommendations/{rec_id}/approve-and-release",
+            json={"actor": "operator"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["recommendation"]["status"] == "approved"
+    assert payload["release"]["release_id"] == "rel_after_mirror_cas"
+    assert payload["recommendation_mirror_refreshed"] is False
+    assert payload["recommendation_mirror_status"] == "degraded"
+    create_release.assert_called_once()
+
+
+def test_canonical_db_transition_failure_is_not_swallowed_as_mirror_degradation(
+    tmp_path: pathlib.Path,
+) -> None:
+    """DB 未提交时必须失败关闭，不能借“镜像降级”吞掉真源错误。"""
+    from aats.data_platform.governance._exceptions import DBUnavailableError
+
+    app = _build_app()
+    rec_id = "rec_db_commit_failed"
+    _write_rec_registry(tmp_path, [_draft_rec(rec_id)])
+    mirror_refresh = MagicMock(return_value=False)
+
+    with (
+        _patch_stack(tmp_path),
+        patch(
+            "aats.data_platform.decision_system.recommendation_registry."
+            "_db_update_rec_status",
+            side_effect=DBUnavailableError("synthetic canonical DB failure"),
+        ),
+        patch(
+            "aats.data_platform.decision_system.recommendation_registry."
+            "refresh_recommendation_audit_mirror_after_db_commit",
+            mirror_refresh,
+        ),
+        pytest.raises(DBUnavailableError, match="synthetic canonical DB failure"),
+    ):
+        TestClient(app).post(
+            f"/rdp/recommendations/{rec_id}/reject",
+            json={"actor": "operator"},
+        )
+
+    mirror_refresh.assert_not_called()
+    assert _read_rec_registry(tmp_path)["recommendations"][0]["status"] == "draft"

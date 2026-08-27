@@ -24,7 +24,19 @@ function Get-RepoRoot {
 
 function Get-PreferredBashPath {
     $cmd = Get-Command bash -ErrorAction SilentlyContinue
-    if ($cmd -and $cmd.Source -and $cmd.Source -notlike '*WindowsApps\bash.exe') {
+    $rejectedLaunchers = @(
+        '*\WindowsApps\bash.exe',
+        '*\Windows\System32\bash.exe',
+        '*\Windows\Sysnative\bash.exe',
+        '*\Windows\SysWOW64\bash.exe'
+    )
+    $commandIsUsable = $cmd -and $cmd.Source
+    foreach ($pattern in $rejectedLaunchers) {
+        if ($commandIsUsable -and $cmd.Source -like $pattern) {
+            $commandIsUsable = $false
+        }
+    }
+    if ($commandIsUsable) {
         return $cmd.Source
     }
 

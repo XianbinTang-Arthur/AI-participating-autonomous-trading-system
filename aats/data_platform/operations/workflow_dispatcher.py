@@ -27,7 +27,11 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
-from aats.data_platform.governance._db_util import try_governance_db
+from aats.data_platform.governance._db_util import (
+    has_explicit_governance_db_configuration,
+    try_governance_db,
+)
+from aats.data_platform.governance._exceptions import DBUnavailableError
 
 log = logging.getLogger(__name__)
 
@@ -406,15 +410,26 @@ def run_workflow(
     """
     config = load_workflow_config(project_root, workflow_name)
     tasks = config.get("tasks", [])
-    run_id = _make_run_id()
     from aats.data_platform.operations.rdp_run_observer import RdpRunObserver
 
     observer = RdpRunObserver.from_environment()
+    queue_identity_present = bool(
+        str(os.environ.get("AATS_RDP_RUN_ID") or "").strip()
+        or str(os.environ.get("AATS_RDP_ATTEMPT_NO") or "").strip()
+    )
+    if queue_identity_present and observer is None:
+        raise ValueError(
+            "AATS_RDP_RUN_ID and AATS_RDP_ATTEMPT_NO must form a valid queue identity"
+        )
+    run_id = observer.run_id if observer is not None else _make_run_id()
+    attempt_no = observer.attempt_no if observer is not None else 1
     if observer is not None:
         observer.initialize(tasks)
 
     report: dict[str, Any] = {
         "run_id": run_id,
+        "attempt_no": attempt_no,
+        "queue_bound": observer is not None,
         "workflow": workflow_name,
         "description": config.get("description", ""),
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -527,19 +542,25 @@ def run_workflow(
             "failure_class": first_issue.get("failure_class"),
         }
 
-    # 保存执行报告
-    _save_run_report(project_root, report)
+    # dry-run 只用于预览。即便任务逐项都返回 dry_run，也不能生成一份可被
+    # Gate 当成最新成功证据的文件或 DB 报告。
+    report["dry_run"] = dry_run
+    if dry_run:
+        report["persistence_status"] = "skipped_dry_run"
+    else:
+        _save_run_report(project_root, report)
 
     return report
 
 
 def _save_run_report(project_root: Path, report: dict[str, Any]) -> Path:
     """保存 workflow 执行报告."""
+    from aats.data_platform.governance._atomic_io import atomic_json_write
+
     log_dir = project_root / "artifacts/operations/workflow_runs"
     log_dir.mkdir(parents=True, exist_ok=True)
     path = log_dir / f"{report['run_id']}.json"
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2, default=str)
+    managed_truth = has_explicit_governance_db_configuration(project_root)
     engine, ok = try_governance_db()
     if ok:
         try:
@@ -550,8 +571,27 @@ def _save_run_report(project_root: Path, report: dict[str, Any]) -> Path:
             with Session(engine) as session, session.begin():
                 db_upsert_workflow_run_report(session, report)
         except Exception as exc:
-            log.warning("workflow run report DB 同步失败: %s", exc)
+            if managed_truth:
+                log.error(
+                    "managed workflow run report DB 同步失败 (%s)",
+                    type(exc).__name__,
+                )
+                raise DBUnavailableError(
+                    "managed workflow run report persistence failed"
+                ) from exc
+            log.warning(
+                "workflow run report DB 同步失败，保留离线文件模式 (%s)",
+                type(exc).__name__,
+            )
         finally:
             if engine is not None:
                 engine.dispose()
+    elif managed_truth:
+        raise DBUnavailableError(
+            "managed workflow run report persistence unavailable"
+        )
+    # Managed mode writes its audit copy only after the DB transaction commits;
+    # otherwise a failed truth-store write could leave a ghost "successful"
+    # report on disk.  Offline mode still receives the same file artifact.
+    atomic_json_write(report, path)
     return path

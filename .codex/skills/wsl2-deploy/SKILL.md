@@ -18,7 +18,7 @@ Run the repository's WSL2 deployment flow safely and predictably.
 - `scripts/deploy.sh` still accepts the legacy fallback `deploy/wsl2-dev/.env.wsl2`, but do not create new setups that way
 - Profile env files live in the repo root; current deployment uses only the selected simulation profile file
 - `scripts/deploy.sh` has no default profile and rejects every live profile before external side effects; there is no override
-- Each standard simulation deploy generates one non-secret runtime readiness generation after sync; the four split main processes, Compose interpolation, Redis ready keys, and evidence packet must agree on it
+- Each standard simulation deploy generates one non-secret runtime readiness generation after sync; every required app process for the selected profile, Compose interpolation, Redis ready keys, and evidence packet must agree on it
 - WSL2 native checkout is expected at `~/aats` unless `AATS_WSL2_PROJECT` overrides it
 - For one-click PowerShell deploys, prefer the bundled wrapper:
   - [scripts/run-deploy.ps1](D:/文件/project/AIParticipatingAutonomousTradingSystem/.codex/skills/wsl2-deploy/scripts/run-deploy.ps1)
@@ -46,8 +46,10 @@ Run the repository's WSL2 deployment flow safely and predictably.
 - Do not manually invent a persistent readiness generation. Read-only Compose inspection must use the generation recorded by the current deployment evidence packet; a static config-only check may use an explicit disposable value.
 
 # Required container sets by profile
-- `spot`, `derivatives`
+- `spot`
   - `aats-gateway aats-market aats-decision aats-execution aats-rdp-daemon`
+- `derivatives`
+  - `aats-gateway aats-market aats-decision aats-execution aats-rdp-daemon aats-liquidations-daemon aats-microstructure-collector`
 - Future `derivatives-live` contract, currently unreachable
   - `aats-gateway aats-market aats-decision aats-execution aats-rdp-daemon aats-liquidations-daemon aats-microstructure-collector`
 - Future `derivatives-live-monolith` contract, currently unreachable
@@ -93,7 +95,7 @@ Using the bundled one-click wrapper:
 
 # When debugging failures
 - If sync did not pick up expected code, inspect Windows `git status`, Windows `git rev-parse HEAD`, and WSL2 `git log -1`.
-- If deploy passes gateway but workers fail, inspect per-container health and logs for `aats-market`, `aats-decision`, `aats-execution`, and `aats-rdp-daemon`.
+- If deploy passes gateway but workers fail, inspect per-container health and logs for every required container; for `derivatives` this includes `aats-liquidations-daemon` and `aats-microstructure-collector` in addition to the core processes.
 - If env lookup fails, verify:
   - `~/aats/.env.wsl2`
   - `~/aats/.env.<profile>`

@@ -58,44 +58,98 @@ def run_release_observation_cycle(
             )
             continue
 
-        observation_result = run_observation(
-            project_root,
-            release_id=release_id,
-            family=family,
-            timeframe=timeframe,
-            window_hours=int(release.get("observation_window_hours", 24) or 24),
-            save_result=save_results,
-        )
-        rollback_result = evaluate_rollback_recommendation(
-            project_root,
-            release_id=release_id,
-            family=family,
-            timeframe=timeframe,
-            save_result=save_results,
-        )
-        effectiveness_result = evaluate_release_effectiveness(
-            project_root,
-            release_id,
-            save_result=save_results,
-        )
+        observation_result: dict[str, Any] | None = None
+        rollback_result: dict[str, Any] | None = None
+        effectiveness_result: dict[str, Any] | None = None
+        stage_errors: list[dict[str, str]] = []
 
-        if rollback_result.get("rollback_recommended"):
+        try:
+            observation_result = run_observation(
+                project_root,
+                release_id=release_id,
+                family=family,
+                timeframe=timeframe,
+                window_hours=int(
+                    release.get("observation_window_hours", 24) or 24
+                ),
+                save_result=save_results,
+            )
+        except Exception as exc:
+            stage_errors.append({
+                "stage": "observation",
+                "error": "observation_stage_failed",
+                "error_type": type(exc).__name__,
+            })
+
+        try:
+            rollback_result = evaluate_rollback_recommendation(
+                project_root,
+                release_id=release_id,
+                family=family,
+                timeframe=timeframe,
+                save_result=save_results,
+            )
+        except Exception as exc:
+            stage_errors.append({
+                "stage": "rollback_recommendation",
+                "error": "rollback_recommendation_stage_failed",
+                "error_type": type(exc).__name__,
+            })
+
+        # Effectiveness must still run after either producer fails.  It reloads
+        # already-committed canonical evidence, so a valid observation risk is
+        # not lost merely because the sibling rollback evaluator crashed.
+        try:
+            effectiveness_result = evaluate_release_effectiveness(
+                project_root,
+                release_id,
+                save_result=save_results,
+            )
+        except Exception as exc:
+            stage_errors.append({
+                "stage": "effectiveness",
+                "error": "effectiveness_stage_failed",
+                "error_type": type(exc).__name__,
+            })
+
+        if (
+            isinstance(rollback_result, dict)
+            and rollback_result.get("rollback_recommended") is True
+        ):
             summary["rollback_recommended_count"] += 1
 
         summary["processed_count"] += 1
-        summary["results"].append(
-            {
-                "release_id": release_id,
-                "family": family,
-                "timeframe": timeframe,
-                "observation": observation_result,
-                "rollback_recommendation": rollback_result,
-                "effectiveness": effectiveness_result,
-                "ok": "error" not in effectiveness_result,
-            }
+        result_entry: dict[str, Any] = {
+            "release_id": release_id,
+            "family": family,
+            "timeframe": timeframe,
+            "observation": observation_result,
+            "rollback_recommendation": rollback_result,
+            "effectiveness": effectiveness_result,
+            "stage_errors": stage_errors,
+        }
+        result_entry["ok"] = bool(
+            not stage_errors
+            and isinstance(effectiveness_result, dict)
+            and effectiveness_result.get("ok", True) is not False
+            and "error" not in effectiveness_result
         )
+        if stage_errors:
+            result_entry["error"] = "release_observation_stage_failed"
+            summary["ok"] = False
+        summary["results"].append(result_entry)
 
-    auto_rollbacks = enforce_pending_rollbacks(project_root) if save_results else []
+    try:
+        auto_rollbacks = (
+            enforce_pending_rollbacks(project_root) if save_results else []
+        )
+    except Exception as exc:
+        summary["ok"] = False
+        summary["auto_rollback_error"] = {
+            "error": "rollback_enforcement_cycle_failed",
+            "error_type": type(exc).__name__,
+        }
+        auto_rollbacks = []
     summary["auto_rollbacks"] = auto_rollbacks
     summary["auto_rollback_count"] = sum(1 for item in auto_rollbacks if item.get("ok"))
     if any(not item.get("ok", False) for item in auto_rollbacks):

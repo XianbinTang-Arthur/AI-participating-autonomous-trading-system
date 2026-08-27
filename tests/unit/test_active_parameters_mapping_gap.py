@@ -12,14 +12,18 @@ from __future__ import annotations
 
 import logging
 import unittest
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from aats.bootstrap.active_parameters import (
+    ActiveParameterSafetyError,
     _RDP_CORE_RESEARCH_PARAMS,
     _RDP_CORE_RESEARCH_PARAMS_BY_FAMILY,
     _RDP_REPLAY_ONLY_PARAMS,
     PARAMETER_MAPPING_DIRECTIONAL,
     PARAMETER_MAPPING_INDEPENDENT,
+    _try_load_from_db,
     build_settings_overrides,
 )
 
@@ -456,6 +460,48 @@ class TestTimeframeFilterRegression(unittest.TestCase):
             f"{target_field} 应为 1h 的 0.99",
         )
 
+    def test_conflicting_enabled_timeframes_fail_closed(self) -> None:
+        """Flat runtime settings must not silently choose one timeframe."""
+
+        db_result = _make_db_result({
+            "independent_15m": {"entry_threshold": 0.25},
+            "independent_1h": {"entry_threshold": 0.99},
+        })
+
+        with patch(
+            "aats.bootstrap.active_parameters._try_load_from_db",
+            return_value=db_result,
+        ):
+            with self.assertRaisesRegex(
+                ActiveParameterSafetyError,
+                "settings collision",
+            ):
+                build_settings_overrides(db_url="mock://db")
+
+    def test_equal_values_across_timeframes_preserve_both_lineages(self) -> None:
+        """Identical flat values are deterministic and may share the field."""
+
+        db_result = _make_db_result({
+            "independent_15m": {"entry_threshold": 0.25},
+            "independent_1h": {"entry_threshold": 0.25},
+        })
+
+        with patch(
+            "aats.bootstrap.active_parameters._try_load_from_db",
+            return_value=db_result,
+        ):
+            overrides = build_settings_overrides(db_url="mock://db")
+
+        target_field = PARAMETER_MAPPING_INDEPENDENT["entry_threshold"]
+        self.assertEqual(overrides[target_field], 0.25)
+        self.assertEqual(
+            overrides["active_parameter_set_ids"],
+            {
+                "independent_15m": "test_independent_15m",
+                "independent_1h": "test_independent_1h",
+            },
+        )
+
 
 class TestDbOnlyRegression(unittest.TestCase):
     """DB-only 模式回归测试。
@@ -484,14 +530,84 @@ class TestDbOnlyRegression(unittest.TestCase):
         self.assertEqual(overrides[target_field], 0.30)
 
     def test_db_unavailable_returns_empty(self) -> None:
-        """DB 不可用时应返回空 overrides（fail-soft）。"""
-        with patch(
-            "aats.bootstrap.active_parameters._try_load_from_db",
-            return_value=None,
+        """纯离线开发且未配置 managed DB 时可保留默认配置。"""
+        with (
+            patch(
+                "aats.bootstrap.active_parameters._try_load_from_db",
+                return_value=None,
+            ),
+            patch(
+                "aats.bootstrap.active_parameters."
+                "has_explicit_governance_db_configuration",
+                return_value=False,
+            ),
         ):
             overrides = build_settings_overrides()
 
         self.assertEqual(overrides, {})
+
+    def test_active_decision_query_failure_discards_active_sets(self) -> None:
+        """局部 decision 查询失败不得把 pause 误解释成未暂停。"""
+
+        class _Rows:
+            def __init__(self, rows: list[object]) -> None:
+                self._rows = rows
+
+            def fetchall(self) -> list[object]:
+                return self._rows
+
+        class _Connection:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def __enter__(self) -> "_Connection":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def begin(self) -> "_Connection":
+                return self
+
+            def execute(self, statement: object) -> _Rows:
+                self.calls += 1
+                sql = str(statement)
+                if sql.startswith("SET TRANSACTION"):
+                    return _Rows([])
+                if "FROM governance.active_parameter_sets AS a" in sql:
+                    row = type(
+                        "ActiveRow",
+                        (),
+                        {
+                            "family": "independent",
+                            "timeframe": "15m",
+                            "parameter_set_id": "ps_must_not_load",
+                            "param_values": {"entry_threshold": 0.99},
+                            "source_round_id": "round_1",
+                            "approval_recommendation_id": "rec_1",
+                            "applied_by": "operator",
+                            "applied_at": None,
+                        },
+                    )()
+                    return _Rows([row])
+                if "FROM governance.active_decisions" in sql:
+                    raise RuntimeError("active_decisions SELECT denied")
+                return _Rows([])
+
+        class _Engine:
+            def __init__(self) -> None:
+                self.connection = _Connection()
+
+            def connect(self) -> _Connection:
+                return self.connection
+
+            def dispose(self) -> None:
+                return None
+
+        with patch("sqlalchemy.create_engine", return_value=_Engine()):
+            registry = _try_load_from_db("postgresql://managed.invalid/aats")
+
+        self.assertIsNone(registry)
 
     def test_try_load_called_only_once(self) -> None:
         """_try_load_from_db 应只被调用 1 次，不再有文件 fallback 再次调用。"""
@@ -566,6 +682,471 @@ class TestActiveParameterNoneHandling(unittest.TestCase):
         }
 
         _validate_safe_edge_invariant(settings)
+
+
+def _complete_managed_independent_values() -> dict[str, float | int]:
+    values: dict[str, float | int] = {
+        key: 1.0
+        for key in _RDP_CORE_RESEARCH_PARAMS_BY_FAMILY["independent"]
+    }
+    values["min_confirm_ticks"] = 2
+    values["max_thesis_age_seconds"] = 1800
+    return values
+
+
+class TestManagedActiveParameterFailClosed(unittest.TestCase):
+    def _managed_registry(
+        self,
+        *,
+        combo: str = "independent_15m",
+        values: object | None = None,
+    ) -> dict:
+        family, timeframe = combo.rsplit("_", 1)
+        return {
+            "generated_at": None,
+            "governance_managed": True,
+            "active_sets": {
+                combo: {
+                    "parameter_set_id": "ps_managed",
+                    "family": family,
+                    "timeframe": timeframe,
+                    "values": (
+                        _complete_managed_independent_values()
+                        if values is None
+                        else values
+                    ),
+                }
+            },
+        }
+
+    def test_managed_missing_production_value_stops_startup(self) -> None:
+        values = _complete_managed_independent_values()
+        values.pop("entry_threshold")
+        with patch(
+            "aats.bootstrap.active_parameters._try_load_from_db",
+            return_value=self._managed_registry(values=values),
+        ):
+            with self.assertRaisesRegex(
+                ActiveParameterSafetyError, "contract incomplete"
+            ):
+                build_settings_overrides(db_url="mock://db")
+
+    def test_managed_null_production_value_stops_startup(self) -> None:
+        values = _complete_managed_independent_values()
+        values["entry_threshold"] = None
+        with patch(
+            "aats.bootstrap.active_parameters._try_load_from_db",
+            return_value=self._managed_registry(values=values),
+        ):
+            with self.assertRaisesRegex(ActiveParameterSafetyError, "null"):
+                build_settings_overrides(db_url="mock://db")
+
+    def test_managed_unknown_family_stops_startup(self) -> None:
+        with patch(
+            "aats.bootstrap.active_parameters._try_load_from_db",
+            return_value=self._managed_registry(
+                combo="future_family_15m", values={"future": 1.0}
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ActiveParameterSafetyError, "no production contract"
+            ):
+                build_settings_overrides(db_url="mock://db")
+
+    def test_managed_invalid_numeric_value_stops_startup(self) -> None:
+        values = _complete_managed_independent_values()
+        values["entry_threshold"] = "not-a-number"
+        with patch(
+            "aats.bootstrap.active_parameters._try_load_from_db",
+            return_value=self._managed_registry(values=values),
+        ):
+            with self.assertRaisesRegex(
+                ActiveParameterSafetyError, "strict settings validation"
+            ):
+                build_settings_overrides(db_url="mock://db")
+
+    def test_rdp_database_url_outage_is_managed_failure(self) -> None:
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "AATS_ACTIVE_PARAMETER_DB_URL": "",
+                    "RDP_DATABASE_URL": "postgresql://managed.invalid/aats",
+                },
+                clear=False,
+            ),
+            patch(
+                "aats.bootstrap.active_parameters._try_load_from_db",
+                return_value=None,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ActiveParameterSafetyError, "DB truth unavailable"
+            ):
+                build_settings_overrides()
+
+    def test_step3_materializes_complete_independent_production_contract(self) -> None:
+        import scripts.rdp_run_step3_research as step3
+
+        merged = step3._merge_recommendations(
+            {
+                "candidates": {
+                    "independent_15m": {
+                        "entry_threshold": 0.30,
+                        "close_threshold": 0.15,
+                    }
+                }
+            },
+            {},
+        )["independent_15m"]
+        emitted = {
+            name: record["value"]
+            for name, record in merged.items()
+            if isinstance(record, dict) and record.get("value") is not None
+        }
+        production_contract = set(PARAMETER_MAPPING_INDEPENDENT).difference(
+            _RDP_REPLAY_ONLY_PARAMS
+        )
+        self.assertEqual(production_contract.difference(emitted), set())
+        self.assertEqual(emitted["short_entry_threshold"], 0.30)
+        self.assertEqual(emitted["short_close_threshold"], 0.15)
+        self.assertEqual(emitted["min_score_drawdown_bps"], 6.0)
+
+
+class _DbRows:
+    def __init__(self, rows: list[object]) -> None:
+        self._rows = rows
+
+    def fetchall(self) -> list[object]:
+        return self._rows
+
+
+class _SnapshotConnection:
+    def __init__(
+        self,
+        *,
+        active_rows: list[object],
+        decision_rows: list[object],
+        known_bad_rows: list[object] | None = None,
+    ) -> None:
+        self.active_rows = active_rows
+        self.decision_rows = decision_rows
+        self.known_bad_rows = known_bad_rows or []
+        self.statements: list[str] = []
+        self.begin_count = 0
+
+    def __enter__(self) -> "_SnapshotConnection":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def begin(self) -> "_SnapshotConnection":
+        self.begin_count += 1
+        return self
+
+    def execute(self, statement: object) -> _DbRows:
+        sql = str(statement)
+        self.statements.append(sql)
+        if sql.startswith("SET TRANSACTION"):
+            return _DbRows([])
+        if "FROM governance.active_parameter_sets AS a" in sql:
+            return _DbRows(self.active_rows)
+        if "FROM governance.active_decisions" in sql:
+            return _DbRows(self.decision_rows)
+        if "FROM governance.release_effectiveness AS e" in sql:
+            return _DbRows(self.known_bad_rows)
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
+class _SnapshotEngine:
+    def __init__(self, connection: _SnapshotConnection) -> None:
+        self.connection = connection
+        self.disposed = False
+
+    def connect(self) -> _SnapshotConnection:
+        return self.connection
+
+    def dispose(self) -> None:
+        self.disposed = True
+
+
+def _canonical_active_row(**overrides: object) -> SimpleNamespace:
+    values = {"entry_threshold": 0.25}
+    now = datetime.now(timezone.utc)
+    fields: dict[str, object] = {
+        "family": "independent",
+        "timeframe": "15m",
+        "parameter_set_id": "ps_1",
+        "param_values": values,
+        "source_round_id": "parameter_round_1",
+        "approval_recommendation_id": "rec_1",
+        "applied_by": "operator",
+        "applied_at": now,
+        "canonical_parameter_set_id": "ps_1",
+        "parameter_set_family": "independent",
+        "parameter_set_symbol": "BTC-USDT-SWAP",
+        "parameter_set_timeframe": "15m",
+        "canonical_param_values": values,
+        "parameter_set_status": "released",
+        "parameter_set_source_round_id": "parameter_round_1",
+        "canonical_recommendation_id": "rec_1",
+        "recommendation_family": "independent",
+        "recommendation_symbol": "BTC-USDT-SWAP",
+        "recommendation_timeframe": "15m",
+        "target_parameter_set_id": "ps_1",
+        "recommendation_source_round_id": "decision_round_9",
+        "recommendation_type": "parameter_upgrade",
+        "recommendation_status": "approved",
+        "evidence_bundle_ref": "bundle_1",
+        "approved_by": "reviewer",
+        "approved_at": now,
+        "canonical_release_id": "rel_1",
+        "release_count": 1,
+        "apply_operation_id": "op_1",
+        "release_applied_at": (now - timedelta(seconds=30)).isoformat(),
+        "release_created_at": now - timedelta(minutes=1),
+        "lineage_count": 1,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+class TestActiveParameterSnapshotLineage(unittest.TestCase):
+    def _load(
+        self,
+        *,
+        active_rows: list[object] | None = None,
+        decision_rows: list[object] | None = None,
+        known_bad_rows: list[object] | None = None,
+    ) -> tuple[dict | None, _SnapshotConnection, _SnapshotEngine]:
+        connection = _SnapshotConnection(
+            active_rows=(
+                [_canonical_active_row()] if active_rows is None else active_rows
+            ),
+            decision_rows=(
+                [
+                SimpleNamespace(
+                    family="independent",
+                    timeframe="15m",
+                    combo_key="independent_15m",
+                    current_status="keep_active",
+                )
+                ]
+                if decision_rows is None
+                else decision_rows
+            ),
+            known_bad_rows=known_bad_rows,
+        )
+        engine = _SnapshotEngine(connection)
+        with patch("sqlalchemy.create_engine", return_value=engine):
+            registry = _try_load_from_db("postgresql://managed.invalid/aats")
+        return registry, connection, engine
+
+    def test_uses_one_read_only_repeatable_read_snapshot(self) -> None:
+        registry, connection, engine = self._load()
+        self.assertIsNotNone(registry)
+        self.assertEqual(connection.begin_count, 1)
+        self.assertEqual(
+            connection.statements[0],
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+        )
+        self.assertTrue(engine.disposed)
+        self.assertIn("independent_15m", registry["active_sets"])
+
+    def test_missing_approval_lineage_is_quarantined(self) -> None:
+        registry, _, _ = self._load(
+            active_rows=[_canonical_active_row(approval_recommendation_id=None)]
+        )
+        self.assertEqual(registry["active_sets"], {})
+        self.assertEqual(
+            registry["quarantined_combos"]["independent_15m"],
+            "active_parameter_lineage_invalid",
+        )
+
+    def test_lineage_negative_matrix_is_fail_closed(self) -> None:
+        cases = {
+            "parameter_set_missing": {"canonical_parameter_set_id": None},
+            "parameter_set_not_released": {"parameter_set_status": "candidate"},
+            "parameter_source_mismatch": {
+                "parameter_set_source_round_id": "other_round"
+            },
+            "recommendation_source_missing": {
+                "recommendation_source_round_id": ""
+            },
+            "evidence_missing": {"evidence_bundle_ref": ""},
+            "symbol_mismatch": {"recommendation_symbol": "ETH-USDT-SWAP"},
+            "recommendation_type_invalid": {
+                "recommendation_type": "keep_active"
+            },
+            "recommendation_status_invalid": {
+                "recommendation_status": "draft"
+            },
+            "approver_missing": {"approved_by": ""},
+            "approval_naive": {"approved_at": datetime.now()},
+            "duplicate_apply_history": {"lineage_count": 2},
+            "release_missing": {
+                "canonical_release_id": None,
+                "release_count": 0,
+            },
+            "duplicate_release": {"release_count": 2},
+            "release_operation_missing": {"apply_operation_id": ""},
+            "release_applied_at_missing": {"release_applied_at": None},
+        }
+        for label, overrides in cases.items():
+            with self.subTest(label=label):
+                registry, _, _ = self._load(
+                    active_rows=[_canonical_active_row(**overrides)]
+                )
+                self.assertEqual(registry["active_sets"], {})
+                self.assertEqual(
+                    registry["quarantined_combos"]["independent_15m"],
+                    "active_parameter_lineage_invalid",
+                )
+
+    def test_known_bad_parameter_set_is_quarantined(self) -> None:
+        registry, _, _ = self._load(
+            known_bad_rows=[
+                SimpleNamespace(
+                    release_id="rel_bad",
+                    parameter_set_id="ps_1",
+                    release_family="independent",
+                    release_timeframe="15m",
+                    release_combo_key="independent_15m",
+                    risk_family="independent",
+                    risk_timeframe="15m",
+                    risk_combo_key="independent_15m",
+                    apply_result="success",
+                )
+            ]
+        )
+        self.assertEqual(registry["active_sets"], {})
+        self.assertEqual(
+            registry["quarantined_combos"]["independent_15m"],
+            "known_bad_parameter_set",
+        )
+
+    def test_malformed_risk_lineage_globally_quarantines(self) -> None:
+        registry, _, _ = self._load(
+            known_bad_rows=[
+                SimpleNamespace(
+                    release_id="rel_orphan",
+                    parameter_set_id=None,
+                    release_family=None,
+                    release_timeframe=None,
+                    release_combo_key=None,
+                    risk_family="independent",
+                    risk_timeframe="15m",
+                    risk_combo_key="independent_15m",
+                    apply_result=None,
+                )
+            ]
+        )
+        self.assertEqual(registry["active_sets"], {})
+        self.assertEqual(
+            registry["quarantined_combos"]["independent_15m"],
+            "global_risk_evidence_lineage_invalid",
+        )
+
+    def test_non_object_values_are_quarantined(self) -> None:
+        registry, _, _ = self._load(
+            active_rows=[
+                _canonical_active_row(
+                    param_values=[1, 2], canonical_param_values=[1, 2]
+                )
+            ]
+        )
+        self.assertEqual(
+            registry["quarantined_combos"]["independent_15m"],
+            "active_parameter_values_not_object",
+        )
+
+    def test_decision_status_is_exact_and_not_trimmed(self) -> None:
+        registry, _, _ = self._load(
+            decision_rows=[
+                SimpleNamespace(
+                    family="independent",
+                    timeframe="15m",
+                    combo_key="independent_15m",
+                    current_status=" keep_active",
+                )
+            ]
+        )
+        self.assertEqual(registry["active_sets"], {})
+        self.assertIn(
+            "decision_missing_or_not_apply_capable",
+            registry["quarantined_combos"]["independent_15m"],
+        )
+
+    def test_duplicate_decisions_pause_and_quarantine(self) -> None:
+        registry, _, _ = self._load(
+            decision_rows=[
+                SimpleNamespace(
+                    family="independent",
+                    timeframe="15m",
+                    combo_key="independent_15m",
+                    current_status="keep_active",
+                ),
+                SimpleNamespace(
+                    family="INDEPENDENT",
+                    timeframe="15M",
+                    combo_key="legacy",
+                    current_status="pause",
+                ),
+            ]
+        )
+        self.assertEqual(registry["active_sets"], {})
+        self.assertIn("independent_15m", registry["paused_combos"])
+        self.assertIn(
+            "count=2", registry["quarantined_combos"]["independent_15m"]
+        )
+
+    def test_duplicate_canonical_active_rows_are_quarantined(self) -> None:
+        registry, _, _ = self._load(
+            active_rows=[
+                _canonical_active_row(),
+                _canonical_active_row(family="INDEPENDENT", timeframe="15M"),
+            ]
+        )
+        self.assertEqual(registry["active_sets"], {})
+        self.assertEqual(
+            registry["quarantined_combos"]["independent_15m"],
+            "duplicate_canonical_active_set",
+        )
+
+    def test_apply_capable_decision_without_active_row_is_quarantined(self) -> None:
+        registry, _, _ = self._load(active_rows=[])
+
+        self.assertEqual(registry["active_sets"], {})
+        self.assertEqual(
+            registry["quarantined_combos"]["independent_15m"],
+            "apply_capable_decision_missing_active_set",
+        )
+
+    def test_explicit_pause_without_active_row_is_safe(self) -> None:
+        registry, _, _ = self._load(
+            active_rows=[],
+            decision_rows=[
+                SimpleNamespace(
+                    family="independent",
+                    timeframe="15m",
+                    combo_key="independent_15m",
+                    current_status="pause",
+                )
+            ],
+        )
+
+        self.assertEqual(registry["active_sets"], {})
+        self.assertEqual(registry["quarantined_combos"], {})
+        self.assertEqual(registry["paused_combos"], ["independent_15m"])
+
+    def test_empty_managed_decision_state_is_quarantined(self) -> None:
+        registry, _, _ = self._load(active_rows=[], decision_rows=[])
+
+        self.assertEqual(
+            registry["quarantined_combos"]["__governance__"],
+            "managed_decision_state_empty",
+        )
 
 
 if __name__ == "__main__":

@@ -55,16 +55,18 @@ Implication:
 16. emit a simulation-only report; never claim trading-ready or production GO
 
 ## Profiles
-### Enabled four-process profiles
-- `spot`
-- `derivatives`
+### Enabled simulation profiles
 
-Required containers:
+`spot` required containers:
 - `aats-gateway`
 - `aats-market`
 - `aats-decision`
 - `aats-execution`
 - `aats-rdp-daemon`
+
+`derivatives` additionally requires the two public derivatives collectors:
+- `aats-liquidations-daemon`
+- `aats-microstructure-collector`
 
 All live profiles and the monolith live fallback are currently rejected with no override. Their Compose files remain future validation inputs, not deployable profiles.
 
@@ -119,6 +121,7 @@ AATS_RUNTIME_READINESS_GENERATION=static-config-check \
 Cause:
 - PowerShell resolves `bash` to `C:\Users\<user>\AppData\Local\Microsoft\WindowsApps\bash.exe`
 - That file is a zero-length App Execution Alias stub, not Git Bash
+- PowerShell can also resolve `bash` to `C:\Windows\System32\bash.exe`; that is the legacy WSL launcher, not Git Bash, and cannot safely execute this Windows-path wrapper flow
 
 Fix:
 - prefer WSL `wsl -d Ubuntu bash ...`
@@ -140,6 +143,7 @@ Check:
 - `docker compose logs aats-decision`
 - `docker compose logs aats-execution`
 - `docker compose logs aats-rdp-daemon`
+- for `derivatives`, also `docker compose logs aats-liquidations-daemon` and `docker compose logs aats-microstructure-collector`
 
 ### Env file confusion
 Preferred layout:

@@ -19,6 +19,12 @@ from typing import Any
 VALID_ENVIRONMENTS = ("dev", "staging", "prod")
 DEFAULT_ENVIRONMENT = "dev"
 ENV_VAR_NAME = "RDP_ENV"
+_PROFILE_ENVIRONMENTS = {
+    "spot": "staging",
+    "derivatives": "staging",
+    "spot_live": "prod",
+    "derivatives_live": "prod",
+}
 
 
 @dataclass(frozen=True)
@@ -31,14 +37,53 @@ class EnvironmentInfo:
 
 
 def get_current_environment() -> str:
-    """获取当前环境名称."""
-    env = os.environ.get(ENV_VAR_NAME, DEFAULT_ENVIRONMENT).lower().strip()
-    if env not in VALID_ENVIRONMENTS:
+    """Resolve RDP safety environment from the canonical managed profile.
+
+    Explicit ``RDP_ENV`` remains supported for isolated development, but it
+    must agree with ``AATS_PROFILE`` / ``AATS_ENV_TEMPLATE_PROFILE`` whenever a
+    managed profile is present.  A live profile therefore resolves to ``prod``
+    even when ``RDP_ENV`` was omitted, while ambiguous managed startup state is
+    rejected instead of silently becoming ``dev``.
+    """
+    explicit_raw = os.environ.get(ENV_VAR_NAME)
+    explicit = explicit_raw.lower().strip() if explicit_raw is not None else None
+    if explicit is not None and explicit not in VALID_ENVIRONMENTS:
         raise ValueError(
-            f"Invalid {ENV_VAR_NAME}='{env}', "
+            f"Invalid {ENV_VAR_NAME}='{explicit}', "
             f"must be one of: {VALID_ENVIRONMENTS}"
         )
-    return env
+
+    profile_values = {
+        name: str(os.environ.get(name) or "").strip().lower()
+        for name in ("AATS_PROFILE", "AATS_ENV_TEMPLATE_PROFILE")
+        if str(os.environ.get(name) or "").strip()
+    }
+    unknown_profiles = {
+        name: value
+        for name, value in profile_values.items()
+        if value not in _PROFILE_ENVIRONMENTS
+    }
+    if unknown_profiles:
+        raise ValueError("invalid managed profile identity for RDP environment")
+    distinct_profiles = set(profile_values.values())
+    if len(distinct_profiles) > 1:
+        raise ValueError("conflicting managed profile identities for RDP environment")
+
+    profile = next(iter(distinct_profiles), None)
+    derived = _PROFILE_ENVIRONMENTS.get(profile) if profile else None
+    if explicit is not None and derived is not None and explicit != derived:
+        raise ValueError("RDP_ENV conflicts with canonical managed profile")
+    if explicit is not None:
+        return explicit
+    if derived is not None:
+        return derived
+
+    # compose_entrypoint always sets AATS_ENV_TEMPLATE_PROFILE together with
+    # AATS_STARTUP_PROFILE.  Seeing only the latter means a managed bootstrap
+    # was partially applied, so falling back to dev would be unsafe.
+    if str(os.environ.get("AATS_STARTUP_PROFILE") or "").strip():
+        raise ValueError("managed RDP environment identity is incomplete")
+    return DEFAULT_ENVIRONMENT
 
 
 def get_environment_info(root: Path) -> EnvironmentInfo:
@@ -92,7 +137,9 @@ def get_policy(env: str | None = None) -> dict[str, Any]:
     """获取指定环境的策略."""
     if env is None:
         env = get_current_environment()
-    return ENVIRONMENT_POLICIES.get(env, ENVIRONMENT_POLICIES["dev"])
+    if env not in VALID_ENVIRONMENTS:
+        raise ValueError(f"invalid RDP environment policy: {env!r}")
+    return ENVIRONMENT_POLICIES[env]
 
 
 # ── 守卫函数 ──────────────────────────────────────────────────

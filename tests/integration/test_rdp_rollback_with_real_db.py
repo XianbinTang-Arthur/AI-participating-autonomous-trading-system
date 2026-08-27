@@ -20,6 +20,7 @@ WSL2 entry:
 
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from pathlib import Path
@@ -86,6 +87,7 @@ class TestRollbackWithRealDb(unittest.TestCase):
         with self.engine.begin() as conn:  # type: ignore[attr-defined]
             conn.execute(text(
                 "TRUNCATE TABLE "
+                "governance.release_effectiveness_action_proofs, "
                 "governance.release_effectiveness, "
                 "governance.rollback_recommendations, "
                 "governance.observation_results, "
@@ -175,6 +177,7 @@ class TestRollbackWithRealDb(unittest.TestCase):
         family: str = "independent",
         timeframe: str = "15m",
         operation_type: str = "apply",
+        recommendation_id: str | None = None,
     ) -> None:
         from sqlalchemy import text
 
@@ -188,7 +191,8 @@ class TestRollbackWithRealDb(unittest.TestCase):
                        recommendation_id, actor, notes, created_at)
                     VALUES
                       (:op, :op_type, :family, :tf,
-                       :from_ps, :to_ps, NULL, 'operator', 'seed', now())
+                       :from_ps, :to_ps, :recommendation_id,
+                       'operator', 'seed', now())
                     """
                 ),
                 {
@@ -198,6 +202,7 @@ class TestRollbackWithRealDb(unittest.TestCase):
                     "tf": timeframe,
                     "from_ps": from_ps,
                     "to_ps": to_ps,
+                    "recommendation_id": recommendation_id,
                 },
             )
 
@@ -234,15 +239,680 @@ class TestRollbackWithRealDb(unittest.TestCase):
         """v0 → v1 → v2 with approved recs + apply history; v2 is live."""
         self._seed_parameter_set("ps_v0")
         self._seed_parameter_set("ps_v1")
-        self._seed_parameter_set("ps_v2")
+        self._seed_parameter_set("ps_v2", status="released")
 
         self._seed_recommendation("rec_v1", target_ps_id="ps_v1")
         self._seed_recommendation("rec_v2", target_ps_id="ps_v2")
 
-        self._seed_apply_history("op_1", from_ps="ps_v0", to_ps="ps_v1")
-        self._seed_apply_history("op_2", from_ps="ps_v1", to_ps="ps_v2")
+        self._seed_apply_history(
+            "op_1",
+            from_ps="ps_v0",
+            to_ps="ps_v1",
+            recommendation_id="rec_v1",
+        )
+        self._seed_apply_history(
+            "op_2",
+            from_ps="ps_v1",
+            to_ps="ps_v2",
+            recommendation_id="rec_v2",
+        )
 
         self._seed_active("ps_v2")
+
+    def test_pending_rollback_query_fails_closed_on_non_boolean_flags(self) -> None:
+        """Postgres JSONB truth checks must not coerce string booleans."""
+        from sqlalchemy import text
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.governance.active_params_db import (
+            db_get_pending_rollback_release_id,
+        )
+
+        cases = [
+            (
+                "rel_string_active",
+                {"rollback_enforced": "true"},
+                "rel_string_active",
+            ),
+            (
+                "rel_string_opposite",
+                {
+                    "rollback_enforced": True,
+                    "rollback_cancelled": "true",
+                    "rollback_enforcement_status": "enforced",
+                },
+                "rel_string_opposite",
+            ),
+            (
+                "rel_exact_terminal",
+                {
+                    "rollback_enforced": True,
+                    "rollback_cancelled": False,
+                    "rollback_enforcement_status": "enforced",
+                },
+                "rel_exact_terminal",
+            ),
+            (
+                "rel_unpersisted_soft_pause",
+                {
+                    "rollback_cancelled": True,
+                    "rollback_soft_pause_applied": False,
+                    "rollback_cancelled_reason": (
+                        "soft_paused_no_valid_rollback_target: no target"
+                    ),
+                },
+                "rel_unpersisted_soft_pause",
+            ),
+            (
+                "rel_persisted_soft_pause",
+                {
+                    "rollback_cancelled": True,
+                    "rollback_soft_pause_applied": True,
+                    "rollback_cancelled_reason": (
+                        "soft_paused_no_valid_rollback_target: no target"
+                    ),
+                },
+                "rel_persisted_soft_pause",
+            ),
+            (
+                "rel_invalid_calendar_terminal",
+                {
+                    "rollback_enforced": True,
+                    "rollback_cancelled": False,
+                    "rollback_soft_pause_applied": False,
+                    "rollback_enforcement_status": "enforced",
+                    "rollback_enforcement_attempt_id": "attempt_invalid_date",
+                    "rollback_enforcement_started_at": (
+                        "2026-02-30T10:00:00+00:00"
+                    ),
+                    "rollback_enforcement_finished_at": (
+                        "2026-02-30T10:05:00+00:00"
+                    ),
+                    "rollback_enforced_at": "2026-02-30T10:05:00+00:00",
+                    "rollback_to_parameter_set_id": "ps_v1",
+                    "rollback_capital_proof_version": (
+                        "rdp-rollback-capital-proof/v1"
+                    ),
+                    "rollback_capital_proof_kind": "rollback",
+                    "rollback_capital_operation_id": "op_forged",
+                    "rollback_capital_proof_verified": True,
+                },
+                "rel_invalid_calendar_terminal",
+            ),
+            (
+                "rel_future_terminal",
+                {
+                    "rollback_enforced": True,
+                    "rollback_cancelled": False,
+                    "rollback_soft_pause_applied": False,
+                    "rollback_enforcement_status": "enforced",
+                    "rollback_enforcement_attempt_id": "attempt_future",
+                    "rollback_enforcement_started_at": (
+                        "2099-01-01T10:00:00+00:00"
+                    ),
+                    "rollback_enforcement_finished_at": (
+                        "2099-01-01T10:05:00+00:00"
+                    ),
+                    "rollback_enforced_at": "2099-01-01T10:05:00+00:00",
+                    "rollback_to_parameter_set_id": "ps_v1",
+                    "rollback_capital_proof_version": (
+                        "rdp-rollback-capital-proof/v1"
+                    ),
+                    "rollback_capital_proof_kind": "rollback",
+                    "rollback_capital_operation_id": "op_forged_future",
+                    "rollback_capital_proof_verified": True,
+                },
+                "rel_future_terminal",
+            ),
+        ]
+        for release_id, payload, expected in cases:
+            with self.engine.begin() as conn:  # type: ignore[attr-defined]
+                conn.execute(text("DELETE FROM governance.release_effectiveness"))
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO governance.release_effectiveness
+                          (evaluation_id, release_id, family, timeframe,
+                           conclusion, evaluated_at, payload)
+                        VALUES
+                          (:evaluation_id, :release_id, 'independent', '15m',
+                           'rollback_triggered', now(), CAST(:payload AS jsonb))
+                        """
+                    ),
+                    {
+                        "evaluation_id": f"eval_{release_id}",
+                        "release_id": release_id,
+                        "payload": json.dumps(payload),
+                    },
+                )
+            with Session(self.engine) as session:  # type: ignore[arg-type]
+                actual = db_get_pending_rollback_release_id(
+                    session,
+                    family="independent",
+                    timeframe="15m",
+                )
+            self.assertEqual(actual, expected)
+
+    def test_forged_payload_attestation_has_no_immutable_proof(
+        self,
+    ) -> None:
+        """A direct JSONB claim cannot replace the DB-owned proof ledger."""
+        from sqlalchemy import text
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.governance.active_params_db import (
+            db_get_pending_rollback_release_id,
+        )
+
+        self._seed_chain_v0_v1_v2()
+        release_id = "rel_forged_active_change"
+        payload = {
+            "evaluation_id": "eval_forged_active_change",
+            "release_id": release_id,
+            "family": "independent",
+            "timeframe": "15m",
+            "combo_key": "independent_15m",
+            "conclusion": "rollback_triggered",
+            "rollback_cancelled": True,
+            "rollback_enforced": False,
+            "rollback_soft_pause_applied": False,
+            "rollback_enforcement_status": "cancelled",
+            "rollback_enforcement_attempt_id": "attempt_forged_active",
+            "rollback_enforcement_started_at": "2026-08-27T10:00:00+00:00",
+            "rollback_enforcement_finished_at": "2026-08-27T10:05:00+00:00",
+            "rollback_cancelled_at": "2026-08-27T10:05:00+00:00",
+            "rollback_cancelled_reason": (
+                "active_parameter_set_changed_before_rollback: forged"
+            ),
+            "rollback_capital_proof_version": "rdp-rollback-capital-proof/v1",
+            "rollback_capital_proof_kind": "active_parameter_changed",
+            "rollback_capital_proof_active_parameter_set_id": "ps_v1",
+            "rollback_capital_proof_verified": True,
+        }
+        with self.engine.begin() as conn:  # type: ignore[attr-defined]
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO governance.parameter_releases
+                      (release_id, family, timeframe, combo_key,
+                       recommendation_id, parameter_set_id,
+                       previous_parameter_set_id, apply_result,
+                       observation_status, payload)
+                    VALUES
+                      (:rid, 'independent', '15m', 'independent_15m',
+                       'rec_v2', 'ps_v2', 'ps_v1', 'success', 'observing',
+                       '{}'::jsonb)
+                    """
+                ),
+                {"rid": release_id},
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO governance.release_effectiveness
+                      (evaluation_id, release_id, family, timeframe,
+                       conclusion, evaluated_at, payload)
+                    VALUES
+                      (:eid, :rid, 'independent', '15m',
+                       'rollback_triggered', now(), CAST(:payload AS jsonb))
+                    """
+                ),
+                {
+                    "eid": payload["evaluation_id"],
+                    "rid": release_id,
+                    "payload": json.dumps(payload),
+                },
+            )
+
+        with Session(self.engine) as session:  # type: ignore[arg-type]
+            actual = db_get_pending_rollback_release_id(
+                session,
+                family="independent",
+                timeframe="15m",
+            )
+
+        # There is no immutable proof row, so even verified=true in JSON fails.
+        self.assertEqual(actual, release_id)
+
+    def test_terminal_proof_survives_two_later_active_changes(self) -> None:
+        """Historical terminal truth must not depend on mutable current active."""
+        from sqlalchemy import text
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.governance.active_params_db import (
+            db_get_pending_rollback_release_id,
+        )
+
+        self._seed_chain_v0_v1_v2()
+        release_id = "rel_immutable_active_change"
+        started = "2026-08-27T10:00:00+00:00"
+        finished = "2026-08-27T10:05:00+00:00"
+        payload = {
+            "evaluation_id": "eval_immutable_active_change",
+            "release_id": release_id,
+            "family": "independent",
+            "timeframe": "15m",
+            "combo_key": "independent_15m",
+            "conclusion": "rollback_triggered",
+            "rollback_cancelled": True,
+            "rollback_enforced": False,
+            "rollback_soft_pause_applied": False,
+            "rollback_enforcement_status": "cancelled",
+            "rollback_enforcement_attempt_id": "attempt_immutable_active",
+            "rollback_enforcement_started_at": started,
+            "rollback_enforcement_finished_at": finished,
+            "rollback_cancelled_at": finished,
+            "rollback_cancelled_reason": (
+                "active_parameter_set_changed_before_rollback: proven"
+            ),
+            "rollback_capital_proof_version": "rdp-rollback-capital-proof/v1",
+            "rollback_capital_proof_kind": "active_parameter_changed",
+            "rollback_capital_proof_active_parameter_set_id": "ps_v1",
+            "rollback_capital_proof_verified": True,
+        }
+        with self.engine.begin() as conn:  # type: ignore[attr-defined]
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO governance.parameter_releases
+                      (release_id, family, timeframe, combo_key,
+                       recommendation_id, parameter_set_id,
+                       previous_parameter_set_id, apply_result,
+                       observation_status, payload)
+                    VALUES
+                      (:rid, 'independent', '15m', 'independent_15m',
+                       'rec_v1', 'ps_v0', NULL, 'success', 'observing',
+                       '{}'::jsonb)
+                    """
+                ),
+                {"rid": release_id},
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO governance.release_effectiveness
+                      (evaluation_id, release_id, family, timeframe,
+                       conclusion, evaluated_at, payload)
+                    VALUES
+                      (:eid, :rid, 'independent', '15m',
+                       'rollback_triggered', now(), CAST(:payload AS jsonb))
+                    """
+                ),
+                {
+                    "eid": payload["evaluation_id"],
+                    "rid": release_id,
+                    "payload": json.dumps(payload),
+                },
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO governance.release_effectiveness_action_proofs
+                      (release_id, attempt_id, outcome, proof_kind,
+                       started_at_utc, finished_at_utc,
+                       observed_active_parameter_set_id, fact_observed_at)
+                    VALUES
+                      (:rid, :attempt, 'cancelled', 'active_parameter_changed',
+                       :started, :finished, 'ps_v1', now())
+                    """
+                ),
+                {
+                    "rid": release_id,
+                    "attempt": payload["rollback_enforcement_attempt_id"],
+                    "started": started,
+                    "finished": finished,
+                },
+            )
+
+        # The terminal proof observed ps_v1.  ps_v2 is already a later active.
+        with Session(self.engine) as session:  # type: ignore[arg-type]
+            first = db_get_pending_rollback_release_id(
+                session,
+                family="independent",
+                timeframe="15m",
+            )
+        self.assertIsNone(first)
+
+        self._seed_parameter_set("ps_v3")
+        self._seed_active("ps_v3")
+        with Session(self.engine) as session:  # type: ignore[arg-type]
+            second = db_get_pending_rollback_release_id(
+                session,
+                family="independent",
+                timeframe="15m",
+            )
+        self.assertIsNone(second)
+
+    def test_release_rollback_before_terminal_ledger_still_blocks_apply(
+        self,
+    ) -> None:
+        """The transaction seam after capital rollback remains fail-closed."""
+        from sqlalchemy import text
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.governance.active_params_db import (
+            db_get_pending_rollback_release_id,
+        )
+
+        self._seed_chain_v0_v1_v2()
+        self._seed_apply_history(
+            "op_rb_seam",
+            from_ps="ps_v2",
+            to_ps="ps_v1",
+            operation_type="rollback",
+        )
+        self._seed_active("ps_v1")
+        release_id = "rel_rollback_before_ledger"
+        release_payload = {
+            "release_id": release_id,
+            "family": "independent",
+            "timeframe": "15m",
+            "combo_key": "independent_15m",
+            "recommendation_id": "rec_v2",
+            "parameter_set_id": "ps_v2",
+            "apply_result": "success",
+            "observation_status": "rolled_back",
+            "rollback_to_parameter_set_id": "ps_v1",
+            "rollback_operation_id": "op_rb_seam",
+            "rollback_capital_proof_version": (
+                "rdp-release-rollback-capital-proof/v1"
+            ),
+            "rollback_capital_proof_verified": True,
+        }
+        effectiveness_payload = {
+            "evaluation_id": "eval_rollback_before_ledger",
+            "release_id": release_id,
+            "family": "independent",
+            "timeframe": "15m",
+            "combo_key": "independent_15m",
+            "conclusion": "rollback_triggered",
+            "rollback_enforcement_status": "in_progress",
+            "rollback_enforcement_attempt_id": "attempt_before_ledger",
+            "rollback_enforcement_started_at": "2026-08-27T10:00:00+00:00",
+        }
+        with self.engine.begin() as conn:  # type: ignore[attr-defined]
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO governance.parameter_releases
+                      (release_id, family, timeframe, combo_key,
+                       recommendation_id, parameter_set_id,
+                       previous_parameter_set_id, apply_result,
+                       observation_status, payload)
+                    VALUES
+                      (:rid, 'independent', '15m', 'independent_15m',
+                       'rec_v2', 'ps_v2', 'ps_v1', 'success', 'rolled_back',
+                       CAST(:payload AS jsonb))
+                    """
+                ),
+                {"rid": release_id, "payload": json.dumps(release_payload)},
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO governance.observation_results
+                      (release_id, family, timeframe, combo_key, status,
+                       recommendation, observation_window_hours,
+                       window_active, evaluated_at, payload)
+                    VALUES
+                      (:rid, 'independent', '15m', 'independent_15m',
+                       'rollback_recommended', 'rollback_recommended', 24,
+                       false, now(), '{}'::jsonb)
+                    """
+                ),
+                {"rid": release_id},
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO governance.release_effectiveness
+                      (evaluation_id, release_id, family, timeframe,
+                       conclusion, evaluated_at, payload)
+                    VALUES
+                      (:eid, :rid, 'independent', '15m',
+                       'rollback_triggered', now(), CAST(:payload AS jsonb))
+                    """
+                ),
+                {
+                    "eid": effectiveness_payload["evaluation_id"],
+                    "rid": release_id,
+                    "payload": json.dumps(effectiveness_payload),
+                },
+            )
+
+        with Session(self.engine) as session:  # type: ignore[arg-type]
+            pending = db_get_pending_rollback_release_id(
+                session,
+                family="independent",
+                timeframe="15m",
+            )
+
+        self.assertEqual(pending, release_id)
+
+    def test_operator_rollback_resolves_pending_effectiveness_as_rollback(
+        self,
+    ) -> None:
+        """A completed Operator rollback is enforced truth, not cancellation."""
+        from datetime import datetime, timedelta, timezone
+        import tempfile
+
+        from sqlalchemy import text
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.governance.active_params_db import (
+            db_get_pending_rollback_release_id,
+        )
+        from aats.data_platform.governance.operational_state_db import (
+            db_load_effectiveness_registry,
+            db_load_release_history,
+        )
+        from aats.data_platform.metrics.release_effectiveness import (
+            enforce_pending_rollbacks,
+        )
+        from aats.data_platform.production_workflow.post_apply_evidence import (
+            POST_APPLY_EVIDENCE_CONTRACT_VERSION,
+            make_source_provenance,
+        )
+
+        self._seed_chain_v0_v1_v2()
+        release_id = "rel_operator_rollback_pending_effectiveness"
+        now = datetime.now(timezone.utc)
+        created_at = now - timedelta(hours=3)
+        applied_at = now - timedelta(hours=2)
+        evaluated_at = now - timedelta(hours=1)
+        release_payload = {
+            "release_id": release_id,
+            "family": "independent",
+            "timeframe": "15m",
+            "combo_key": "independent_15m",
+            "recommendation_id": "rec_v2",
+            "parameter_set_id": "ps_v2",
+            "previous_parameter_set_id": "ps_v1",
+            "actor": "release_test",
+            "created_at": created_at.isoformat(),
+            "applied_at": applied_at.isoformat(),
+            "apply_operation_id": "op_2",
+            "apply_result": "success",
+            "observation_status": "rollback_recommended",
+            "observation_window_hours": 24,
+        }
+        effectiveness_payload = {
+            "evaluation_id": "eval_operator_rollback_pending_effectiveness",
+            "release_id": release_id,
+            "family": "independent",
+            "timeframe": "15m",
+            "combo_key": "independent_15m",
+            "conclusion": "rollback_triggered",
+            "evaluated_at": evaluated_at.isoformat(),
+            "rollback_enforcement_status": "pending",
+        }
+        with self.engine.begin() as conn:  # type: ignore[attr-defined]
+            conn.execute(
+                text(
+                    """
+                    UPDATE governance.active_parameter_sets
+                    SET approval_recommendation_id = 'rec_v2'
+                    WHERE family = 'independent' AND timeframe = '15m'
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO governance.parameter_releases
+                      (release_id, family, timeframe, combo_key,
+                       recommendation_id, parameter_set_id,
+                       previous_parameter_set_id, actor, apply_result,
+                       observation_status, observation_window_hours,
+                       payload, created_at)
+                    VALUES
+                      (:rid, 'independent', '15m', 'independent_15m',
+                       'rec_v2', 'ps_v2', 'ps_v1', 'release_test', 'success',
+                       'rollback_recommended', 24, CAST(:payload AS jsonb),
+                       :created_at)
+                    """
+                ),
+                {
+                    "rid": release_id,
+                    "payload": json.dumps(release_payload),
+                    "created_at": created_at,
+                },
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO governance.release_effectiveness
+                      (evaluation_id, release_id, family, timeframe,
+                       conclusion, evaluated_at, payload)
+                    VALUES
+                      (:eid, :rid, 'independent', '15m',
+                       'rollback_triggered', :evaluated_at,
+                       CAST(:payload AS jsonb))
+                    """
+                ),
+                {
+                    "eid": effectiveness_payload["evaluation_id"],
+                    "rid": release_id,
+                    "evaluated_at": evaluated_at,
+                    "payload": json.dumps(effectiveness_payload),
+                },
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            operator_result = self._rollback_helper(
+                Path(tmp), to_parameter_set_id="ps_v1"
+            )
+            self.assertTrue(operator_result["ok"], operator_result)
+            self.assertEqual(operator_result["release_id"], release_id)
+
+            with Session(self.engine) as session:  # type: ignore[arg-type]
+                release_history = db_load_release_history(session)
+
+            source = make_source_provenance(
+                source_kind="governance_snapshot",
+                source_id="governance_snapshot_operator_rollback",
+                source_timestamp=evaluated_at,
+                source_payload={"status": "regression"},
+            )
+            rollback_evidence = {
+                "release_id": release_id,
+                "family": "independent",
+                "timeframe": "15m",
+                "combo_key": "independent_15m",
+                "evaluated_at": evaluated_at.isoformat(),
+                "rollback_recommended": True,
+                "severity": "high",
+                "triggers": [
+                    {
+                        "trigger": "governance_regression",
+                        "fired": True,
+                        "evidence_status": "valid",
+                        "severity": "high",
+                        "source_provenance": source,
+                    }
+                ],
+                "fired_trigger_count": 1,
+                "evidence_contract_version": (
+                    POST_APPLY_EVIDENCE_CONTRACT_VERSION
+                ),
+                "source_provenance": [source],
+            }
+            with (
+                patch(
+                    "aats.data_platform.metrics.release_effectiveness."
+                    "try_governance_db",
+                    return_value=(self.engine, True),
+                ),
+                patch(
+                    "aats.data_platform.metrics.release_effectiveness."
+                    "has_explicit_governance_db_configuration",
+                    return_value=True,
+                ),
+                patch(
+                    "aats.data_platform.production_workflow.release_registry."
+                    "load_release_history",
+                    return_value=release_history,
+                ),
+                patch(
+                    "aats.data_platform.production_workflow.observation_window."
+                    "load_observation_result",
+                    return_value=None,
+                ),
+                patch(
+                    "aats.data_platform.production_workflow.rollback_policy."
+                    "load_rollback_recommendation",
+                    return_value=rollback_evidence,
+                ),
+                patch(
+                    "aats.data_platform.decision_system.active_parameter_apply."
+                    "rollback_active_parameter_set",
+                    return_value={
+                        "ok": False,
+                        "code": "ACTIVE_SET_CHANGED",
+                        "from_parameter_set_id": "ps_v1",
+                    },
+                ) as duplicate_rollback,
+            ):
+                results = enforce_pending_rollbacks(Path(tmp))
+
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]["ok"], results)
+        self.assertTrue(results[0]["resolved_by_existing_rollback"])
+        duplicate_rollback.assert_not_called()
+
+        with Session(self.engine) as session:  # type: ignore[arg-type]
+            registry = db_load_effectiveness_registry(session)
+            pending = db_get_pending_rollback_release_id(
+                session,
+                family="independent",
+                timeframe="15m",
+            )
+            proof = session.execute(
+                text(
+                    """
+                    SELECT outcome, proof_kind, operation_id,
+                           target_parameter_set_id
+                    FROM governance.release_effectiveness_action_proofs
+                    WHERE release_id = :release_id
+                    """
+                ),
+                {"release_id": release_id},
+            ).fetchone()
+
+        evaluation = next(
+            item
+            for item in registry["evaluations"]
+            if item["release_id"] == release_id
+        )
+        self.assertEqual(evaluation["rollback_enforcement_status"], "enforced")
+        self.assertEqual(evaluation["rollback_capital_proof_kind"], "rollback")
+        self.assertTrue(evaluation["rollback_capital_proof_verified"])
+        self.assertIsNone(pending)
+        self.assertIsNotNone(proof)
+        self.assertEqual(proof.outcome, "enforced")
+        self.assertEqual(proof.proof_kind, "rollback")
+        self.assertEqual(proof.operation_id, operator_result["operation_id"])
+        self.assertEqual(proof.target_parameter_set_id, "ps_v1")
 
     # ── validate_rollback_target (6 rules) ─────────────────────────────
 
@@ -287,11 +957,11 @@ class TestRollbackWithRealDb(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "target_status_illegal:draft")
 
-    def test_validate_rejects_deprecated_status(self) -> None:
+    def test_validate_rejects_deprecated_without_timestamp(self) -> None:
         self._seed_parameter_set("ps_dep", status="deprecated")
         ok, reason = self._run_validate("ps_dep")
         self.assertFalse(ok)
-        self.assertEqual(reason, "target_status_illegal:deprecated")
+        self.assertEqual(reason, "target_deprecated_without_timestamp")
 
     def test_validate_rejects_target_without_apply_history(self) -> None:
         self._seed_parameter_set("ps_never_applied")
@@ -314,14 +984,19 @@ class TestRollbackWithRealDb(unittest.TestCase):
 
     def test_validate_rejects_target_without_approved_recommendation(self) -> None:
         self._seed_parameter_set("ps_orphan")
-        self._seed_apply_history("op_orphan", from_ps=None, to_ps="ps_orphan")
-        # Active something else so rule 5 passes.
-        self._seed_parameter_set("ps_active_other")
-        self._seed_active("ps_active_other")
         # Only draft recommendation — rule 6 rejects since status not in allowlist.
         self._seed_recommendation(
             "rec_draft", target_ps_id="ps_orphan", status="draft"
         )
+        self._seed_apply_history(
+            "op_orphan",
+            from_ps=None,
+            to_ps="ps_orphan",
+            recommendation_id="rec_draft",
+        )
+        # Active something else so rule 5 passes.
+        self._seed_parameter_set("ps_active_other")
+        self._seed_active("ps_active_other")
 
         ok, reason = self._run_validate("ps_orphan")
         self.assertFalse(ok)
@@ -420,7 +1095,7 @@ class TestRollbackWithRealDb(unittest.TestCase):
             self.assertEqual(hist.from_parameter_set_id, "ps_v2")
             self.assertEqual(hist.to_parameter_set_id, "ps_v1")
 
-    def test_rollback_rejects_deprecated_with_validation_failed(self) -> None:
+    def test_rollback_rejects_deprecated_without_timestamp(self) -> None:
         self._seed_chain_v0_v1_v2()
         self._seed_parameter_set("ps_dep_target", status="deprecated")
         self._seed_apply_history(
@@ -436,7 +1111,7 @@ class TestRollbackWithRealDb(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["code"], "VALIDATION_FAILED")
-        self.assertEqual(result["reason"], "target_status_illegal:deprecated")
+        self.assertEqual(result["reason"], "target_deprecated_without_timestamp")
 
     def test_rollback_auto_derives_previous_when_not_specified(self) -> None:
         self._seed_chain_v0_v1_v2()

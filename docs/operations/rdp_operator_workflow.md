@@ -1,6 +1,8 @@
 # RDP Operator 工作流 SOP
 
-> 最后核对：2026-08-26（起始代码基线 `51448768`，含本轮未提交 live attribution lineage 修复）。本 SOP 只使用当前 Operator API/UI 和 Run/attempt queue；旧直写 CLI、4-workflow 清单和 active JSON fallback 已移除。
+> 文档状态：现行操作说明
+> 最后核对：2026-08-27（起始 HEAD `9c4112c6`，含当前 RDP 控制面收口候选；以本文档所在 HEAD 为准）
+> 核对范围：当前 Operator API/UI、Run/attempt queue、发布资格和回滚风险收敛代码；不证明现场状态
 
 ## 1. 每日观察
 
@@ -22,6 +24,8 @@
 审批前确认：
 
 - source parameter set 和 evidence lineage 完整；
+- apply-capable recommendation 精确引用成功的 Phase 6 round，且当前 qualification policy、combo candidate、显式时区完成时间与 168 小时有效期均通过；系统会将合法时区偏移归一为 UTC，naive/未来/不一致时间失败关闭；
+- approve-and-release 内部签发的晋级 capability 最长只存活 5 分钟，并受上述证据剩余寿命进一步限制；它不可序列化或跨请求长期复用；
 - Step2 integrity 正常；
 - replay、attribution、execution realism 和 readiness 支持；
 - 结论不是只靠单次收益或短窗口；
@@ -40,11 +44,13 @@
 
 生产前向变更必须按 [Production Parameter Change Runbook](production_parameter_change_runbook.md) 执行。
 
-当前入口：
+当前可执行入口：
 
-- 单独 apply：`POST /rdp/parameters/apply`，需要 `action=apply` 的短时 `X-Rdp-Apply-Token`；
 - release + apply：`POST /rdp/releases/create`，需要 write access、integrity/gate 和 `action=apply` token；
 - approve + release + apply：`POST /rdp/recommendations/{id}/approve-and-release`，需要同一组控制，token 校验先于审批写入。
+
+`POST /rdp/parameters/apply` 是无写入迁移失败入口，固定返回
+`code=release_required`；不得把它写成发布或故障重试通道。
 
 UI 会自动从当前 session 申请短时 token；直接调用 API 时必须显式携带。`skip_apply=true` 不要求 apply token，生产仍不得使用 `skip_gate=true`。
 
@@ -58,11 +64,18 @@ UI 会自动从当前 session 申请短时 token；直接调用 API 时必须显
 
 ## 4. 回滚
 
+本节是 Operator 人工入口。另有启用中的 `observation_cycle` 内部风险收敛路径：它可在
+精确 release/provenance、combo lock、clean attempt 和数据库终态证明全部满足时自动回滚、
+取消旧意图或 soft pause。legacy/缺证明/中断记录进入 `reconciliation_required`，不会自动
+重放；这条内部路径不使用浏览器 rollback token，也不等于允许自动 release。
+
 1. 运行/查看 `POST /rdp/rollback-recommendation/evaluate` 的建议；
 2. 确认合法 previous/explicit target；
 3. 当前 Operator session 申请 `action=rollback` token；
 4. 携带 token 调用 `POST /rdp/parameters/rollback`；
-5. 核对 active/history/release/provenance 和主交易事实。
+5. 核对 active/history/release/provenance 和主交易事实；若该 release 已有 pending
+   effectiveness 风险义务，等待/触发受控 observation cycle 依据精确 operation、target、
+   history、active 与时间事实将其收口为 `enforced`。只见 release=`rolled_back` 不算完成。
 
 旧的 `scripts/rdp_rollback_active_parameter_set.py` 已禁用，不能作为紧急通道。
 
@@ -92,6 +105,7 @@ UI 会自动从当前 session 申请短时 token；直接调用 API 时必须显
 | --- | --- |
 | Recommendation 看不到 | 检查 DB-first registry、过滤条件和 source artifact；不要用禁用 CLI show |
 | Apply integrity blocked | 修复 Step2 evidence，不继续前向变更 |
+| Promotion qualification blocked / audit-only | 核对 recommendation 的精确 evidence round；不能用较新的健康 round 替代，也不能原地补写历史证据 |
 | Gate blocked | 根据 failed checks 修复后重跑；不跳 gate |
 | Active set 与预期不符 | 停止发布，查 DB active set/history/release/runtime provenance |
 | DB active loader 失败 | runtime 已退化到 profile 参数；恢复数据库，不能靠 JSON fallback |
@@ -101,6 +115,8 @@ UI 会自动从当前 session 申请短时 token；直接调用 API 时必须显
 | Run running 无 heartbeat | daemon 只回收超过 30 秒无 task heartbeat 的 running attempt；旧 attempt 应变 failed/-3，Run 错误码为 `worker_orphan_recovered`，新鲜心跳不得被另一 daemon 误杀 |
 | Run 失败后未自动排队 | 先看 failure class；只有 `transient_infrastructure` 会自动重试一次，其余需要修复根因后由 `POST /rdp/v2/runs/{run_id}/retry` 人工重试 |
 | Rollback 无 target | 不猜测版本；人工审查合法 parameter set |
+| Rollback `in_progress` / `reconciliation_required` | 保持 combo 前向变更阻断；核对 exact attempt、active/history/release 与 action proof，禁止手改状态或重放 |
+| Recommendation 写入返回 mirror degraded | DB canonical 迁移可能已成功；先读取权威状态并修复审计镜像，不要盲目重复 approve/reject/supersede |
 
 ## 7. 禁止事项
 

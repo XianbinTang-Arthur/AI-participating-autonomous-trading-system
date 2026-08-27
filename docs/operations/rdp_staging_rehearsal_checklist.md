@@ -2,7 +2,9 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
-> 文档状态：现行 staging 演练清单。最后核对：2026-08-22（代码基线 `be9179e`）。当前共有 10 个 workflow 定义，其中 8 个 enabled；`decision_cycle`、`release_cycle` disabled，后者还禁止入队。
+> 文档状态：现行 staging 演练清单
+> 最后核对：2026-08-27（起始 HEAD `9c4112c6`，含当前控制面收口候选；以本文档所在 HEAD 为准）
+> 核对范围：10 个 workflow、release/observation/rollback 静态契约；不证明任何现场演练已完成
 
 
 > 目的：在 `RDP_ENV=staging` 下完整验证 recommendation → gate → release → observation → rollback 链路，再允许进入 `prod` 试运行。
@@ -38,11 +40,13 @@
 - [ ] `artifacts/production_workflow/observations/<release_id>/` 已生成 observation 结果
 - [ ] `artifacts/metrics/release_effectiveness_registry.json` 已生成 effectiveness 评估
 - [ ] 至少完成一次 rollback recommendation 评估
-- [ ] 至少完成一次 rollback 演练，并确认 active parameter set 恢复
+- [ ] Operator token 回滚和内部 observation-cycle 风险收敛分别演练；后者只接受精确 provenance/clean attempt/combo lock
+- [ ] 至少完成一次 rollback、active-changed cancellation 或 soft pause 分支，并确认 active/history/release/action-proof 一致
+- [ ] legacy/缺 provenance/中断 attempt 进入 `reconciliation_required` 且不会自动重放
 
 ## 5. 准入门槛
 
-- [ ] prod 下 direct apply 被拒绝
+- [ ] 所有环境下 direct apply 都无写入返回 `release_required`
 - [ ] prod 下 `skip_gate=true` 被拒绝
 - [ ] prod 下观察窗口 < 72h 被拒绝
 - [ ] `/rdp/health` 能在 daemon 心跳丢失、live DB 不健康、workflow 过期时正确降级

@@ -18,7 +18,11 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from ._db_util import try_governance_db
+from ._db_util import (
+    has_explicit_governance_db_configuration,
+    try_governance_db,
+)
+from ._exceptions import DBUnavailableError
 
 log = logging.getLogger(__name__)
 
@@ -162,13 +166,25 @@ def _infer_candidate_confidence(
 # ── Registry 操作 ───────────────────────────────────────────────────
 
 
-def load_registry(path: pathlib.Path, *, skip_db: bool = False) -> dict[str, Any]:
+def load_registry(
+    path: pathlib.Path,
+    *,
+    skip_db: bool = False,
+    fail_closed_on_db_error: bool = False,
+) -> dict[str, Any]:
     """加载 parameter registry.
 
     优先级: DB (AATS_ACTIVE_PARAMETER_DB_URL) → JSON 文件 → 空 registry。
     skip_db=True 时跳过 DB 直接读文件（用于 seed-db 等需要文件数据的场景）。
+    ``fail_closed_on_db_error=True`` 供 release/apply 资本路径使用：DB probe 已
+    成功但查询失败时，不得消费 mutable JSON 副本。
     """
     if not skip_db:
+        try:
+            project_root = path.resolve(strict=False).parents[2]
+        except (IndexError, OSError, RuntimeError, ValueError):
+            project_root = None
+        db_is_managed_truth = has_explicit_governance_db_configuration(project_root)
         engine, ok = try_governance_db()
         if ok:
             try:
@@ -183,10 +199,22 @@ def load_registry(path: pathlib.Path, *, skip_db: bool = False) -> dict[str, Any
                          len(registry.get("parameter_sets", [])))
                 return registry
             except Exception as exc:
-                log.warning("parameter_registry: DB 读取失败 (%s)，fallback 到文件（stale 风险）", exc)
+                if fail_closed_on_db_error or db_is_managed_truth:
+                    raise DBUnavailableError(
+                        "governance DB parameter read failed; stale JSON fallback denied"
+                    ) from exc
+                log.warning(
+                    "parameter_registry: 离线开发 DB 读取失败 (%s)，"
+                    "fallback 到文件（stale）",
+                    type(exc).__name__,
+                )
             finally:
                 if engine is not None:
                     engine.dispose()
+        elif db_is_managed_truth:
+            raise DBUnavailableError(
+                "governance DB unavailable; stale parameter JSON fallback denied"
+            )
 
     if not path.exists():
         return {

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import threading
 from typing import Any
 
 import pytest
@@ -218,3 +219,326 @@ def test_db_load_no_file_stamps_version_zero(
     mod.save_recommendation_registry(registry, path)
     on_disk = json.loads(path.read_text(encoding="utf-8"))
     assert on_disk["version"] == 1
+
+
+def test_db_empty_is_authoritative_and_does_not_resurrect_stale_json(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aats.data_platform.decision_system import recommendation_registry as mod
+
+    path = tmp_path / "artifacts/decision_system/recommendation_registry.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 7,
+                "recommendations": [
+                    {
+                        "recommendation_id": "rec_deleted_from_db",
+                        "status": "approved",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _FakeEngine:
+        def dispose(self) -> None: ...
+
+    class _FakeSession:
+        def __init__(self, _engine: object) -> None: ...
+        def __enter__(self) -> "_FakeSession": return self
+        def __exit__(self, *_args: object) -> None: ...
+
+    monkeypatch.setattr(mod, "try_governance_db", lambda: (_FakeEngine(), True))
+    import aats.data_platform.governance.recommendations_db as recs_db_mod
+    monkeypatch.setattr(
+        recs_db_mod,
+        "db_load_recommendation_registry",
+        lambda _session: {"generated_at": "now", "recommendations": []},
+    )
+    import sqlalchemy.orm
+    monkeypatch.setattr(sqlalchemy.orm, "Session", _FakeSession)
+
+    registry = mod.load_recommendation_registry(path)
+
+    assert registry["recommendations"] == []
+    assert registry["version"] == 7
+
+
+def test_managed_db_error_denies_stale_recommendation_fallback(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aats.data_platform.decision_system import recommendation_registry as mod
+    from aats.data_platform.governance._exceptions import DBUnavailableError
+
+    path = tmp_path / "artifacts/decision_system/recommendation_registry.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"recommendations": [{"recommendation_id": "rec_stale"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "AATS_ACTIVE_PARAMETER_DB_URL",
+        "postgresql+psycopg://managed.invalid/aats_research",
+    )
+    monkeypatch.setattr(mod, "try_governance_db", lambda: (None, False))
+
+    with pytest.raises(DBUnavailableError, match="stale recommendation JSON fallback denied"):
+        mod.load_recommendation_registry(path)
+
+
+def test_active_decision_db_empty_is_authoritative(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aats.data_platform.decision_system import recommendation_registry as mod
+
+    path = tmp_path / "artifacts/decision_system/active_decision_registry.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"decisions": [{"combo_key": "stale_combo", "current_status": "active"}]}),
+        encoding="utf-8",
+    )
+
+    class _Engine:
+        def dispose(self) -> None: ...
+
+    class _Session:
+        def __init__(self, _engine: object) -> None: ...
+        def __enter__(self) -> "_Session": return self
+        def __exit__(self, *_args: object) -> None: ...
+
+    monkeypatch.setattr(mod, "has_explicit_governance_db_configuration", lambda _root: True)
+    monkeypatch.setattr(mod, "try_governance_db", lambda: (_Engine(), True))
+    import aats.data_platform.governance.recommendations_db as recs_db_mod
+    monkeypatch.setattr(
+        recs_db_mod,
+        "db_load_active_decisions",
+        lambda _session: {"generated_at": "now", "decisions": []},
+    )
+    import sqlalchemy.orm
+    monkeypatch.setattr(sqlalchemy.orm, "Session", _Session)
+
+    registry = mod.load_active_decision_registry(path)
+
+    assert registry["decisions"] == []
+
+
+def test_managed_active_decision_error_denies_stale_json(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aats.data_platform.decision_system import recommendation_registry as mod
+    from aats.data_platform.governance._exceptions import DBUnavailableError
+
+    path = tmp_path / "artifacts/decision_system/active_decision_registry.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"decisions": [{"combo_key": "stale_combo", "current_status": "active"}]}),
+        encoding="utf-8",
+    )
+
+    class _Engine:
+        def dispose(self) -> None: ...
+
+    class _Session:
+        def __init__(self, _engine: object) -> None: ...
+        def __enter__(self) -> "_Session": return self
+        def __exit__(self, *_args: object) -> None: ...
+
+    monkeypatch.setattr(mod, "has_explicit_governance_db_configuration", lambda _root: True)
+    monkeypatch.setattr(mod, "try_governance_db", lambda: (_Engine(), True))
+    import aats.data_platform.governance.recommendations_db as recs_db_mod
+    monkeypatch.setattr(
+        recs_db_mod,
+        "db_load_active_decisions",
+        lambda _session: (_ for _ in ()).throw(RuntimeError("synthetic decision read failure")),
+    )
+    import sqlalchemy.orm
+    monkeypatch.setattr(sqlalchemy.orm, "Session", _Session)
+
+    with pytest.raises(DBUnavailableError, match="stale JSON fallback denied"):
+        mod.load_active_decision_registry(path)
+
+
+def test_offline_registry_write_failure_remains_strict(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """纯文件模式没有 DB 真源，写失败必须继续向上抛出。"""
+    from aats.data_platform.decision_system import recommendation_registry as mod
+    from aats.data_platform.governance import _atomic_io
+
+    path = tmp_path / "recommendation_registry.json"
+    registry = _registry(0, [{"recommendation_id": "rec_offline"}])
+    monkeypatch.setattr(
+        _atomic_io,
+        "atomic_json_write",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("synthetic offline write failure")
+        ),
+    )
+
+    with pytest.raises(OSError, match="synthetic offline write failure"):
+        mod.save_recommendation_registry(registry, path)
+
+
+def test_db_committed_mirror_refresh_marks_corrupt_json_degraded(
+    tmp_path: pathlib.Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DB 已提交时不覆盖损坏镜像：返回 False 并保留可审计错误。"""
+    import logging
+
+    from aats.data_platform.decision_system import recommendation_registry as mod
+
+    path = tmp_path / "recommendation_registry.json"
+    path.write_text("{corrupt-json", encoding="utf-8")
+    registry = _registry(0, [{"recommendation_id": "rec_db_committed"}])
+    monkeypatch.setattr(
+        mod,
+        "_load_canonical_recommendation_registry_for_audit_mirror",
+        lambda _path: registry,
+    )
+
+    with caplog.at_level(logging.ERROR):
+        refreshed = mod.refresh_recommendation_audit_mirror_after_db_commit(
+            path,
+            recommendation_id="rec_db_committed",
+            transition="approve",
+        )
+
+    assert refreshed is False
+    assert path.read_text(encoding="utf-8") == "{corrupt-json"
+    assert any(
+        "audit mirror degraded after canonical DB commit" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_db_readback_and_file_cas_preserve_distinct_concurrent_transitions(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """不同 recommendation 并发提交时，旧快照不得覆盖已提交真值。
+
+    A 先读到“A/B 均已批准”的 canonical DB 快照和磁盘 base v1，
+    但停在写入前；B 用较早的“仅 B 已批准”快照先写成 v2。A 的
+    首次写入命中 CAS 后必须重读 DB + 当前 v2，再写成 v3；最终镜像
+    必须保留 A/B 两条已提交转移，不得留在“A 仍 draft”的假状态。
+    """
+    from aats.data_platform.decision_system import recommendation_registry as mod
+
+    path = tmp_path / "recommendation_registry.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "recommendations": [
+                    {"recommendation_id": "rec_a", "status": "draft"},
+                    {"recommendation_id": "rec_b", "status": "draft"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    stale_b_readback = {
+        "version": 1,
+        "recommendations": [
+            {"recommendation_id": "rec_a", "status": "draft"},
+            {"recommendation_id": "rec_b", "status": "approved"},
+        ],
+    }
+    readback_counts: dict[str, int] = {}
+
+    def _readback(_path: pathlib.Path) -> dict[str, Any]:
+        thread_name = threading.current_thread().name
+        readback_counts[thread_name] = readback_counts.get(thread_name, 0) + 1
+        if thread_name == "mirror-b":
+            return stale_b_readback
+        return {
+            # A 的首次 readback 在 B 写前绑定 v1；CAS 失败后第二次
+            # readback 必须看到 B 已推进的 v2。
+            "version": 1 if readback_counts[thread_name] == 1 else 2,
+            "recommendations": [
+                {"recommendation_id": "rec_a", "status": "approved"},
+                {"recommendation_id": "rec_b", "status": "approved"},
+            ],
+        }
+
+    real_save = mod.save_recommendation_registry
+    a_waiting_to_write = threading.Event()
+    b_write_finished = threading.Event()
+
+    def _coordinated_save(
+        registry: dict[str, Any],
+        target: pathlib.Path,
+        **kwargs: Any,
+    ) -> None:
+        if (
+            threading.current_thread().name == "mirror-a"
+            and int(registry["version"]) == 1
+        ):
+            a_waiting_to_write.set()
+            if not b_write_finished.wait(timeout=5):
+                raise TimeoutError("B mirror writer did not finish")
+            # 磁盘已被 B 推到 v2，这次 v1 写入必须 CAS 失败，helper
+            # 应回到 DB readback 开始下一次尝试。
+            real_save(registry, target, **kwargs)
+            return
+        if threading.current_thread().name == "mirror-b":
+            try:
+                real_save(registry, target, **kwargs)
+            finally:
+                b_write_finished.set()
+            return
+        # A 的第二次尝试：canonical 快照 + 当前 base v2。
+        real_save(registry, target, **kwargs)
+
+    monkeypatch.setattr(
+        mod,
+        "_load_canonical_recommendation_registry_for_audit_mirror",
+        _readback,
+    )
+    monkeypatch.setattr(mod, "save_recommendation_registry", _coordinated_save)
+
+    results: dict[str, bool] = {}
+
+    def _refresh(key: str, recommendation_id: str) -> None:
+        results[key] = mod.refresh_recommendation_audit_mirror_after_db_commit(
+            path,
+            recommendation_id=recommendation_id,
+            transition="approve",
+        )
+
+    b_thread = threading.Thread(
+        target=_refresh,
+        args=("b", "rec_b"),
+        name="mirror-b",
+    )
+    a_thread = threading.Thread(
+        target=_refresh,
+        args=("a", "rec_a"),
+        name="mirror-a",
+    )
+    a_thread.start()
+    assert a_waiting_to_write.wait(timeout=5)
+    b_thread.start()
+    a_thread.join(timeout=5)
+    b_thread.join(timeout=5)
+
+    assert not a_thread.is_alive()
+    assert not b_thread.is_alive()
+    assert results == {"a": True, "b": True}
+    assert readback_counts == {"mirror-a": 2, "mirror-b": 1}
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert on_disk["version"] == 3
+    assert {
+        item["recommendation_id"]: item["status"]
+        for item in on_disk["recommendations"]
+    } == {"rec_a": "approved", "rec_b": "approved"}

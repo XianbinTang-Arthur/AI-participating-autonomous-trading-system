@@ -40,6 +40,51 @@ def _run(run_id: str, *, trigger_kind: str, eligible_at: str) -> dict[str, objec
     }
 
 
+def _qualified_release_candidate(recommendation_id: str) -> dict[str, object]:
+    round_id = "20260827_120000_deadbeef"
+    return {
+        "combo_key": "independent_15m",
+        "family": "independent",
+        "timeframe": "15m",
+        "recommendation_id": recommendation_id,
+        "recommendation_type": "parameter_upgrade",
+        "status": "approved",
+        "target_parameter_set_id": "ps_1",
+        "source_round_id": "research_round_1",
+        "evidence_bundle_ref": round_id,
+        "allow_apply": True,
+        "promotion_qualification": {
+            "required": True,
+            "eligible": True,
+            "reason_code": "qualified",
+            "evidence_bundle_ref": round_id,
+            "source_round_id": "research_round_1",
+            "qualified_round_id": round_id,
+        },
+    }
+
+
+def _release_control(
+    *,
+    decision_status: str = "keep_active",
+    decision_truth_available: bool = True,
+) -> dict[str, object]:
+    return {
+        "release_history_status": {"source": "db", "stale": False},
+        "gate_history_status": {"source": "db", "available": True},
+        "governance_state": {
+            "decision_truth_available": decision_truth_available,
+            "combo_states": [
+                {
+                    "combo_key": "independent_15m",
+                    "decision_status": decision_status,
+                    "decision_truth_available": decision_truth_available,
+                }
+            ],
+        },
+    }
+
+
 def test_queue_position_matches_daemon_priority_and_backoff_truth() -> None:
     runs = {
         "items": [
@@ -111,12 +156,22 @@ def test_release_projection_never_enables_release_before_gate_pass() -> None:
         "release_candidates": {
             "items": [
                 {
-                    "recommendation_id": "rec_blocked",
+                    **_qualified_release_candidate("rec_blocked"),
                     "created_at": "2026-08-25T10:00:00+00:00",
-                    "gate_status": "block",
-                    "actions": [
-                        {"key": "run_gate", "enabled": True},
-                        {"key": "create_release", "enabled": True},
+                        "gate_status": "block",
+                        "actions": [
+                            {
+                                "key": "run_gate",
+                                "ui_action": "rdp-run-gate",
+                                "value": "rec_blocked",
+                                "enabled": True,
+                            },
+                            {
+                                "key": "create_release",
+                                "ui_action": "rdp-create-release",
+                                "value": "rec_blocked",
+                                "enabled": True,
+                            },
                     ],
                 }
             ]
@@ -124,10 +179,7 @@ def test_release_projection_never_enables_release_before_gate_pass() -> None:
     }
 
     projection = rdp_workspace._release_projection(
-        {
-            "release_history_status": {"source": "db", "stale": False},
-            "gate_history_status": {"source": "db", "available": True},
-        },
+        _release_control(),
         workbench,
     )
 
@@ -137,20 +189,47 @@ def test_release_projection_never_enables_release_before_gate_pass() -> None:
     assert "先运行并通过" in release_action["disabled_reason"]
 
 
+def test_release_projection_requires_status_and_allow_apply_to_agree() -> None:
+    candidate = {
+        **_qualified_release_candidate("rec_gate_conflict"),
+        "created_at": "2026-08-25T10:00:00+00:00",
+        "gate_status": "pass",
+        "allow_apply": False,
+        "actions": [
+            {
+                "key": "create_release",
+                "ui_action": "rdp-create-release",
+                "value": "rec_gate_conflict",
+                "enabled": True,
+            }
+        ],
+    }
+
+    projection = rdp_workspace._release_projection(
+        _release_control(),
+        {"release_candidates": {"items": [candidate]}},
+    )
+
+    assert projection["selection_status"] == "no_eligible_candidate"
+    assert projection["candidates"][0]["actions"][0]["enabled"] is False
+
+
 def test_release_projection_selects_latest_approved_gate_pass() -> None:
     def candidate(recommendation_id: str, created_at: str) -> dict[str, object]:
         return {
-            "recommendation_id": recommendation_id,
+            **_qualified_release_candidate(recommendation_id),
             "created_at": created_at,
             "gate_status": "pass",
-            "actions": [{"key": "create_release", "enabled": True}],
+            "actions": [{
+                "key": "create_release",
+                "ui_action": "rdp-create-release",
+                "value": recommendation_id,
+                "enabled": True,
+            }],
         }
 
     projection = rdp_workspace._release_projection(
-        {
-            "release_history_status": {"source": "db", "stale": False},
-            "gate_history_status": {"source": "db", "available": True},
-        },
+        _release_control(),
         {
             "release_candidates": {
                 "items": [
@@ -165,19 +244,73 @@ def test_release_projection_selects_latest_approved_gate_pass() -> None:
     assert projection["eligible_candidate"]["recommendation_id"] == "rec_new"
 
 
+def test_release_projection_blocks_create_release_while_combo_is_paused() -> None:
+    candidate = {
+        **_qualified_release_candidate("rec_paused"),
+        "gate_status": "pass",
+        "actions": [{
+            "key": "create_release",
+            "ui_action": "rdp-create-release",
+            "value": "rec_paused",
+            "enabled": True,
+        }],
+    }
+
+    projection = rdp_workspace._release_projection(
+        _release_control(decision_status="pause"),
+        {"release_candidates": {"items": [candidate]}},
+    )
+
+    assert projection["selection_status"] == "no_eligible_candidate"
+    projected = projection["candidates"][0]
+    assert projected["decision_status"] == "pause"
+    assert projected["decision_allows_release"] is False
+    assert projected["actions"][0]["enabled"] is False
+    assert "暂停" in projected["actions"][0]["disabled_reason"]
+
+
+def test_release_projection_blocks_create_release_when_decision_truth_unavailable() -> None:
+    candidate = {
+        **_qualified_release_candidate("rec_truth_unknown"),
+        "gate_status": "pass",
+        "actions": [{
+            "key": "create_release",
+            "ui_action": "rdp-create-release",
+            "value": "rec_truth_unknown",
+            "enabled": True,
+        }],
+    }
+
+    projection = rdp_workspace._release_projection(
+        _release_control(decision_truth_available=False),
+        {"release_candidates": {"items": [candidate]}},
+    )
+
+    assert projection["selection_status"] == "no_eligible_candidate"
+    projected = projection["candidates"][0]
+    assert projected["decision_truth_available"] is False
+    assert projected["actions"][0]["enabled"] is False
+    assert "真源不可验证" in projected["actions"][0]["disabled_reason"]
+
+
 def test_release_projection_fails_closed_when_release_truth_source_is_unknown() -> None:
     projection = rdp_workspace._release_projection(
         {
+            **_release_control(),
             "release_history_status": {"source": "unknown", "stale": False},
-            "gate_history_status": {"source": "db", "available": True},
         },
         {
             "release_candidates": {
                 "items": [
                     {
-                        "recommendation_id": "rec_untrusted",
+                        **_qualified_release_candidate("rec_untrusted"),
                         "gate_status": "pass",
-                        "actions": [{"key": "create_release", "enabled": True}],
+                        "actions": [{
+                            "key": "create_release",
+                            "ui_action": "rdp-create-release",
+                            "value": "rec_untrusted",
+                            "enabled": True,
+                        }],
                     }
                 ]
             }
@@ -186,6 +319,101 @@ def test_release_projection_fails_closed_when_release_truth_source_is_unknown() 
 
     assert projection["selection_status"] == "no_eligible_candidate"
     assert projection["candidates"][0]["actions"][0]["enabled"] is False
+
+
+def test_release_projection_rejects_legacy_candidate_even_with_persisted_gate_pass() -> None:
+    projection = rdp_workspace._release_projection(
+        _release_control(),
+        {
+            "release_candidates": {
+                "items": [
+                    {
+                        "recommendation_id": "rec_legacy_gate_pass",
+                        "recommendation_type": "parameter_upgrade",
+                        "status": "approved",
+                        "target_parameter_set_id": "ps_legacy",
+                        "source_round_id": "research_round_legacy",
+                        "evidence_bundle_ref": "round_legacy",
+                        "gate_status": "pass",
+                        "promotion_qualification": {
+                            "required": True,
+                            "eligible": True,
+                            "reason_code": "promotion_round_not_found",
+                            "source_round_id": "research_round_legacy",
+                            "evidence_bundle_ref": "round_legacy",
+                            "qualified_round_id": None,
+                        },
+                        "actions": [
+                            {"key": "run_gate", "enabled": True},
+                            {"key": "create_release", "enabled": True},
+                        ],
+                    }
+                ]
+            }
+        },
+    )
+
+    assert projection["selection_status"] == "no_eligible_candidate"
+    candidate = projection["candidates"][0]
+    assert candidate["eligible_for_release_review"] is False
+    assert candidate["actions"] == []
+
+
+def test_audit_only_history_is_governance_work_and_exposes_supersede_only() -> None:
+    workbench = {
+        "items": [],
+        "release_candidates": {
+            "items": [],
+            "audit_only_items": [
+                {
+                    **_qualified_release_candidate("rec_legacy_visible"),
+                    "audit_only": True,
+                    "created_at": "2026-08-27T12:00:00Z",
+                    "actions": [
+                        {
+                            "key": "supersede",
+                            "ui_action": "rdp-create-release",
+                            "value": "rec_legacy_visible",
+                            "enabled": True,
+                        },
+                        {
+                            "key": "supersede",
+                            "ui_action": "rdp-supersede-recommendation",
+                            "value": "rec_legacy_visible",
+                            "enabled": True,
+                        },
+                    ],
+                }
+            ],
+        },
+    }
+    projection = rdp_workspace._release_projection(
+        _release_control(),
+        workbench,
+    )
+
+    assert projection["selection_status"] == "no_eligible_candidate"
+    assert len(projection["candidates"]) == 1
+    assert projection["candidates"][0]["audit_only"] is True
+    assert [action["key"] for action in projection["candidates"][0]["actions"]] == [
+        "supersede"
+    ]
+    lifecycle = rdp_workspace._lifecycle_projection(
+        {}, {}, workbench, {}, {"active_run": None, "recent_runs": []},
+    )
+    governance = next(
+        stage for stage in lifecycle["stages"] if stage["key"] == "governance"
+    )
+    release = next(
+        stage for stage in lifecycle["stages"] if stage["key"] == "release"
+    )
+    assert lifecycle["current_stage"] == "governance"
+    assert governance["status"] == "action_required"
+    assert governance["evidence_count"] == 1
+    assert release["status"] == "idle"
+    next_action = rdp_workspace._next_action({}, lifecycle, {}, projection)
+    assert next_action["ui_action"] == "rdp-supersede-recommendation"
+    assert next_action["value"] == "rec_legacy_visible"
 
 
 def test_workspace_route_maps_database_failure_to_retryable_503() -> None:
@@ -252,3 +480,53 @@ def test_workspace_derives_all_workbench_views_from_one_control_summary() -> Non
     build_control.assert_called_once_with(request)
     build_bundle.assert_called_once_with(request, control_summary=control)
     build_data_governance.assert_called_once_with(project_root.return_value)
+
+
+def test_workspace_surfaces_governance_quarantine_as_blocked_alert() -> None:
+    request = object()
+    governance_state = {
+        "available": True,
+        "audit_only": True,
+        "reason_code": "governance_quarantine",
+        "db_load_failed": False,
+        "quarantined_combos": {
+            "independent_15m": "active_parameter_lineage_invalid"
+        },
+        "combo_states": [],
+    }
+    control = {
+        "health": _health(),
+        "tasks": {},
+        "governance_state": governance_state,
+    }
+    bundle = {
+        "overview": {},
+        "workbench": {},
+        "alerts": {},
+        "tuning_overview": {},
+        "tuning_proposals": {},
+    }
+
+    with (
+        patch("aats.api.rdp_workspace._project_root", return_value=Path(".").resolve()),
+        patch("aats.api.rdp_workspace.build_rdp_control_summary", return_value=control),
+        patch("aats.api.rdp_workspace.build_rdp_workbench_bundle", return_value=bundle),
+        patch("aats.api.rdp_workspace.build_rdp_runs_panel", return_value={"items": []}),
+        patch("aats.api.rdp_workspace._workflow_catalog", return_value=[]),
+        patch(
+            "aats.api.rdp_workspace.build_data_governance_snapshot",
+            return_value={"schema_version": "rdp.data_governance.v1"},
+        ),
+    ):
+        payload = rdp_workspace.build_rdp_workspace(request)  # type: ignore[arg-type]
+
+    assert payload["governance_state"] == governance_state
+    assert payload["health"]["overall_health"] == "blocked"
+    assert payload["lifecycle"]["overall_status"] == "blocked"
+    stages = {item["key"]: item["status"] for item in payload["lifecycle"]["stages"]}
+    assert stages["governance"] == "blocked"
+    assert stages["release"] == "blocked"
+    assert stages["runtime"] == "blocked"
+    alert = payload["research"]["alerts"]["governance_alerts"][0]
+    assert alert["code"] == "governance_quarantine"
+    assert alert["blocks_approval"] is True

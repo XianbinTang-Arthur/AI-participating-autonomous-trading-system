@@ -1,6 +1,9 @@
 # Production Parameter Change Runbook
 
-> 最后核对：2026-08-24（起始 HEAD `00b6df0` + 未提交 Phase 3F 覆盖层）。这是 future production 变更门禁；当前全系统 `REAL-MONEY PRODUCTION: NO-GO`，标准 deploy/prewarm/wrapper 硬禁用所有 live profile。本页当前只可用于准备和审阅证据，不得执行 release/apply/runtime rebuild。API payload 以运行时 `/openapi.json` 为准，基础 apply/rollback 语义见 [Parameter Apply 与 Rollback](parameter_apply_and_rollback.md)。
+> 文档状态：现行 future-production 操作约束
+> 最后核对：2026-08-27（起始 HEAD `9c4112c6`，含当前控制面收口候选；以本文档所在 HEAD 为准）
+> 核对范围：当前 release/apply/observation/rollback 静态契约；不证明 live 可部署或任何现场状态
+> 当前边界：全系统 `REAL-MONEY PRODUCTION: NO-GO`，标准 deploy/prewarm/wrapper 在副作用前拒绝所有 live profile。本页只可准备和审阅证据，不得执行 live release/apply/runtime rebuild。
 
 ## 1. 流程
 
@@ -13,7 +16,7 @@ research evidence
   -> runtime rebuild/load
   -> observation
   -> keep / review / rollback recommendation
-  -> rollback（如需）
+  -> Operator rollback 或内部受控风险收敛（如需）
 ```
 
 生产环境不允许自动 release。`release_cycle` 的 JSON schedule 为 disabled，任务队列也阻止它入队；所有前向变更必须是可归因的 Operator 动作。
@@ -50,7 +53,11 @@ research evidence
 - `POST /rdp/releases/create`：对已批准 recommendation 执行 gate + release + apply；
 - `POST /rdp/recommendations/{id}/approve-and-release`：approve + gate + release + apply。
 
-两者与直接 `POST /rdp/parameters/apply` 一样，在实际执行 apply 时依赖 Operator write access、Step2 integrity gate 和当前 session 签发的 `action=apply` 短时 `X-Rdp-Apply-Token`。token 校验先于 approve/release 写入；`skip_apply=true` 的纯治理记录操作不要求该 token。
+两者在实际执行 apply 时依赖 Operator write access、Step2 integrity gate 和当前 session
+签发的 `action=apply` 短时 `X-Rdp-Apply-Token`。token 校验先于
+approve/release 写入；`skip_apply=true` 的纯治理记录操作不要求该 token。
+`POST /rdp/parameters/apply` 已在所有环境停用，固定无写入返回
+`code=release_required`，不能作为第三条发布路径。
 
 发布响应必须检查：
 
@@ -96,9 +103,15 @@ runtime loader 数据库失败时会退化到 profile 参数并记录 error，�
 | --- | --- |
 | `completed` / keep | 完成记录，保留参数 |
 | review | 冻结进一步变更，人工审查 |
-| `rollback_recommended` | 评估 target 后走受保护回滚 |
+| `rollback_recommended` | 保持同 combo 前向 apply 阻断；评估人工 target，或由 observation cycle 的内部 enforcer 在严格证明下收敛 |
 
 ## 7. Rollback
+
+Operator 直接回滚仍按以下步骤执行并要求 session-bound rollback token。另有启用中的
+`observation_cycle` 内部路径：它不使用浏览器 token，但必须验证精确 post-apply
+release/evidence、clean attempt、combo lock 和数据库 action proof；它只能执行精确回滚、
+因 active 已改变而取消旧意图，或在无合法 target 时 soft pause。任何 legacy、缺 provenance、
+中断或结果不确定状态进入 `reconciliation_required`，不能自动重放。
 
 1. 通过 `POST /rdp/rollback-recommendation/evaluate` 获取建议和 target。
 2. 当前 Operator session 调用 `POST /rdp/operator-tokens`，action 为 `rollback`。
@@ -121,6 +134,8 @@ Rollback 是安全动作，代码不会因为 Step2 integrity 降级而阻断；
 | runtime provenance 不匹配 | 保持/触发 halt，恢复 DB 真源并完整重建 |
 | observation 严重退化 | 停止新决策，评估并执行 rollback |
 | rollback 无合法 target | 不从 JSON 猜测；人工审查合法 parameter set |
+| rollback attempt 中断或证明不完整 | 保持 apply veto；核对 active/history/release/attempt/proof 后人工 reconciliation，禁止重放 |
+| DB recommendation CAS 成功但 mirror degraded | 以 canonical DB 为准修复审计镜像，不把镜像失败当作状态迁移失败 |
 
 任何 ambiguous 状态都先保护资金、保留证据，不能用重复 apply 掩盖。
 

@@ -58,6 +58,7 @@ export const KNOWN_RDP_UI_ACTIONS = new Set([
   "rdp-rollback-parameters",
   "rdp-run-gate",
   "rdp-run-observation",
+  "rdp-supersede-recommendation",
   "rdp-trigger-workflow",
 ]);
 

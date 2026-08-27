@@ -128,6 +128,158 @@ def test_workflow_dispatcher_preserves_failed_duplicate_task_position(
     ]
 
 
+def test_managed_failed_workflow_cannot_silently_leave_old_db_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from aats.data_platform.governance._exceptions import DBUnavailableError
+
+    _write_json(
+        tmp_path / "configs" / "rdp_workflows" / "demo.json",
+        {
+            "workflow": "demo",
+            "tasks": [
+                {
+                    "name": "failed_task",
+                    "command": "python noop.py",
+                    "enabled": True,
+                    "allow_failure": False,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "aats.data_platform.operations.workflow_dispatcher._run_task",
+        lambda *_args, **_kwargs: {
+            "name": "failed_task",
+            "status": "failed",
+            "allow_failure": False,
+            "exit_code": 1,
+            "error": "deterministic failure",
+        },
+    )
+    monkeypatch.setattr(
+        "aats.data_platform.operations.workflow_dispatcher."
+        "has_explicit_governance_db_configuration",
+        lambda _root: True,
+    )
+    monkeypatch.setattr(
+        "aats.data_platform.operations.workflow_dispatcher.try_governance_db",
+        lambda: (None, False),
+    )
+
+    with pytest.raises(
+        DBUnavailableError,
+        match="managed workflow run report persistence unavailable",
+    ):
+        run_workflow(tmp_path, "demo")
+    report_dir = tmp_path / "artifacts/operations/workflow_runs"
+    assert not list(report_dir.glob("*.json"))
+
+
+def test_queue_workflow_report_uses_exact_run_and_attempt_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from aats.data_platform.operations import workflow_dispatcher
+    from aats.data_platform.operations.rdp_run_observer import RdpRunObserver
+
+    _write_json(
+        tmp_path / "configs" / "rdp_workflows" / "demo.json",
+        {
+            "workflow": "demo",
+            "tasks": [
+                {
+                    "name": "task",
+                    "command": "python noop.py",
+                    "enabled": True,
+                    "allow_failure": False,
+                }
+            ],
+        },
+    )
+    monkeypatch.setenv("AATS_RDP_RUN_ID", "logical_run_42")
+    monkeypatch.setenv("AATS_RDP_ATTEMPT_NO", "3")
+    monkeypatch.setattr(RdpRunObserver, "initialize", lambda *_args: None)
+    monkeypatch.setattr(RdpRunObserver, "step_started", lambda *_args: None)
+    monkeypatch.setattr(RdpRunObserver, "step_finished", lambda *_args: None)
+    monkeypatch.setattr(
+        workflow_dispatcher,
+        "_run_task",
+        lambda *_args, **_kwargs: {
+            "name": "task",
+            "status": "success",
+            "allow_failure": False,
+            "exit_code": 0,
+        },
+    )
+    persisted: list[dict] = []
+    monkeypatch.setattr(
+        workflow_dispatcher,
+        "_save_run_report",
+        lambda _root, report: persisted.append(dict(report)),
+    )
+
+    report = run_workflow(tmp_path, "demo")
+
+    assert report["run_id"] == "logical_run_42"
+    assert report["attempt_no"] == 3
+    assert report["queue_bound"] is True
+    assert persisted[0]["run_id"] == "logical_run_42"
+    assert persisted[0]["attempt_no"] == 3
+
+
+def test_partial_queue_identity_fails_before_report_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _write_json(
+        tmp_path / "configs" / "rdp_workflows" / "demo.json",
+        {"workflow": "demo", "tasks": []},
+    )
+    monkeypatch.setenv("AATS_RDP_RUN_ID", "logical_run_without_attempt")
+    monkeypatch.delenv("AATS_RDP_ATTEMPT_NO", raising=False)
+
+    with pytest.raises(ValueError, match="must form a valid queue identity"):
+        run_workflow(tmp_path, "demo")
+
+
+def test_dry_run_never_persists_fresh_success_report(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from aats.data_platform.operations import workflow_dispatcher
+
+    _write_json(
+        tmp_path / "configs" / "rdp_workflows" / "demo.json",
+        {
+            "workflow": "demo",
+            "tasks": [
+                {
+                    "name": "preview",
+                    "command": "python noop.py",
+                    "enabled": True,
+                    "allow_failure": False,
+                }
+            ],
+        },
+    )
+    persisted: list[dict] = []
+    monkeypatch.setattr(
+        workflow_dispatcher,
+        "_save_run_report",
+        lambda _root, report: persisted.append(dict(report)),
+    )
+
+    report = run_workflow(tmp_path, "demo", dry_run=True)
+
+    assert report["overall_status"] == "success"
+    assert report["dry_run"] is True
+    assert report["persistence_status"] == "skipped_dry_run"
+    assert persisted == []
+    assert not (tmp_path / "artifacts/operations/workflow_runs").exists()
+
+
 def test_workflow_dispatcher_propagates_pipeline_warning(tmp_path: Path) -> None:
     script = tmp_path / "pipeline.py"
     script.write_text(

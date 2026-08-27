@@ -1,6 +1,9 @@
 # RDP 代码模块参考
 
-> 最后核对：2026-08-26（实现基线 `fe5596fd5ee4`，历史数据恢复与持续采集加固已完成标准 derivatives 模拟部署）。本页按当前目录和运行入口组织，不再沿用早期“少量 Phase 文件清单”。RDP 总览见 [`aats/data_platform/README.md`](../../aats/data_platform/README.md)。
+> 文档状态：现行模块说明
+> 最后核对：2026-08-27（起始 HEAD `9c4112c6`，含当前 RDP 控制面收口候选；以本文档所在 HEAD 为准）
+> 核对范围：当前 Python 文件、ORM metadata、router registry 与静态职责；不证明现场数据库或服务状态
+> RDP 总览：[`aats/data_platform/README.md`](../../aats/data_platform/README.md)
 
 ## 1. 根模块
 
@@ -8,14 +11,14 @@
 | --- | --- |
 | `config.py` | `ResearchPlatformSettings`；读取 `RDP_DATABASE_URL`、live 只读库、采集和 artifact 配置；容器中可复用 `AATS_ACTIVE_PARAMETER_DB_URL` |
 | `db.py` | Engine/Session、迁移入口和数据库生命周期 |
-| `rdp_models.py` | `RdpBase` 的 98 张 ORM 表，覆盖 staging/bronze/silver/gold/meta/research/governance；Batch B stage 18 增加来源、归档、缺口、连续性、bundle 与历史重建事实 |
+| `rdp_models.py` | `RdpBase` 的 102 张 ORM 表，覆盖 staging/bronze/silver/gold/meta/research/governance；ORM baseline 含 action proof 表，Batch B 仍为 18 个有序 stage |
 | `models.py` | 采集、replay 等轻量领域数据结构和表名解析 |
 | `live_query_adapter.py` | 主交易数据库只读查询适配层 |
 | `orderbook_diff_payload_contract.py` | orderbook diff payload 契约 |
 
 ## 2. 目录总览
 
-当前 `aats/data_platform/` 有 225 个 Python 文件。目录职责如下；数量用于发现明显漏扫，不是公共 API 保证。
+当前 `aats/data_platform/` 有 235 个 Python 文件。目录职责如下；数量用于发现明显漏扫，不是公共 API 保证。
 
 | 目录 | Python 文件数 | 职责 |
 | --- | ---: | --- |
@@ -25,18 +28,18 @@
 | `merge/` | 5 | staging→bronze→silver、microstructure Silver 合并 |
 | `gold/` | 3 | funding 对齐、replay bar 构建 |
 | `jobs/` | 4 | checkpoint、run registry、gap repair |
-| `replay/` | 26 | replay core、strategy adapters、diagnostics、scan、reports |
+| `replay/` | 27 | replay core、strategy adapters、diagnostics、scan、reports |
 | `attribution/` | 6 | live/replay 对齐、瀑布归因、聚合、报告 |
 | `execution_realism/` | 9 | fill feasibility、slippage、cost、market alignment |
-| `decision_system/` | 8 | evidence、candidate、decision、readiness、recommendation registry |
+| `decision_system/` | 10 | evidence、candidate、精确 promotion qualification/guard、decision、readiness、recommendation registry |
 | `governance/` | 29 | 参数/推荐/active set、Run/Attempt/Step/Event、任务队列、调度状态、snapshot、tuning 与 apply saga |
-| `data_governance/` | 9 | provenance、coverage、gap、continuity、不可变归档、双准入、bundle registry 与历史 Silver 重建 |
-| `production_workflow/` | 9 | gate、release、observation、rollback policy |
+| `data_governance/` | 13 | provenance、coverage、gap、continuity、不可变归档、双准入、bundle registry 与历史 Silver 重建 |
+| `production_workflow/` | 11 | gate、release、post-apply evidence、observation、rollback policy |
 | `operations/` | 16 | dispatcher、Run observer、scheduler、failure/retry、reliability、daemon health、tuning review |
 | `metrics/` | 9 | 指标、baseline、release effectiveness、periodic review、backlog |
 | `live_facts/` | 4 | live 事实只读访问和模型 |
 | `research/` | 3 | profile research job 与结果 |
-| `research_factory/` | 49 | 证据契约、实验、verdict、治理 review、dry-run/manual apply design |
+| `research_factory/` | 50 | 证据契约、实验、verdict、治理 review、dry-run/manual apply design |
 | `migrations/` | 3 | RDP schema 版本化迁移 |
 | `gates/` | 2 | gate 相关共享能力 |
 | `runtime/` | 2 | RDP runtime 辅助能力 |
@@ -115,6 +118,10 @@ Research Factory 是当前最大的 RDP 子域，覆盖：
 - `observation_cycle.py` / `observation_window.py`：发布后观察。
 - `rollback_policy.py`：回滚建议和保护。
 
+`observation_cycle.py` 的持久化运行会调用内部 pending-risk enforcer。它不是自动
+release；只有 exact post-apply provenance、clean attempt、combo lock 和数据库 action proof
+完整时才会回滚、取消或 soft pause，其余状态进入 reconciliation。
+
 当前调度层禁用 `release_cycle`，任务队列还在 `ENQUEUE_BLOCKED_WORKFLOWS` 中冻结它。保留代码不代表允许自动执行。
 
 ## 6. Operations
@@ -144,7 +151,7 @@ RDP daemon 的标准容器入口是 `scripts/rdp_task_daemon.py --poll-interval 
 | `aats/api/rdp_apply_token.py` | v2 HMAC apply/rollback token 签发与验证 |
 | `aats/services/operator/rdp_queries.py` | Operator RDP 查询聚合 |
 
-核心 `rdp_router` 当前组合 41 个路由；Gateway 加上 profile/sleeve 子路由后共注册 56 个 `/rdp/*` 路由，其中 5 个是 Run V2 路由、1 个是 Workspace V3 路由。完整清单以运行时 `/openapi.json` 和 [项目代码审查与系统说明](../code_review/README.md) 为准。
+核心 `rdp_router` 当前注册 42 个 method/path operation、41 个唯一 URL path；profile/sleeve router 为 15/15。Gateway 合计 57 个 RDP operation、56 个唯一 `/rdp/*` URL path，其中 Run V2 为 5 个、Workspace V3 为 2 个。完整清单以运行时 `/openapi.json` 和 [项目代码审查与系统说明](../code_review/README.md) 为准。
 
 ## 8. 维护规则
 

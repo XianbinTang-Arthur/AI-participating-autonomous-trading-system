@@ -1,6 +1,8 @@
 # AATS Operations 文档索引
 
-> 文档状态：现行索引。最后核对：2026-08-26（实现基线 `fe5596fd5ee4`；历史数据恢复与持续采集加固已完成标准 derivatives 模拟部署）。
+> 文档状态：现行索引
+> 最后核对：2026-08-27（起始 HEAD `9c4112c6`，含当前 RDP 控制面收口候选；以本文档所在 HEAD 为准）
+> 核对范围：目录状态、当前静态入口与安全边界；不证明现场服务或数据状态
 
 本目录同时保存当前操作手册、专题参考和历史运行记录。文件名包含 `runbook`、`checklist` 或 `release`，不代表它仍可用于当前实盘。执行任何状态变更前，先按本页状态选择入口，并按 [`../README.md`](../README.md) 的真实性与时效性规则复核当前 `HEAD`。
 
@@ -14,7 +16,7 @@
 | [`platform_runbook.md`](platform_runbook.md) | RDP daemon、队列、调度与恢复 | RDP 操作不能替代主交易恢复 |
 | [`rdp_operator_workflow.md`](rdp_operator_workflow.md) | RDP Operator 标准流程 | 禁止使用已硬禁用的旧 CLI |
 | [`parameter_governance.md`](parameter_governance.md) | 参数治理状态与证据 | active parameter 真源是 Postgres |
-| [`parameter_apply_and_rollback.md`](parameter_apply_and_rollback.md) | apply/rollback API、安全门和审计 | 所有实际 apply 路径及 rollback 都需要 action-bound 短时 token |
+| [`parameter_apply_and_rollback.md`](parameter_apply_and_rollback.md) | release/apply/rollback、安全门和审计 | direct apply 已停用；Operator rollback 用 token，内部风险收敛用精确 DB 证明 |
 | [`production_parameter_change_runbook.md`](production_parameter_change_runbook.md) | 生产参数变更全流程 | 当前 live 部署禁用；只可准备/审阅证据，不得执行 runtime 发布 |
 | [`rdp_scheduling_strategy.md`](rdp_scheduling_strategy.md) | scheduler 语义 | 以 workflow JSON、allowlist 和 daemon timeout 为真源 |
 | [`rdp_workflow_calendar.md`](rdp_workflow_calendar.md) | 当前 workflow 日历 | decision/release disabled；release 禁止入队 |
@@ -39,7 +41,7 @@
 | [`event_store_archive_runbook.md`](event_store_archive_runbook.md) | event store 归档 | 当前 schema、archive script、备份/恢复验证 |
 | [`improvement_backlog_process.md`](improvement_backlog_process.md) | 改进 backlog 治理 | 当前治理流程与负责人决策 |
 | [`live_schema_contract_for_rdp.md`](live_schema_contract_for_rdp.md) | RDP/live schema 边界 | ORM、migration、只读连接权限 |
-| [`operator_rdp_integration.md`](operator_rdp_integration.md) | 最初 8 个 RDP 只读端点 | 当前共有 50 个 RDP 路由；完整集合读 OpenAPI |
+| [`operator_rdp_integration.md`](operator_rdp_integration.md) | 最初 8 个 RDP 只读端点 | 当前为 57 个 method/path operation、56 个唯一 URL path；完整集合读 OpenAPI |
 | [`parameter_mapping_reference.md`](parameter_mapping_reference.md) | 参数映射 | `active_parameters.py` 与 settings 字段 |
 | [`periodic_review_workflow.md`](periodic_review_workflow.md) | 周期复核框架 | 当前 workflow/scheduler 与治理策略 |
 | [`rdp_environment_matrix.md`](rdp_environment_matrix.md) | 环境能力矩阵 | environment guard、managed profile、DB 配置 |

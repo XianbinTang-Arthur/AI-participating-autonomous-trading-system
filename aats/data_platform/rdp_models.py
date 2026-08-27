@@ -1,7 +1,7 @@
 """RDP (Research Data Platform) SQLAlchemy ORM 模型。
 
 替代 migrations/research/*.sql，通过 RdpBase.metadata.create_all() 自动建表。
-96 张表分布在 7 个 PostgreSQL schema：meta / staging / bronze / silver /
+当前 102 张表分布在 7 个 PostgreSQL schema：meta / staging / bronze / silver /
 gold / research / governance。
 
 设计决策：
@@ -46,7 +46,7 @@ class RdpBase(DeclarativeBase):
 
 
 # =====================================================================
-# META Schema — 12 张表
+# META Schema — 14 张表
 # =====================================================================
 
 class DatasetManifestModel(RdpBase):
@@ -1622,7 +1622,7 @@ class ExperimentSummaryModel(RdpBase):
 
 
 # =====================================================================
-# GOVERNANCE Schema — 6 张表
+# GOVERNANCE Schema — 26 张表
 # =====================================================================
 
 class ActiveParameterSetModel(RdpBase):
@@ -3062,6 +3062,69 @@ class ReleaseEffectivenessModel(RdpBase):
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 
+class ReleaseEffectivenessActionProofModel(RdpBase):
+    """Application insert-once proof ledger for terminal action outcomes.
+
+    ``release_effectiveness.payload`` is an operator-facing projection.  A
+    caller-controlled JSON flag must never authorize capital flow, so terminal
+    resolution additionally requires one row written by the combo-locked DB
+    transition after canonical capital/decision truth was re-derived.  The
+    schema enforces FK/UNIQUE/shape constraints; database roles must separately
+    prevent ad-hoc UPDATE/DELETE because no immutable trigger exists.
+    """
+
+    __tablename__ = "release_effectiveness_action_proofs"
+    __table_args__ = (
+        UniqueConstraint("release_id", name="uq_release_eff_action_proof_release"),
+        UniqueConstraint("attempt_id", name="uq_release_eff_action_proof_attempt"),
+        ForeignKeyConstraint(
+            ["release_id"],
+            ["governance.parameter_releases.release_id"],
+            name="fk_release_eff_action_proof_release",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        CheckConstraint(
+            "outcome IN ('enforced', 'cancelled')",
+            name="ck_release_eff_action_proof_outcome",
+        ),
+        CheckConstraint(
+            "proof_kind IN ('rollback', 'active_parameter_changed', 'soft_pause')",
+            name="ck_release_eff_action_proof_kind",
+        ),
+        CheckConstraint(
+            "(outcome = 'enforced' AND proof_kind = 'rollback' "
+            " AND operation_id IS NOT NULL AND target_parameter_set_id IS NOT NULL"
+            " AND observed_active_parameter_set_id IS NULL AND decision_status IS NULL)"
+            " OR (outcome = 'cancelled' AND proof_kind = 'active_parameter_changed'"
+            " AND operation_id IS NULL AND target_parameter_set_id IS NULL"
+            " AND observed_active_parameter_set_id IS NOT NULL"
+            " AND decision_status IS NULL)"
+            " OR (outcome = 'cancelled' AND proof_kind = 'soft_pause'"
+            " AND operation_id IS NULL AND target_parameter_set_id IS NULL"
+            " AND observed_active_parameter_set_id IS NULL"
+            " AND decision_status = 'pause')",
+            name="ck_release_eff_action_proof_shape",
+        ),
+        Index("ix_release_eff_action_proof_created", "created_at"),
+        {"schema": "governance"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    release_id = Column(String(128), nullable=False, unique=True)
+    attempt_id = Column(String(128), nullable=False, unique=True)
+    outcome = Column(String(32), nullable=False)
+    proof_kind = Column(String(64), nullable=False)
+    started_at_utc = Column(String(40), nullable=False)
+    finished_at_utc = Column(String(40), nullable=False)
+    operation_id = Column(String(128))
+    target_parameter_set_id = Column(String(128))
+    observed_active_parameter_set_id = Column(String(128))
+    decision_status = Column(String(32))
+    fact_observed_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
 class StrategyTuningProposalModel(RdpBase):
     __tablename__ = "strategy_tuning_proposals"
     __table_args__ = (
@@ -3122,7 +3185,7 @@ class DecisionEvidenceBundleModel(RdpBase):
 # =====================================================================
 
 def create_rdp_schema(engine: object) -> None:
-    """创建 RDP 的全部 7 个 PostgreSQL schema + 96 张表。
+    """创建 RDP 的全部 7 个 PostgreSQL schema + 当前 102 张表。
 
     替代 migrations/research/*.sql 迁移文件。幂等——已存在的 schema/表不会
     被破坏（CREATE SCHEMA IF NOT EXISTS + create_all 的 checkfirst=True）。

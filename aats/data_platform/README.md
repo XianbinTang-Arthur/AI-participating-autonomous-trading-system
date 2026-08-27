@@ -3,8 +3,8 @@
 > 项目定位声明：RDP 只在严格风控、可审计、可恢复、可治理的边界内为主交易系统提供研究证据和受控参数。完整定位见 [项目定位声明](../../docs/project_positioning.md)。
 
 > 文档状态：现行模块说明
-> 最后核对：2026-08-26（实现基线 `314adc6e8f17`；一日官方历史恢复、归档恢复与故障自愈已完成现场验证）
-> 核对范围：当前静态代码、迁移、配置、单元契约及 2026-08-26 derivatives 模拟证据；数据库覆盖、容器在线和 collector 连续性会漂移，运行时仍须重新验证
+> 最后核对：2026-08-27（起始 HEAD `9c4112c6`，含当前 RDP 控制面收口候选；以本文档所在 HEAD 为准）
+> 核对范围：当前静态代码、迁移、配置和测试契约；既有 2026-08-26 运行证据仅作带日期历史快照，数据库覆盖、容器在线和 collector 连续性必须现场重验
 
 适用范围：`aats/data_platform/`、`scripts/rdp_*.py`、`configs/rdp_workflows/`、RDP API 与任务守护进程。
 
@@ -18,7 +18,7 @@ RDP 是研究和治理子系统，不是实时交易执行器。
 - RDP 对 live 交易库只读，写入集中在独立 research/governance 数据库。
 - recommendation、candidate、verdict 和 research artifact 都不会自行改变交易行为。
 - runtime active parameter 的唯一真源是 Postgres `governance.active_parameter_sets`。
-- 参数写入必须经受保护的 Operator API、权限校验、gate、actor 和 history；apply/rollback 以及包含 apply 的组合 release 入口都要求 action-bound 短时 HMAC token。旧的直写 CLI 已禁用并返回退出码 2。
+- 参数前向写入必须经受保护的 release API、权限、资格、gate、actor 和 history；direct apply 已停用。`skip_apply=false` 的组合 release 入口要求 `apply` token，Operator rollback 要求 `rollback` token。内部 observation 风险收敛不使用浏览器 token，但必须由精确数据库事实、combo lock、attempt 和 action proof 授权。旧直写 CLI 已禁用并返回退出码 2。
 - Research Factory 只产出证据、结论和人工应用设计，不写 runtime、active parameters、managed config 或 OKX。
 - 当前不允许自动 release：`release_cycle` 配置禁用，且任务队列显式阻止它入队。
 - Phase 3V 的 real-data runner 使用 train stability + valid selection 双门；test 只参与
@@ -28,20 +28,20 @@ RDP 是研究和治理子系统，不是实时交易执行器。
 
 ## 2. 数据架构
 
-`aats/data_platform/rdp_models.py::RdpBase` 当前声明 98 张表：
+`aats/data_platform/rdp_models.py::RdpBase` 当前声明 102 张表：
 
 | Schema | 表数 | 主要职责 |
 | --- | ---: | --- |
 | `staging` | 13 | 原始文件/API 落地、官方成交/L2 历史、待校验输入 |
 | `bronze` | 21 | 标准化原始事实、实时采集与隔离的历史 L2/mark proxy |
 | `silver` | 16 | 去重、质量门控，以及 bundle-scoped 历史派生数据 |
-| `gold` | 8 | replay、对齐和研究消费数据集 |
-| `meta` | 12 | ingest run、checkpoint、来源、归档、缺口、bundle、重建与 collector continuity |
+| `gold` | 9 | replay、对齐和研究消费数据集 |
+| `meta` | 14 | ingest run、checkpoint、来源、归档、缺口、bundle、重建与 collector continuity |
 | `research` | 3 | experiment 与研究结果 |
-| `governance` | 25 | 参数、推荐、发布、观察、任务队列、逻辑 Run/Step/Event、holdout、参数代次和运行状态 |
-| **合计** | **98** | — |
+| `governance` | 26 | 参数、推荐、发布、观察、应用层 action proof、任务队列、逻辑 Run/Step/Event、holdout、参数代次和运行状态 |
+| **合计** | **102** | — |
 
-迁移定义位于 `aats/data_platform/migrations/`。显式前向入口是 `scripts/apply_schema_migrations.py`（部署综合作业）或兼容初始化入口 `scripts/rdp_init_db.py`；它们均执行 ORM baseline + 全部 18 个有序 Batch B stage，并在 `governance.rdp_schema_migrations` 保存 version/checksum。应用、daemon 和研究 job 不在启动期执行 DDL，只读校验 ORM table/column surface 与迁移账本。不能用旧文档中的“48/78/81/84 张表”或单纯“表存在”判断 schema 完整。
+迁移定义位于 `aats/data_platform/migrations/`。显式前向入口是 `scripts/apply_schema_migrations.py`（部署综合作业）或兼容初始化入口 `scripts/rdp_init_db.py`；它们均执行 ORM baseline + 全部 18 个有序 Batch B stage（末项名称 `batch_b_19_historical_research_artifacts`），并在 `governance.rdp_schema_migrations` 保存 version/checksum。应用、daemon 和研究 job 不在启动期执行 DDL，只读校验 ORM table/column surface 与迁移账本。不能用旧文档中的“48/78/81/84/98/101 张表”或单纯“表存在”判断 schema 完整。
 
 ### 数据流
 
@@ -66,7 +66,7 @@ OKX REST / 历史 ZIP / live 只读事实
 | RDP task daemon | `scripts/rdp_task_daemon.py` | 在容器内启用 scheduler、领取 attempt、同步 Run heartbeat、执行/取消 workflow、写终态与重试关系 |
 | Workflow scheduler | `scripts/rdp_schedule_workflows.py` / `operations/workflow_scheduler.py` | 从数据库调度状态和 JSON 定义计算到期 slot，原子入队 |
 | Workflow dispatcher | `operations/workflow_dispatcher.py` | 校验 workflow 和任务、按顺序执行、写运行报告并上报结构化 Run Step/Event |
-| Gateway RDP API | `aats/api/rdp_routes.py`、`rdp_v2.py`、`rdp_workspace.py`、`rdp_profile_routes.py` | Run 创建/详情/取消/重试、Workspace V3，以及查询、审批、gate、release/apply/rollback、兼容 workbench、profile/sleeve 治理 |
+| Gateway RDP API | `aats/api/rdp_routes.py`、`rdp_v2.py`、`rdp_workspace.py`、`rdp_workspace_routes.py`、`rdp_profile_routes.py` | Run 创建/详情/取消/重试、Workspace V3，以及查询、审批、gate、release/apply/rollback、兼容 workbench、profile/sleeve 治理 |
 | Rolling collectors | `collectors/rolling/`、相关 `scripts/rdp_*` | Candle、funding、OI、mark、long/short 等增量采集 |
 | Public WS collectors | `collectors/microstructure_ws_collector.py`、`liquidations_ws_collector.py` | `trades`、BBO、books5、OI/funding/mark 与公共强平；保存连接代次、采样/接收时间、drop/flush/gap 证据 |
 | Data governance | `data_governance/`、`scripts/rdp_{audit,archive,import,rebuild}_*.py` | 只读覆盖审计、不可变 Parquet 归档、官方历史来源、双资格门与确定性历史重建 |
@@ -127,14 +127,14 @@ Gateway 和 scheduler 都向 `governance.rdp_task_queue` 写任务，daemon 负�
 
 ## 7. Active parameter 受控变更
 
-当前可执行写路径在 Operator API：
+当前可执行前向写路径在 Operator release API：
 
 1. 审阅并批准 recommendation。
 2. 运行 pre-apply gate。
-3. 若调用 `POST /rdp/parameters/apply`，先通过 `POST /rdp/operator-tokens` 获取 `action=apply` 的短时 token，并携带 `X-Rdp-Apply-Token`。
-4. 也可调用组合入口 `POST /rdp/releases/create`；该入口同样要求 `action=apply` token，并在任何 apply 副作用前校验。
+3. 通过 `POST /rdp/operator-tokens` 获取 `action=apply` 的短时 token，再调用 `POST /rdp/releases/create` 或 `POST /rdp/recommendations/{id}/approve-and-release` 建立 canonical release。
+4. `POST /rdp/parameters/apply` 已停用并固定返回 `release_required`，不得作为前向或重试入口。
 5. 核对 `GET /rdp/parameters/active`、apply history、release history 和主交易 `/system/health`。
-6. 观察失败时，通过携带 `action=rollback` token 的 `POST /rdp/parameters/rollback` 回滚。
+6. 观察失败时可通过携带 `action=rollback` token 的 `POST /rdp/parameters/rollback` 人工回滚；启用的 observation cycle 也会在精确证明下收敛 pending rollback risk，不确定状态转人工 reconciliation。
 
 以下 CLI 已禁用，不能写进现行 runbook：
 
@@ -189,7 +189,7 @@ Gateway 和 scheduler 都向 `governance.rdp_task_queue` 写任务，daemon 负�
 
 ## 9. API 与 Operator UI
 
-Gateway 当前注册 56 个 `/rdp/*` 端点，其中包括 5 个 Run V2 路由和 1 个 Workspace V3 路由，覆盖：
+Gateway 当前注册 57 个 method/path operation、56 个唯一 `/rdp/*` URL path，其中包括 5 个 Run V2 operation 和 2 个 Workspace V3 operation，覆盖：
 
 - health、active parameters、apply history；
 - attribution、execution、decision、readiness；
@@ -200,7 +200,7 @@ Gateway 当前注册 56 个 `/rdp/*` 端点，其中包括 5 个 Run V2 路由�
 - profile recommendation/type review；
 - sleeve advice。
 
-当前 UI 只读取 `GET /rdp/v3/workspace` 返回的单一版本化业务快照；数据治理部分由服务端读取最新不可变覆盖 artifact 和有界 meta 聚合。`GET /rdp/v3/data-governance` 提供同一治理快照的只读端点，不扫描 raw tick 表、不返回 DSN/source locator，也不提供 live 或参数 apply 动作。旧 control/workbench/tuning 读接口继续保留给兼容脚本，不再由页面异步拼接。
+当前 UI 只读取 `GET /rdp/v3/workspace` 返回的单一版本化业务快照；数据治理部分由服务端读取最新不可变覆盖 artifact 和有界 meta 聚合。`GET /rdp/v3/data-governance` 提供同一治理快照的只读端点，不扫描 raw tick 表、不返回 DSN/source locator，也不提供 live 或参数 apply 动作。旧 control/workbench/tuning 读接口继续保留给兼容脚本，不再由页面异步拼接。Managed recommendation/effectiveness 数据库读取失败时禁止回退到陈旧 JSON；DB CAS 已提交但审计镜像刷新失败时必须单独报告 degraded，不能把 canonical 成功误报为业务失败。
 
 完整方法与路径以运行时 `/openapi.json` 和 [项目代码审查与系统说明](../../docs/code_review/README.md) 为准。`/healthz` 只表示 Gateway 存活，不代表 RDP、交易或参数发布已 ready。
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -17,6 +17,17 @@ from aats.api.rdp_routes import rdp_router
 @pytest.fixture(autouse=True)
 def _set_apply_token_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RDP_APPLY_TOKEN_SECRET", "production-workflow-test-secret")
+    # Integration contracts must not inherit a developer shell or deployed
+    # container's managed-profile identity.  Individual production cases
+    # override RDP_ENV explicitly; the rest exercise the deterministic dev
+    # policy rather than whichever profile happened to launch pytest.
+    for name in (
+        "AATS_PROFILE",
+        "AATS_ENV_TEMPLATE_PROFILE",
+        "AATS_STARTUP_PROFILE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("RDP_ENV", "dev")
 
 
 def _build_runtime() -> SimpleNamespace:
@@ -105,6 +116,104 @@ def test_trigger_task_api_rejects_release_cycle_under_golden_path_freeze() -> No
     assert payload["task_id"] is None
     assert payload["blocked_by_freeze"] is True
     assert "golden-path freeze" in payload["message"]
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ["/rdp/observations/run", "/rdp/rollback-recommendation/evaluate"],
+)
+def test_post_apply_evidence_api_rejects_wrong_release_combo(
+    endpoint: str,
+    tmp_path,
+) -> None:
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+    release = {
+        "release_id": "rel_api_identity",
+        "family": "independent",
+        "timeframe": "15m",
+        "apply_result": "success",
+    }
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: tmp_path),
+        patch(
+            "aats.data_platform.production_workflow.release_registry."
+            "load_release_history",
+            return_value={"releases": [release]},
+        ),
+        patch(
+            "aats.data_platform.production_workflow.observation_window."
+            "_save_observation",
+        ) as save_observation,
+        patch(
+            "aats.data_platform.production_workflow.rollback_policy."
+            "_save_rollback_recommendation",
+        ) as save_rollback,
+    ):
+        response = TestClient(app).post(
+            endpoint,
+            json={
+                "release_id": "rel_api_identity",
+                "family": "directional",
+                "timeframe": "1h",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["reason"] == "release_identity_mismatch"
+    save_observation.assert_not_called()
+    save_rollback.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ["/rdp/observations/run", "/rdp/rollback-recommendation/evaluate"],
+)
+def test_post_apply_evidence_api_rejects_non_success_release(
+    endpoint: str,
+    tmp_path,
+) -> None:
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+    release = {
+        "release_id": "rel_api_failed",
+        "family": "independent",
+        "timeframe": "15m",
+        "apply_result": "failed",
+    }
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: tmp_path),
+        patch(
+            "aats.data_platform.production_workflow.release_registry."
+            "load_release_history",
+            return_value={"releases": [release]},
+        ),
+        patch(
+            "aats.data_platform.production_workflow.observation_window."
+            "_save_observation",
+        ) as save_observation,
+        patch(
+            "aats.data_platform.production_workflow.rollback_policy."
+            "_save_rollback_recommendation",
+        ) as save_rollback,
+    ):
+        response = TestClient(app).post(
+            endpoint,
+            json={"release_id": "rel_api_failed"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["reason"] == "release_not_applied"
+    save_observation.assert_not_called()
+    save_rollback.assert_not_called()
 
 
 def test_trigger_task_api_accepts_research_cycle_when_full_pipeline_enabled(tmp_path) -> None:
@@ -621,9 +730,11 @@ def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_
                         "family": "independent",
                         "symbol": "BTC-USDT-SWAP",
                         "timeframe": "15m",
-                        "recommendation_type": "parameter_upgrade",
-                        "target_parameter_set_id": "ps_candidate_1",
-                        "confidence": "high",
+                            "recommendation_type": "parameter_upgrade",
+                            "target_parameter_set_id": "ps_candidate_1",
+                            "source_round_id": "round_demo",
+                            "evidence_bundle_ref": "round_demo",
+                            "confidence": "high",
                         "reason": "候选参数已生成，可审批",
                         "status": "draft",
                     },
@@ -709,7 +820,12 @@ def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_
             ],
         }
 
-    def _fake_gate(project_root, recommendation_id):
+    def _fake_gate(
+        project_root,
+        recommendation_id,
+        *,
+        promotion_qualification=None,
+    ):
         result = {
             "gate_run_id": "gate_demo_1",
             "recommendation_id": recommendation_id,
@@ -724,7 +840,17 @@ def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_
         gate_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         return result
 
-    def _fake_apply(project_root, *, recommendation_id, actor="operator", notes=None, dry_run=False, release_id=None, gate_result=None):
+    def _fake_apply(
+        project_root,
+        *,
+        recommendation_id,
+        actor="operator",
+        notes=None,
+        dry_run=False,
+        release_id=None,
+        gate_result=None,
+        promotion_authorization=None,
+    ):
         active_state["active_sets"]["independent_15m"] = {
             "parameter_set_id": "ps_candidate_1",
             "family": "independent",
@@ -736,6 +862,27 @@ def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_
             "source_round_id": "round_demo",
             "values": {"entry_threshold": 0.42},
         }
+        history_path = (
+            project_root
+            / "artifacts/production_workflow/parameter_release_history.json"
+        )
+        history = json.loads(history_path.read_text(encoding="utf-8"))
+        transaction_release = next(
+            item
+            for item in history["releases"]
+            if item["release_id"] == release_id
+        )
+        transaction_release.update({
+            "previous_parameter_set_id": "ps_live_0",
+            "apply_result": "success",
+            "observation_status": "observing",
+            "applied_at": transaction_release["created_at"],
+            "apply_operation_id": "apply_rec_demo_1",
+        })
+        history_path.write_text(
+            json.dumps(history, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         return {
             "ok": True,
             "message": "apply success",
@@ -745,7 +892,9 @@ def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_
             "timeframe": "15m",
             "recommendation_id": recommendation_id,
             "parameter_set_id": "ps_candidate_1",
+            "from_parameter_set_id": "ps_live_0",
             "release_id": release_id,
+            "release": dict(transaction_release),
         }
 
     def _fake_rollback(project_root, *, family, timeframe, to_parameter_set_id=None, actor="operator", notes=None, dry_run=False):
@@ -774,7 +923,37 @@ def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_
         path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
 
-    with (
+    canonical_recommendation: dict[str, object] = {}
+
+    def _fake_db_update_recommendation(rec, *, expected_current_status):
+        assert expected_current_status == "draft"
+        canonical_recommendation.clear()
+        canonical_recommendation.update(rec)
+        return True
+
+    def _fake_refresh_recommendation_mirror(
+        path,
+        *,
+        recommendation_id,
+        transition,
+    ):
+        assert transition == "approve"
+        registry = json.loads(path.read_text(encoding="utf-8"))
+        registry["recommendations"] = [
+            dict(canonical_recommendation)
+            if item.get("recommendation_id") == recommendation_id
+            else item
+            for item in registry["recommendations"]
+        ]
+        registry["version"] = int(registry.get("version", 0)) + 1
+        path.write_text(
+            json.dumps(registry, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return True
+
+    with ExitStack() as stack:
+        for patcher in (
         patch("aats.api.rdp_routes._project_root", lambda _request: root),
         patch("aats.api.rdp_routes._step2_integrity_blocking_reason", return_value=None),
         patch("aats.api.rdp_routes._governance_session", _fake_governance_session),
@@ -797,16 +976,46 @@ def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_
             "checks": [],
         }),
         patch("aats.api.rdp_control_summary.query_active_parameter_sets", side_effect=lambda _root: _active_summary()),
-        patch("aats.api.rdp_control_summary.query_latest_decision_round", return_value={"available": False}),
-        patch("aats.api.rdp_control_summary.query_latest_decisions", return_value={
+            patch("aats.api.rdp_control_summary.query_latest_decision_round", return_value={"available": False}),
+            patch("aats.api.rdp_control_summary.query_latest_decisions", return_value={
             "available": True,
             "generated_at": "2026-04-16T12:00:00Z",
             "status_distribution": {"keep_active": 1},
-            "decisions": [],
-        }),
-        patch("aats.data_platform.decision_system.recommendation_registry.try_governance_db", lambda: (None, False)),
-        patch("aats.data_platform.decision_system.recommendation_registry._db_update_rec_status", return_value=True),
-        patch("aats.data_platform.governance.parameter_registry.try_governance_db", lambda: (None, False)),
+                "decisions": [],
+            }),
+            patch(
+                "aats.api.rdp_control_summary.evaluate_promotion_qualifications",
+                return_value={
+                    "rec_demo_1": SimpleNamespace(
+                        to_dict=lambda: {
+                            "required": True,
+                            "eligible": True,
+                            "reason_code": "qualified",
+                            "evidence_bundle_ref": "round_demo",
+                            "source_round_id": "round_demo",
+                            "qualified_round_id": "round_demo",
+                            "detail": "integration fixture qualification",
+                        }
+                    )
+                },
+            ),
+                patch("aats.data_platform.decision_system.recommendation_registry.try_governance_db", lambda: (None, False)),
+            patch(
+                "aats.data_platform.decision_system.recommendation_registry."
+                "_db_update_rec_status",
+                side_effect=_fake_db_update_recommendation,
+            ),
+            patch(
+                "aats.data_platform.decision_system.recommendation_registry."
+                "refresh_recommendation_audit_mirror_after_db_commit",
+                side_effect=_fake_refresh_recommendation_mirror,
+            ),
+            patch(
+                "aats.data_platform.decision_system.promotion_guard."
+                "require_promotion_qualification",
+                return_value=SimpleNamespace(required=True, eligible=True),
+            ),
+            patch("aats.data_platform.governance.parameter_registry.try_governance_db", lambda: (None, False)),
         patch("aats.data_platform.production_workflow.release_registry.try_governance_db", lambda: (None, False)),
         patch("aats.data_platform.production_workflow.release_registry.save_release_history", _fake_save_release_history),
         patch("aats.data_platform.production_workflow.observation_window.try_governance_db", lambda: (None, False)),
@@ -818,7 +1027,9 @@ def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_
             return_value=("task_demo_1", None),
         ),
         patch("aats.data_platform.governance.rdp_task_db.db_get_recent_tasks", return_value=[]),
-    ):
+        ):
+            stack.enter_context(patcher)
+
         client = TestClient(app)
 
         before = client.get("/rdp/control-summary").json()
@@ -850,7 +1061,7 @@ def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_
             },
             headers=_apply_headers(),
         ).json()
-        assert released["ok"] is True
+        assert released["ok"] is True, released
         release_id = released["release"]["release_id"]
 
         after_release = client.get("/rdp/control-summary").json()
@@ -1078,13 +1289,8 @@ def test_recommendation_approve_blocked_when_step2_snapshot_incomplete(tmp_path)
         "Integrity gate 必须阻止 registry 被 approve"
 
 
-def test_apply_parameter_blocked_when_step2_snapshot_incomplete(tmp_path) -> None:
-    """Step2 快照不完整时，/parameters/apply 必须被 server 端直接拒绝。
-
-    approve 时已有门闸，但 approve → apply 之间 Step2 仍可能 degrade；UI 会
-    同步禁用按钮，但 curl / 脚本 / 回放请求能绕过。apply 会把已批准的参数推
-    到 active_parameter_sets，影响面大于 approve 本身，server 必须再校验。
-    """
+def test_direct_apply_is_disabled_before_step2_or_capital_action(tmp_path) -> None:
+    """退役的 /parameters/apply 在任何 Step2/资本逻辑前固定 fail closed."""
     app = FastAPI()
     app.include_router(rdp_router)
     app.state.runtime = _build_runtime()
@@ -1128,11 +1334,8 @@ def test_apply_parameter_blocked_when_step2_snapshot_incomplete(tmp_path) -> Non
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is False
-    assert payload.get("integrity_blocked") is True, (
-        "apply 必须带 integrity_blocked=True，否则前端无法区分"
-        " Step2 降级 vs 业务失败"
-    )
-    assert "不完整" in payload["message"]
+    assert payload["code"] == "release_required"
+    assert payload.get("integrity_blocked") is not True
 
 
 def test_create_release_blocked_when_step2_snapshot_incomplete(tmp_path) -> None:

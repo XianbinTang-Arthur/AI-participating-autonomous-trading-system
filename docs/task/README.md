@@ -3,6 +3,7 @@
 > 文档状态：任务与交付历史证据索引（截至 2026-08-27）
 > 最后核对：2026-08-27（Research OS G0 bootstrap、RDP 衍生品合同 P0-A 与
 > P0-B LF-A 本地静态验收证据已登记；其余历史状态边界不变）
+> 核对范围：任务文件存在性、索引与各任务自报状态；不把任务状态升级为运行时或生产事实
 
 本目录保存任务书、SOW、阶段设计、实施记录和交付报告。它是工程可追溯性材料，不是当前系统说明；“完成”“通过”“上线”等措辞只对文件记录的基线和验证范围成立。
 
@@ -41,6 +42,17 @@
 
 ## 2026-08-26 RDP 数据治理实施记录
 
+### 2026-08-27 控制面真值收口
+
+- [`rdp_legacy_recommendation_forward_isolation_p0_sow_2026_08_27.md`](rdp_legacy_recommendation_forward_isolation_p0_sow_2026_08_27.md)：
+  LF-A 代码级失败关闭任务；apply-capable recommendation 必须绑定精确、成功、未过期且使用
+  当前 qualification policy 的 Phase 6 round，approval/gate/release/apply 各层独立阻断旧证据。
+  当前仍需随本轮完整验证和运行证据一起验收，不能把历史 recommendation 升级为合格。
+- [`rdp_control_plane_truth_finalization_sow_2026_08_27.md`](rdp_control_plane_truth_finalization_sow_2026_08_27.md)：
+  promotion readiness、canonical UTC、DB/mirror 状态边界、post-apply provenance、自动风险
+  收敛与 action proof 的收口任务。当前状态以文件头为准；完整回归、独立复审和模拟运行前
+  不得标记完成。
+
 - [`rdp_continuity_monitoring_correctness_p1_sow_2026_08_27.md`](rdp_continuity_monitoring_correctness_p1_sow_2026_08_27.md)：
   RDP 连续性监控与研究资格 LF-B 设计；拟引入 typed subscription catalog、default/registered/ACK
   三方对账、活动模型、current lifecycle、桶/序列完整性及 DROP/gap 一致性。当前状态为
@@ -55,7 +67,7 @@
 - [`rdp_strict_instrument_scope_p0_sow_2026_08_27.md`](rdp_strict_instrument_scope_p0_sow_2026_08_27.md)：
   记录 BTC/ETH spot/swap 显式支持集合及统一失败关闭规则；未知币对、伪 `-SWAP` 与 FUTURES
   不再因字符串形状进入 lineage、Gold、replay、capital eligibility、治理 API 或历史导入。
-- [`rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md`](rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md)：历史数据恢复、持续采集、不可变归档、双准入与完整模拟 RDP 的实施台账。工程实现、标准 derivatives 部署和 NO-GO 运行验证已回填；官方 1 日样本、随机归档恢复、故障注入、跨日采集与签名 UI 仍明确未完成。
+- [`rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md`](rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md)：历史数据恢复、持续采集、归档、双准入与完整模拟 RDP 的实施台账。旧 v1 30 日 campaign 已在 2026-08-27 写入 `SUCCEEDED`，但不满足当前 v2 持久 fencing、不可变 Silver/source-aware Gold 与逐行终态 verifier 契约；账户只读事实、跨日连续性、签名 UI、精确归因、OOS/holdout 和资本资格仍未完成，90 日保持 NO-GO。
 
 现行操作入口是 [`../operations/rdp_historical_data_recovery_runbook.md`](../operations/rdp_historical_data_recovery_runbook.md)，当前收益/上线门结论是 [`../testing/profit_readiness_acceptance.md`](../testing/profit_readiness_acceptance.md)。任务书不替代下一次运行前的新覆盖审计和健康检查。
 

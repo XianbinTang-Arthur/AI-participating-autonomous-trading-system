@@ -1,6 +1,8 @@
 # RDP Workflow 调度策略
 
-> 最后核对：2026-08-22（代码基线 `be9179e`）。当前生产式路径是容器内 task daemon + scheduler + Postgres queue，不是 cron 直接执行 workflow，也不是早期 realtime daemon。
+> 文档状态：现行操作说明
+> 最后核对：2026-08-27（起始 HEAD `9c4112c6`，含当前控制面收口候选；以本文档所在 HEAD 为准）
+> 核对范围：task daemon、scheduler、queue、workflow dispatch 与自动风险收敛静态契约；不证明当前 daemon 健康
 
 ## 1. 架构
 
@@ -51,6 +53,11 @@ python scripts/rdp_task_daemon.py --poll-interval 10 --enable-scheduler
 - `release_cycle` 还在 `ENQUEUE_BLOCKED_WORKFLOWS`，API/scheduler/retry/daemon 都不能把它变成可执行任务；
 - `observation_cycle` 与 `reliability_cycle` 已从低频 decision 关注点拆成独立小时任务；
 - candles/microstructure 每 15 分钟，REST history 每小时。
+
+`observation_cycle` 的持久化执行会在各 release 的 observation、rollback recommendation、
+effectiveness 阶段之后调用内部 pending-risk enforcer。该动作不是 `release_cycle`，不会创建新
+release；它只在精确 post-apply provenance、clean attempt、combo lock 和数据库终态证明下
+执行回滚/取消/soft pause，其他状态一律转人工 reconciliation。
 
 ## 4. Scheduler state
 

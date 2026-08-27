@@ -14,7 +14,13 @@ from fastapi import Request
 from sqlalchemy.orm import Session
 
 from aats.api._governance_db import governance_session as _governance_session
-from aats.data_platform.governance._db_util import try_governance_db
+from aats.data_platform.decision_system.evidence_bundle import (
+    PHASE2_PROMOTION_QUALIFICATION_POLICY,
+)
+from aats.data_platform.decision_system.promotion_qualification import (
+    evaluate_promotion_qualifications,
+)
+from aats.data_platform.governance._db_util import VALID_REC_TYPES, try_governance_db
 from aats.data_platform.operations.environment_guard import (
     get_current_environment,
     get_observation_window_hours,
@@ -34,6 +40,11 @@ from aats.services.operator.rdp_queries import (
 logger = logging.getLogger(__name__)
 
 _PENDING_RECOMMENDATION_STATUSES = {"draft", "approved"}
+_RELEASE_ALLOWED_DECISION_STATUSES = frozenset({
+    "keep_active",
+    "lower_priority",
+    "require_review",
+})
 _RDP_CONTROL_SUMMARY_SNAPSHOT_CACHE_TTL_SECONDS = 5.0
 _RDP_CONTROL_SUMMARY_SNAPSHOT_CACHE_MAX_ENTRIES = 16
 _rdp_control_summary_snapshot_cache_lock = Lock()
@@ -58,6 +69,85 @@ def _combo_key(family: str | None, timeframe: str | None) -> str:
     if not family or not timeframe:
         return ""
     return f"{family}_{str(timeframe).lower()}"
+
+
+def _promotion_qualification_required(rec: dict[str, Any]) -> bool:
+    recommendation_type = rec.get("recommendation_type")
+    return (
+        recommendation_type == "parameter_upgrade"
+        or bool(rec.get("target_parameter_set_id"))
+    )
+
+
+def _promotion_qualification_allows(rec: dict[str, Any]) -> bool:
+    recommendation_type = rec.get("recommendation_type")
+    if (
+        type(recommendation_type) is not str
+        or not recommendation_type
+        or recommendation_type != recommendation_type.strip()
+        or recommendation_type not in VALID_REC_TYPES
+    ):
+        return False
+    target = rec.get("target_parameter_set_id")
+    if target is not None and (
+        type(target) is not str or not target or target != target.strip()
+    ):
+        return False
+    if recommendation_type != "parameter_upgrade" and target is not None:
+        return False
+
+    qualification = rec.get("promotion_qualification")
+    if not isinstance(qualification, dict):
+        return False
+    required = qualification.get("required")
+    eligible = qualification.get("eligible")
+    reason_code = qualification.get("reason_code")
+    if type(required) is not bool or type(eligible) is not bool or eligible is not True:
+        return False
+
+    if recommendation_type != "parameter_upgrade":
+        return (
+            required is False
+            and reason_code == "not_required"
+            and qualification.get("qualified_round_id") is None
+        )
+
+    evidence_ref = rec.get("evidence_bundle_ref")
+    source_round_id = rec.get("source_round_id")
+    if (
+        type(target) is not str
+        or type(evidence_ref) is not str
+        or not evidence_ref
+        or evidence_ref != evidence_ref.strip()
+        or type(source_round_id) is not str
+        or not source_round_id
+        or source_round_id != source_round_id.strip()
+    ):
+        return False
+    return (
+        required is True
+        and reason_code == "qualified"
+        and qualification.get("evidence_bundle_ref") == evidence_ref
+        and qualification.get("source_round_id") == source_round_id
+        and qualification.get("qualified_round_id") == evidence_ref
+    )
+
+
+def _failed_closed_qualification(rec: dict[str, Any], reason_code: str) -> dict[str, Any]:
+    required = _promotion_qualification_required(rec)
+    return {
+        "required": required,
+        "eligible": not required,
+        "reason_code": reason_code if required else "not_required",
+        "evidence_bundle_ref": rec.get("evidence_bundle_ref"),
+        "source_round_id": rec.get("source_round_id"),
+        "qualified_round_id": None,
+        "detail": (
+            "无法验证该参数升级建议的精确证据引用，已按仅审计记录处理。"
+            if required
+            else "该建议不会触发参数应用，无需 promotion 资格。"
+        ),
+    }
 
 
 def _snapshot_summary_cache_runtime(request: Request) -> Any | None:
@@ -178,7 +268,7 @@ def _load_recent_gate_results(project_root: Path, *, limit: int = 8) -> list[dic
             "recommendation_id": payload.get("recommendation_id"),
             "created_at": payload.get("created_at"),
             "gate_status": payload.get("gate_status"),
-            "allow_apply": bool(payload.get("allow_apply")),
+            "allow_apply": payload.get("allow_apply") is True,
             "blocking_reasons": payload.get("blocking_reasons") or [],
             "warnings": payload.get("warnings") or [],
             "checks": payload.get("checks") or [],
@@ -186,6 +276,28 @@ def _load_recent_gate_results(project_root: Path, *, limit: int = 8) -> list[dic
         for payload in results
         if isinstance(payload, dict)
     ]
+
+
+def _load_gate_history_for_summary(
+    project_root: Path,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Load gate history without exposing driver or credential details."""
+    try:
+        return _load_recent_gate_results(project_root), {
+            "source": "db",
+            "available": True,
+        }
+    except Exception as exc:
+        logger.warning(
+            "control-summary: gate 历史不可用（%s）",
+            type(exc).__name__,
+        )
+        return [], {
+            "source": "db",
+            "available": False,
+            "unavailable_reason": "governance_db_unavailable",
+            "reason_code": "governance_db_unavailable",
+        }
 
 
 def _load_recent_releases(
@@ -337,7 +449,11 @@ def _environment_summary() -> dict[str, Any]:
         "require_gate_pass": bool(policy.get("require_gate_pass")),
         "require_approval": bool(policy.get("require_approval")),
         "allow_parameter_rollback": bool(policy.get("allow_parameter_rollback")),
-        "direct_apply_allowed": env != "prod",
+        # The public direct-apply route is a fail-closed migration guard in
+        # every environment.  Forward capital changes must create a canonical
+        # release, so the control plane must never advertise this as usable.
+        "direct_apply_allowed": False,
+        "direct_apply_status": "retired_release_required",
         "required_observation_window_hours": get_observation_window_hours(env),
     }
 
@@ -348,12 +464,18 @@ def _classify_runtime_source(
     active_parameters: dict[str, Any],
     governance_managed: bool,
     paused_combos: set[str],
+    quarantined_combos: set[str],
+    db_load_failed: bool,
 ) -> str:
+    if db_load_failed:
+        return "governance_unavailable"
+    if combo_key in quarantined_combos:
+        return "governance_quarantine"
     if combo_key in active_parameters:
         return "active_parameters"
     if governance_managed and combo_key in paused_combos:
         return "governance_pause"
-    return "profile_defaults"
+    return "governance_missing" if governance_managed else "profile_defaults"
 
 
 def _overall_runtime_mode(combo_sources: list[str]) -> str:
@@ -377,6 +499,20 @@ def _build_governance_state(
     active_parameters = active_params_data.get("active_sets", {}) or {}
     governance_managed = bool(active_params_data.get("governance_managed", False))
     paused_combos = set(active_params_data.get("paused_combos", []) or [])
+    quarantined_by_combo = dict(
+        active_params_data.get("quarantined_combos") or {}
+    )
+    quarantined_combos = set(quarantined_by_combo)
+    db_load_failed = active_params_data.get("db_load_failed") is True
+    governance_audit_only = (
+        active_params_data.get("audit_only") is True
+        or db_load_failed
+        or bool(quarantined_combos)
+    )
+    decision_truth_available = (
+        latest_decision_state.get("available") is True
+        and latest_decision_state.get("audit_only") is not True
+    )
 
     parameter_sets = parameter_registry_data.get("parameter_sets", []) or []
     parameter_by_id = {
@@ -433,6 +569,7 @@ def _build_governance_state(
     all_combo_keys = set(combo_meta)
     all_combo_keys.update(active_parameters)
     all_combo_keys.update(paused_combos)
+    all_combo_keys.update(quarantined_combos)
     all_combo_keys.update(latest_round_by_combo)
     all_combo_keys.update(round_candidate_by_combo)
     all_combo_keys.update(decision_by_combo)
@@ -465,6 +602,8 @@ def _build_governance_state(
             active_parameters=active_parameters,
             governance_managed=governance_managed,
             paused_combos=paused_combos,
+            quarantined_combos=quarantined_combos,
+            db_load_failed=db_load_failed,
         )
         combo_sources.append(runtime_source)
 
@@ -501,6 +640,13 @@ def _build_governance_state(
             pending_operator_action = True
 
         inconsistencies: list[str] = []
+        if combo_key in quarantined_combos:
+            inconsistencies.append(
+                "治理参数已隔离："
+                f"{quarantined_by_combo.get(combo_key, 'unknown_reason')}"
+            )
+        if db_load_failed:
+            inconsistencies.append("治理数据库不可用，运行参数已失败关闭")
         if decision.get("current_status") == "pause" and runtime_source == "active_parameters":
             inconsistencies.append("pause 决策仍有 active 参数在运行")
         if (
@@ -529,7 +675,14 @@ def _build_governance_state(
             "family": meta.get("family") or latest_round.get("family") or decision.get("family"),
             "timeframe": meta.get("timeframe") or latest_round.get("timeframe") or decision.get("timeframe"),
             "runtime_source": runtime_source,
+            "runtime_available": runtime_source == "active_parameters",
+            "audit_only": governance_audit_only,
+            "governance_quarantine_reason": quarantined_by_combo.get(
+                combo_key
+            ),
             "decision_status": decision.get("current_status"),
+            "decision_truth_available": decision_truth_available,
+            "decision_truth_reason_code": latest_decision_state.get("reason_code"),
             "decision_updated_at": decision.get("last_updated_at"),
             "decision_target_parameter_set_id": governance_target_parameter_set_id,
             "latest_round_decision": latest_round.get("decision"),
@@ -560,9 +713,15 @@ def _build_governance_state(
         })
 
     return {
-        "available": bool(combo_states),
+        "available": bool(combo_states) and not db_load_failed,
+        "audit_only": governance_audit_only,
+        "reason_code": active_params_data.get("reason_code"),
+        "db_load_failed": db_load_failed,
+        "decision_truth_available": decision_truth_available,
+        "decision_truth_reason_code": latest_decision_state.get("reason_code"),
         "governance_managed": governance_managed,
         "paused_combos": sorted(paused_combos),
+        "quarantined_combos": quarantined_by_combo,
         "parameter_source_mode": _overall_runtime_mode(combo_sources),
         "status_distribution": latest_decision_state.get("status_distribution", {}),
         "combo_states": combo_states,
@@ -666,6 +825,7 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
                 "status": rec.get("status"),
                 "target_parameter_set_id": rec.get("target_parameter_set_id"),
                 "source_round_id": rec.get("source_round_id"),
+                "evidence_bundle_ref": rec.get("evidence_bundle_ref"),
                 "created_at": rec.get("created_at"),
             }
             for rec in (recommendations_data.get("recommendations") or [])
@@ -674,9 +834,40 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
     except Exception as exc:
         logger.warning("control-summary: recommendations query failed: %s", exc)
 
+    if recommendations:
+        try:
+            verdicts = evaluate_promotion_qualifications(root, recommendations)
+        except Exception as exc:  # defensive: read model stays available, but fails closed
+            logger.warning(
+                "control-summary: promotion qualification unavailable (%s)",
+                type(exc).__name__,
+            )
+            verdicts = {}
+        for rec in recommendations:
+            recommendation_id = str(rec.get("recommendation_id") or "")
+            verdict = verdicts.get(recommendation_id)
+            qualification = (
+                verdict.to_dict()
+                if verdict is not None
+                else _failed_closed_qualification(
+                    rec,
+                    "promotion_qualification_unavailable",
+                )
+            )
+            rec["promotion_qualification"] = qualification
+            promotion_eligible = _promotion_qualification_allows(rec)
+            rec["promotion_eligible"] = promotion_eligible
+            rec["audit_only"] = not promotion_eligible
+
     active_params_data: dict[str, Any] = {
         "generated_at": None,
-        "governance_managed": False,
+        "available": False,
+        "audit_only": True,
+        "reason_code": "active_parameter_query_failed",
+        "runtime_source": "governance_unavailable",
+        "db_load_failed": True,
+        "governance_managed": True,
+        "quarantined_combos": {},
         "paused_combos": [],
         "known_combos": [],
         "active_sets": {},
@@ -738,6 +929,17 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
     try:
         decision_round = query_latest_decision_round(root)
         if decision_round.get("available"):
+            decision_evidence = decision_round.get("evidence_bundle_summary")
+            decision_phase2 = (
+                decision_evidence.get("phase2_evidence")
+                if isinstance(decision_evidence, dict)
+                else None
+            )
+            decision_round_promotion_qualified = bool(
+                isinstance(decision_phase2, dict)
+                and decision_phase2.get("promotion_qualification_policy")
+                == PHASE2_PROMOTION_QUALIFICATION_POLICY
+            )
             # decision_round 的 round_id 是"本 round 的所有 phase2 结论"的共同
             # 追溯锚。evidence_bundle / phase2 卡片需要显示这个 round_id 才能形
             # 成完整的证据链；如果每条结论本身也带了 source_round_id（例如从
@@ -761,6 +963,8 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
                     # phase2 就能直接拿到 round 追溯锚，不用再回头 join。
                     "source_round_id": item.get("source_round_id") or decision_round_id,
                     "round_id": item.get("round_id") or decision_round_id,
+                    "promotion_qualified": decision_round_promotion_qualified,
+                    "audit_only": not decision_round_promotion_qualified,
                 }
                 for item in conclusions
             ]
@@ -774,6 +978,8 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
                     "parameter_set_id": item.get("parameter_set_id"),
                     "confidence": item.get("confidence"),
                     "reason": item.get("reason"),
+                    "promotion_qualified": decision_round_promotion_qualified,
+                    "audit_only": not decision_round_promotion_qualified,
                 }
                 for item in (decision_round.get("parameter_upgrade_candidates") or [])
                 if isinstance(item, dict)
@@ -832,20 +1038,7 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
     # _load_recent_gate_results 在 governance DB 不可达时会抛 RuntimeError。
     # 这里降级为空列表，并通过 gate_history_status 向 UI 透出不可用原因，
     # 避免整个 control-summary 端点因为 gate 历史挂了而退化成裸 500。
-    gate_history_status: dict[str, Any] = {"source": "db", "available": True}
-    try:
-        recent_gate_results = _load_recent_gate_results(root)
-    except Exception as exc:
-        logger.warning(
-            "control-summary: gate 历史不可用（governance DB 抖动或查询失败）: %s",
-            exc,
-        )
-        recent_gate_results = []
-        gate_history_status = {
-            "source": "db",
-            "available": False,
-            "unavailable_reason": str(exc) or "governance_db_unavailable",
-        }
+    recent_gate_results, gate_history_status = _load_gate_history_for_summary(root)
     recent_releases = _load_recent_releases(root, limit=10)
     observation_source_releases = _load_recent_releases(root, limit=None)
     observation_queue = _build_observation_queue(
@@ -858,6 +1051,14 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         for rec in pending_recommendations
         if rec.get("recommendation_type") == "parameter_upgrade"
         and rec.get("status") == "approved"
+        and _promotion_qualification_allows(rec)
+    ]
+    audit_only_approved_parameter_recommendations = [
+        rec
+        for rec in pending_recommendations
+        if rec.get("recommendation_type") == "parameter_upgrade"
+        and rec.get("status") == "approved"
+        and not _promotion_qualification_allows(rec)
     ]
     draft_parameter_recommendations = [
         rec
@@ -882,6 +1083,9 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
 
     operations_summary = {
         "approved_release_candidate_count": len(approved_parameter_recommendations),
+        "audit_only_approved_parameter_recommendation_count": len(
+            audit_only_approved_parameter_recommendations
+        ),
         "draft_recommendation_count": sum(
             1 for rec in pending_recommendations if rec.get("status") == "draft"
         ),
@@ -1295,17 +1499,30 @@ def _build_release_candidates_payload(summary: dict[str, Any]) -> dict[str, Any]
         for item in (governance_state.get("combo_states") or [])
         if isinstance(item, dict) and item.get("combo_key")
     }
-    latest_gate_by_recommendation = {
-        str(item.get("recommendation_id") or ""): item
-        for item in (summary.get("recent_gate_results") or [])
-        if isinstance(item, dict) and str(item.get("recommendation_id") or "").strip()
-    }
-    approved_candidates = [
+    # `_load_recent_gate_results` returns newest-first.  Preserve the first row
+    # for each recommendation: a dict-comprehension would let a later, older
+    # pass overwrite a newer block and resurrect release eligibility.
+    latest_gate_by_recommendation: dict[str, dict[str, Any]] = {}
+    for gate_item in summary.get("recent_gate_results") or []:
+        if not isinstance(gate_item, dict):
+            continue
+        recommendation_id = str(gate_item.get("recommendation_id") or "").strip()
+        if recommendation_id:
+            latest_gate_by_recommendation.setdefault(recommendation_id, gate_item)
+    all_approved_candidates = [
         item
         for item in (summary.get("pending_recommendations") or [])
         if isinstance(item, dict)
         and item.get("recommendation_type") == "parameter_upgrade"
         and item.get("status") == "approved"
+    ]
+    approved_candidates = [
+        item for item in all_approved_candidates
+        if _promotion_qualification_allows(item)
+    ]
+    audit_only_candidates = [
+        item for item in all_approved_candidates
+        if not _promotion_qualification_allows(item)
     ]
     by_combo: dict[str, dict[str, Any]] = {}
     for rec in sorted(
@@ -1320,8 +1537,73 @@ def _build_release_candidates_payload(summary: dict[str, Any]) -> dict[str, Any]
     items: list[dict[str, Any]] = []
     for combo_key, rec in by_combo.items():
         combo_state = combo_states.get(combo_key) or {}
+        decision_status = combo_state.get("decision_status")
+        decision_truth_available = (
+            governance_state.get("decision_truth_available") is True
+            and combo_state.get("decision_truth_available") is True
+        )
+        governance_runtime_allows_release = (
+            governance_state.get("audit_only") is not True
+            and combo_state.get("audit_only") is not True
+            and combo_state.get("runtime_source")
+            not in {
+                "governance_unavailable",
+                "governance_quarantine",
+            }
+        )
+        decision_allows_release = (
+            decision_truth_available
+            and decision_status in _RELEASE_ALLOWED_DECISION_STATUSES
+            and governance_runtime_allows_release
+        )
+        if not governance_runtime_allows_release:
+            release_disabled_reason = (
+                "当前运行参数处于治理不可用、隔离或缺失状态；完成对账并恢复"
+                " canonical 运行真源后才能创建发布。"
+            )
+            headline = "已批准，等待治理对账"
+            decision_summary = (
+                "这组参数已经批准，但当前运行参数真源处于失败关闭状态；"
+                "可运行只读 Gate，不能创建发布。"
+            )
+        elif not decision_truth_available:
+            release_disabled_reason = (
+                "当前决策真源不可验证，恢复治理数据库并确认该组合的现行决策后，"
+                "才能创建发布。"
+            )
+            headline = "已批准，等待决策真源"
+            decision_summary = (
+                "这组参数已经批准，但当前无法证明现行决策允许前向发布；"
+                "可重新运行 Gate，不能创建发布。"
+            )
+        elif decision_status == "pause":
+            release_disabled_reason = (
+                "该组合当前处于安全暂停状态；解除暂停并重新通过门禁前不能创建发布。"
+            )
+            headline = "已批准，当前暂停"
+            decision_summary = (
+                "这组参数已经批准，但该组合当前为安全暂停；"
+                "可重新运行 Gate，不能创建发布。"
+            )
+        elif not decision_allows_release:
+            release_disabled_reason = (
+                "该组合缺少受支持的现行决策状态，重新完成治理决策后才能创建发布。"
+            )
+            headline = "已批准，等待治理决策"
+            decision_summary = (
+                "这组参数已经批准，但现行决策状态缺失或无效；"
+                "可重新运行 Gate，不能创建发布。"
+            )
+        else:
+            release_disabled_reason = None
+            headline = "已批准，待发布"
+            decision_summary = (
+                "这组参数已经批准，可运行 Gate；仅在最新 Gate 通过且治理真源"
+                "保持可用时才能创建发布。"
+            )
         gate_result = latest_gate_by_recommendation.get(str(rec.get("recommendation_id") or ""))
         gate_status = str((gate_result or {}).get("gate_status") or "not_run")
+        gate_allow_apply = (gate_result or {}).get("allow_apply") is True
         gate_note = None
         if gate_result:
             gate_note = (
@@ -1334,13 +1616,28 @@ def _build_release_candidates_payload(summary: dict[str, Any]) -> dict[str, Any]
             "family": rec.get("family") or combo_state.get("family"),
             "timeframe": rec.get("timeframe") or combo_state.get("timeframe"),
             "recommendation_id": rec.get("recommendation_id"),
+            "recommendation_type": rec.get("recommendation_type"),
+            "status": rec.get("status"),
+            "target_parameter_set_id": rec.get("target_parameter_set_id"),
+            "source_round_id": rec.get("source_round_id"),
+            "evidence_bundle_ref": rec.get("evidence_bundle_ref"),
             "confidence": rec.get("confidence") or "unknown",
-            "headline": "已批准，待发布",
-            "decision_summary": "这组参数已经批准，下一步可以运行 Gate 或直接创建发布。",
+            "headline": headline,
+            "decision_summary": decision_summary,
+            "decision_status": decision_status,
+            "decision_truth_available": decision_truth_available,
+            "decision_truth_reason_code": (
+                combo_state.get("decision_truth_reason_code")
+                or governance_state.get("decision_truth_reason_code")
+            ),
+            "decision_allows_release": decision_allows_release,
             "gate_status": gate_status,
+            "allow_apply": gate_allow_apply,
             "gate_note": _humanize_reason_entry(str(gate_note)) if gate_note else None,
             "reason_summary": _build_reason_summary(rec, combo_state),
             "created_at": rec.get("created_at"),
+            "promotion_qualification": rec.get("promotion_qualification"),
+            "audit_only": False,
             "actions": [
                 _make_ui_action(
                     key="run_gate",
@@ -1353,6 +1650,8 @@ def _build_release_candidates_payload(summary: dict[str, Any]) -> dict[str, Any]
                     label="创建发布",
                     ui_action="rdp-create-release",
                     value=str(rec.get("recommendation_id") or ""),
+                    enabled=decision_allows_release,
+                    disabled_reason=release_disabled_reason,
                 ),
             ],
         }
@@ -1361,6 +1660,37 @@ def _build_release_candidates_payload(summary: dict[str, Any]) -> dict[str, Any]
     return {
         "total": len(items),
         "items": items,
+        "audit_only_total": len(audit_only_candidates),
+        "audit_only_items": [
+            {
+                "combo_key": rec.get("combo_key")
+                or _combo_key(rec.get("family"), rec.get("timeframe")),
+                "family": rec.get("family"),
+                "timeframe": rec.get("timeframe"),
+                "recommendation_id": rec.get("recommendation_id"),
+                "recommendation_type": rec.get("recommendation_type"),
+                "status": rec.get("status"),
+                "target_parameter_set_id": rec.get("target_parameter_set_id"),
+                "source_round_id": rec.get("source_round_id"),
+                "evidence_bundle_ref": rec.get("evidence_bundle_ref"),
+                "headline": "历史建议，仅供审计",
+                "decision_summary": (
+                    "该建议已审批，但缺少现行精确证据资格，不能运行 Gate、创建发布或应用。"
+                ),
+                "created_at": rec.get("created_at"),
+                "promotion_qualification": rec.get("promotion_qualification"),
+                "audit_only": True,
+                "actions": [
+                    _make_ui_action(
+                        key="supersede",
+                        label="归档为已替代",
+                        ui_action="rdp-supersede-recommendation",
+                        value=str(rec.get("recommendation_id") or ""),
+                    ),
+                ],
+            }
+            for rec in audit_only_candidates
+        ],
     }
 
 
@@ -1586,7 +1916,14 @@ def _select_workbench_pending_recommendations(
     for rec in sorted(
         pending_recommendations,
         key=lambda item: (
-            1 if item.get("recommendation_type") == "parameter_upgrade" else 0,
+            (
+                2
+                if item.get("recommendation_type") == "parameter_upgrade"
+                and _promotion_qualification_allows(item)
+                else 0
+                if item.get("recommendation_type") == "parameter_upgrade"
+                else 1
+            ),
             _iso_sort_key(item.get("created_at")),
         ),
         reverse=True,
@@ -1608,16 +1945,15 @@ def _count_workbench_integrity_blocked_items(
         alert for alert in (alerts_payload.get("integrity_alerts") or [])
         if bool(alert.get("blocks_approval"))
     ]
-    if not blocking_integrity:
-        return 0
-
     blocked_count = 0
-    for combo_key in pending_items_by_combo:
-        if any(
+    for combo_key, rec in pending_items_by_combo.items():
+        qualification_blocked = not _promotion_qualification_allows(rec)
+        alert_blocked = any(
             not str(alert.get("combo_key") or "").strip()
             or str(alert.get("combo_key") or "").strip() == combo_key
             for alert in blocking_integrity
-        ):
+        )
+        if qualification_blocked or alert_blocked:
             blocked_count += 1
     return blocked_count
 
@@ -1677,7 +2013,15 @@ def _build_combo_evidence_digest(
     return [
         {
             "phase": "phase2",
-            "status": "blocked" if phase2_blocked else ("available" if phase2 else "missing"),
+            "status": (
+                "blocked"
+                if phase2_blocked
+                else "audit_only"
+                if phase2.get("audit_only")
+                else "available"
+                if phase2
+                else "missing"
+            ),
             "headline": (
                 f"研究结论：{phase2.get('decision')}"
                 if phase2.get("decision")
@@ -1690,7 +2034,13 @@ def _build_combo_evidence_digest(
                 "mean_positive_edge_ratio",
             ),
             "round_id": phase2_round_id,
-            "incomplete_reason": "manifest_missing_on_disk" if phase2_blocked else None,
+            "incomplete_reason": (
+                "manifest_missing_on_disk"
+                if phase2_blocked
+                else "promotion_qualification_policy_unsupported"
+                if phase2.get("audit_only")
+                else None
+            ),
         },
         {
             "phase": "phase3",
@@ -1762,6 +2112,8 @@ def _build_item_detail_payload(item: dict[str, Any]) -> dict[str, Any]:
         "source_rounds": item.get("source_rounds") or {},
         "integrity_status": item.get("integrity_status"),
         "integrity_alerts": item.get("integrity_alerts") or [],
+        "promotion_qualification": item.get("promotion_qualification"),
+        "audit_only": bool(item.get("audit_only")),
     }
 
 
@@ -1798,10 +2150,23 @@ def _build_workbench_items_payload(
             alert for alert in blocking_integrity
             if not alert.get("combo_key") or alert.get("combo_key") == combo_key
         ]
-        integrity_status = "blocked" if item_alerts else "complete"
+        promotion_qualification = rec.get("promotion_qualification")
+        promotion_blocked = not _promotion_qualification_allows(rec)
+        integrity_status = "blocked" if item_alerts or promotion_blocked else "complete"
         reason_summary = _build_reason_summary(rec, combo_state)
+        missing_evidence_inputs = [
+            str(alert.get("title") or "") for alert in item_alerts
+        ]
+        if promotion_blocked and isinstance(promotion_qualification, dict):
+            missing_evidence_inputs.append(
+                str(
+                    promotion_qualification.get("detail")
+                    or promotion_qualification.get("reason_code")
+                    or "promotion_qualification_failed"
+                )
+            )
         missing_evidence = _dedupe_texts(
-            [str(alert.get("title") or "") for alert in item_alerts],
+            missing_evidence_inputs,
             limit=3,
         )
         recommendation_type = str(rec.get("recommendation_type") or "require_review")
@@ -1814,11 +2179,14 @@ def _build_workbench_items_payload(
             has_integrity_block=bool(item_alerts),
             combo_state=combo_state,
         )
-        disabled_reason = (
-            "当前轮次存在不完整证据，需先补齐研究/归因/执行结论。"
-            if item_alerts
-            else None
-        )
+        if promotion_blocked:
+            disabled_reason = (
+                "该参数升级建议缺少现行精确证据资格，仅供审计；请生成新的合格 recommendation。"
+            )
+        elif item_alerts:
+            disabled_reason = "当前轮次存在不完整证据，需先补齐研究/归因/执行结论。"
+        else:
+            disabled_reason = None
         evidence_digest = _build_combo_evidence_digest(
             root=root,
             summary=summary,
@@ -1834,7 +2202,7 @@ def _build_workbench_items_payload(
                 label=_approval_action_label_v2(recommendation_type),
                 ui_action="rdp-approve-only",
                 value=str(rec.get("recommendation_id") or ""),
-                enabled=not item_alerts,
+                enabled=not item_alerts and not promotion_blocked,
                 disabled_reason=disabled_reason,
             ),
             _make_ui_action(
@@ -1864,7 +2232,9 @@ def _build_workbench_items_payload(
             ],
             "integrity_status": integrity_status,
             "integrity_alerts": item_alerts,
-            "approval_enabled": not item_alerts,
+            "promotion_qualification": promotion_qualification,
+            "audit_only": promotion_blocked,
+            "approval_enabled": not item_alerts and not promotion_blocked,
             "approval_blocked_reason": disabled_reason,
             "created_at": rec.get("created_at"),
             "updated_at": rec.get("created_at"),

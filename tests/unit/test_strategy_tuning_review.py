@@ -27,7 +27,7 @@ def _seed_step2_round(root: Path, round_id: str, comparison: list[dict]) -> None
         round_dir / "round_manifest.json",
         {
             "round_id": round_id,
-            "overall_status": "completed",
+            "overall_status": "succeeded",
             "started_at": "2026-04-16T09:00:00Z",
             "finished_at": "2026-04-16T09:05:00Z",
         },

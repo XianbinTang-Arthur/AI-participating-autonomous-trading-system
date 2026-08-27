@@ -12,7 +12,13 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ._db_util import json_dumps, parse_dt, try_governance_db
+from ._db_util import (
+    has_explicit_governance_db_configuration,
+    json_dumps,
+    parse_dt,
+    try_governance_db,
+)
+from ._exceptions import DBUnavailableError
 
 log = logging.getLogger(__name__)
 
@@ -226,8 +232,13 @@ def db_load_governance_snapshot(
         return None
     payload = dict(row.payload or {})
     payload.setdefault("snapshot_type", row.snapshot_type)
-    if row.generated_at and "generated_at" not in payload:
+    # The relational column is the canonical freshness field.  Never let a
+    # stale DB row carry a newer timestamp inside mutable JSON and pass a
+    # production freshness gate.
+    if row.generated_at:
         payload["generated_at"] = row.generated_at.isoformat()
+    else:
+        payload.pop("generated_at", None)
     return payload
 
 
@@ -256,7 +267,9 @@ def load_governance_snapshot(
     project_root: Path,
     *,
     snapshot_type: str,
+    require_managed_db_truth: bool = False,
 ) -> dict[str, Any] | None:
+    managed_truth = has_explicit_governance_db_configuration(project_root)
     engine, ok = try_governance_db()
     db_reachable = False
     if ok:
@@ -267,6 +280,11 @@ def load_governance_snapshot(
             if payload is not None:
                 payload.setdefault("data_source", "db")
                 return payload
+
+            if require_managed_db_truth and managed_truth:
+                # 资本 Gate 的受管读路径必须是只读的：DB 空是权威缺失，
+                # 不得把 mutable 文件回灌后在下一轮冒充 DB 真值。
+                return None
 
             # DB 可达但没有该 snapshot：可能是升级后 DB 表还没回填。
             # 若磁盘上存在同名快照文件，执行 lazy bootstrap —— 把文件内容
@@ -299,11 +317,22 @@ def load_governance_snapshot(
                     return file_payload
             return None
         except Exception as exc:  # pragma: no cover - defensive
+            if require_managed_db_truth and managed_truth:
+                raise DBUnavailableError(
+                    f"governance DB snapshot read failed for {snapshot_type}; "
+                    "stale file fallback denied"
+                ) from exc
             log.warning("DB load governance snapshot failed (%s): %s", snapshot_type, exc)
             db_reachable = False
         finally:
             if engine is not None:
                 engine.dispose()
+
+    if require_managed_db_truth and managed_truth:
+        raise DBUnavailableError(
+            f"governance DB unavailable for snapshot {snapshot_type}; "
+            "stale file fallback denied"
+        )
 
     rel_path = _SNAPSHOT_FILE_MAP.get(snapshot_type)
     if not rel_path:
@@ -617,7 +646,12 @@ def load_latest_research_round_snapshot(
     *,
     phase: str,
     project_root: Path | None = None,
+    require_managed_db_truth: bool = False,
 ) -> dict[str, Any] | None:
+    managed_truth = bool(
+        project_root is not None
+        and has_explicit_governance_db_configuration(project_root)
+    )
     engine, ok = try_governance_db()
     db_reachable = False
     if ok:
@@ -628,6 +662,10 @@ def load_latest_research_round_snapshot(
             if snapshot is not None:
                 snapshot.setdefault("data_source", "db")
                 return snapshot
+
+            if require_managed_db_truth and managed_truth:
+                # 写门闸是只读消费者；DB 空必须保持权威缺失，禁止 lazy bootstrap。
+                return None
 
             # DB 可达但该 phase 尚无记录：如果磁盘上已有历史 round 目录
             # （升级过渡期）lazy bootstrap 最新一轮，避免最新 round writer 重跑前
@@ -684,12 +722,22 @@ def load_latest_research_round_snapshot(
                             return built
             return None
         except Exception as exc:  # pragma: no cover - defensive
+            if require_managed_db_truth and managed_truth:
+                raise DBUnavailableError(
+                    f"governance DB latest research round read failed for {phase}; "
+                    "stale file fallback denied"
+                ) from exc
             log.warning("DB load research round snapshot failed (%s): %s", phase, exc)
             db_reachable = False
         finally:
             if engine is not None:
                 engine.dispose()
 
+    if require_managed_db_truth and managed_truth:
+        raise DBUnavailableError(
+            f"governance DB unavailable for latest research round {phase}; "
+            "stale file fallback denied"
+        )
     if project_root is None:
         return None
     rel_root = _ROUND_PHASE_ROOTS.get(phase)

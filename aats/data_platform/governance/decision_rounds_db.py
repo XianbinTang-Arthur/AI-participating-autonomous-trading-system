@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from ._db_util import parse_dt
@@ -101,10 +102,85 @@ def db_load_latest_decision_round_snapshot(session: Session) -> dict[str, Any] |
     ).fetchone()
     if row is None:
         return None
+    return _decision_round_snapshot_from_row(row)
+
+
+def db_load_decision_round_snapshot(
+    session: Session,
+    *,
+    round_id: str,
+) -> dict[str, Any] | None:
+    """Load one exact Phase 6 decision-round snapshot.
+
+    This reader deliberately has no latest-round fallback.  Callers use it for
+    recommendation evidence, where substituting a newer round would break the
+    source identity and could authorize a legacy recommendation incorrectly.
+    """
+
+    row = session.execute(
+        text(
+            """
+            SELECT round_id,
+                   started_at,
+                   finished_at,
+                   evidence_summary_json,
+                   parameter_upgrade_candidates_json,
+                   family_timeframe_decisions_json,
+                   promotion_readiness_json,
+                   manifest_json,
+                   conclusion_markdown
+            FROM governance.decision_round_snapshots
+            WHERE round_id = :round_id
+            LIMIT 1
+            """
+        ),
+        {"round_id": round_id},
+    ).fetchone()
+    if row is None:
+        return None
+    return _decision_round_snapshot_from_row(row)
+
+
+def db_load_decision_round_snapshots(
+    session: Session,
+    *,
+    round_ids: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    """Load an exact set of decision-round snapshots in one bounded query."""
+
+    unique_round_ids = tuple(sorted(set(round_ids)))
+    if not unique_round_ids:
+        return {}
+    statement = text(
+        """
+        SELECT round_id,
+               started_at,
+               finished_at,
+               evidence_summary_json,
+               parameter_upgrade_candidates_json,
+               family_timeframe_decisions_json,
+               promotion_readiness_json,
+               manifest_json,
+               conclusion_markdown
+        FROM governance.decision_round_snapshots
+        WHERE round_id IN :round_ids
+        """
+    ).bindparams(bindparam("round_ids", expanding=True))
+    rows = session.execute(
+        statement,
+        {"round_ids": unique_round_ids},
+    ).fetchall()
+    return {
+        row.round_id: _decision_round_snapshot_from_row(row)
+        for row in rows
+    }
+
+
+def _decision_round_snapshot_from_row(row: Any) -> dict[str, Any]:
     return {
         "round_id": row.round_id,
-        "started_at": row.started_at.isoformat() if row.started_at else None,
-        "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+        "started_at": _db_timestamp_iso(row.started_at),
+        "finished_at": _db_timestamp_iso(row.finished_at),
         "evidence_bundle_summary": _from_json(row.evidence_summary_json, {}),
         "parameter_upgrade_candidates": _from_json(row.parameter_upgrade_candidates_json, []),
         "family_timeframe_decisions": _from_json(row.family_timeframe_decisions_json, []),
@@ -112,6 +188,20 @@ def db_load_latest_decision_round_snapshot(session: Session) -> dict[str, Any] |
         "manifest": _from_json(row.manifest_json, {}),
         "conclusion_markdown": row.conclusion_markdown,
     }
+
+
+def _db_timestamp_iso(value: datetime | None) -> str | None:
+    """Project aware database timestamps as canonical UTC ISO strings.
+
+    A naive driver value is preserved as naive text so downstream promotion
+    qualification rejects it instead of silently assuming a timezone.
+    """
+
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.isoformat()
+    return value.astimezone(timezone.utc).isoformat()
 
 
 def _to_json(payload: Any) -> str | None:

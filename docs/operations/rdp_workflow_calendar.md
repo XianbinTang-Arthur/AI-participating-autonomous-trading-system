@@ -1,6 +1,8 @@
 # RDP Workflow 调度日历
 
-> 最后核对：2026-08-25（起始代码基线 `70f1a581`，含本轮 RDP 整改工作区）。时间均为 UTC，以 `configs/rdp_workflows/*.json` 为声明真相；实际执行还受 scheduler state、environment guard、task queue 和 freeze 约束。
+> 文档状态：现行操作说明
+> 最后核对：2026-08-27（起始 HEAD `9c4112c6`，含当前控制面收口候选；以本文档所在 HEAD 为准）
+> 核对范围：workflow JSON、scheduler/queue 与 observation dispatch 静态契约；不证明当前 task 已运行
 
 ## 当前 10 个 Workflow
 
@@ -10,7 +12,7 @@
 | `microstructure_silver_15m` | 每 15 分钟 | 是 | microstructure Silver 构建 |
 | `reliability_cycle` | 每小时 :15 | 是 | reliability check |
 | `okx_rest_history_rolling_1h` | 每小时 :20 | 是 | OI/mark/long-short REST history |
-| `observation_cycle` | 每小时 :30 | 是 | release observation |
+| `observation_cycle` | 每小时 :30 | 是 | release observation；持久化运行结束时执行受控 pending-risk 收敛 |
 | `data_maintenance` | 每日 04:00 | 是 | daily ingest、artifact index、retention |
 | `governance_cycle` | 每日 07:00 | 是 | quality、artifact validation、round/candidate |
 | `research_cycle` | 周日 08:00 | 是 | refresh data、full pipeline |
@@ -30,6 +32,11 @@
 ```
 
 `decision_cycle` 和 `release_cycle` 不在执行日历中。不得因 JSON 中保留 schedule 字段就把它们视为会自动运行。
+
+`release_cycle` 禁用只表示“不自动创建/应用新 release”。它不禁用
+`observation_cycle` 的安全收敛职责：后者会对已有 release 生成 observation/effectiveness，
+并仅在精确 provenance、clean attempt、combo lock 和数据库终态证明都成立时处理 pending
+rollback；不满足时进入 `reconciliation_required`，不会用 legacy 证据执行资本动作。
 
 ## 冷启动与补偿
 

@@ -1,6 +1,8 @@
 # AATS 文档地图与适用边界
 
-最后核对：2026-08-27（起始 HEAD `c0f59047ed71bd2989a3ab279d323401c04b0477`；含本轮 RDP contract-aware replay P0-D 本地候选，以本文档所在 HEAD 为准）
+> 文档状态：现行全仓文档入口
+> 最后核对：2026-08-27（起始 HEAD `9c4112c6d769735f171971c8fa4f2cae5a03a824`；含当前 RDP 控制面收口候选，以本文档所在 HEAD 为准）
+> 核对范围：当前代码、迁移、配置、测试与文档入口的静态复核；不证明现场容器、数据库、交易所或资金状态
 
 本页解决一个长期问题：仓库同时保存当前规范、专题参考、历史设计、审查报告、任务书和一次性观察记录。文件仍在仓库中，不代表它描述当前行为。
 
@@ -122,10 +124,12 @@
 - 本地 `start_api.py` 是 HTTP，只接受模拟 profile 与 loopback host；live TLS 配置仍保留，但当前 deploy/prewarm/wrapper/local launcher 都禁止 live。
 - `scripts/run_local.py` 现为明确迁移失败入口：不加载 profile/runtime，输出指引并 exit `2`；不是可用 paper loop，仓库外旧调用方仍需迁移。
 - JetStream 是 3 条 stream，全部 1 天上限/兜底；总声明容量 6.5 GiB，server 8 GiB。
-- RDP ORM 是 84 张表；新增 `rdp_runs`、`rdp_run_steps`、`rdp_run_events` 后，
-  旧材料中的 48/78/81 张均已过时。
+- RDP ORM 是 102 张表，分布为 staging 13 / bronze 21 / silver 16 / gold 9 /
+  meta 14 / research 3 / governance 26；旧材料中的 48/78/81/84/98/101 张均已过时。
 - RDP workflow 是 10 个定义、8 个 enabled；decision/release disabled，release 还禁止入队。
 - runtime active parameter 是 Postgres DB-only；JSON 文件不是 fallback。
+- direct `POST /rdp/parameters/apply` 已停用并固定返回 `release_required`；前向资本变更必须建立 canonical release。Operator rollback 需要 action token，启用中的 observation cycle 则通过 exact provenance、combo lock、attempt 和应用层 insert-once action proof 执行内部风险收敛；legacy/不确定状态进入 reconciliation。
+- apply-capable recommendation 必须绑定精确、成功、未过期且使用当前 qualification policy 的 Phase 6 evidence round；不得用“最新 round”替旧 recommendation 背书。Managed DB 读取失败时禁止陈旧 JSON fallback，DB CAS 成功与审计镜像 degraded 必须分别报告。
 - `apply_active_parameter_set.py`、`approve_recommendation_and_apply.py`、`rdp_rollback_active_parameter_set.py`、`rdp_freeze_parameter_set.py`、`rdp_run_release_cycle.py` 已禁用。
 - `deploy.sh` 没有默认 profile，只允许 `spot`/`derivatives` 模拟部署；future derivatives-live required list 已包含两个采集器，但当前 live 禁用且没有运行结论。
 - 2026-08-24 未提交整改工作区已把 replay/backtest 固定为

@@ -25,7 +25,11 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
-from aats.data_platform.governance._db_util import try_governance_db
+from aats.data_platform.governance._db_util import (
+    has_explicit_governance_db_configuration,
+    try_governance_db,
+)
+from aats.data_platform.governance._exceptions import DBUnavailableError
 from aats.data_platform.governance.snapshot_db import (
     SNAPSHOT_QUALITY_MONITOR,
     load_governance_snapshot,
@@ -47,6 +51,20 @@ _GOVERNANCE_DIR = "artifacts/governance"
 _DECISION_SYSTEM_DIR = "artifacts/decision_system"
 _DECISION_ROUNDS_DIR = "artifacts/decision_rounds"
 _GATES_DIR = "artifacts/production_workflow/gates"
+
+
+def gate_result_allows_apply(result: object) -> bool:
+    """Return whether a gate result is an exact, unambiguous pass contract.
+
+    This predicate sits on the capital boundary and intentionally rejects
+    truthy strings, missing fields, warnings, blocks, and persistence errors.
+    """
+    return (
+        isinstance(result, dict)
+        and type(result.get("allow_apply")) is bool
+        and result.get("allow_apply") is True
+        and result.get("gate_status") == "pass"
+    )
 
 
 def _is_gate_json_export_enabled() -> bool:
@@ -91,6 +109,8 @@ def _find_latest_round_dir(rounds_root: Path) -> Path | None:
 def build_gate_context(
     project_root: Path,
     recommendation_id: str,
+    *,
+    promotion_qualification: Any | None = None,
 ) -> dict[str, Any]:
     """构建 gate 检查所需的上下文."""
     from aats.data_platform.decision_system.recommendation_registry import (
@@ -111,27 +131,88 @@ def build_gate_context(
     env = get_current_environment()
     ctx["environment"] = env
     ctx["environment_policy"] = get_policy(env)
+    ctx["quality_monitor_managed_truth"] = (
+        has_explicit_governance_db_configuration(project_root)
+    )
 
     # recommendation
     rec_path = project_root / _DECISION_SYSTEM_DIR / "recommendation_registry.json"
     rec_reg = load_recommendation_registry(rec_path)
     rec = find_recommendation(rec_reg, recommendation_id)
     ctx["recommendation"] = rec or {}
+    if rec is not None:
+        if promotion_qualification is None:
+            from aats.data_platform.decision_system.promotion_qualification import (
+                evaluate_promotion_qualification,
+            )
+
+            promotion_qualification = evaluate_promotion_qualification(
+                project_root=project_root,
+                recommendation=rec,
+            )
+        ctx["promotion_qualification"] = promotion_qualification
+    else:
+        ctx["promotion_qualification"] = None
 
     # quality monitor
-    qm = load_governance_snapshot(
-        project_root,
-        snapshot_type=SNAPSHOT_QUALITY_MONITOR,
-    )
-    ctx["quality_monitor"] = qm
+    try:
+        qm = load_governance_snapshot(
+            project_root,
+            snapshot_type=SNAPSHOT_QUALITY_MONITOR,
+            require_managed_db_truth=True,
+        )
+    except Exception as exc:
+        if not isinstance(exc, DBUnavailableError):
+            raise
+        log.error(
+            "pre-apply gate quality-monitor truth unavailable; blocking apply (%s)",
+            type(exc).__name__,
+        )
+        ctx["quality_monitor"] = None
+        ctx["quality_monitor_available"] = False
+    else:
+        ctx["quality_monitor"] = qm
+        ctx["quality_monitor_available"] = qm is not None
 
     # active decisions
-    dec_reg = load_active_decision_registry(
-        project_root / _DECISION_SYSTEM_DIR / "active_decision_registry.json",
-    )
-    ctx["active_decisions"] = (dec_reg or {}).get("decisions", [])
+    try:
+        dec_reg = load_active_decision_registry(
+            project_root / _DECISION_SYSTEM_DIR / "active_decision_registry.json",
+        )
+    except Exception as exc:
+        if not isinstance(exc, DBUnavailableError):
+            raise
+        log.error(
+            "pre-apply gate active-decision truth unavailable; blocking apply (%s)",
+            type(exc).__name__,
+        )
+        ctx["active_decisions"] = []
+        ctx["active_decisions_available"] = False
+        ctx["active_decisions_unavailable_reason"] = str(exc)
+    else:
+        ctx["active_decisions"] = (dec_reg or {}).get("decisions", [])
+        ctx["active_decisions_available"] = True
+
+    # Pending rollback/reconciliation is a capital-state veto, independent of
+    # whether an active_decision row exists.  Managed deployments use the DB
+    # canonical reader and never fall back to a stale file.
+    try:
+        from aats.data_platform.metrics.release_effectiveness import (
+            pending_rollback_combos,
+        )
+
+        ctx["pending_rollback_combos"] = pending_rollback_combos(project_root)
+        ctx["pending_rollback_truth_available"] = True
+    except DBUnavailableError as exc:
+        log.error(
+            "pre-apply gate pending-rollback truth unavailable; blocking apply (%s)",
+            type(exc).__name__,
+        )
+        ctx["pending_rollback_combos"] = {}
+        ctx["pending_rollback_truth_available"] = False
 
     # latest decision round
+    managed_truth = has_explicit_governance_db_configuration(project_root)
     engine, ok = try_governance_db()
     if ok:
         try:
@@ -144,12 +225,16 @@ def build_gate_context(
                 }
             else:
                 ctx["latest_decision_round"] = {}
-        except Exception:
+        except Exception as exc:
+            log.error(
+                "pre-apply gate latest-round truth unavailable (%s)",
+                type(exc).__name__,
+            )
             ctx["latest_decision_round"] = {}
         finally:
             if engine is not None:
                 engine.dispose()
-    else:
+    elif not managed_truth:
         rounds_root = project_root / _DECISION_ROUNDS_DIR
         latest_dir = _find_latest_round_dir(rounds_root)
         if latest_dir:
@@ -160,9 +245,16 @@ def build_gate_context(
             }
         else:
             ctx["latest_decision_round"] = {}
+    else:
+        # 受管配置一旦存在，DB 空/错就是权威的 unavailable；旧 round 文件
+        # 只能留作审计，不能重新进入 Gate 上下文。
+        ctx["latest_decision_round"] = {}
 
     # parameter sets
-    gov_reg = load_registry(project_root / _GOVERNANCE_DIR / "current_parameter_registry.json")
+    gov_reg = load_registry(
+        project_root / _GOVERNANCE_DIR / "current_parameter_registry.json",
+        fail_closed_on_db_error=True,
+    )
     ctx["parameter_sets"] = gov_reg.get("parameter_sets", [])
 
     runtime_contract = build_gate_runtime_contract(project_root, environment=env)
@@ -185,6 +277,7 @@ def run_pre_apply_gate(
     *,
     rules: list | None = None,
     save_result: bool = True,
+    promotion_qualification: Any | None = None,
 ) -> dict[str, Any]:
     """运行 pre-apply gate 检查.
 
@@ -205,7 +298,11 @@ def run_pre_apply_gate(
         rules = DEFAULT_GATE_RULES
 
     gate_run_id = _make_gate_run_id()
-    ctx = build_gate_context(project_root, recommendation_id)
+    ctx = build_gate_context(
+        project_root,
+        recommendation_id,
+        promotion_qualification=promotion_qualification,
+    )
     strict_environment = runtime_strict_environment(ctx)
 
     checks: list[dict[str, Any]] = []
@@ -216,13 +313,18 @@ def run_pre_apply_gate(
         try:
             result: GateCheckResult = rule_fn(ctx)
         except Exception as exc:
-            log.warning("gate rule %s 执行异常: %s", rule_fn.__name__, exc)
+            log.error(
+                "gate rule %s 执行异常 (%s)",
+                rule_fn.__name__,
+                type(exc).__name__,
+            )
             result = GateCheckResult(
                 name=rule_fn.__name__,
                 category="error",
                 passed=False,
                 severity="block" if strict_environment else "warn",
-                detail=f"规则执行异常: {exc}",
+                detail="gate_rule_execution_failed: 规则执行异常，已按环境策略处理",
+                reason_code="gate_rule_execution_failed",
             )
 
         check_dict = {
@@ -232,6 +334,8 @@ def run_pre_apply_gate(
             "severity": result.severity,
             "detail": result.detail,
         }
+        if result.reason_code is not None:
+            check_dict["reason_code"] = result.reason_code
         checks.append(check_dict)
 
         if not result.passed and result.severity == "block":
@@ -270,14 +374,20 @@ def run_pre_apply_gate(
         try:
             _save_gate_result(project_root, gate_run_id, gate_result)
         except Exception as exc:
-            log.error("pre-apply gate 落库失败，拒绝 apply: %s", exc)
+            log.error(
+                "pre-apply gate 落库失败，拒绝 apply (%s)",
+                type(exc).__name__,
+            )
             gate_result = {
                 **gate_result,
                 "allow_apply": False,
                 "gate_status": "error",
                 "blocking_reasons": [
                     *gate_result.get("blocking_reasons", []),
-                    f"[gate_persistence] gate 结果未能写入 governance DB: {exc}",
+                    (
+                        "[gate_persistence] gate_persistence_failed: "
+                        "gate 结果未能写入 governance DB"
+                    ),
                 ],
             }
 

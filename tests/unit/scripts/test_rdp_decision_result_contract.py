@@ -87,57 +87,79 @@ def test_decision_parameter_sets_use_db_first_registry_without_json_file(
     assert [item["parameter_set_id"] for item in selected] == ["candidate", "frozen"]
 
 
-def test_registry_batch_sync_preserves_recommendation_source_round(monkeypatch) -> None:
-    from contextlib import contextmanager
-
+def test_round_update_never_replays_stale_loaded_recommendation_snapshot(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     from aats.data_platform.decision_system import recommendation_registry
     from aats.data_platform.governance import recommendations_db
 
     captured = []
-
-    class _Session:
-        def __init__(self, _engine):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        @contextmanager
-        def begin(self):
-            yield
-
-    class _Engine:
-        def dispose(self):
-            pass
-
-    monkeypatch.setattr(recommendation_registry, "try_governance_db", lambda: (_Engine(), True))
-    monkeypatch.setattr("sqlalchemy.orm.Session", _Session)
     monkeypatch.setattr(
         recommendations_db,
         "db_upsert_recommendation",
         lambda _session, **kwargs: captured.append(kwargs),
     )
-    monkeypatch.setattr(recommendations_db, "db_upsert_active_decision", lambda *_a, **_k: None)
-
-    recommendation_registry._sync_registries_to_db_best_effort(
-        {
-            "recommendations": [
-                {
-                    "recommendation_id": "rec_1",
-                    "family": "independent",
-                    "timeframe": "15m",
-                    "recommendation_type": "parameter_upgrade",
-                    "source_round_id": "round_source_001",
-                }
-            ]
-        },
-        {"decisions": []},
+    stale_loaded_registry = {
+        "version": 1,
+        "recommendations": [
+            {
+                "recommendation_id": "rec_concurrently_superseded",
+                "family": "independent",
+                "symbol": "BTC-USDT-SWAP",
+                "timeframe": "15m",
+                "recommendation_type": "parameter_upgrade",
+                "source_round_id": "round_source_001",
+                "status": "approved",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        recommendation_registry,
+        "load_recommendation_registry",
+        lambda _path: stale_loaded_registry,
+    )
+    monkeypatch.setattr(
+        recommendation_registry,
+        "save_recommendation_registry",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        recommendation_registry,
+        "load_active_decision_registry",
+        lambda _path: {"decisions": []},
+    )
+    monkeypatch.setattr(
+        recommendation_registry,
+        "save_active_decision_registry",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        recommendation_registry,
+        "load_evidence_bundle_index",
+        lambda _path: {"bundles": []},
+    )
+    monkeypatch.setattr(
+        recommendation_registry,
+        "save_evidence_bundle_index",
+        lambda *_args: None,
     )
 
-    assert captured[0]["source_round_id"] == "round_source_001"
+    recommendation_registry.update_registries_from_round(
+        round_id="round_new",
+        upgrade_candidates=[],
+        ft_decisions=[],
+        evidence_bundle={"evidence_completeness": {}},
+        rec_registry_path=tmp_path / "recommendations.json",
+        decision_registry_path=tmp_path / "decisions.json",
+        bundle_index_path=tmp_path / "bundles.json",
+        evidence_summary_path="summary.json",
+    )
+
+    # The row may have become superseded in DB after the load above.  The old
+    # full-registry replay would resurrect it to approved; current code only
+    # persists newly owned transitions, so no stale upsert is issued.
+    assert captured == []
 
 
 def test_scheduled_workflow_marker_propagates_pipeline_business_result(

@@ -1,7 +1,7 @@
 # RDP Workspace V3 UI 速查
 
 > 文档状态：现行 UI 操作入口
-> 最后核对：2026-08-25（起始代码基线 `70f1a581`，V3 实现位于同一待提交工作树）
+> 最后核对：2026-08-27（起始 HEAD `9c4112c6`，含当前控制面收口候选；以本文档所在 HEAD 为准）
 > 运行边界：仅适用于 `derivatives` 本地模拟环境 `http://127.0.0.1:8001/ui/rdp`；本文不证明容器、数据、候选或参数的当前现场状态
 
 ## 1. 页面解决什么问题
@@ -45,7 +45,7 @@ RDP Workspace V3 把运行、队列、研究证据、治理审阅、发布候选
    - `失败`：先打开详情确认首个失败步骤，修复后再重试。
 6. 在“研究证据与治理审阅”检查完整性、原因摘要和证据链；证据阻断时批准按钮必须禁用。
 7. 参数候选获批后先运行门禁。只有门禁通过且治理历史新鲜时，“创建发布”才可用。
-8. 模拟发布后进入观察窗口；出现“建议回滚”时先复核效果证据，再决定是否发起受保护的回滚。
+8. 模拟发布后进入观察窗口；出现“建议回滚”时先复核效果证据和 action attempt。Operator 可发起 token 回滚；后台 observation cycle 也可能在严格证明下自动回滚、取消旧意图或 soft pause，页面不得把 `reconciliation_required` 显示为已恢复。
 
 ## 4. 关键按钮与实际效果
 
@@ -76,6 +76,7 @@ RDP Workspace V3 把运行、队列、研究证据、治理审阅、发布候选
 
 1. `release_cycle` 仍然 disabled 且禁止入队，页面重构没有解除它。
 2. “批准”与“应用”是两步；应用仍需要权限、短时 token、参数映射、Gate、rollback target 和审计。
+   direct `POST /rdp/parameters/apply` 已停用；创建 canonical release 才能前向应用。
 3. 发布历史来自副本或标记 stale 时，运行观察和回滚按钮必须失败关闭。
 4. `partially_succeeded` 和 `succeeded_with_warnings` 都需要处理，不应显示为完整闭环。
 5. 当前部署只验证 derivatives 模拟栈；任何 `ok=true` 都不能被写成 live 资金已生效。
@@ -90,7 +91,7 @@ RDP Workspace V3 把运行、队列、研究证据、治理审阅、发布候选
 | Run 失败且完整流水线步骤显示失败 | 打开详情定位首个失败步骤；不要根据最后一行“闭环完成”误判成功 |
 | 有已批准候选但“创建发布”禁用 | 先运行并通过最新 Gate，并确认治理历史不是 stale |
 | 显示“无合格候选” | 正常的安全终止；不得从失败候选中强制挑选一个应用 |
-| 观察卡显示“建议回滚” | 先读观察评估，再执行受 token 保护的回滚，并核对 runtime provenance |
+| 观察卡显示“建议回滚” | 先读观察、attempt 和 proof；若后台尚未收敛，可执行受 token 保护的 Operator 回滚；若为 `in_progress/reconciliation_required`，禁止重复资本动作 |
 
 ## 8. 深入入口
 

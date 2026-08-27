@@ -19,17 +19,23 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
-from aats.data_platform.governance._db_util import try_governance_db
+from aats.data_platform.governance._db_util import (
+    has_explicit_governance_db_configuration,
+    try_governance_db,
+)
 from aats.data_platform.governance._exceptions import (
     DBConstraintViolation,
     DBUnavailableError,
+)
+from aats.data_platform.production_workflow.post_apply_evidence import (
+    risk_evidence_provenance_error,
 )
 
 log = logging.getLogger(__name__)
@@ -39,6 +45,33 @@ _RELEASE_HISTORY_PATH = "artifacts/production_workflow/parameter_release_history
 
 def _make_release_id() -> str:
     return f"rel_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+
+
+def _release_audit_instant(
+    value: Any,
+    *,
+    canonical_utc_string: bool,
+) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            return None
+        return value.astimezone(timezone.utc)
+    if not isinstance(value, str):
+        return None
+    token = value.strip()
+    if not token:
+        return None
+    if canonical_utc_string and not (
+        token.endswith("Z") or token.endswith("+00:00")
+    ):
+        return None
+    try:
+        parsed = datetime.fromisoformat(token.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 # ── 加载 / 保存 ───────────────────────────────────────────────────
@@ -52,10 +85,11 @@ def load_release_history(project_root: Path) -> dict[str, Any]:
       - ``stale``: ``True`` 表示数据来自 JSON 副本（DB 不可达或读取失败），
         消费方需把这个信号透传到 UI / 监控，避免运营者误把 stale JSON 当成真源。
 
-    真源是 governance DB；JSON 副本仅作单机兼容 / DB 抖动时的 last-known 副本。
+    真源是 governance DB；JSON 副本仅作明确离线开发的兼容读源。
     DB 读成功即返回（即使 releases 为空），不做"空就回退 JSON"的兜底——否则
     旧 JSON 会把已淘汰的 release 重新注入运行链。
     """
+    db_is_managed_truth = has_explicit_governance_db_configuration(project_root)
     engine, ok = try_governance_db()
     if ok:
         try:
@@ -72,14 +106,24 @@ def load_release_history(project_root: Path) -> dict[str, Any]:
             history["stale"] = False
             return history
         except Exception as exc:
+            if db_is_managed_truth:
+                raise DBUnavailableError(
+                    "governance DB release-history read failed; stale JSON fallback denied"
+                ) from exc
             log.warning(
-                "release history: DB 读取失败 (%s)，退化到文件（stale 风险）", exc,
+                "release history: 离线开发 DB 读取失败 (%s)，退化到文件（stale）",
+                type(exc).__name__,
             )
             stale_reason = f"db_read_error: {exc}"
         finally:
             if engine is not None:
                 engine.dispose()
     else:
+        if db_is_managed_truth:
+            raise DBUnavailableError(
+                "governance DB unavailable while loading release history; "
+                "stale JSON fallback denied"
+            )
         stale_reason = "db_unreachable"
 
     path = project_root / _RELEASE_HISTORY_PATH
@@ -141,20 +185,24 @@ def save_release_history(
         )
     try:
         from aats.data_platform.governance.operational_state_db import (
+            db_load_release_history,
             db_set_gate_result_release_id,
             db_upsert_parameter_release,
         )
 
+        canonical_history: dict[str, Any]
+        canonical_rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
         with Session(engine) as session, session.begin():
             for release in history.get("releases", []):
                 if not isinstance(release, dict):
                     continue
-                db_upsert_parameter_release(session, release)
+                canonical_release = db_upsert_parameter_release(session, release)
+                canonical_rows.append((release, canonical_release))
                 # 把 release_id 回填到 gate 行，让 db_list_gate_results_for_release
                 # 能在 release_id 索引上直接命中，而不是回落到 parameter_releases JOIN。
                 # 同事务内做，确保 release upsert 与 gate 回填一起 commit / 一起回滚。
-                gate_ref = release.get("gate_result_ref")
-                rel_id = release.get("release_id")
+                gate_ref = canonical_release.get("gate_result_ref")
+                rel_id = canonical_release.get("release_id")
                 if gate_ref and rel_id:
                     matched = db_set_gate_result_release_id(
                         session,
@@ -169,6 +217,17 @@ def save_release_history(
                             rel_id,
                             gate_ref,
                         )
+            # Export the DB-owned canonical view, not the caller's potentially
+            # partial/stale list.  This makes single-record writes safe without
+            # truncating the human-readable audit snapshot.
+            canonical_history = db_load_release_history(session)
+        # The transaction is committed at this point.  Reflect the DB-owned
+        # merged state back into caller-owned rows so a single-record capital
+        # path can continue from the exact canonical transition without a
+        # second read (and therefore without a new read/write race window).
+        for source_release, canonical_release in canonical_rows:
+            source_release.clear()
+            source_release.update(canonical_release)
     except IntegrityError as exc:
         log.exception("release history DB 约束违反")
         raise DBConstraintViolation(
@@ -184,9 +243,73 @@ def save_release_history(
             engine.dispose()
 
     # DB 写成功后才写文件副本
-    atomic_json_write(history, path)
-    log.info("已保存 release history: %d releases", len(history.get("releases", [])))
+    atomic_json_write(canonical_history, path)
+    log.info(
+        "已保存 release history: %d releases",
+        len(canonical_history.get("releases", [])),
+    )
     return path
+
+
+def save_release_record(
+    release: dict[str, Any],
+    project_root: Path,
+) -> dict[str, Any]:
+    """Persist exactly one owned release transition.
+
+    Capital paths must use this entrypoint.  ``save_release_history`` remains a
+    compatibility/import surface, while its DB merge is monotonic and therefore
+    cannot resurrect a terminal release from a stale batch snapshot.
+    """
+    if not isinstance(release, dict) or not release.get("release_id"):
+        raise ValueError("release record requires release_id")
+    save_release_history({"releases": [release]}, project_root)
+    # Production ``save_release_history`` replaces this object with the
+    # transactionally merged DB row after commit.  Keeping this small wrapper
+    # also preserves the established test/offline adapter contract: a valid
+    # persistence adapter may write its owned audit target without providing a
+    # second canonical read surface.
+    return dict(release)
+
+
+def mirror_release_history_from_db_best_effort(project_root: Path) -> bool:
+    """Refresh the human-readable JSON mirror after a DB-owned transition.
+
+    Capital state is already committed before this helper is called.  A local
+    filesystem failure must therefore be observable but must not turn a
+    successful canonical transition into an exception that stops the safety
+    state machine.  This helper never writes DB state and never falls back to
+    a stale JSON source.
+    """
+    from aats.data_platform.governance._atomic_io import atomic_json_write
+
+    engine, ok = try_governance_db()
+    if not ok or engine is None:
+        log.error(
+            "release_history_mirror_degraded: canonical DB unavailable after "
+            "committed release transition"
+        )
+        return False
+    try:
+        from aats.data_platform.governance.operational_state_db import (
+            db_load_release_history,
+        )
+
+        with Session(engine) as session:
+            canonical_history = db_load_release_history(session)
+        path = project_root / _RELEASE_HISTORY_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_json_write(canonical_history, path)
+        return True
+    except Exception as exc:
+        log.error(
+            "release_history_mirror_degraded: canonical release is safe in DB "
+            "but JSON audit mirror refresh failed: %s",
+            type(exc).__name__,
+        )
+        return False
+    finally:
+        engine.dispose()
 
 
 # ── Release 创建 ──────────────────────────────────────────────────
@@ -237,6 +360,205 @@ def find_release(
     for rel in history.get("releases", []):
         if rel.get("release_id") == release_id:
             return rel
+    return None
+
+
+def validate_post_apply_release_identity(
+    history: dict[str, Any],
+    *,
+    release_id: str,
+    requested_family: str | None,
+    requested_timeframe: str | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Resolve the canonical combo for a successful release, fail closed.
+
+    Observation and rollback evidence is keyed by ``release_id``.  Caller
+    supplied combo fields may only confirm that immutable identity; they may
+    never redirect evidence to another strategy family or timeframe.
+    """
+    release = find_release(history, release_id)
+    if release is None:
+        return None, {
+            "ok": False,
+            "reason": "release_not_found",
+            "message": f"release 未找到: {release_id}",
+            "release_id": release_id,
+        }
+
+    canonical_family = str(release.get("family") or "").strip()
+    canonical_timeframe = str(release.get("timeframe") or "").strip().lower()
+    if not canonical_family or not canonical_timeframe:
+        return None, {
+            "ok": False,
+            "reason": "release_identity_missing",
+            "message": "release 缺少 canonical family/timeframe，禁止生成后续证据",
+            "release_id": release_id,
+        }
+
+    requested_family_norm = (
+        str(requested_family).strip() if requested_family is not None else None
+    )
+    requested_timeframe_norm = (
+        str(requested_timeframe).strip().lower()
+        if requested_timeframe is not None
+        else None
+    )
+    if (
+        requested_family_norm not in {None, canonical_family}
+        or requested_timeframe_norm not in {None, canonical_timeframe}
+    ):
+        return None, {
+            "ok": False,
+            "reason": "release_identity_mismatch",
+            "message": "请求 combo 与 release canonical identity 不一致",
+            "release_id": release_id,
+            "requested_family": requested_family_norm,
+            "requested_timeframe": requested_timeframe_norm,
+            "canonical_family": canonical_family,
+            "canonical_timeframe": canonical_timeframe,
+        }
+
+    if release.get("apply_result") != "success":
+        return None, {
+            "ok": False,
+            "reason": "release_not_applied",
+            "message": "仅 apply_result=success 的 release 可生成 post-apply 证据",
+            "release_id": release_id,
+            "apply_result": release.get("apply_result"),
+        }
+
+    operation_id = release.get("apply_operation_id")
+    created_at = _release_audit_instant(
+        release.get("created_at"), canonical_utc_string=False
+    )
+    applied_at = _release_audit_instant(
+        release.get("applied_at"), canonical_utc_string=True
+    )
+    if (
+        not isinstance(operation_id, str)
+        or not operation_id.strip()
+        or created_at is None
+        or applied_at is None
+        or applied_at < created_at
+        or applied_at > datetime.now(timezone.utc) + timedelta(minutes=5)
+    ):
+        return None, {
+            "ok": False,
+            "reason": "release_apply_lineage_invalid",
+            "message": (
+                "successful release 缺少可信 apply_operation_id/applied_at；"
+                "必须完成 canonical lineage 对账后才能生成 post-apply 证据"
+            ),
+            "release_id": release_id,
+        }
+
+    canonical = dict(release)
+    canonical["family"] = canonical_family
+    canonical["timeframe"] = canonical_timeframe
+    return canonical, None
+
+
+def validate_release_bound_evidence(
+    release: dict[str, Any],
+    evidence: dict[str, Any] | None,
+    *,
+    evidence_kind: str,
+) -> dict[str, Any] | None:
+    """Reject persisted evidence whose identity does not match its release."""
+    if evidence is None:
+        return None
+    canonical_release_id = str(release.get("release_id") or "").strip()
+    canonical_family = str(release.get("family") or "").strip()
+    canonical_timeframe = str(release.get("timeframe") or "").strip().lower()
+    canonical_combo = f"{canonical_family}_{canonical_timeframe}"
+    evidence_release_id = str(evidence.get("release_id") or "").strip()
+    evidence_family = str(evidence.get("family") or "").strip()
+    evidence_timeframe = str(evidence.get("timeframe") or "").strip().lower()
+    evidence_combo = str(evidence.get("combo_key") or "").strip().lower()
+    if (
+        evidence_release_id != canonical_release_id
+        or evidence_family != canonical_family
+        or evidence_timeframe != canonical_timeframe
+        or evidence_combo != canonical_combo.lower()
+    ):
+        return {
+            "ok": False,
+            "reason": "release_evidence_identity_mismatch",
+            "error": (
+                f"{evidence_kind} identity does not match canonical release "
+                f"{canonical_release_id}"
+            ),
+            "release_id": canonical_release_id,
+            "evidence_kind": evidence_kind,
+            "canonical_family": canonical_family,
+            "canonical_timeframe": canonical_timeframe,
+        }
+    applied_at = _release_audit_instant(
+        release.get("applied_at"), canonical_utc_string=True
+    )
+    evaluated_at = _release_audit_instant(
+        evidence.get("evaluated_at"), canonical_utc_string=True
+    )
+    if (
+        applied_at is None
+        or evaluated_at is None
+        or evaluated_at < applied_at
+        or evaluated_at > datetime.now(timezone.utc) + timedelta(minutes=5)
+    ):
+        return {
+            "ok": False,
+            "reason": "release_evidence_time_invalid",
+            "error": (
+                f"{evidence_kind} is missing, pre-apply, or future-dated"
+            ),
+            "release_id": canonical_release_id,
+            "evidence_kind": evidence_kind,
+        }
+    if evidence_kind == "observation":
+        started_at = _release_audit_instant(
+            evidence.get("started_at"), canonical_utc_string=True
+        )
+        release_window = release.get("observation_window_hours")
+        evidence_window = evidence.get("observation_window_hours")
+        if (
+            started_at != applied_at
+            or evaluated_at < started_at
+            or type(release_window) is not int
+            or release_window <= 0
+            or type(evidence_window) is not int
+            or evidence_window != release_window
+        ):
+            return {
+                "ok": False,
+                "reason": "release_observation_contract_invalid",
+                "error": "observation window is not bound to canonical applied_at",
+                "release_id": canonical_release_id,
+                "evidence_kind": evidence_kind,
+            }
+    if (
+        evidence_kind == "rollback_recommendation"
+        and type(evidence.get("rollback_recommended")) is not bool
+    ):
+        return {
+            "ok": False,
+            "reason": "release_rollback_contract_invalid",
+            "error": "rollback recommendation boolean is malformed",
+            "release_id": canonical_release_id,
+            "evidence_kind": evidence_kind,
+        }
+    provenance_error = risk_evidence_provenance_error(
+        release,
+        evidence,
+        evidence_kind=evidence_kind,
+    )
+    if provenance_error is not None:
+        return {
+            "ok": False,
+            "reason": "release_evidence_provenance_invalid",
+            "error": provenance_error,
+            "release_id": canonical_release_id,
+            "evidence_kind": evidence_kind,
+        }
     return None
 
 
@@ -323,6 +645,7 @@ def create_parameter_release(
     notes: str | None = None,
     run_gate: bool = True,
     run_apply: bool = True,
+    promotion_authorization: Any | None = None,
 ) -> dict[str, Any]:
     """完整的 parameter release 流程.
 
@@ -383,6 +706,30 @@ def create_parameter_release(
         result["message"] = f"recommendation 状态为 '{rec['status']}'，必须为 approved"
         return result
 
+    # Independent fail-closed boundary: even callers that deliberately skip
+    # the general gate cannot create a release for legacy/unbound evidence.
+    # This must precede parameter-registry and active-set reads.
+    from aats.data_platform.decision_system.promotion_guard import (
+        PromotionQualificationBlockedError,
+        promotion_qualification_failure,
+        require_promotion_authorization,
+    )
+
+    authorized_verdict = None
+    if promotion_authorization is not None:
+        try:
+            authorized_verdict = require_promotion_authorization(
+                project_root,
+                rec,
+                promotion_authorization,
+            )
+        except PromotionQualificationBlockedError as exc:
+            return exc.to_dict()
+    else:
+        qualification_failure = promotion_qualification_failure(project_root, rec)
+        if qualification_failure is not None:
+            return qualification_failure
+
     ps_id = rec.get("target_parameter_set_id")
     if not ps_id:
         result["message"] = "recommendation 无 target_parameter_set_id"
@@ -390,7 +737,7 @@ def create_parameter_release(
 
     # 获取 parameter set 信息
     gov_path = project_root / "artifacts/governance/current_parameter_registry.json"
-    gov_reg = load_registry(gov_path)
+    gov_reg = load_registry(gov_path, fail_closed_on_db_error=True)
     target_ps = None
     for ps in gov_reg.get("parameter_sets", []):
         if ps["parameter_set_id"] == ps_id:
@@ -406,8 +753,29 @@ def create_parameter_release(
     # 查找当前 active set
     from aats.bootstrap.active_parameters import load_active_parameter_registry
     active_reg = load_active_parameter_registry(project_root=project_root)
+    if active_reg.get("db_load_failed") is True:
+        return {
+            "ok": False,
+            "code": "active_parameter_truth_unavailable",
+            "message": (
+                "active parameter 数据库读取失败，无法证明当前回滚前驱；"
+                "release 已在任何 Gate/apply 副作用前阻断"
+            ),
+        }
+    if not isinstance(active_reg.get("active_sets"), dict):
+        return {
+            "ok": False,
+            "code": "active_parameter_truth_invalid",
+            "message": "active parameter registry 结构无效，release 已阻断",
+        }
     combo_key = f"{family}_{timeframe.lower()}"
     current_entry = active_reg.get("active_sets", {}).get(combo_key, {})
+    if not isinstance(current_entry, dict):
+        return {
+            "ok": False,
+            "code": "active_parameter_truth_invalid",
+            "message": f"{combo_key} active parameter 记录结构无效，release 已阻断",
+        }
     prev_ps_id = current_entry.get("parameter_set_id")
 
     # 2. Gate（可选）
@@ -416,16 +784,24 @@ def create_parameter_release(
     gate_status_str = None
     if run_gate:
         from aats.data_platform.production_workflow.pre_apply_gate import (
+            gate_result_allows_apply,
             run_pre_apply_gate,
         )
-        gate_result = run_pre_apply_gate(project_root, recommendation_id)
+        gate_result = run_pre_apply_gate(
+            project_root,
+            recommendation_id,
+            promotion_qualification=authorized_verdict,
+        )
         gate_ref = gate_result.get("gate_run_id")
         gate_status_str = gate_result.get("gate_status")
         result["gate_result"] = gate_result
 
-        if not gate_result.get("allow_apply"):
+        if not gate_result_allows_apply(gate_result):
             result["message"] = f"Gate blocked: {gate_result.get('blocking_reasons')}"
-            # 仍然创建 release record 但标记为 blocked
+            # First persist the immutable pending authorization anchor.  The
+            # DB lifecycle contract deliberately rejects a terminal state on
+            # first insert, because otherwise a caller could fabricate a
+            # release outcome without a transition from an owned anchor.
             release = create_release_record(
                 family=family,
                 timeframe=timeframe,
@@ -438,10 +814,16 @@ def create_parameter_release(
                 observation_window_hours=observation_window_hours,
                 notes=notes,
             )
+            canonical_release = save_release_record(release, project_root)
+            release.clear()
+            release.update(canonical_release)
+            # Gate denial has no capital side effect, so it may now advance the
+            # anchored release to the terminal blocked state through the
+            # regular row-locked monotonic merge.
             release["apply_result"] = "blocked_by_gate"
-            history = load_release_history(project_root)
-            add_release(history, release)
-            save_release_history(history, project_root)
+            canonical_release = save_release_record(release, project_root)
+            release.clear()
+            release.update(canonical_release)
             result["release"] = release
             return result
 
@@ -459,7 +841,14 @@ def create_parameter_release(
         notes=notes,
     )
 
-    # 4. Apply（可选）
+    # 4. 先持久化 pending release，再执行任何 active-parameter 写入。
+    # 若 apply 进程崩溃或最终状态回写失败，DB 至少保留一条 pending 审计锚点；
+    # 初次持久化失败则绝不触发 apply，避免“参数已生效但 release 不存在”。
+    canonical_release = save_release_record(release, project_root)
+    release.clear()
+    release.update(canonical_release)
+
+    # 5. Apply（可选）
     apply_result_data = None
     if run_apply:
         from aats.data_platform.decision_system.active_parameter_apply import (
@@ -472,22 +861,65 @@ def create_parameter_release(
             notes=f"Release {release['release_id']}",
             release_id=release["release_id"],
             gate_result=gate_result,
+            promotion_authorization=promotion_authorization,
         )
         result["apply_result"] = apply_result_data
-
-        if apply_result_data.get("ok"):
-            release["apply_result"] = "success"
-            release["observation_status"] = "observing"
+        transaction_release = apply_result_data.get("release")
+        if apply_result_data.get("ok") is True and isinstance(
+            transaction_release, dict
+        ):
+            # success/observing 与 active/history 已由 apply 的同一事务提交。
+            # 此处只刷新 JSON 审计副本；失败仅降级告警，不能破坏已提交的
+            # canonical safety state machine。
+            release.clear()
+            release.update(transaction_release)
+            result["release_mirror_refreshed"] = (
+                mirror_release_history_from_db_best_effort(project_root)
+            )
         else:
-            release["apply_result"] = "failed"
-            release["observation_status"] = "not_started"
-
-    # 5. 写入 release history
-    history = load_release_history(project_root)
-    add_release(history, release)
-    save_release_history(history, project_root)
+            _record_release_apply_outcome(release, apply_result_data)
+            # 无资本写入的失败结果仍可单独持久化到 pending audit anchor。
+            canonical_release = save_release_record(release, project_root)
+            release.clear()
+            release.update(canonical_release)
 
     result["ok"] = release["apply_result"] == "success" or not run_apply
     result["release"] = release
     result["message"] = f"Release {release['release_id']} created"
     return result
+
+
+def _record_release_apply_outcome(
+    release: dict[str, Any],
+    apply_result: dict[str, Any],
+) -> None:
+    """Map an apply outcome onto values accepted by the release DB contract."""
+    if apply_result.get("ok") is True:
+        # The only authoritative predecessor is the value read inside the
+        # combo-locked apply transaction.  The earlier release snapshot exists
+        # only for the pending audit anchor and may have changed meanwhile.
+        if "from_parameter_set_id" not in apply_result:
+            release["apply_result"] = "pending"
+            release["observation_status"] = "pending"
+            release["apply_reconciliation_required"] = True
+            release["apply_reconciliation_reason"] = (
+                "successful_apply_result_missing_transaction_predecessor"
+            )
+            return
+        release["previous_parameter_set_id"] = apply_result.get(
+            "from_parameter_set_id"
+        )
+        release["apply_result"] = "success"
+        release["observation_status"] = "observing"
+        return
+    if apply_result.get("code") == "recommendation_already_applied":
+        release["apply_result"] = "pending"
+        release["observation_status"] = "pending"
+        release["apply_reconciliation_required"] = True
+        release["apply_reconciliation_reason"] = "recommendation_already_applied"
+        return
+    release["apply_result"] = "failed"
+    # governance.parameter_releases CHECK 只允许 pending/observing/completed/
+    # rollback_recommended/rolled_back。apply_result 已明确表达失败；观察尚未
+    # 开始保持 pending，避免终态写回撞约束后把 DB 永久留在不确定 anchor。
+    release["observation_status"] = "pending"

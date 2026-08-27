@@ -5574,16 +5574,26 @@ async def build_runtime(
         profile_resolution = runtime_profile_resolution(settings=base_settings)
         # ── Active Parameter Set 注入（RDP 整合） ──────────────────
         # 在 profile resolution 之后、settings validate 之前合并。
-        # fail-soft: 加载失败不阻断主系统启动。
+        # 离线/未配置治理库时保持兼容；一旦 managed governance truth 已配置，
+        # DB outage、隔离记录或不完整映射必须 fail-closed，绝不静默跑 defaults。
         _resolved_for_active = profile_resolution.resolved_settings
         _provenance.snapshot("profile_resolution", _resolved_for_active)
         try:
-            from aats.bootstrap.active_parameters import apply_active_parameters_to_settings
+            from aats.bootstrap.active_parameters import (
+                ActiveParameterSafetyError,
+                apply_active_parameters_to_settings,
+            )
             _resolved_for_active = apply_active_parameters_to_settings(
                 profile_resolution.resolved_settings,
                 project_root=Path.cwd(),
             )
             _provenance.snapshot("active_parameters", _resolved_for_active)
+        except ActiveParameterSafetyError:
+            # A configured DB that is unavailable, or a quarantined active set,
+            # cannot safely fall back to profile defaults: that would make the
+            # running strategy diverge from the capital/audit truth.  Stop this
+            # process before strategy/execution services are constructed.
+            raise
         except Exception as _active_param_exc:
             log_event(
                 get_logger("aats.bootstrap"),

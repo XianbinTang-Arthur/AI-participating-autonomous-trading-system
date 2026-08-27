@@ -147,6 +147,7 @@ def db_update_recommendation_status(
     superseded_at: str | None = None,
     superseded_by_recommendation_id: str | None = None,
     expected_current_status: str | tuple[str, ...] | None = None,
+    expected_identity: dict[str, Any] | None = None,
 ) -> bool:
     """更新 recommendation 审批状态.
 
@@ -158,6 +159,12 @@ def db_update_recommendation_status(
         ``rec["status"] == "draft"`` 检查通过，但 DB 已经被先到的请求改写为
         ``approved``，此时 UPDATE 的 rowcount=0，本函数返回 False，API 层可以
         把这种情况映射成"状态已被他人改写"。
+    expected_identity:
+        可选的 recommendation 不可变身份快照。提供后，UPDATE 除状态 CAS 外
+        还会以 ``IS NOT DISTINCT FROM`` 精确比较 family / symbol / timeframe /
+        recommendation_type / target_parameter_set_id / source_round_id /
+        evidence_bundle_ref。这样资格校验与状态写入之间即使同 ID 行被替换或
+        改写，也不会把已校验的结论错误应用到另一条业务记录。
 
     Returns
     -------
@@ -207,6 +214,33 @@ def db_update_recommendation_status(
                 params[key] = st
             where_parts.append(f"status IN ({', '.join(placeholders)})")
 
+    if expected_identity is not None:
+        identity_columns = (
+            "family",
+            "symbol",
+            "timeframe",
+            "recommendation_type",
+            "target_parameter_set_id",
+            "source_round_id",
+            "evidence_bundle_ref",
+        )
+        unknown = set(expected_identity) - set(identity_columns)
+        if unknown:
+            raise ValueError(
+                "expected_identity 包含不受支持的字段: "
+                f"{sorted(unknown)}"
+            )
+        missing = set(identity_columns) - set(expected_identity)
+        if missing:
+            raise ValueError(
+                "expected_identity 缺少身份字段: "
+                f"{sorted(missing)}"
+            )
+        for column in identity_columns:
+            key = f"expected_identity_{column}"
+            where_parts.append(f"{column} IS NOT DISTINCT FROM :{key}")
+            params[key] = expected_identity[column]
+
     sql = (
         f"UPDATE governance.recommendations SET {', '.join(set_parts)} "
         f"WHERE {' AND '.join(where_parts)}"
@@ -215,11 +249,12 @@ def db_update_recommendation_status(
     updated = result.rowcount > 0
     if updated:
         log.info("DB update recommendation status: %s -> %s", recommendation_id, status)
-    elif expected_current_status is not None:
+    elif expected_current_status is not None or expected_identity is not None:
         log.warning(
-            "DB update recommendation status skipped: %s expected=%s (row not updated, "
-            "probably raced with another operator)",
+            "DB update recommendation status skipped: %s expected_status=%s "
+            "identity_bound=%s (row not updated, probably raced with another operator)",
             recommendation_id, expected_current_status,
+            expected_identity is not None,
         )
     return updated
 
@@ -373,6 +408,25 @@ def db_get_recommendation(
     用这个更直白的名字；``db_find_recommendation`` 保留以兼容已有调用。
     """
     return db_find_recommendation(session, recommendation_id)
+
+
+def db_get_recommendation_for_update(
+    session: Session,
+    recommendation_id: str,
+) -> dict[str, Any] | None:
+    """Load one recommendation under a row lock for a capital transaction."""
+    row = session.execute(
+        text(f"""
+            SELECT {_REC_SELECT_COLUMNS}
+            FROM governance.recommendations
+            WHERE recommendation_id = :rec_id
+            FOR UPDATE
+        """),
+        {"rec_id": recommendation_id},
+    ).fetchone()
+    if row is None:
+        return None
+    return _rec_row_to_dict(row)
 
 
 def db_find_recommendations(
@@ -535,12 +589,42 @@ def db_upsert_active_decision(
     active_parameter_set_id: str | None = None,
     last_recommendation_id: str | None = None,
     notes: str | None = None,
-) -> None:
+) -> bool:
     """UPSERT 一条 active decision 记录.
 
     INSERT ... ON CONFLICT (family, timeframe) DO UPDATE
     """
-    combo_key = f"{family}_{timeframe.lower()}"
+    from .active_params_db import db_try_acquire_parameter_apply_lock
+
+    timeframe_norm = timeframe.lower()
+    combo_key = f"{family}_{timeframe_norm}"
+    if not db_try_acquire_parameter_apply_lock(
+        session,
+        family=family,
+        timeframe=timeframe_norm,
+    ):
+        raise RuntimeError(
+            f"active decision mutation lock busy for {combo_key}"
+        )
+    existing = db_get_active_decision_for_update(
+        session,
+        family=family,
+        timeframe=timeframe_norm,
+    )
+    # A safety pause is sticky.  Automated decision-round snapshots are not an
+    # authorization to clear it; only a future explicit operator reconciliation
+    # API may perform that transition.
+    if (
+        isinstance(existing, dict)
+        and existing.get("current_status") == "pause"
+        and current_status != "pause"
+    ):
+        log.warning(
+            "active_decision pause preserved for %s; rejected automatic transition to %s",
+            combo_key,
+            current_status,
+        )
+        return False
     session.execute(
         text("""
             INSERT INTO governance.active_decisions
@@ -563,7 +647,7 @@ def db_upsert_active_decision(
         {
             "family": family,
             "symbol": symbol,
-            "timeframe": timeframe.lower(),
+            "timeframe": timeframe_norm,
             "combo_key": combo_key,
             "status": current_status,
             "active_ps_id": active_parameter_set_id,
@@ -573,6 +657,7 @@ def db_upsert_active_decision(
         },
     )
     log.info("DB upsert active_decision: %s -> %s", combo_key, current_status)
+    return True
 
 
 def db_set_combo_pause(
@@ -600,6 +685,30 @@ def db_set_combo_pause(
         False: combo 没有 active_decision 行（UPDATE 0 行），调用方应该 log
         warning 而不是创建新 row——pause 是对已存在决策的降级，不是凭空写入。
     """
+    from .active_params_db import db_try_acquire_parameter_apply_lock
+
+    if not db_try_acquire_parameter_apply_lock(
+        session,
+        family=family,
+        timeframe=timeframe,
+    ):
+        raise RuntimeError(
+            f"active decision mutation lock busy for {family}_{timeframe.lower()}"
+        )
+    # Lock the mutable row before changing it so every decision writer has the
+    # same lock order: combo advisory lock, then active_decisions row lock.
+    existing = db_get_active_decision_for_update(
+        session,
+        family=family,
+        timeframe=timeframe,
+    )
+    if existing is None:
+        log.warning(
+            "db_set_combo_pause: combo family=%s timeframe=%s 无 active_decision 记录",
+            family,
+            timeframe.lower(),
+        )
+        return False
     result = session.execute(
         text("""
             UPDATE governance.active_decisions
@@ -628,6 +737,49 @@ def db_set_combo_pause(
         family, timeframe.lower(),
     )
     return False
+
+
+def db_get_active_decision_for_update(
+    session: Session,
+    *,
+    family: str,
+    timeframe: str,
+) -> dict[str, Any] | None:
+    """Lock and return the canonical decision for one parameter combo.
+
+    Callers must already hold the combo mutation advisory lock.  The row lock
+    makes the decision re-read and the subsequent capital mutation part of the
+    same transaction boundary; a pause cannot be hidden by an older Gate
+    snapshot.
+    """
+    row = session.execute(
+        text(
+            """
+            SELECT family, symbol, timeframe, combo_key,
+                   current_status, active_parameter_set_id,
+                   last_recommendation_id, last_updated_at, notes
+            FROM governance.active_decisions
+            WHERE family = :family AND timeframe = :timeframe
+            FOR UPDATE
+            """
+        ),
+        {"family": family, "timeframe": timeframe.lower()},
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "family": row.family,
+        "symbol": row.symbol,
+        "timeframe": row.timeframe,
+        "combo_key": row.combo_key,
+        "current_status": row.current_status,
+        "active_parameter_set_id": row.active_parameter_set_id,
+        "last_recommendation_id": row.last_recommendation_id,
+        "last_updated_at": (
+            row.last_updated_at.isoformat() if row.last_updated_at else None
+        ),
+        "notes": row.notes,
+    }
 
 
 def db_load_active_decisions(session: Session) -> dict[str, Any]:
@@ -683,7 +835,11 @@ def _rec_row_to_dict(row: Any) -> dict[str, Any]:
     """将 recommendation SQL 结果行转换为与文件 registry 兼容的 dict."""
     d: dict[str, Any] = {
         "recommendation_id": row.recommendation_id,
-        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "created_at": (
+            row.created_at.astimezone(timezone.utc).isoformat()
+            if row.created_at
+            else None
+        ),
         "family": row.family,
         "symbol": row.symbol,
         "timeframe": row.timeframe,
@@ -699,17 +855,17 @@ def _rec_row_to_dict(row: Any) -> dict[str, Any]:
     if row.approved_by:
         d["approved_by"] = row.approved_by
     if row.approved_at:
-        d["approved_at"] = row.approved_at.isoformat()
+        d["approved_at"] = row.approved_at.astimezone(timezone.utc).isoformat()
     if row.review_notes:
         d["review_notes"] = row.review_notes
     if row.rejected_by:
         d["rejected_by"] = row.rejected_by
     if row.rejected_at:
-        d["rejected_at"] = row.rejected_at.isoformat()
+        d["rejected_at"] = row.rejected_at.astimezone(timezone.utc).isoformat()
     if row.superseded_by:
         d["superseded_by"] = row.superseded_by
     if row.superseded_at:
-        d["superseded_at"] = row.superseded_at.isoformat()
+        d["superseded_at"] = row.superseded_at.astimezone(timezone.utc).isoformat()
     if row.superseded_by_recommendation_id:
         d["superseded_by_recommendation_id"] = row.superseded_by_recommendation_id
     return d

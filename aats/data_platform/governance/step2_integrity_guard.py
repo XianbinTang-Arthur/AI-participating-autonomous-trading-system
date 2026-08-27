@@ -18,7 +18,10 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from aats.data_platform.governance._time_util import parse_iso_datetime_utc
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +35,20 @@ _STEP2_LOOKUP_FAILURE_REASON = (
 _STEP2_INCOMPLETE_REASON = (
     "Step2 研究快照不完整，当前轮次不能据此做正式审批。"
 )
+
+_STEP2_STATUS_REASON = (
+    "Step2 研究快照未成功完成，当前轮次不能据此做正式审批。"
+)
+
+_STEP2_MANIFEST_REASON = (
+    "Step2 研究快照的 manifest 缺失或与轮次不一致，当前轮次不能据此做正式审批。"
+)
+
+_STEP2_FINISHED_AT_REASON = (
+    "Step2 研究快照的完成时间缺失、无效或位于未来，当前轮次不能据此做正式审批。"
+)
+
+_MAX_FUTURE_CLOCK_SKEW = timedelta(minutes=5)
 
 # 当 governance 库和磁盘都没有任何 Step2 round 时（fresh deploy / 迁库丢数据 /
 # 研究目录被清），``load_latest_research_round_snapshot`` 返回 ``None``。这时
@@ -55,6 +72,7 @@ def assess_step2_integrity(project_root: Path) -> dict[str, object]:
         snapshot = load_latest_research_round_snapshot(
             phase=ROUND_PHASE_STEP2,
             project_root=project_root,
+            require_managed_db_truth=True,
         )
     except Exception:
         logger.exception("step2 integrity check failed to load snapshot")
@@ -75,6 +93,43 @@ def assess_step2_integrity(project_root: Path) -> dict[str, object]:
             "ok": False,
             "code": "manifest_missing_on_disk",
             "reason": _STEP2_INCOMPLETE_REASON,
+        }
+    if snapshot.get("status") != "succeeded":
+        return {
+            "ok": False,
+            "code": "snapshot_status_invalid",
+            "reason": _STEP2_STATUS_REASON,
+        }
+    manifest = snapshot.get("manifest")
+    round_id = snapshot.get("round_id")
+    if (
+        type(manifest) is not dict
+        or not manifest
+        or not isinstance(round_id, str)
+        or not round_id.strip()
+        or manifest.get("round_id") != round_id
+    ):
+        return {
+            "ok": False,
+            "code": "snapshot_manifest_invalid",
+            "reason": _STEP2_MANIFEST_REASON,
+        }
+    finished_at_raw = snapshot.get("finished_at")
+    try:
+        finished_at = parse_iso_datetime_utc(
+            finished_at_raw,
+            context="step2_integrity_guard.finished_at",
+        )
+    except (TypeError, ValueError):
+        finished_at = None
+    if (
+        finished_at is None
+        or finished_at > datetime.now(timezone.utc) + _MAX_FUTURE_CLOCK_SKEW
+    ):
+        return {
+            "ok": False,
+            "code": "snapshot_finished_at_invalid",
+            "reason": _STEP2_FINISHED_AT_REASON,
         }
     return {"ok": True, "code": None, "reason": None}
 
