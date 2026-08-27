@@ -28,6 +28,10 @@ from aats.data_platform.replay.core.replay_context import (
     ReplayDecision,
     ReplayParameterOverrides,
 )
+from aats.domain.instrument_scope import (
+    INSTRUMENT_SCOPE_UNSUPPORTED_REASON,
+    classify_instrument_scope,
+)
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +44,9 @@ for _inst in ("spot", "swap"):
 
 def _resolve_gold_table(symbol: str, timeframe: str) -> str:
     """根据 symbol 和 timeframe 确定 Gold 表名。"""
-    inst = "swap" if symbol.upper().endswith("-SWAP") else "spot"
+    inst = classify_instrument_scope(symbol)
+    if inst == "unsupported":
+        raise ValueError(INSTRUMENT_SCOPE_UNSUPPORTED_REASON)
     tf = timeframe.lower()
     key = (inst, tf)
     table = _GOLD_TABLE_MAP.get(key)
@@ -59,6 +65,11 @@ def load_gold_bars(
     dataset_version: str | None = None,
 ) -> list[ReplayBar]:
     """从 Gold 表加载 replay bars，按 ts 升序排列。"""
+    instrument_scope = classify_instrument_scope(symbol)
+    if instrument_scope == "unsupported":
+        raise ValueError(INSTRUMENT_SCOPE_UNSUPPORTED_REASON)
+    if instrument_scope == "swap":
+        raise ValueError("legacy_derivative_replay_contract_lineage_required")
     table = _resolve_gold_table(symbol, timeframe)
 
     where_clauses = ["symbol = :symbol", "ts >= :start_ts", "ts < :end_ts"]

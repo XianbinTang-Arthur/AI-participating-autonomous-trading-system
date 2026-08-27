@@ -1,8 +1,12 @@
 # RDP 衍生品合约数量、名义价值与损益统一 P0 任务书
 
-> 文档状态：现行实施任务书；P0-A 代码切片已完成单元验证与独立复审，WSL2 集成/运行验证未执行；其余阶段未验收
-> 最后核对：2026-08-27（起始代码基线 `main@7945a078a0447492af8cfbee81aaf138ea8a665b`）
-> Freeze 分类：`LF-A`（金融正确性与数据真实性修复，不扩展 Legacy 研究能力）
+> 文档状态：现行实施任务书；P0-A 已完成本地验证与独立复审；P0-B 的 LF-A
+> 应用层失败关闭切片已完成本地静态验收与独立复审，但数据库不可变性、source-aware Gold
+> 与运行验证未完成
+> 最后核对：2026-08-27（P0-B 起始代码基线
+> `main@e3d16681431fcea0c0ffa4c7054e8db46cc98a23`，以本文档所在 HEAD 为准）
+> Freeze 分类：应用层金融正确性/数据真实性修复为 `LF-A`；Stage 20 schema、触发器与
+> rollback 属不可避免的 `LF-B` 窄扩展，未取得真人审批前不得实施
 > 核对范围：OKX instrument 解析、数量转换、RDP 微观结构 Silver、OHLCV replay、
 > L2/execution realism、campaign/bundle/artifact fingerprint 与相关测试/操作说明
 > 运行状态边界：当前公开 instrument 响应只证明核对时的产品定义，不证明历史有效期；
@@ -92,8 +96,10 @@ Legacy 中已经存在且继续影响安全/研究真实性的路径做最小完
 分阶段实施，禁止在没有 migration/rollback 的情况下直接改库：
 
 1. P0-A 不改 schema：扩充进程内 `InstrumentMetadata` 与纯算术真源。
-2. P0-B 评估并实施最窄版本化 instrument snapshot。优先复用现有 source registry/campaign
-   manifest JSON，但若无法表达唯一 digest、有效窗口和不可变引用，则新增专用表及约束。
+2. P0-B 已选择复用现有 `meta.data_source_registry` 特殊记录作为窄证据锚，不建设 Legacy
+   Instrument Master。应用层会验证唯一 digest、有效窗口、registry 引用和下游传播；现有
+   JSON 本身没有 FK/不可变约束，完整闭环仍需经 LF-B 批准的 Stage 20 条件约束、唯一索引、
+   mutation trigger 与 rollback。批准前不得把应用层校验表述为数据库不可变。
 3. source、campaign、bundle、rebuild、Gold/replay artifact 必须保存同一 snapshot digest；
    digest 缺失或窗口不覆盖数据时不得取得 contract-aware eligibility。
 4. 旧 Silver 金额列不原地伪修；通过新 dataset version 确定性重建。旧版本保留 lineage 并
@@ -237,3 +243,66 @@ P0/P1。五组受严格合同影响的 WSL2 integration 夹具已补齐显式合
 
 P0-B 至 P0-F 均未完成，因此上述结论不是整个 P0 验收。当前 RDP 的衍生品绝对 notional、
 fee/PnL 和由其派生的收益证据仍不得声明 contract-aware 或可用于实盘。
+
+P0-B 当前候选切片（2026-08-27）完成了以下 LF-A 范围工作：
+
+1. 新增规范化 `InstrumentContractSnapshot`，digest 显式绑定算术策略、白名单合同字段、
+   observation/effective window 与来源摘要。单次当前观测、聚合观测 DTO 或其摘要都只能
+   封存调用方声明；当前没有 immutable raw capture/manifest verifier，因此两者均固定报告
+   `instrument_snapshot_observation_evidence_unverified`，不能授权历史区间或 derivative
+   eligibility。未来只能在 verifier 重新锚定不可变 raw/manifest 后才可能证明
+   prospective window。`authoritative_history` 自标签同样始终保持 unverified。
+2. `DataSourceRecord`、source/bundle fingerprint、registry 特殊记录、bundle component 与
+   eligibility report 传播同一 digest；source identity/window 与 payload 分离，同 identity 的
+   异 payload 在应用层失败关闭。Silver rebuild 重新查询 registry 锚，稳定内容 fingerprint
+   排除数据库 UUID，并统一 UTC/epoch 时间材料。
+3. historical campaign 引入严格 v2：snapshot 与 registry source reference 同时绑定；v1
+   只允许读取和审计，在下载、导入、状态变更前失败关闭，不能原地“补 digest”。checkpoint
+   复用必须同时匹配 binding report、digest 与 source reference。manifest builder 在任何
+   DB/网络之前验证时间证据，独立 manifest 下载 apply 已停用；只有已登记并通过
+   registry anchor 的 campaign runner 仅是未来执行边界。候选版本不能用 session advisory
+   lease 或调用方 token 同时 fence 数据库、文件系统和网络副作用，因此已经删除旧私有执行链，
+   并让 runner、start、checkpoint、finish 在任何副作用前统一失败关闭；`--resume-running`
+   只保留命令行兼容性，不代表具备恢复能力。容量报告
+   固定 policy version、校准常量与 multiplier，唯一文件总 ceiling、单文件 Content-Length/
+   流式字节、磁盘 reserve、connect/read timeout、wall-clock deadline 和 redirect 均失败关闭。
+   当前 Gold source content 尚未 sealed，无法逐行重验终态，因此 campaign 全部执行与状态
+   变更固定返回
+   `historical_campaign_execution_unavailable_until_persistent_fencing_and_immutable_silver`；旧
+   `SUCCEEDED` 也不能短路为已验证成功，不接受格式型伪证据。重新开放需要 schema-backed
+   persistent fencing、attempt 隔离/stale recovery CAS、不可变 Silver 与逐行终态 verifier。
+4. Gold 对无绑定、混合 digest 与伪历史证据失败关闭。当前 candle/funding
+   Silver 的主键是 `(symbol, ts)`，且按可变 `dataset_version` 读取；后续 merge 可以在相同
+   版本和行数下覆盖内容，因此 spot 与 derivative 都无法证明所读行属于所声明 bundle。
+   两者在 plan/start/execute 均固定阻断为 `historical_gold_source_content_unsealed`，
+   没有生成伪 source-aware Gold。
+5. 旧 derivative replay 在查询 Legacy Gold 前阻断。Research Factory 虽能记录未来 lineage
+   DTO，但当前 verifier 明确为 unavailable，Legacy reader 也不会生成可授权证据；因此调用方
+   `verified=True` 不能解锁实验或资本资格。capital eligibility 对所有已支持 spot/swap
+   固定报告 `source_aware_research_artifact_unavailable`；derivative 另外报告
+   `contract_aware_derivative_artifact_unavailable`。必须由 DB-backed verifier 重新核验真实 artifact，
+   调用方布尔值与引用都不是授权。
+6. 数据治理 API 保留旧 raw/source 状态，同时单独报告 dataset-bundle 范围的
+   contract-aware 状态；`research_usable` 固定为 false，旧 derivative ELIGIBLE 进入 critical
+   告警，不能被 UI 包装成金额、PnL 或收益研究已可用。
+
+P0-B LF-A 本地验收证据（2026-08-27）：historical campaign 冻结与兼容边界的五文件聚焦
+回归为 `63 passed`，主流程复跑并覆盖环境隔离回归后为 `66 passed`；Windows 全量 unit 为
+`5048 passed, 30 skipped, 94 subtests passed`，`aats/` 及本轮修改脚本/测试的 Ruff 均通过，
+`git diff --check` 无内容错误。独立最终复审对本切片与严格 instrument scope 给出 `ACCEPT`，
+未发现未关闭 P0/P1。FS009 PostgreSQL 集成契约仅完成 `5 tests collected`，未执行真实
+PostgreSQL、WSL2 E2E 或部署；因此这些结果只证明候选代码的本地静态/单元行为，不证明运行态
+完成，也不改变下述 NO-GO 与未完成项。
+
+尚未完成、不得误报为 P0-B 完成的项目：
+
+- LF-B Stage 20 migration/rollback、partial unique/check/trigger、真实 PostgreSQL 并发与回滚测试；
+- candle/funding append-only 或等价 source-aware Silver，及 spot/derivative Gold 行级内容封存；
+- DB-backed artifact/snapshot verifier 与新的 source-aware derivative reader；
+- P0-C 至 P0-F 的金额聚合、replay fee/PnL、L2/execution realism、旧产物清单与确定性重建；
+- WSL2 集成、模拟环境端到端与部署验证。
+
+运行兼容边界：当前恢复 campaign
+`60e46f5e-e3e0-4090-b141-b53c92f1aa71` 是在旧 WSL 提交上运行的 v1 manifest。候选代码不会
+中断该真实进程，但部署候选版本后 v1 不可继续完整 pipeline；因此必须等待当前任务安全完成，
+或另行批准并设计 raw-only 过渡，禁止为了验证新代码重启/恢复/替换该 campaign。

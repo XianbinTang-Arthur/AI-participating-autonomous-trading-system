@@ -5,6 +5,10 @@ from datetime import UTC, datetime
 
 import pytest
 
+from aats.data_platform.research_factory.validation import capital_eligibility
+from aats.data_platform.research_factory.contract_lineage import (
+    ContractAwareArtifactLineage,
+)
 from aats.data_platform.research_factory.validation.capital_eligibility import (
     CAPITAL_ELIGIBLE_EXECUTION_MODEL,
     CURRENT_SELECTION_PROTOCOL,
@@ -25,6 +29,8 @@ def _capital_evidence(**overrides: object) -> CapitalEligibilityEvidence:
     values: dict[str, object] = {
         "candidate_id": "cand_v2",
         "dataset_fingerprint": "rfds_" + "a" * 64,
+        "symbol": "BTC-USDT-SWAP",
+        "timeframe": "1h",
         "selection_protocol_version": CURRENT_SELECTION_PROTOCOL,
         "benchmark_segment": "valid",
         "candidate_gate_passed": True,
@@ -46,14 +52,34 @@ def _capital_evidence(**overrides: object) -> CapitalEligibilityEvidence:
             "execution_calibration": "calibration.json",
             "holdout": "holdout.json",
         },
+        "source_contract_lineage": ContractAwareArtifactLineage(
+            artifact_output_fingerprint="b" * 64,
+            instrument_snapshot_digest="c" * 64,
+            instrument_snapshot_source_ref=(
+                "meta.data_source_registry/instrument-snapshot-test"
+            ),
+            verification_ref="meta.historical_research_artifacts/test-artifact",
+            symbol="BTC-USDT-SWAP",
+            timeframe="1h",
+            coverage_start="2026-08-01T00:00:00+00:00",
+            coverage_end="2026-08-02T00:00:00+00:00",
+            verified=True,
+        ),
     }
     values.update(overrides)
     return CapitalEligibilityEvidence(**values)  # type: ignore[arg-type]
 
 
-def test_capital_eligibility_requires_every_independent_evidence_class() -> None:
+def test_capital_eligibility_requires_every_independent_evidence_class(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        capital_eligibility,
+        "_SOURCE_AWARE_ARTIFACT_VERIFIER_AVAILABLE",
+        True,
+    )
     decision = evaluate_capital_eligibility(
-        _capital_evidence(),
+        _capital_evidence(symbol="BTC-USDT", source_contract_lineage=None),
         evaluated_at=datetime(2026, 8, 25, tzinfo=UTC),
     )
     assert decision.capital_eligible is True
@@ -62,6 +88,8 @@ def test_capital_eligibility_requires_every_independent_evidence_class() -> None
     failed = evaluate_capital_eligibility(
         replace(
             _capital_evidence(),
+            symbol="BTC-USDT",
+            source_contract_lineage=None,
             microstructure_eligible=False,
             evidence_refs={"candidate": "candidate.json"},
         )
@@ -69,6 +97,69 @@ def test_capital_eligibility_requires_every_independent_evidence_class() -> None
     assert failed.capital_eligible is False
     assert "microstructure_ineligible_or_unknown" in failed.reason_codes
     assert "evidence_ref_missing:holdout" in failed.reason_codes
+
+
+def test_derivative_capital_eligibility_requires_verified_contract_lineage() -> None:
+    missing = evaluate_capital_eligibility(
+        replace(_capital_evidence(), source_contract_lineage=None)
+    )
+    unverified = evaluate_capital_eligibility(
+        replace(
+            _capital_evidence(),
+            source_contract_lineage=replace(
+                _capital_evidence().source_contract_lineage,
+                verified=False,
+            ),
+        )
+    )
+
+    assert missing.capital_eligible is False
+    assert "contract_aware_derivative_artifact_unavailable" in missing.reason_codes
+    assert "source_contract_lineage_missing" in missing.reason_codes
+    assert unverified.capital_eligible is False
+    assert "source_contract_lineage_unverified" in unverified.reason_codes
+
+    recorded_but_not_authoritative = evaluate_capital_eligibility(
+        _capital_evidence()
+    )
+    assert recorded_but_not_authoritative.capital_eligible is False
+    assert "contract_aware_derivative_artifact_unavailable" in (
+        recorded_but_not_authoritative.reason_codes
+    )
+
+
+def test_spot_capital_eligibility_requires_source_aware_artifact_verifier() -> None:
+    decision = evaluate_capital_eligibility(
+        replace(
+            _capital_evidence(),
+            symbol="BTC-USDT",
+            source_contract_lineage=None,
+        )
+    )
+
+    assert decision.capital_eligible is False
+    assert "source_aware_research_artifact_unavailable" in decision.reason_codes
+    assert "source_contract_lineage_missing" not in decision.reason_codes
+
+
+@pytest.mark.parametrize(
+    "symbol",
+    ("DOGE-USDT", "DOGE-USDT-SWAP", "BTC-USDT-240927"),
+)
+def test_unknown_instrument_scope_is_never_capital_eligible(symbol: str) -> None:
+    decision = evaluate_capital_eligibility(
+        replace(
+            _capital_evidence(),
+            symbol=symbol,
+            source_contract_lineage=None,
+        )
+    )
+
+    assert decision.capital_eligible is False
+    assert "instrument_scope_unsupported_or_unproven" in decision.reason_codes
+    assert "contract_aware_derivative_artifact_unavailable" not in (
+        decision.reason_codes
+    )
 
 
 def test_legacy_candidate_using_test_for_selection_is_never_capital_eligible() -> None:
@@ -83,6 +174,42 @@ def test_legacy_candidate_using_test_for_selection_is_never_capital_eligible() -
     assert "legacy_test_used_for_selection" in reasons
     assert "selection_protocol_not_v2" in reasons
     assert "holdout_not_evaluated_pass" in reasons
+
+
+def test_legacy_derivative_candidate_cannot_claim_lineage_from_dataset_fingerprint() -> None:
+    reasons = legacy_candidate_reasons(
+        {
+            "payload": {
+                "symbol": "BTC-USDT-SWAP",
+                "dataset_fingerprint": "rfds_" + "a" * 64,
+                "selection_protocol_version": CURRENT_SELECTION_PROTOCOL,
+                "benchmark_segment": "valid",
+                "execution_model": CAPITAL_ELIGIBLE_EXECUTION_MODEL,
+                "holdout_status": "evaluated_pass",
+            }
+        }
+    )
+
+    assert "source_contract_lineage_missing" in reasons
+    assert "contract_aware_derivative_artifact_unavailable" in reasons
+
+
+def test_legacy_unknown_swap_suffix_does_not_prove_derivative_scope() -> None:
+    reasons = legacy_candidate_reasons(
+        {
+            "payload": {
+                "symbol": "DOGE-USDT-SWAP",
+                "selection_protocol_version": CURRENT_SELECTION_PROTOCOL,
+                "benchmark_segment": "valid",
+                "execution_model": CAPITAL_ELIGIBLE_EXECUTION_MODEL,
+                "holdout_status": "evaluated_pass",
+            }
+        }
+    )
+
+    assert "instrument_scope_unsupported_or_unproven" in reasons
+    assert "contract_aware_derivative_artifact_unavailable" not in reasons
+    assert "source_contract_lineage_missing" not in reasons
 
 
 def test_purged_walk_forward_split_has_no_train_test_overlap() -> None:

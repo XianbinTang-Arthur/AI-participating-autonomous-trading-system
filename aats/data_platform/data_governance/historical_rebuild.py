@@ -6,14 +6,27 @@ import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from sqlalchemy import text
 
 from aats.data_platform.data_governance.contracts import canonical_json_bytes
+from aats.data_platform.data_governance.instrument_lineage import (
+    instrument_snapshot_scope_reason,
+    instrument_snapshot_temporal_evidence_reason,
+    load_verified_instrument_contract_snapshot,
+)
+from aats.domain.instrument_contract_snapshot import (
+    InstrumentContractSnapshot,
+)
+from aats.domain.instrument_scope import (
+    INSTRUMENT_SCOPE_UNSUPPORTED_REASON,
+    classify_instrument_scope,
+)
 
 
-TRANSFORM_VERSION = "rdp-historical-silver-v1"
+TRANSFORM_VERSION = "rdp-historical-silver-v2"
 _SUPPORTED_PURPOSES = {"l2_replay", "trade_flow_research"}
 _GIT_COMMIT = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 
@@ -23,11 +36,15 @@ class HistoricalRebuildPlan:
     operation_key: str
     bundle_id: str
     bundle_fingerprint: str
+    bundle_key: str
     purpose: str
     symbol: str
     coverage_start: Any
     coverage_end: Any
     source_id: str
+    source_key: str
+    instrument_snapshot_digest: str | None
+    instrument_snapshot_source_id: str | None
     source_row_count: int
     raw_partition_sha256: tuple[str, ...]
     transform_version: str
@@ -55,7 +72,7 @@ def plan_historical_rebuild(
         raise ValueError("historical_rebuild_git_commit_invalid")
     row = session.execute(
         text(
-            "SELECT bundle_id, fingerprint, purpose, status, coverage_start, "
+            "SELECT bundle_id, bundle_key, fingerprint, purpose, status, coverage_start, "
             "coverage_end, component_sources FROM meta.dataset_bundles "
             "WHERE bundle_id = CAST(:bundle_id AS UUID)"
         ),
@@ -98,31 +115,40 @@ def plan_historical_rebuild(
     ):
         raise ValueError("historical_bundle_source_hash_invalid")
     symbol_value = _bundle_symbol_from_key(str(row["bundle_id"]), component)
-    identity = {
-        "bundle_id": str(row["bundle_id"]),
-        "bundle_fingerprint": str(row["fingerprint"]),
-        "purpose": purpose,
-        "symbol": symbol_value,
-        "coverage_start": row["coverage_start"],
-        "coverage_end": row["coverage_end"],
-        "source_id": source_id,
-        "source_row_count": source_row_count,
-        "raw_partition_sha256": raw_partition_sha256,
-        "transform_version": TRANSFORM_VERSION,
-        "git_commit": git_commit,
-    }
-    operation_key = "hist-rebuild-" + hashlib.sha256(
-        canonical_json_bytes(identity)
-    ).hexdigest()
-    return HistoricalRebuildPlan(
-        operation_key=operation_key,
-        bundle_id=str(row["bundle_id"]),
+    snapshot_digest, snapshot_source_id = _validated_snapshot_reference(
+        session,
+        component,
+        symbol=symbol_value,
+        coverage_start=row["coverage_start"],
+        coverage_end=row["coverage_end"],
+    )
+    operation_key = _rebuild_operation_key(
+        bundle_key=str(row["bundle_key"]),
         bundle_fingerprint=str(row["fingerprint"]),
         purpose=purpose,
         symbol=symbol_value,
         coverage_start=row["coverage_start"],
         coverage_end=row["coverage_end"],
+        source_key=source_key,
+        source_row_count=source_row_count,
+        raw_partition_sha256=raw_partition_sha256,
+        instrument_snapshot_digest=snapshot_digest,
+        transform_version=TRANSFORM_VERSION,
+        git_commit=git_commit,
+    )
+    return HistoricalRebuildPlan(
+        operation_key=operation_key,
+        bundle_id=str(row["bundle_id"]),
+        bundle_fingerprint=str(row["fingerprint"]),
+        bundle_key=str(row["bundle_key"]),
+        purpose=purpose,
+        symbol=symbol_value,
+        coverage_start=row["coverage_start"],
+        coverage_end=row["coverage_end"],
         source_id=source_id,
+        source_key=source_key,
+        instrument_snapshot_digest=snapshot_digest,
+        instrument_snapshot_source_id=snapshot_source_id,
         source_row_count=source_row_count,
         raw_partition_sha256=raw_partition_sha256,
         transform_version=TRANSFORM_VERSION,
@@ -131,6 +157,10 @@ def plan_historical_rebuild(
 
 
 def start_historical_rebuild(session, plan: HistoricalRebuildPlan) -> str:
+    # Re-anchor the bundle and contract evidence before inserting or restarting
+    # a RUNNING row.  The runner commits this state in a separate transaction,
+    # so deferring verification to execute would leave a stale permanent run.
+    _verify_plan_is_current(session, plan)
     inserted = session.execute(
         text(
             """
@@ -150,7 +180,7 @@ def start_historical_rebuild(session, plan: HistoricalRebuildPlan) -> str:
             "bundle_id": plan.bundle_id,
             "transform_version": plan.transform_version,
             "git_commit": plan.git_commit,
-            "scope": json.dumps(asdict(plan), sort_keys=True, default=str),
+            "scope": json.dumps(_plan_scope_payload(plan), sort_keys=True),
             "input_fingerprint": plan.bundle_fingerprint,
         },
     ).scalar_one_or_none()
@@ -158,12 +188,25 @@ def start_historical_rebuild(session, plan: HistoricalRebuildPlan) -> str:
         return "started"
     existing = session.execute(
         text(
-            "SELECT status, input_fingerprint, transform_version, git_commit, "
-            "output_fingerprint FROM meta.data_rebuild_runs "
+            "SELECT bundle_id, rebuild_scope, status, input_fingerprint, "
+            "transform_version, git_commit, output_fingerprint "
+            "FROM meta.data_rebuild_runs "
             "WHERE operation_key = :operation_key FOR UPDATE"
         ),
         {"operation_key": plan.operation_key},
     ).mappings().one()
+    existing_scope = existing["rebuild_scope"]
+    if isinstance(existing_scope, str):
+        existing_scope = json.loads(existing_scope)
+    expected_scope = _plan_scope_payload(plan)
+    if (
+        str(existing["bundle_id"]) != plan.bundle_id
+        or existing_scope != expected_scope
+        or str(existing["input_fingerprint"]) != plan.bundle_fingerprint
+        or str(existing["transform_version"]) != plan.transform_version
+        or str(existing["git_commit"]) != plan.git_commit
+    ):
+        raise RuntimeError("historical_rebuild_operation_identity_conflict")
     if existing["status"] == "SUCCEEDED":
         _verify_succeeded_rebuild(session, plan, existing)
         return "already_succeeded"
@@ -189,8 +232,10 @@ def execute_historical_rebuild(
     _verify_source_material(session, plan)
     if plan.purpose == "l2_replay":
         rows_read, rows_written, output_table = _rebuild_orderbook(session, plan)
-    else:
+    elif plan.purpose == "trade_flow_research":
         rows_read, rows_written, output_table = _rebuild_trade_flow(session, plan)
+    else:  # pragma: no cover - the preflight verifier enforces this first
+        raise RuntimeError("historical_bundle_purpose_not_rebuildable")
     output_rows = session.execute(
         text(
             f"SELECT output_fingerprint FROM {output_table} "
@@ -307,8 +352,12 @@ def _rebuild_orderbook(
                 SELECT CAST(:bundle_id AS UUID) AS bundle_id, :symbol AS symbol,
                        bbo.bar_ts AS ts, bbo.bbo_samples_n,
                        COALESCE(books.books5_samples_n, 0) AS books5_samples_n,
-                       bbo.mid_price_mean, bbo.spread_bps_mean,
-                       bbo.top_imbalance_mean,
+                       CAST(bbo.mid_price_mean AS NUMERIC(28, 12))
+                           AS mid_price_mean,
+                       CAST(bbo.spread_bps_mean AS NUMERIC(28, 12))
+                           AS spread_bps_mean,
+                       CAST(bbo.top_imbalance_mean AS NUMERIC(28, 12))
+                           AS top_imbalance_mean,
                        GREATEST(bbo.bbo_max_staleness,
                                 COALESCE(books.books_max_staleness, 0)) AS max_staleness_ms,
                        GREATEST(bbo.bbo_source_max_ts,
@@ -323,11 +372,15 @@ def _rebuild_orderbook(
                 max_staleness_ms, source_max_ts, transform_version,
                 output_fingerprint
             )
-            SELECT *, encode(sha256(convert_to(concat_ws('|', bundle_id::TEXT, symbol, ts::TEXT,
+            SELECT *, encode(sha256(convert_to(concat_ws('|',
+                       :bundle_fingerprint, :instrument_snapshot_digest,
+                       symbol,
+                       FLOOR(EXTRACT(EPOCH FROM ts) * 1000000)::BIGINT::TEXT,
                        bbo_samples_n::TEXT, books5_samples_n::TEXT,
                        mid_price_mean::TEXT, spread_bps_mean::TEXT,
                        top_imbalance_mean::TEXT, max_staleness_ms::TEXT,
-                       source_max_ts::TEXT, transform_version), 'UTF8')), 'hex')
+                       FLOOR(EXTRACT(EPOCH FROM source_max_ts) * 1000000)::BIGINT::TEXT,
+                       transform_version), 'UTF8')), 'hex')
             FROM values_to_write
             ON CONFLICT (bundle_id, symbol, ts) DO UPDATE SET
                 bbo_samples_n = EXCLUDED.bbo_samples_n,
@@ -342,7 +395,12 @@ def _rebuild_orderbook(
                 updated_at = NOW()
             """
         ),
-        {**_scope_params(plan), "transform_version": plan.transform_version},
+        {
+            **_scope_params(plan),
+            "transform_version": plan.transform_version,
+            "bundle_fingerprint": plan.bundle_fingerprint,
+            "instrument_snapshot_digest": plan.instrument_snapshot_digest,
+        },
     )
     return rows_read, max(int(result.rowcount or 0), 0), (
         "silver.historical_orderbook_metrics_15m"
@@ -377,14 +435,25 @@ def _rebuild_trade_flow(
                        COUNT(*)::INTEGER AS trade_count,
                        COUNT(*) FILTER (WHERE side = 'buy')::INTEGER AS buy_count,
                        COUNT(*) FILTER (WHERE side = 'sell')::INTEGER AS sell_count,
-                       SUM(sz) AS total_size,
-                       SUM(sz) FILTER (WHERE side = 'buy') AS buy_size,
-                       SUM(sz) FILTER (WHERE side = 'sell') AS sell_size,
-                       SUM(px * sz) / NULLIF(SUM(sz), 0) AS vwap,
-                       (COALESCE(SUM(sz) FILTER (WHERE side = 'buy'), 0) -
-                        COALESCE(SUM(sz) FILTER (WHERE side = 'sell'), 0)) /
-                           NULLIF(SUM(sz), 0)
-                           AS trade_flow_imbalance,
+                       CAST(SUM(sz) AS NUMERIC(38, 18)) AS total_size,
+                       CAST(
+                           COALESCE(SUM(sz) FILTER (WHERE side = 'buy'), 0)
+                           AS NUMERIC(38, 18)
+                       ) AS buy_size,
+                       CAST(
+                           COALESCE(SUM(sz) FILTER (WHERE side = 'sell'), 0)
+                           AS NUMERIC(38, 18)
+                       ) AS sell_size,
+                       CAST(
+                           SUM(px * sz) / NULLIF(SUM(sz), 0)
+                           AS NUMERIC(28, 12)
+                       ) AS vwap,
+                       CAST(
+                           (COALESCE(SUM(sz) FILTER (WHERE side = 'buy'), 0) -
+                            COALESCE(SUM(sz) FILTER (WHERE side = 'sell'), 0)) /
+                               NULLIF(SUM(sz), 0)
+                           AS NUMERIC(28, 12)
+                       ) AS trade_flow_imbalance,
                        MAX(ts) AS source_max_ts,
                        :transform_version AS transform_version
                 FROM staging.official_trade_history
@@ -398,13 +467,17 @@ def _rebuild_trade_flow(
                 source_max_ts, transform_version, output_fingerprint
             )
             SELECT bundle_id, symbol, bar_ts, trade_count, buy_count, sell_count,
-                   total_size, COALESCE(buy_size, 0), COALESCE(sell_size, 0),
+                   total_size, buy_size, sell_size,
                    vwap, trade_flow_imbalance, source_max_ts, transform_version,
-                   encode(sha256(convert_to(concat_ws('|', bundle_id::TEXT, symbol, bar_ts::TEXT,
+                   encode(sha256(convert_to(concat_ws('|',
+                       :bundle_fingerprint, :instrument_snapshot_digest,
+                       symbol,
+                       FLOOR(EXTRACT(EPOCH FROM bar_ts) * 1000000)::BIGINT::TEXT,
                        trade_count::TEXT, buy_count::TEXT, sell_count::TEXT,
-                       total_size::TEXT, COALESCE(buy_size, 0)::TEXT,
-                       COALESCE(sell_size, 0)::TEXT, vwap::TEXT,
-                       trade_flow_imbalance::TEXT, source_max_ts::TEXT,
+                       total_size::TEXT, buy_size::TEXT,
+                       sell_size::TEXT, vwap::TEXT,
+                       trade_flow_imbalance::TEXT,
+                       FLOOR(EXTRACT(EPOCH FROM source_max_ts) * 1000000)::BIGINT::TEXT,
                        transform_version), 'UTF8')), 'hex')
             FROM values_to_write
             ON CONFLICT (bundle_id, symbol, ts) DO UPDATE SET
@@ -426,6 +499,8 @@ def _rebuild_trade_flow(
             **_scope_params(plan),
             "source_id": plan.source_id,
             "transform_version": plan.transform_version,
+            "bundle_fingerprint": plan.bundle_fingerprint,
+            "instrument_snapshot_digest": plan.instrument_snapshot_digest,
         },
     )
     return rows_read, max(int(result.rowcount or 0), 0), (
@@ -436,12 +511,78 @@ def _rebuild_trade_flow(
 def _verify_plan_is_current(session, plan: HistoricalRebuildPlan) -> None:
     row = session.execute(
         text(
-            "SELECT fingerprint, status FROM meta.dataset_bundles "
+            "SELECT bundle_key, fingerprint, purpose, status, coverage_start, "
+            "coverage_end, component_sources FROM meta.dataset_bundles "
             "WHERE bundle_id = CAST(:bundle_id AS UUID) FOR SHARE"
         ),
         {"bundle_id": plan.bundle_id},
-    ).one()
-    if row[0] != plan.bundle_fingerprint or row[1] != "ELIGIBLE":
+    ).mappings().one()
+    if (
+        row["status"] != "ELIGIBLE"
+        or str(row["purpose"]) not in _SUPPORTED_PURPOSES
+    ):
+        raise RuntimeError("historical_bundle_changed_or_ineligible")
+    components = row["component_sources"]
+    if isinstance(components, str):
+        components = json.loads(components)
+    if not isinstance(components, list) or len(components) != 1:
+        raise RuntimeError("historical_bundle_changed_or_ineligible")
+    component = components[0]
+    if not isinstance(component, Mapping):
+        raise RuntimeError("historical_bundle_changed_or_ineligible")
+    provenance = component.get("provenance")
+    if not isinstance(provenance, Mapping):
+        raise RuntimeError("historical_bundle_changed_or_ineligible")
+    try:
+        observed_source_id = str(component["source_id"])
+        observed_symbol = _bundle_symbol_from_key(plan.bundle_id, dict(component))
+        observed_source_key = str(provenance["source_key"])
+        observed_row_count = int(provenance["row_count"])
+        observed_hashes = tuple(
+            str(value)
+            for value in provenance["gap_manifest"]["raw_partition_sha256"]
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("historical_bundle_changed_or_ineligible") from exc
+    digest, source_id = _validated_snapshot_reference(
+        session,
+        component,
+        symbol=observed_symbol,
+        coverage_start=row["coverage_start"],
+        coverage_end=row["coverage_end"],
+    )
+    expected_operation_key = _rebuild_operation_key(
+        bundle_key=str(row["bundle_key"]),
+        bundle_fingerprint=str(row["fingerprint"]),
+        purpose=str(row["purpose"]),
+        symbol=observed_symbol,
+        coverage_start=row["coverage_start"],
+        coverage_end=row["coverage_end"],
+        source_key=observed_source_key,
+        source_row_count=observed_row_count,
+        raw_partition_sha256=observed_hashes,
+        instrument_snapshot_digest=digest,
+        transform_version=TRANSFORM_VERSION,
+        git_commit=plan.git_commit,
+    )
+    if (
+        str(row["bundle_key"]) != plan.bundle_key
+        or str(row["fingerprint"]) != plan.bundle_fingerprint
+        or str(row["purpose"]) != plan.purpose
+        or observed_symbol != plan.symbol
+        or _canonical_time(row["coverage_start"])
+        != _canonical_time(plan.coverage_start)
+        or _canonical_time(row["coverage_end"]) != _canonical_time(plan.coverage_end)
+        or observed_source_id != plan.source_id
+        or observed_source_key != plan.source_key
+        or observed_row_count != plan.source_row_count
+        or observed_hashes != plan.raw_partition_sha256
+        or digest != plan.instrument_snapshot_digest
+        or source_id != plan.instrument_snapshot_source_id
+        or plan.transform_version != TRANSFORM_VERSION
+        or not _GIT_COMMIT.fullmatch(plan.git_commit)
+        or plan.operation_key != expected_operation_key
+    ):
         raise RuntimeError("historical_bundle_changed_or_ineligible")
 
 
@@ -484,29 +625,91 @@ def _verify_succeeded_rebuild(
         or str(run["git_commit"]) != plan.git_commit
     ):
         raise RuntimeError("historical_rebuild_succeeded_identity_mismatch")
-    table = (
-        "silver.historical_orderbook_metrics_15m"
-        if plan.purpose == "l2_replay"
-        else "silver.historical_trade_flow_15m"
+    row_fingerprints = verified_historical_rebuild_output_fingerprints(
+        session,
+        purpose=plan.purpose,
+        bundle_id=plan.bundle_id,
+        symbol=plan.symbol,
+        coverage_start=plan.coverage_start,
+        coverage_end=plan.coverage_end,
+        bundle_fingerprint=plan.bundle_fingerprint,
+        instrument_snapshot_digest=plan.instrument_snapshot_digest,
     )
-    row_fingerprints = session.execute(
-        text(
-            f"SELECT output_fingerprint FROM {table} "
-            "WHERE bundle_id = CAST(:bundle_id AS UUID) "
-            "AND symbol = :symbol AND ts >= :start AND ts < :end ORDER BY ts"
-        ),
-        _scope_params(plan),
-    ).scalars().all()
     if not row_fingerprints:
         raise RuntimeError("historical_rebuild_succeeded_output_missing")
-    if any(not re.fullmatch(r"[0-9a-f]{64}", str(item)) for item in row_fingerprints):
-        raise RuntimeError("historical_rebuild_succeeded_row_fingerprint_invalid")
     observed = _aggregate_output_fingerprint(
         plan,
-        [str(item) for item in row_fingerprints],
+        row_fingerprints,
     )
     if observed != str(run["output_fingerprint"]):
         raise RuntimeError("historical_rebuild_succeeded_output_fingerprint_mismatch")
+
+
+def verified_historical_rebuild_output_fingerprints(
+    session,
+    *,
+    purpose: str,
+    bundle_id: str,
+    symbol: str,
+    coverage_start: Any,
+    coverage_end: Any,
+    bundle_fingerprint: str,
+    instrument_snapshot_digest: str | None,
+) -> list[str]:
+    """Recompute every persisted Silver row fingerprint from business columns."""
+
+    if purpose == "l2_replay":
+        table = "silver.historical_orderbook_metrics_15m"
+        fingerprint_expression = """
+            encode(sha256(convert_to(concat_ws('|',
+                :bundle_fingerprint, :instrument_snapshot_digest, symbol,
+                FLOOR(EXTRACT(EPOCH FROM ts) * 1000000)::BIGINT::TEXT,
+                bbo_samples_n::TEXT, books5_samples_n::TEXT,
+                mid_price_mean::TEXT, spread_bps_mean::TEXT,
+                top_imbalance_mean::TEXT, max_staleness_ms::TEXT,
+                FLOOR(EXTRACT(EPOCH FROM source_max_ts) * 1000000)::BIGINT::TEXT,
+                transform_version), 'UTF8')), 'hex')
+        """
+    elif purpose == "trade_flow_research":
+        table = "silver.historical_trade_flow_15m"
+        fingerprint_expression = """
+            encode(sha256(convert_to(concat_ws('|',
+                :bundle_fingerprint, :instrument_snapshot_digest, symbol,
+                FLOOR(EXTRACT(EPOCH FROM ts) * 1000000)::BIGINT::TEXT,
+                trade_count::TEXT, buy_count::TEXT, sell_count::TEXT,
+                total_size::TEXT, buy_size::TEXT, sell_size::TEXT, vwap::TEXT,
+                trade_flow_imbalance::TEXT,
+                FLOOR(EXTRACT(EPOCH FROM source_max_ts) * 1000000)::BIGINT::TEXT,
+                transform_version), 'UTF8')), 'hex')
+        """
+    else:
+        raise ValueError("historical_bundle_purpose_not_rebuildable")
+    rows = session.execute(
+        text(
+            f"SELECT output_fingerprint, {fingerprint_expression} "
+            f"AS computed_fingerprint FROM {table} "
+            "WHERE bundle_id = CAST(:bundle_id AS UUID) "
+            "AND symbol = :symbol AND ts >= :start AND ts < :end ORDER BY ts"
+        ),
+        {
+            "bundle_id": bundle_id,
+            "symbol": symbol,
+            "start": coverage_start,
+            "end": coverage_end,
+            "bundle_fingerprint": bundle_fingerprint,
+            "instrument_snapshot_digest": instrument_snapshot_digest,
+        },
+    ).mappings().all()
+    fingerprints: list[str] = []
+    for row in rows:
+        stored = str(row["output_fingerprint"] or "")
+        computed = str(row["computed_fingerprint"] or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", stored):
+            raise RuntimeError("historical_rebuild_succeeded_row_fingerprint_invalid")
+        if stored != computed:
+            raise RuntimeError("historical_rebuild_succeeded_row_content_mismatch")
+        fingerprints.append(computed)
+    return fingerprints
 
 
 def _aggregate_output_fingerprint(
@@ -516,6 +719,9 @@ def _aggregate_output_fingerprint(
     return hashlib.sha256(
         canonical_json_bytes(
             {
+                "schema": "aats.historical_rebuild.output.v2",
+                "bundle_fingerprint": plan.bundle_fingerprint,
+                "instrument_snapshot_digest": plan.instrument_snapshot_digest,
                 "git_commit": plan.git_commit,
                 "transform_version": plan.transform_version,
                 "row_fingerprints": row_fingerprints,
@@ -552,6 +758,63 @@ def _scope_params(plan: HistoricalRebuildPlan) -> dict[str, Any]:
     }
 
 
+def _canonical_time(value: Any) -> str:
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("historical_rebuild_window_invalid") from exc
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
+        raise ValueError("historical_rebuild_window_invalid")
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _plan_scope_payload(plan: HistoricalRebuildPlan) -> dict[str, Any]:
+    payload = asdict(plan)
+    payload["coverage_start"] = _canonical_time(plan.coverage_start)
+    payload["coverage_end"] = _canonical_time(plan.coverage_end)
+    return payload
+
+
+def _rebuild_operation_key(
+    *,
+    bundle_key: str,
+    bundle_fingerprint: str,
+    purpose: str,
+    symbol: str,
+    coverage_start: Any,
+    coverage_end: Any,
+    source_key: str,
+    source_row_count: int,
+    raw_partition_sha256: tuple[str, ...],
+    instrument_snapshot_digest: str | None,
+    transform_version: str,
+    git_commit: str,
+) -> str:
+    identity = {
+        "schema": "aats.historical_rebuild.identity.v2",
+        "bundle_key": bundle_key,
+        "bundle_fingerprint": bundle_fingerprint,
+        "purpose": purpose,
+        "symbol": symbol,
+        "coverage_start": _canonical_time(coverage_start),
+        "coverage_end": _canonical_time(coverage_end),
+        "source_key": source_key,
+        "source_row_count": source_row_count,
+        "raw_partition_sha256": raw_partition_sha256,
+        "instrument_snapshot_digest": instrument_snapshot_digest,
+        "transform_version": transform_version,
+        "git_commit": git_commit,
+    }
+    return "hist-rebuild-" + hashlib.sha256(
+        canonical_json_bytes(identity)
+    ).hexdigest()
+
+
 def _bundle_symbol_from_key(bundle_id: str, component: dict[str, Any]) -> str:
     symbol = component.get("symbol")
     if isinstance(symbol, str) and symbol:
@@ -559,6 +822,60 @@ def _bundle_symbol_from_key(bundle_id: str, component: dict[str, Any]) -> str:
     # Registry v1 stores symbol in bundle_key, not the component.  The caller
     # should backfill the explicit field; fail closed rather than guess.
     raise ValueError(f"historical_bundle_symbol_missing:{bundle_id}")
+
+
+def _validated_snapshot_reference(
+    session,
+    component: Mapping[str, Any],
+    *,
+    symbol: str,
+    coverage_start: Any,
+    coverage_end: Any,
+) -> tuple[str | None, str | None]:
+    scope = classify_instrument_scope(symbol)
+    if scope == "unsupported":
+        raise ValueError(INSTRUMENT_SCOPE_UNSUPPORTED_REASON)
+    provenance = component.get("provenance")
+    raw_snapshot = (
+        provenance.get("instrument_contract_snapshot")
+        if isinstance(provenance, Mapping)
+        else None
+    )
+    digest = str(component.get("instrument_snapshot_digest") or "")
+    source_id = str(component.get("instrument_snapshot_source_id") or "")
+    snapshot_material = (raw_snapshot, digest, source_id)
+    if scope == "spot" and not any(snapshot_material):
+        return None, None
+    if (
+        not isinstance(raw_snapshot, Mapping)
+        or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        or not source_id
+    ):
+        if scope == "swap":
+            raise ValueError("derivative_instrument_metadata_required")
+        raise ValueError("historical_rebuild_instrument_contract_binding_invalid")
+    embedded_snapshot = InstrumentContractSnapshot.from_dict(raw_snapshot)
+    if instrument_snapshot_scope_reason(embedded_snapshot, symbol=symbol) is not None:
+        raise ValueError("historical_rebuild_instrument_contract_binding_invalid")
+    registered_snapshot = load_verified_instrument_contract_snapshot(
+        session,
+        snapshot_source_id=source_id,
+    )
+    if embedded_snapshot.to_dict() != registered_snapshot.to_dict():
+        raise ValueError("instrument_snapshot_source_anchor_mismatch")
+    evidence_reason = instrument_snapshot_temporal_evidence_reason(
+        registered_snapshot
+    )
+    if evidence_reason is not None:
+        raise ValueError(evidence_reason)
+    registered_snapshot.validate_window(
+        symbol=symbol,
+        start=coverage_start,
+        end=coverage_end,
+    )
+    if registered_snapshot.digest != digest:
+        raise ValueError("instrument_snapshot_digest_mismatch")
+    return digest, source_id
 
 
 __all__ = [
@@ -569,4 +886,5 @@ __all__ = [
     "fail_historical_rebuild",
     "plan_historical_rebuild",
     "start_historical_rebuild",
+    "verified_historical_rebuild_output_fingerprints",
 ]

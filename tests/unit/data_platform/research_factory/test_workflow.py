@@ -7,6 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from aats.data_platform.research_factory import real_data as real_data_module
+from aats.data_platform.research_factory.contract_lineage import (
+    ContractAwareArtifactLineage,
+)
 from aats.data_platform.research_factory.datasets.gold_bars import GoldBarRecord
 from aats.data_platform.research_factory.real_data import (
     GoldReplayLoadResult,
@@ -30,6 +34,17 @@ def workspace_tmp_path() -> Iterator[Path]:
         yield path
     finally:
         shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture
+def future_contract_lineage_verifier(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicitly simulate the future immutable artifact verifier in tests."""
+
+    monkeypatch.setattr(
+        real_data_module,
+        "_verify_contract_aware_artifact_lineage",
+        lambda **_kwargs: True,
+    )
 
 
 class FakeDataSource:
@@ -96,6 +111,19 @@ def load_result() -> GoldReplayLoadResult:
         },
         gold_table="gold.market_swap_replay_bars_1h",
         dataset_version="v1.0",
+        contract_lineage=ContractAwareArtifactLineage(
+            artifact_output_fingerprint="a" * 64,
+            instrument_snapshot_digest="b" * 64,
+            instrument_snapshot_source_ref=(
+                "meta.data_source_registry/instrument-snapshot-test"
+            ),
+            verification_ref="meta.historical_research_artifacts/test-artifact",
+            symbol="BTC-USDT-SWAP",
+            timeframe="1h",
+            coverage_start=START.isoformat(),
+            coverage_end=(START + timedelta(hours=12)).isoformat(),
+            verified=True,
+        ),
     )
 
 
@@ -193,7 +221,10 @@ def experiment_config(
     )
 
 
-def test_governance_workflow_creates_review_pending_chain(workspace_tmp_path: Path) -> None:
+def test_governance_workflow_creates_review_pending_chain(
+    workspace_tmp_path: Path,
+    future_contract_lineage_verifier: None,
+) -> None:
     root = artifact_root(workspace_tmp_path)
     execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
     observation_summary = root.parent / "observation_inputs" / "shadow_summary.json"
@@ -347,7 +378,10 @@ def test_governance_workflow_rejects_smoke_profile_without_opt_in(workspace_tmp_
         )
 
 
-def test_governance_workflow_failed_observation_gate_does_not_become_ready(workspace_tmp_path: Path) -> None:
+def test_governance_workflow_failed_observation_gate_does_not_become_ready(
+    workspace_tmp_path: Path,
+    future_contract_lineage_verifier: None,
+) -> None:
     root = artifact_root(workspace_tmp_path)
     execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
     observation_summary = root.parent / "observation_inputs" / "shadow_summary.json"

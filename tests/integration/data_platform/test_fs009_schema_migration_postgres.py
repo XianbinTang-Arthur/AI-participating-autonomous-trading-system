@@ -6,9 +6,11 @@ never reads a repository ``.env.*`` file or connects to an operator database.
 
 from __future__ import annotations
 
+import json
 import os
 import unittest
 import uuid
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
 try:
@@ -312,7 +314,7 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
                 session,
                 source_id=source_id,
                 source=source,
-                symbol="BTC-USDT-SWAP",
+                symbol="BTC-USDT",
                 role="trades",
                 purpose="trade_flow_research",
                 coverage_ratio=1.0,
@@ -341,7 +343,7 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
                 session,
                 source_id=source_id,
                 source=later_retry,
-                symbol="BTC-USDT-SWAP",
+                symbol="BTC-USDT",
                 role="trades",
                 purpose="trade_flow_research",
                 coverage_ratio=1.0,
@@ -370,7 +372,7 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
                 session,
                 source_id=source_id,
                 source=reservation_source,
-                symbol="BTC-USDT-SWAP",
+                symbol="BTC-USDT",
                 role="trades",
                 purpose="trade_flow_research",
             )
@@ -381,7 +383,7 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
                 reservation_fingerprint=reservation_fingerprint,
                 source_id=source_id,
                 source=reservation_source,
-                symbol="BTC-USDT-SWAP",
+                symbol="BTC-USDT",
                 role="trades",
                 purpose="trade_flow_research",
                 coverage_ratio=1.0,
@@ -394,8 +396,8 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
                 session,
                 run_type="backfill",
                 dataset_domain="microstructure",
-                instrument_type="SWAP",
-                symbol="BTC-USDT-SWAP",
+                instrument_type="SPOT",
+                symbol="BTC-USDT",
                 trigger_mode="manual",
             )
             for index, (side, price, size) in enumerate(
@@ -409,7 +411,7 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
                             source_id, symbol, ts, trade_id, px, sz, side,
                             raw_payload, raw_partition_sha256, ingest_run_id
                         ) VALUES (
-                            CAST(:source_id AS UUID), 'BTC-USDT-SWAP', :ts,
+                            CAST(:source_id AS UUID), 'BTC-USDT', :ts,
                             :trade_id, :price, :size, :side, '{}'::jsonb,
                             :raw_sha256, CAST(:ingest_run_id AS UUID)
                         )
@@ -460,7 +462,7 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 RuntimeError,
-                "historical_rebuild_succeeded_output_fingerprint_mismatch",
+                "historical_rebuild_succeeded_row_content_mismatch",
             ):
                 start_historical_rebuild(session, plan)
             session.execute(
@@ -602,7 +604,7 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
             reset_engine()
             archive_container.stop()
 
-    def test_stage_19_source_aware_gold_is_versioned_and_repeatable(self) -> None:
+    def test_stage_19_gold_and_legacy_campaign_fail_closed(self) -> None:
         from sqlalchemy import text
         from sqlalchemy.orm import Session
 
@@ -611,11 +613,12 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
         )
         from aats.data_platform.config import ResearchPlatformSettings
         from aats.data_platform.data_governance.historical_gold import (
-            execute_historical_gold,
             plan_historical_gold,
-            start_historical_gold,
         )
         from aats.data_platform.data_governance.historical_campaign import (
+            LEGACY_CAMPAIGN_SCHEMA,
+            _campaign_manifest_fingerprint,
+            assess_campaign_capacity,
             update_campaign_checkpoint,
         )
         from aats.data_platform.data_governance.registry import (
@@ -623,7 +626,6 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
             persist_historical_bundle,
         )
         from aats.data_platform.db import apply_rdp_migrations, get_engine
-        from aats.data_platform.jobs.run_registry import create_ingest_run
 
         settings = ResearchPlatformSettings(
             database_url=self.container.get_connection_url(driver="psycopg2"),
@@ -634,9 +636,8 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
         engine = get_engine(settings)
         start = datetime(2026, 8, 10, tzinfo=timezone.utc)
         end = start + timedelta(hours=1)
-        symbol = "STAGE19-USDT-SWAP"
+        symbol = "BTC-USDT"
         candle_version = f"candle-{uuid.uuid4()}"
-        funding_version = f"funding-{uuid.uuid4()}"
         with Session(engine) as session, session.begin():
             candle_source_key = f"integration-candle-{uuid.uuid4()}"
             candle_source_id = register_official_source(
@@ -674,179 +675,103 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
             )
             self.assertTrue(candle_report.eligible)
 
-            funding_source_key = f"integration-funding-{uuid.uuid4()}"
-            funding_source_id = register_official_source(
-                session,
-                source_key=funding_source_key,
-                source_kind="okx_rest",
-                source_locator="/integration/funding",
-                timestamp_semantics="UTC funding settlement time",
-            )
-            funding_source = import_source_record(
-                source_key=funding_source_key,
-                source_kind="okx_rest",
-                provider="OKX",
-                source_locator="/integration/funding",
-                coverage_start=start,
-                coverage_end=end,
-                timestamp_semantics="UTC funding settlement time",
-                schema_version="integration-v1",
-                dataset_version=funding_version,
-                transform_version="integration-funding-v1",
-                git_commit="a" * 40,
-                raw_partition_sha256=("b" * 64,),
-                row_count=1,
-                gaps=(),
-            )
-            funding_bundle_id, funding_report = persist_historical_bundle(
-                session,
-                source_id=funding_source_id,
-                source=funding_source,
-                symbol=symbol,
-                role="funding",
-                purpose="funding_research",
-                coverage_ratio=1.0,
-                causal_time_check=True,
-            )
-            self.assertTrue(funding_report.eligible)
-
-            candle_run = create_ingest_run(
-                session,
-                run_type="backfill",
-                dataset_domain="candles",
-                instrument_type="SWAP",
-                symbol=symbol,
-                timeframe="15m",
-                trigger_mode="manual",
-            )
-            for index in range(4):
-                session.execute(
-                    text(
-                        "INSERT INTO silver.market_swap_candles_15m "
-                        "(symbol, ts, open, high, low, close, vol, vol_quote, "
-                        "confirm, ingest_run_id, dataset_version) VALUES "
-                        "(:symbol, :ts, 100, 102, 99, 101, 1, 101, TRUE, "
-                        "CAST(:run_id AS UUID), :dataset_version)"
-                    ),
-                    {
-                        "symbol": symbol,
-                        "ts": start + timedelta(minutes=15 * index),
-                        "run_id": candle_run,
-                        "dataset_version": candle_version,
-                    },
-                )
-            funding_run = create_ingest_run(
-                session,
-                run_type="backfill",
-                dataset_domain="funding",
-                instrument_type="SWAP",
-                symbol=symbol,
-                trigger_mode="manual",
-            )
-            session.execute(
-                text(
-                    "INSERT INTO silver.market_swap_funding "
-                    "(symbol, ts, funding_rate, ingest_run_id, dataset_version) "
-                    "VALUES (:symbol, :ts, 0.0001, CAST(:run_id AS UUID), :version)"
-                ),
-                {
-                    "symbol": symbol,
-                    "ts": start,
-                    "run_id": funding_run,
-                    "version": funding_version,
-                },
-            )
-
-            plan = plan_historical_gold(
-                session,
-                symbol=symbol,
-                timeframe="15m",
-                candle_bundle_id=candle_bundle_id,
-                funding_bundle_id=funding_bundle_id,
-                git_commit="c" * 40,
-            )
-            state, artifact_id = start_historical_gold(session, plan)
-            self.assertEqual(state, "started")
-            result = execute_historical_gold(
-                session,
-                plan,
-                artifact_id=artifact_id,
-            )
-            self.assertEqual(result.rows_written, 4)
-            self.assertTrue(result.quality_report["eligible"])
-            self.assertEqual(result.artifact_index["input_bundle_count"], 2)
-            state, same_artifact_id = start_historical_gold(session, plan)
-            self.assertEqual(state, "already_succeeded")
-            self.assertEqual(same_artifact_id, artifact_id)
-            original_row_fingerprint = session.execute(
-                text(
-                    "SELECT output_fingerprint FROM gold.historical_replay_bars "
-                    "WHERE artifact_id = CAST(:artifact_id AS UUID) ORDER BY ts LIMIT 1"
-                ),
-                {"artifact_id": artifact_id},
-            ).scalar_one()
-            session.execute(
-                text(
-                    "UPDATE gold.historical_replay_bars "
-                    "SET output_fingerprint = :tampered WHERE artifact_id = "
-                    "CAST(:artifact_id AS UUID) AND ts = :start"
-                ),
-                {
-                    "artifact_id": artifact_id,
-                    "start": start,
-                    "tampered": "0" * 64,
-                },
-            )
             with self.assertRaisesRegex(
-                RuntimeError,
-                "historical_gold_succeeded_artifact_fingerprint_mismatch",
+                ValueError,
+                "historical_gold_source_content_unsealed",
             ):
-                start_historical_gold(session, plan)
-            session.execute(
+                plan_historical_gold(
+                    session,
+                    symbol=symbol,
+                    timeframe="15m",
+                    candle_bundle_id=candle_bundle_id,
+                    funding_bundle_id=None,
+                    git_commit="c" * 40,
+                )
+            artifact_rows = session.execute(
                 text(
-                    "UPDATE gold.historical_replay_bars "
-                    "SET output_fingerprint = :original WHERE artifact_id = "
-                    "CAST(:artifact_id AS UUID) AND ts = :start"
+                    "SELECT COUNT(*) FROM meta.historical_research_artifacts "
+                    "WHERE primary_bundle_id = CAST(:bundle_id AS UUID)"
                 ),
-                {
-                    "artifact_id": artifact_id,
-                    "start": start,
-                    "original": original_row_fingerprint,
-                },
-            )
-            rows = session.execute(
-                text(
-                    "SELECT COUNT(*), COUNT(DISTINCT source_candle_bundle_id), "
-                    "COUNT(DISTINCT source_funding_bundle_id) "
-                    "FROM gold.historical_replay_bars "
-                    "WHERE artifact_id = CAST(:artifact_id AS UUID)"
-                ),
-                {"artifact_id": artifact_id},
-            ).one()
-            self.assertEqual(tuple(rows), (4, 1, 1))
+                {"bundle_id": candle_bundle_id},
+            ).scalar_one()
+            self.assertEqual(artifact_rows, 0)
 
+            campaign_start = datetime(2026, 8, 10, tzinfo=timezone.utc)
+            campaign_end = campaign_start + timedelta(days=1)
+            campaign_capacity = assess_campaign_capacity(
+                requested_days=1,
+                current_database_bytes=1,
+                disk_total_bytes=1_000_000_000_000,
+                disk_free_bytes=900_000_000_000,
+            )
+            trade_files = []
+            for value in (campaign_start, campaign_end):
+                date = value.date().isoformat()
+                filename = f"BTC-USDT-SWAP-trades-{date}.zip"
+                trade_files.append(
+                    {
+                        "filename": filename,
+                        "date": date,
+                        "size_mb": "1",
+                        "url": f"https://static.okx.com/test/{filename}",
+                    }
+                )
+            l2_filename = (
+                f"BTC-USDT-SWAP-L2orderbook-400lv-"
+                f"{campaign_start.date().isoformat()}.zip"
+            )
+            legacy_manifest = {
+                "schema": LEGACY_CAMPAIGN_SCHEMA,
+                "symbol": "BTC-USDT-SWAP",
+                "coverage_start": campaign_start.isoformat(),
+                "coverage_end": campaign_end.isoformat(),
+                "requested_days": 1,
+                "capacity_report": asdict(campaign_capacity),
+                "partitions": [
+                    {
+                        "coverage_start": campaign_start.isoformat(),
+                        "coverage_end": campaign_end.isoformat(),
+                        "trade_files": trade_files,
+                        "l2_file": {
+                            "filename": l2_filename,
+                            "date": campaign_start.date().isoformat(),
+                            "size_mb": "1",
+                            "url": f"https://static.okx.com/test/{l2_filename}",
+                        },
+                    }
+                ],
+            }
+            legacy_manifest["manifest_fingerprint"] = (
+                _campaign_manifest_fingerprint(legacy_manifest)
+            )
             campaign_id = session.execute(
                 text(
                     "INSERT INTO meta.historical_campaign_runs "
                     "(operation_key, symbol, coverage_start, coverage_end, "
                     "requested_days, status, capacity_report, manifest, started_at) "
                     "VALUES (:operation_key, :symbol, :start, :end, 1, 'RUNNING', "
-                    "'{\"approved\": true}'::jsonb, '{}'::jsonb, NOW()) "
+                    "CAST(:capacity AS jsonb), CAST(:manifest AS jsonb), NOW()) "
                     "RETURNING campaign_id"
                 ),
                 {
                     "operation_key": f"integration-campaign-{uuid.uuid4()}",
-                    "symbol": symbol,
-                    "start": start,
-                    "end": start + timedelta(days=1),
+                    "symbol": legacy_manifest["symbol"],
+                    "start": campaign_start,
+                    "end": campaign_end,
+                    "capacity": json.dumps(legacy_manifest["capacity_report"]),
+                    "manifest": json.dumps(legacy_manifest),
                 },
             ).scalar_one()
-            update_campaign_checkpoint(
-                session,
-                str(campaign_id),
-                checkpoint_key="candle:15m",
-                payload={"status": "succeeded", "bundle_id": candle_bundle_id},
-            )
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "execution_unavailable_until_persistent_fencing_and_immutable_silver",
+            ):
+                update_campaign_checkpoint(
+                    session,
+                    str(campaign_id),
+                    checkpoint_key="candle:15m",
+                    payload={"status": "succeeded", "bundle_id": candle_bundle_id},
+                )
             checkpoint = session.execute(
                 text(
                     "SELECT checkpoint FROM meta.historical_campaign_runs "
@@ -854,10 +779,7 @@ class Fs009SchemaMigrationPostgresTests(unittest.TestCase):
                 ),
                 {"campaign_id": campaign_id},
             ).scalar_one()
-            self.assertEqual(
-                checkpoint["candle:15m"]["bundle_id"],
-                candle_bundle_id,
-            )
+            self.assertEqual(checkpoint, {})
 
 
 if __name__ == "__main__":

@@ -19,6 +19,9 @@ from aats.data_platform.research_factory.benchmarks.baseline import (
     factor_baseline_return_series,
     run_factor_baseline,
 )
+from aats.data_platform.research_factory.contract_lineage import (
+    ContractAwareArtifactLineage,
+)
 from aats.data_platform.research_factory.datasets.gold_bars import (
     GoldBarDatasetHandler,
     GoldBarRecord,
@@ -39,6 +42,10 @@ from aats.data_platform.research_factory.experiments.recorder import ExperimentR
 from aats.data_platform.research_factory.features.expressions import (
     MICROSTRUCTURE_FACTOR_FIELDS,
     parse_factor_expression,
+)
+from aats.domain.instrument_scope import (
+    INSTRUMENT_SCOPE_UNSUPPORTED_REASON,
+    classify_instrument_scope,
 )
 from aats.data_platform.research_factory.features.functions import evaluate_factor_expression
 from aats.data_platform.research_factory.features.quality import (
@@ -125,6 +132,7 @@ class GoldReplayLoadResult:
     gold_table: str
     dataset_version: str
     source_tables: tuple[str, ...] = ()
+    contract_lineage: ContractAwareArtifactLineage | None = None
 
     def __post_init__(self) -> None:
         if not self.records:
@@ -134,7 +142,18 @@ class GoldReplayLoadResult:
         if not isinstance(self.source_watermark, Mapping) or not self.source_watermark:
             raise ValueError("gold replay source_watermark must be a non-empty mapping")
         object.__setattr__(self, "records", tuple(self.records))
-        object.__setattr__(self, "source_watermark", dict(self.source_watermark))
+        source_watermark = dict(self.source_watermark)
+        if self.contract_lineage is not None:
+            if not isinstance(self.contract_lineage, ContractAwareArtifactLineage):
+                raise ValueError(
+                    "gold replay contract_lineage must be ContractAwareArtifactLineage"
+                )
+            lineage_payload = self.contract_lineage.to_dict()
+            existing_lineage = source_watermark.get("contract_lineage")
+            if existing_lineage is not None and existing_lineage != lineage_payload:
+                raise ValueError("gold_replay_contract_lineage_watermark_mismatch")
+            source_watermark["contract_lineage"] = lineage_payload
+        object.__setattr__(self, "source_watermark", source_watermark)
         object.__setattr__(self, "gold_table", _require_non_empty(self.gold_table, "gold_table"))
         object.__setattr__(self, "dataset_version", _require_non_empty(self.dataset_version, "dataset_version"))
         source_tables = self.source_tables or (self.gold_table,)
@@ -479,6 +498,7 @@ def run_research_factory_experiment(
             data_source,
             required_factor_fields=parsed_factor.fields,
         )
+        _require_contract_aware_derivative_input(config, load_result)
         dataset_spec = _build_dataset_spec(
             config,
             segments,
@@ -689,6 +709,8 @@ def run_research_factory_experiment(
             raise ValueError(f"development selection gate failed: {failures}")
         candidate = _build_candidate(
             experiment_id=experiment_id,
+            symbol=config.symbol,
+            timeframe=config.timeframe,
             feature=feature,
             metrics=metrics,
             gate=gate,
@@ -699,6 +721,7 @@ def run_research_factory_experiment(
             novelty_gate_ref=novelty_gate_ref,
             proposal_ref=proposal_ref,
             proposal_id=config.proposal.proposal_id if config.proposal is not None else None,
+            contract_lineage=load_result.contract_lineage,
             created_at=config.timestamp,
         )
         recorder.record_candidate(experiment_id, candidate)
@@ -842,6 +865,55 @@ def _load_gold_replay_records(
         dataset_version=config.dataset_version,
         required_factor_fields=required_factor_fields,
     )
+
+
+def _require_contract_aware_derivative_input(
+    config: ResearchFactoryExperimentConfig,
+    load_result: GoldReplayLoadResult,
+) -> None:
+    """Reject Legacy derivative Gold unless an upstream verifier bound lineage."""
+
+    instrument_scope = classify_instrument_scope(config.symbol)
+    if instrument_scope == "unsupported":
+        raise ValueError(INSTRUMENT_SCOPE_UNSUPPORTED_REASON)
+    if instrument_scope == "spot":
+        return
+    lineage = load_result.contract_lineage
+    if lineage is None:
+        raise ValueError("derivative_research_input_contract_lineage_required")
+    if not lineage.covers(
+        symbol=config.symbol,
+        timeframe=config.timeframe,
+        start=config.start,
+        end=config.end,
+    ):
+        raise ValueError("derivative_research_input_contract_lineage_scope_mismatch")
+    if not _verify_contract_aware_artifact_lineage(
+        config=config,
+        load_result=load_result,
+    ):
+        raise ValueError(
+            "derivative_research_input_contract_lineage_verifier_unavailable"
+        )
+
+
+def _verify_contract_aware_artifact_lineage(
+    *,
+    config: ResearchFactoryExperimentConfig,
+    load_result: GoldReplayLoadResult,
+) -> bool:
+    """Fail closed until a real immutable artifact/registry verifier exists.
+
+    ``ContractAwareArtifactLineage.verified`` is intentionally ignored here:
+    it is caller-controlled data and cannot authorize capital evidence.  A
+    future implementation must independently query the immutable artifact
+    index and instrument snapshot registry, match the exact output fingerprint,
+    digest, symbol, timeframe and requested window, then replace this fixed
+    failure.  The arguments remain explicit to make that contract reviewable.
+    """
+
+    _ = config, load_result
+    return False
 
 
 def _resolve_factor_expression(config: ResearchFactoryExperimentConfig) -> str:
@@ -1277,6 +1349,8 @@ def _build_development_evidence(
 def _build_candidate(
     *,
     experiment_id: str,
+    symbol: str,
+    timeframe: str,
     feature: FeatureSpec,
     metrics: MetricsSnapshot,
     gate: CandidateGateResult,
@@ -1287,13 +1361,19 @@ def _build_candidate(
     novelty_gate_ref: str | None,
     proposal_ref: str | None,
     proposal_id: str | None,
+    contract_lineage: ContractAwareArtifactLineage | None,
     created_at: datetime,
 ) -> CandidateArtifact:
+    lineage_payload = (
+        {} if contract_lineage is None else {"source_contract_lineage": contract_lineage.to_dict()}
+    )
     return CandidateArtifact(
         candidate_id=f"cand_{experiment_id}",
         experiment_id=experiment_id,
         candidate_type="factor",
         payload={
+            "symbol": str(symbol).strip().upper(),
+            "timeframe": str(timeframe).strip().lower(),
             "factor_expression": feature.expression,
             "dataset_fingerprint": dataset_fingerprint_value,
             "benchmark_segment": BENCHMARK_SEGMENT,
@@ -1311,6 +1391,7 @@ def _build_candidate(
             "factor_proposal_id": proposal_id,
             "generated_by": "research_factory_real_data_runner",
             "research_only": True,
+            **lineage_payload,
         },
         metrics=metrics,
         gate=gate,

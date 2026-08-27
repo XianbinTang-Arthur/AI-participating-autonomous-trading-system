@@ -55,24 +55,19 @@ ROOT = HERE.parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# 加载环境 (.env.wsl2 / .env.derivatives.live)
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    print("missing python-dotenv; pip install python-dotenv", file=sys.stderr)
-    sys.exit(2)
+from aats.domain.instrument_scope import (  # noqa: E402
+    INSTRUMENT_SCOPE_UNSUPPORTED_REASON,
+    classify_instrument_scope,
+)
 
-_ENV_SEARCH_ROOTS: list[Path] = [ROOT]
-_home = os.environ.get("HOME")
-if _home:
-    _ENV_SEARCH_ROOTS.append(Path(_home) / "aats")
-
-for env_file in (".env.wsl2", ".env.derivatives.live"):
-    for search_root in _ENV_SEARCH_ROOTS:
-        env_path = search_root / env_file
-        if env_path.is_file():
-            load_dotenv(env_path, override=False)
-            break
+_DATABASE_ENV_KEYS = (
+    "RDP_DATABASE_URL",
+    "POSTGRES_USER",
+    "POSTGRES_PASSWORD",
+    "POSTGRES_HOST",
+    "POSTGRES_PORT",
+    "RDP_POSTGRES_DB",
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,22 +82,61 @@ log = logging.getLogger("rdp_backfill_okx_rest_history")
 
 
 def resolve_db_url() -> str:
-    """Resolve RDP DB URL from env (never echo VALUES, only KEYS)."""
+    """Resolve the RDP URL without mutating the process environment.
+
+    This script used to load both managed dotenv files at module import time.
+    Besides making a read-only import change global process state, first-wins
+    layering could combine a spot product type with a derivatives position
+    mode.  Only the database keys needed by this legacy CLI are now read, and
+    importing or dry-running the module has no dotenv side effect.
+    """
+    configured = _database_configuration()
     for key in ("RDP_DATABASE_URL",):
-        val = os.environ.get(key)
+        val = configured.get(key)
         if val:
             return val
-    user = os.environ.get("POSTGRES_USER", "admin")
-    pw = os.environ.get("POSTGRES_PASSWORD")
+    user = configured.get("POSTGRES_USER", "admin")
+    pw = configured.get("POSTGRES_PASSWORD")
     if not pw:
         raise SystemExit(
             "missing credentials: set POSTGRES_PASSWORD or RDP_DATABASE_URL "
             "in .env.wsl2 / .env.derivatives.live"
         )
-    host = os.environ.get("POSTGRES_HOST", "localhost")
-    port = os.environ.get("POSTGRES_PORT", "5432")
-    db = os.environ.get("RDP_POSTGRES_DB", "aats_research")
+    host = configured.get("POSTGRES_HOST", "localhost")
+    port = configured.get("POSTGRES_PORT", "5432")
+    db = configured.get("RDP_POSTGRES_DB", "aats_research")
     return f"postgresql+psycopg://{user}:{pw}@{host}:{port}/{db}"
+
+
+def _database_configuration() -> dict[str, str]:
+    """Read only the allowlisted DB keys with the legacy first-wins order."""
+
+    values = {
+        key: value
+        for key in _DATABASE_ENV_KEYS
+        if (value := os.environ.get(key))
+    }
+    try:
+        from dotenv import dotenv_values
+    except ImportError as exc:  # pragma: no cover - locked runtime dependency
+        raise RuntimeError("missing python-dotenv; install the locked dependencies") from exc
+
+    search_roots: list[Path] = [ROOT]
+    home = os.environ.get("HOME")
+    if home:
+        search_roots.append(Path(home) / "aats")
+    for env_file in (".env.wsl2", ".env.derivatives.live"):
+        for search_root in search_roots:
+            env_path = search_root / env_file
+            if not env_path.is_file():
+                continue
+            dotenv = dotenv_values(env_path)
+            for key in _DATABASE_ENV_KEYS:
+                raw = dotenv.get(key)
+                if key not in values and raw:
+                    values[key] = str(raw)
+            break
+    return values
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -376,7 +410,7 @@ def run_ls_ratio(
 # ─────────────────────────────────────────────────────────────────────
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="P1-D Stage 5 — OKX REST 历史数据 batch backfill",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -431,7 +465,19 @@ def main() -> int:
     ap.add_argument("--output", default=None,
                     help="可选 JSON output path (stats summary)")
 
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+
+    symbol = str(args.symbol or "").strip().upper()
+    if classify_instrument_scope(symbol) != "swap":
+        log.error(INSTRUMENT_SCOPE_UNSUPPORTED_REASON)
+        return 1
+    symbol_base = symbol.split("-", 1)[0]
+    ccy = symbol_base if args.ccy is None else str(args.ccy or "").strip().upper()
+    if ccy != symbol_base:
+        log.error("instrument_scope_symbol_ccy_mismatch")
+        return 1
+    args.symbol = symbol
+    args.ccy = ccy
 
     if args.apply and args.verify:
         log.error("--apply 和 --verify 不能同时给")
@@ -439,11 +485,6 @@ def main() -> int:
 
     if args.verify:
         return run_verify(args.symbol)
-
-    # 推断 ccy
-    if args.ccy is None:
-        # "BTC-USDT-SWAP" → "BTC"
-        args.ccy = args.symbol.split("-")[0].upper()
 
     dry_run = not args.apply
     mode_label = "DRY-RUN" if dry_run else "APPLY"

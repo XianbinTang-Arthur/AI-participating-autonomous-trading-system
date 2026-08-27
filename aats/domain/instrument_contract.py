@@ -27,6 +27,7 @@ from aats.schemas.exchange import InstrumentMetadata
 
 
 ContractType = Literal["spot", "linear", "inverse"]
+INSTRUMENT_ARITHMETIC_POLICY_ID = "instrument-arithmetic/v1"
 _DERIVATIVE_INSTRUMENT_TYPES = frozenset({"SWAP", "FUTURES"})
 _SPOT_QUANTITY_INSTRUMENT_TYPES = frozenset({"SPOT", "MARGIN"})
 _ARITHMETIC_CONTEXT = Context(
@@ -86,19 +87,40 @@ class InstrumentContract:
 
         if not symbol:
             raise InstrumentContractError("instrument_symbol_required")
+        symbol_parts = symbol.split("-")
+        if (
+            len(symbol_parts) < 2
+            or symbol_parts[0] != base_currency
+            or symbol_parts[1] != quote_currency
+        ):
+            raise InstrumentContractError("instrument_identity_mismatch")
         if self.contract_type == "spot":
-            if instrument_type in _DERIVATIVE_INSTRUMENT_TYPES:
+            if instrument_type not in _SPOT_QUANTITY_INSTRUMENT_TYPES:
                 raise InstrumentContractError("contract_type_unknown_or_inconsistent")
+            if len(symbol_parts) != 2:
+                raise InstrumentContractError("instrument_identity_mismatch")
             if settle_currency != quote_currency or value_currency != base_currency:
                 raise InstrumentContractError("contract_value_currency_inconsistent")
         elif self.contract_type == "linear":
             if instrument_type not in _DERIVATIVE_INSTRUMENT_TYPES:
                 raise InstrumentContractError("contract_type_unknown_or_inconsistent")
+            if (
+                (symbol.endswith("-SWAP") and instrument_type != "SWAP")
+                or (instrument_type == "SWAP" and not symbol.endswith("-SWAP"))
+                or (instrument_type == "FUTURES" and len(symbol_parts) < 3)
+            ):
+                raise InstrumentContractError("instrument_identity_mismatch")
             if value_currency != base_currency or settle_currency != quote_currency:
                 raise InstrumentContractError("contract_value_currency_inconsistent")
         elif self.contract_type == "inverse":
             if instrument_type not in _DERIVATIVE_INSTRUMENT_TYPES:
                 raise InstrumentContractError("contract_type_unknown_or_inconsistent")
+            if (
+                (symbol.endswith("-SWAP") and instrument_type != "SWAP")
+                or (instrument_type == "SWAP" and not symbol.endswith("-SWAP"))
+                or (instrument_type == "FUTURES" and len(symbol_parts) < 3)
+            ):
+                raise InstrumentContractError("instrument_identity_mismatch")
             if value_currency != quote_currency or settle_currency != base_currency:
                 raise InstrumentContractError("contract_value_currency_inconsistent")
         else:  # pragma: no cover - Literal is enforced by callers and type checkers
@@ -394,6 +416,7 @@ def _arithmetic_result(
 
 __all__ = [
     "ContractType",
+    "INSTRUMENT_ARITHMETIC_POLICY_ID",
     "InstrumentContract",
     "InstrumentContractError",
     "instrument_contract_from_metadata",

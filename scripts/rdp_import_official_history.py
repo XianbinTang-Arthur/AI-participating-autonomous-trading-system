@@ -43,6 +43,14 @@ from aats.data_platform.data_governance.registry import (
 )
 from aats.data_platform.db import get_session
 from aats.data_platform.jobs.run_registry import create_ingest_run, finish_ingest_run
+from aats.domain.instrument_contract_snapshot import (
+    InstrumentContractSnapshot,
+    parse_instrument_contract_snapshot,
+)
+from aats.domain.instrument_scope import (
+    INSTRUMENT_SCOPE_UNSUPPORTED_REASON,
+    classify_instrument_scope,
+)
 
 
 def _utc(raw: str) -> datetime:
@@ -74,12 +82,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--max-pages", type=int, default=10_000)
     parser.add_argument("--max-staleness-ms", type=int, default=2_000)
+    parser.add_argument(
+        "--instrument-snapshot",
+        type=Path,
+        help="可选的绝对路径合约快照；未绑定的衍生品 bundle 将失败关闭",
+    )
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--confirm", action="store_true")
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    instrument_contract_snapshot: InstrumentContractSnapshot | dict[str, object] | None = None,
+) -> int:
     args = parse_args(argv)
     if args.apply != args.confirm:
         print("--apply 与 --confirm 必须同时使用", file=sys.stderr)
@@ -99,6 +116,16 @@ def main(argv: list[str] | None = None) -> int:
     symbol = args.symbol.strip().upper()
     if not re.fullmatch(r"[A-Z0-9][A-Z0-9-]{0,63}", symbol):
         print("--symbol 格式无效", file=sys.stderr)
+        return 4
+    instrument_scope = classify_instrument_scope(symbol)
+    allowed_scopes = {
+        "trade-rest": frozenset(("spot", "swap")),
+        "trade-file": frozenset(("spot", "swap")),
+        "l2-file": frozenset(("spot", "swap")),
+        "mark-rest": frozenset(("swap",)),
+    }
+    if instrument_scope not in allowed_scopes[args.mode]:
+        print(INSTRUMENT_SCOPE_UNSUPPORTED_REASON, file=sys.stderr)
         return 4
     if args.end <= args.start:
         print("--end 必须晚于 --start", file=sys.stderr)
@@ -126,6 +153,26 @@ def main(argv: list[str] | None = None) -> int:
     if args.additional_input and args.mode != "trade-file":
         print("--additional-input 只允许用于 trade-file", file=sys.stderr)
         return 4
+    if args.instrument_snapshot is not None and instrument_contract_snapshot is not None:
+        print("instrument snapshot 只能通过文件或内部绑定传入一次", file=sys.stderr)
+        return 4
+    snapshot = None
+    try:
+        if args.instrument_snapshot is not None:
+            snapshot_path = args.instrument_snapshot.expanduser()
+            if not snapshot_path.is_absolute() or not snapshot_path.is_file():
+                print("--instrument-snapshot 必须指向现有绝对路径文件", file=sys.stderr)
+                return 4
+            snapshot = InstrumentContractSnapshot.from_dict(
+                json.loads(snapshot_path.read_text(encoding="utf-8"))
+            )
+        elif instrument_contract_snapshot is not None:
+            snapshot = parse_instrument_contract_snapshot(instrument_contract_snapshot)
+        if snapshot is not None:
+            snapshot.validate_window(symbol=symbol, start=args.start, end=args.end)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"instrument snapshot 无效: {exc}", file=sys.stderr)
+        return 4
     if args.mode == "l2-file" and args.end - args.start > timedelta(days=1):
         print("L2 单次导入最多 1 个 UTC 日；请按日分区运行", file=sys.stderr)
         return 4
@@ -145,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
         "bundle_id_present": args.bundle_id is not None,
         "network": args.mode.endswith("rest"),
         "live_side_effects": False,
+        "instrument_snapshot_digest": None if snapshot is None else snapshot.digest,
+        "contract_binding_status": "UNBOUND" if snapshot is None else "BOUND",
     }
     if not args.apply:
         print(json.dumps({"dry_run": True, "plan": plan}, indent=2, ensure_ascii=False))
@@ -157,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
                 session,
                 run_type="backfill",
                 dataset_domain="microstructure",
-                instrument_type="SWAP",
+                instrument_type=instrument_scope,
                 symbol=symbol,
                 trigger_mode="manual",
             )
@@ -270,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
                     source_locator=source_locator,
                     timestamp_semantics=timestamp_semantics,
                     transform_version=_L2_TRANSFORM_VERSION,
+                    instrument_contract_snapshot=snapshot,
                 )
                 bundle_id, reservation_fingerprint = reserve_historical_bundle(
                     session,
@@ -345,6 +395,7 @@ def main(argv: list[str] | None = None) -> int:
                     timestamp_semantics=timestamp_semantics,
                     transform_version=_L2_TRANSFORM_VERSION,
                     gaps=combined_gaps,
+                    instrument_contract_snapshot=snapshot,
                 )
                 expected_bbo = int((args.end - args.start).total_seconds())
                 expected_books5 = expected_bbo * 2
@@ -393,6 +444,7 @@ def main(argv: list[str] | None = None) -> int:
                     source_key=source_key,
                     source_locator=source_locator,
                     timestamp_semantics=timestamp_semantics,
+                    instrument_contract_snapshot=snapshot,
                 )
                 coverage_ratio = _coverage_ratio(args.mode, stats, args)
                 bundle_id, eligibility = persist_historical_bundle(
@@ -503,6 +555,7 @@ def _source_record(
     timestamp_semantics: str,
     transform_version: str | None = None,
     gaps=None,
+    instrument_contract_snapshot=None,
 ):
     return import_source_record(
         source_key=source_key,
@@ -519,6 +572,7 @@ def _source_record(
         raw_partition_sha256=stats.raw_sha256,
         row_count=stats.rows_read,
         gaps=tuple(stats.gaps if gaps is None else gaps),
+        instrument_contract_snapshot=instrument_contract_snapshot,
     )
 
 

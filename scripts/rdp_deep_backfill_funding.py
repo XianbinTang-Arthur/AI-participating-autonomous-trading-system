@@ -35,6 +35,11 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from aats.domain.instrument_scope import (
+    INSTRUMENT_SCOPE_UNSUPPORTED_REASON,
+    classify_instrument_scope,
+)
+
 if TYPE_CHECKING:
     import httpx
     from sqlalchemy.orm import Session
@@ -256,6 +261,7 @@ def deep_backfill_funding(
     raw_archive_dir: Path | None = None,
     refresh_existing: bool = False,
     refresh_end: datetime | None = None,
+    instrument_contract_snapshot: Any | None = None,
 ) -> dict[str, Any]:
     """对单个 symbol 执行 funding 深度回填.
 
@@ -274,6 +280,10 @@ def deep_backfill_funding(
     -------
     dict  包含统计信息
     """
+    normalized_symbol = str(symbol or "").strip().upper()
+    if classify_instrument_scope(normalized_symbol) != "swap":
+        raise ValueError(INSTRUMENT_SCOPE_UNSUPPORTED_REASON)
+    symbol = normalized_symbol
     import httpx
 
     from aats.data_platform.config import get_settings
@@ -565,6 +575,7 @@ def deep_backfill_funding(
             raw_hashes=stats["raw_partition_sha256"],
             gaps=stats["gaps"],
             coverage_ratio=stats["coverage_ratio"],
+            instrument_contract_snapshot=instrument_contract_snapshot,
         )
 
     log.info(
@@ -589,6 +600,7 @@ def _persist_funding_bundle(
     raw_hashes: list[str],
     gaps: list[dict[str, str]],
     coverage_ratio: float,
+    instrument_contract_snapshot: Any | None = None,
 ) -> dict[str, Any]:
     from aats.data_platform.collectors.backfill.official_history_importers import (
         register_official_source,
@@ -626,6 +638,7 @@ def _persist_funding_bundle(
             raw_partition_sha256=raw_hashes,
             row_count=row_count,
             gaps=gaps,
+            instrument_contract_snapshot=instrument_contract_snapshot,
         )
         record_data_gaps(
             session,
@@ -814,6 +827,14 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
+    normalized_symbols: list[str] = []
+    for raw_symbol in args.symbols:
+        symbol = str(raw_symbol or "").strip().upper()
+        if classify_instrument_scope(symbol) != "swap":
+            log.error("%s: %s", raw_symbol, INSTRUMENT_SCOPE_UNSUPPORTED_REASON)
+            return 2
+        normalized_symbols.append(symbol)
+
     if args.target_start:
         target_start = datetime.strptime(args.target_start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     elif args.days:
@@ -839,7 +860,7 @@ def main(argv: list[str] | None = None) -> int:
 
     log.info("=" * 60)
     log.info("OKX API 深度 funding 回填")
-    log.info("  交易对  : %s", ", ".join(args.symbols))
+    log.info("  交易对  : %s", ", ".join(normalized_symbols))
     log.info("  目标起点: %s", target_start.strftime("%Y-%m-%d %H:%M UTC"))
     log.info("  执行模式: %s", "覆盖刷新" if args.refresh_existing else "缺失历史回填")
     if refresh_end is not None:
@@ -850,7 +871,7 @@ def main(argv: list[str] | None = None) -> int:
 
     all_stats: list[dict[str, Any]] = []
 
-    for symbol in args.symbols:
+    for symbol in normalized_symbols:
         log.info("")
         log.info("━" * 40)
         log.info("开始回填: %s", symbol)

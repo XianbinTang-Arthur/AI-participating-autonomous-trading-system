@@ -10,6 +10,9 @@ from types import SimpleNamespace
 import pytest
 
 from aats.data_platform.research_factory import real_data as real_data_module
+from aats.data_platform.research_factory.contract_lineage import (
+    ContractAwareArtifactLineage,
+)
 from aats.data_platform.research_factory.datasets.gold_bars import GoldBarRecord
 from aats.data_platform.research_factory.real_data import (
     GoldReplayDataSource,
@@ -32,6 +35,17 @@ def tmp_path() -> Iterator[Path]:
         yield path
     finally:
         shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture
+def future_contract_lineage_verifier(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicitly simulate the future immutable artifact verifier in tests."""
+
+    monkeypatch.setattr(
+        real_data_module,
+        "_verify_contract_aware_artifact_lineage",
+        lambda **_kwargs: True,
+    )
 
 
 class FakeDataSource:
@@ -130,6 +144,9 @@ def load_result(
     records: tuple[GoldBarRecord, ...] | None = None,
     *,
     dataset_version: str = "v1.0",
+    include_contract_lineage: bool = True,
+    contract_lineage_verified: bool = True,
+    lineage_symbol: str | None = None,
 ) -> GoldReplayLoadResult:
     records = records or gold_records()
     return GoldReplayLoadResult(
@@ -145,6 +162,23 @@ def load_result(
         },
         gold_table="gold.market_swap_replay_bars_1h",
         dataset_version=dataset_version,
+        contract_lineage=(
+            ContractAwareArtifactLineage(
+                artifact_output_fingerprint="a" * 64,
+                instrument_snapshot_digest="b" * 64,
+                instrument_snapshot_source_ref=(
+                    "meta.data_source_registry/instrument-snapshot-test"
+                ),
+                verification_ref="meta.historical_research_artifacts/test-artifact",
+                symbol=lineage_symbol or records[0].symbol,
+                timeframe=records[0].timeframe,
+                coverage_start=records[0].ts.isoformat(),
+                coverage_end=(records[-1].ts + timedelta(hours=1)).isoformat(),
+                verified=contract_lineage_verified,
+            )
+            if include_contract_lineage
+            else None
+        ),
     )
 
 
@@ -350,7 +384,10 @@ def test_real_data_config_timestamp_defaults_to_current_utc(tmp_path: Path) -> N
     assert config.timestamp != datetime(2026, 5, 16, tzinfo=UTC)
 
 
-def test_real_data_runner_writes_recommendation_and_registry(tmp_path: Path) -> None:
+def test_real_data_runner_writes_recommendation_and_registry(
+    tmp_path: Path,
+    future_contract_lineage_verifier: None,
+) -> None:
     root = artifact_root(tmp_path)
     execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
     write_execution_cost_summary(execution_summary)
@@ -462,6 +499,22 @@ def test_real_data_runner_writes_recommendation_and_registry(tmp_path: Path) -> 
         == "development_return_series.json"
     )
     assert candidate["payload"]["holdout_status"] == "sealed_not_evaluated"
+    assert candidate["payload"]["symbol"] == "BTC-USDT-SWAP"
+    assert candidate["payload"]["timeframe"] == "1h"
+    assert candidate["payload"]["source_contract_lineage"] == {
+        "artifact_output_fingerprint": "a" * 64,
+        "instrument_snapshot_digest": "b" * 64,
+        "instrument_snapshot_source_ref": (
+            "meta.data_source_registry/instrument-snapshot-test"
+        ),
+        "schema_version": "research_contract_artifact_lineage_v1",
+        "symbol": "BTC-USDT-SWAP",
+        "timeframe": "1h",
+        "coverage_start": START.isoformat(),
+        "coverage_end": (START + timedelta(hours=12)).isoformat(),
+        "verification_ref": "meta.historical_research_artifacts/test-artifact",
+        "verified": True,
+    }
     assert (
         candidate["payload"]["holdout_content_fingerprint"]
         == development_evidence["holdout"]["content_fingerprint"]
@@ -470,9 +523,129 @@ def test_real_data_runner_writes_recommendation_and_registry(tmp_path: Path) -> 
     assert registry_entries[0]["created_by"] == "research_factory_real_data_runner"
 
 
+def test_derivative_research_input_without_contract_lineage_fails_closed(
+    tmp_path: Path,
+) -> None:
+    root = artifact_root(tmp_path)
+    result = run_research_factory_experiment(
+        experiment_config(
+            root,
+            execution_cost_summary_path=None,
+            require_execution_realism=False,
+            experiment_id="rf_unbound_derivative",
+        ),
+        data_source=FakeDataSource(load_result(include_contract_lineage=False)),
+    )
+
+    assert result.status == "failed"
+    assert result.candidate_generated is False
+    assert result.error == "derivative_research_input_contract_lineage_required"
+    assert not (root / "rf_unbound_derivative" / "candidate_artifact.json").exists()
+
+
+def test_unknown_instrument_cannot_fall_through_to_spot_research(
+    tmp_path: Path,
+) -> None:
+    root = artifact_root(tmp_path)
+    config = replace(
+        experiment_config(
+            root,
+            execution_cost_summary_path=None,
+            require_execution_realism=False,
+            experiment_id="rf_unknown_instrument",
+        ),
+        symbol="BTC-USDT-260925",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="instrument_scope_unsupported_or_unproven",
+    ):
+        run_research_factory_experiment(
+            config,
+            data_source=FakeDataSource(load_result()),
+        )
+
+    assert not (root / config.experiment_id).exists()
+
+
+def test_derivative_self_attested_lineage_cannot_authorize_without_verifier(
+    tmp_path: Path,
+) -> None:
+    root = artifact_root(tmp_path)
+    result = run_research_factory_experiment(
+        experiment_config(
+            root,
+            execution_cost_summary_path=None,
+            require_execution_realism=False,
+            experiment_id="rf_self_attested_derivative",
+        ),
+        data_source=FakeDataSource(load_result(contract_lineage_verified=True)),
+    )
+
+    assert result.status == "failed"
+    assert result.candidate_generated is False
+    assert result.error == (
+        "derivative_research_input_contract_lineage_verifier_unavailable"
+    )
+
+
+def test_derivative_research_input_rejects_lineage_for_a_different_scope(
+    tmp_path: Path,
+) -> None:
+    root = artifact_root(tmp_path)
+    result = run_research_factory_experiment(
+        experiment_config(
+            root,
+            execution_cost_summary_path=None,
+            require_execution_realism=False,
+            experiment_id="rf_mismatched_derivative_lineage",
+        ),
+        data_source=FakeDataSource(
+            load_result(lineage_symbol="ETH-USDT-SWAP")
+        ),
+    )
+
+    assert result.status == "failed"
+    assert result.candidate_generated is False
+    assert result.error == "derivative_research_input_contract_lineage_scope_mismatch"
+
+
+def test_spot_research_input_does_not_require_derivative_contract_lineage(
+    tmp_path: Path,
+) -> None:
+    root = artifact_root(tmp_path)
+    spot_records = tuple(
+        replace(record, symbol="BTC-USDT") for record in gold_records()
+    )
+    config = replace(
+        experiment_config(
+            root,
+            execution_cost_summary_path=None,
+            require_execution_realism=False,
+            experiment_id="rf_spot_without_contract_lineage",
+        ),
+        symbol="BTC-USDT",
+    )
+
+    result = run_research_factory_experiment(
+        config,
+        data_source=FakeDataSource(
+            load_result(spot_records, include_contract_lineage=False)
+        ),
+    )
+
+    assert result.status == "succeeded"
+    assert result.candidate_generated is True
+    candidate = read_json(root / config.experiment_id / "candidate_artifact.json")
+    assert candidate["payload"]["symbol"] == "BTC-USDT"
+    assert "source_contract_lineage" not in candidate["payload"]
+
+
 def test_real_data_runner_does_not_evaluate_sealed_test_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    future_contract_lineage_verifier: None,
 ) -> None:
     root = artifact_root(tmp_path)
     observed_segments: list[tuple[datetime, ...]] = []
@@ -499,7 +672,10 @@ def test_real_data_runner_does_not_evaluate_sealed_test_rows(
     assert all(not (set(segment) & test_timestamps) for segment in observed_segments)
 
 
-def test_real_data_runner_requires_train_and_valid_gates_to_pass(tmp_path: Path) -> None:
+def test_real_data_runner_requires_train_and_valid_gates_to_pass(
+    tmp_path: Path,
+    future_contract_lineage_verifier: None,
+) -> None:
     root = artifact_root(tmp_path)
     closes = (105.0, 104.0, 103.0, 102.0, 101.0, 100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0)
     records = tuple(
@@ -541,6 +717,7 @@ def test_real_data_runner_requires_train_and_valid_gates_to_pass(tmp_path: Path)
 
 def test_holdout_content_change_does_not_change_development_metrics(
     tmp_path: Path,
+    future_contract_lineage_verifier: None,
 ) -> None:
     root_a = tmp_path / "case_a" / "artifacts" / "research" / "research_factory" / "experiments"
     root_b = tmp_path / "case_b" / "artifacts" / "research" / "research_factory" / "experiments"
@@ -577,7 +754,10 @@ def test_holdout_content_change_does_not_change_development_metrics(
     )
 
 
-def test_real_data_runner_applies_research_profile_quality_thresholds(tmp_path: Path) -> None:
+def test_real_data_runner_applies_research_profile_quality_thresholds(
+    tmp_path: Path,
+    future_contract_lineage_verifier: None,
+) -> None:
     root = artifact_root(tmp_path)
     execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
     write_execution_cost_summary(execution_summary)
@@ -604,7 +784,10 @@ def test_real_data_runner_applies_research_profile_quality_thresholds(tmp_path: 
     assert any("dataset_quality" in failure for failure in evidence_bundle["failures"])
 
 
-def test_real_data_runner_profile_rejects_compatible_execution_evidence(tmp_path: Path) -> None:
+def test_real_data_runner_profile_rejects_compatible_execution_evidence(
+    tmp_path: Path,
+    future_contract_lineage_verifier: None,
+) -> None:
     root = artifact_root(tmp_path)
     execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
     write_execution_cost_summary(execution_summary)
@@ -627,7 +810,10 @@ def test_real_data_runner_profile_rejects_compatible_execution_evidence(tmp_path
     assert any("compatibility is not allowed" in failure for failure in execution_evidence["failures"])
 
 
-def test_real_data_runner_records_factor_proposal_artifact(tmp_path: Path) -> None:
+def test_real_data_runner_records_factor_proposal_artifact(
+    tmp_path: Path,
+    future_contract_lineage_verifier: None,
+) -> None:
     root = artifact_root(tmp_path)
     execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
     write_execution_cost_summary(execution_summary)
@@ -686,7 +872,10 @@ def test_real_data_runner_rejects_proposal_expression_mismatch(tmp_path: Path) -
         )
 
 
-def test_real_data_runner_skips_duplicate_from_novelty_gate(tmp_path: Path) -> None:
+def test_real_data_runner_skips_duplicate_from_novelty_gate(
+    tmp_path: Path,
+    future_contract_lineage_verifier: None,
+) -> None:
     root = artifact_root(tmp_path)
     execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
     write_execution_cost_summary(execution_summary)
@@ -730,7 +919,10 @@ def test_real_data_runner_skips_duplicate_from_novelty_gate(tmp_path: Path) -> N
     assert registry_entries[-1]["dataset_fingerprint"] == first_result.dataset_fingerprint
 
 
-def test_real_data_runner_suppresses_repeated_failed_factor_family(tmp_path: Path) -> None:
+def test_real_data_runner_suppresses_repeated_failed_factor_family(
+    tmp_path: Path,
+    future_contract_lineage_verifier: None,
+) -> None:
     root = artifact_root(tmp_path)
     execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
     write_execution_cost_summary(execution_summary)
@@ -770,7 +962,10 @@ def test_real_data_runner_suppresses_repeated_failed_factor_family(tmp_path: Pat
     assert not (experiment_dir / "candidate_artifact.json").exists()
 
 
-def test_real_data_runner_records_warn_novelty_gate_and_continues(tmp_path: Path) -> None:
+def test_real_data_runner_records_warn_novelty_gate_and_continues(
+    tmp_path: Path,
+    future_contract_lineage_verifier: None,
+) -> None:
     root = artifact_root(tmp_path)
     execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
     write_execution_cost_summary(execution_summary)
@@ -874,7 +1069,10 @@ def test_real_data_runner_writes_failure_artifact_when_gold_load_fails(tmp_path:
     assert not (experiment_dir / "candidate_artifact.json").exists()
 
 
-def test_real_data_runner_rejects_mixed_source_candle_versions(tmp_path: Path) -> None:
+def test_real_data_runner_rejects_mixed_source_candle_versions(
+    tmp_path: Path,
+    future_contract_lineage_verifier: None,
+) -> None:
     root = artifact_root(tmp_path)
     execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
     write_execution_cost_summary(execution_summary)
@@ -909,7 +1107,10 @@ def test_real_data_runner_rejects_mixed_source_candle_versions(tmp_path: Path) -
     assert not (experiment_dir / "candidate_artifact.json").exists()
 
 
-def test_real_data_runner_rejects_mixed_build_run_ids(tmp_path: Path) -> None:
+def test_real_data_runner_rejects_mixed_build_run_ids(
+    tmp_path: Path,
+    future_contract_lineage_verifier: None,
+) -> None:
     root = artifact_root(tmp_path)
     execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
     write_execution_cost_summary(execution_summary)
@@ -943,7 +1144,10 @@ def test_real_data_runner_rejects_mixed_build_run_ids(tmp_path: Path) -> None:
     assert not (experiment_dir / "candidate_artifact.json").exists()
 
 
-def test_real_data_runner_rejects_missing_funding_alignment(tmp_path: Path) -> None:
+def test_real_data_runner_rejects_missing_funding_alignment(
+    tmp_path: Path,
+    future_contract_lineage_verifier: None,
+) -> None:
     root = artifact_root(tmp_path)
     execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
     write_execution_cost_summary(execution_summary)
@@ -970,7 +1174,10 @@ def test_real_data_runner_rejects_missing_funding_alignment(tmp_path: Path) -> N
     assert not (experiment_dir / "candidate_artifact.json").exists()
 
 
-def test_real_data_runner_rejects_execution_summary_missing_contract_fields(tmp_path: Path) -> None:
+def test_real_data_runner_rejects_execution_summary_missing_contract_fields(
+    tmp_path: Path,
+    future_contract_lineage_verifier: None,
+) -> None:
     root = artifact_root(tmp_path)
     execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
     write_execution_cost_summary(execution_summary)
@@ -1003,7 +1210,10 @@ def test_real_data_runner_rejects_execution_summary_missing_contract_fields(tmp_
     assert not (experiment_dir / "candidate_artifact.json").exists()
 
 
-def test_real_data_runner_rejects_execution_summary_covering_sealed_test(tmp_path: Path) -> None:
+def test_real_data_runner_rejects_execution_summary_covering_sealed_test(
+    tmp_path: Path,
+    future_contract_lineage_verifier: None,
+) -> None:
     root = artifact_root(tmp_path)
     execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
     write_execution_cost_summary(execution_summary)
@@ -1033,7 +1243,10 @@ def test_real_data_runner_rejects_execution_summary_covering_sealed_test(tmp_pat
     assert not (experiment_dir / "candidate_artifact.json").exists()
 
 
-def test_real_data_runner_rejects_execution_summary_for_test_segment(tmp_path: Path) -> None:
+def test_real_data_runner_rejects_execution_summary_for_test_segment(
+    tmp_path: Path,
+    future_contract_lineage_verifier: None,
+) -> None:
     root = artifact_root(tmp_path)
     execution_summary = root.parent / "phase4" / "execution_cost_summary.json"
     write_execution_cost_summary(execution_summary)
@@ -1059,7 +1272,10 @@ def test_real_data_runner_rejects_execution_summary_for_test_segment(tmp_path: P
     assert not (experiment_dir / "candidate_artifact.json").exists()
 
 
-def test_real_data_runner_rejects_unsafe_execution_summary_path(tmp_path: Path) -> None:
+def test_real_data_runner_rejects_unsafe_execution_summary_path(
+    tmp_path: Path,
+    future_contract_lineage_verifier: None,
+) -> None:
     root = artifact_root(tmp_path)
     unsafe_path = tmp_path / "artifacts" / "research" / "live_execution_cost_summary.json"
     write_execution_cost_summary(unsafe_path)
@@ -1082,7 +1298,10 @@ def test_real_data_runner_rejects_unsafe_execution_summary_path(tmp_path: Path) 
     assert not (experiment_dir / "execution_cost_summary.json").exists()
 
 
-def test_real_data_runner_rejects_execution_summary_outside_research_artifacts(tmp_path: Path) -> None:
+def test_real_data_runner_rejects_execution_summary_outside_research_artifacts(
+    tmp_path: Path,
+    future_contract_lineage_verifier: None,
+) -> None:
     root = artifact_root(tmp_path)
     outside_path = tmp_path / "execution_cost_summary.json"
     write_execution_cost_summary(outside_path)
@@ -1104,6 +1323,7 @@ def test_real_data_runner_rejects_execution_summary_outside_research_artifacts(t
 
 def test_real_data_runner_rejects_execution_summary_outside_configured_research_root(
     tmp_path: Path,
+    future_contract_lineage_verifier: None,
 ) -> None:
     root = artifact_root(tmp_path)
     other_research_root = tmp_path / "other" / "artifacts" / "research"

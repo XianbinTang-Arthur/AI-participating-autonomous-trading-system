@@ -1,7 +1,8 @@
 # AATS Task 与 SOW 历史索引
 
 > 文档状态：任务与交付历史证据索引（截至 2026-08-27）
-> 最后核对：2026-08-27（Research OS G0 bootstrap 与 RDP 衍生品合同 P0-A 代码切片证据已登记；其余历史状态边界不变）
+> 最后核对：2026-08-27（Research OS G0 bootstrap、RDP 衍生品合同 P0-A 与
+> P0-B LF-A 本地静态验收证据已登记；其余历史状态边界不变）
 
 本目录保存任务书、SOW、阶段设计、实施记录和交付报告。它是工程可追溯性材料，不是当前系统说明；“完成”“通过”“上线”等措辞只对文件记录的基线和验证范围成立。
 
@@ -43,8 +44,12 @@
 - [`rdp_derivatives_contract_arithmetic_p0_sow_2026_08_27.md`](rdp_derivatives_contract_arithmetic_p0_sow_2026_08_27.md)：
   现行 LF-A/P0 实施任务书；统一 spot/linear/inverse 的张数、base quantity、quote notional、
   fee 与 PnL 语义，绑定版本化 instrument contract，并使旧错误产物失格后重建。P0-A 代码切片
-  已通过单元验证和独立复审，但 WSL2 集成/运行验证及 P0-B 至 P0-F 均未验收，不能据此声明
-  历史收益证据已修复。
+  已通过单元验证和独立复审；P0-B LF-A 已完成本地静态验收，增加 snapshot/source/bundle 绑定并对不可验证
+  Gold、资本资格与完整 campaign 执行失败关闭，但 Stage 20、不可变 Silver、DB-backed verifier、
+  WSL2 集成/运行验证及 P0-C 至 P0-F 仍未验收，不能据此声明历史收益证据已修复。
+- [`rdp_strict_instrument_scope_p0_sow_2026_08_27.md`](rdp_strict_instrument_scope_p0_sow_2026_08_27.md)：
+  记录 BTC/ETH spot/swap 显式支持集合及统一失败关闭规则；未知币对、伪 `-SWAP` 与 FUTURES
+  不再因字符串形状进入 lineage、Gold、replay、capital eligibility、治理 API 或历史导入。
 - [`rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md`](rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md)：历史数据恢复、持续采集、不可变归档、双准入与完整模拟 RDP 的实施台账。工程实现、标准 derivatives 部署和 NO-GO 运行验证已回填；官方 1 日样本、随机归档恢复、故障注入、跨日采集与签名 UI 仍明确未完成。
 
 现行操作入口是 [`../operations/rdp_historical_data_recovery_runbook.md`](../operations/rdp_historical_data_recovery_runbook.md)，当前收益/上线门结论是 [`../testing/profit_readiness_acceptance.md`](../testing/profit_readiness_acceptance.md)。任务书不替代下一次运行前的新覆盖审计和健康检查。

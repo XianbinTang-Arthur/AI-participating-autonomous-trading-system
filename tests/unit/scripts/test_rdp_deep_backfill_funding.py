@@ -12,6 +12,45 @@ from scripts.rdp_deep_backfill_funding import (
 )
 
 
+@pytest.mark.parametrize("symbol", ("DOGE-USDT-SWAP", "BTC-USDT-FUTURES"))
+def test_unproven_funding_scope_fails_before_settings_database_or_network(
+    symbol: str,
+) -> None:
+    with patch(
+        "aats.data_platform.config.get_settings",
+        side_effect=AssertionError("settings must not load"),
+    ), patch(
+        "scripts.rdp_deep_backfill_funding._fetch_funding_page",
+        side_effect=AssertionError("network must not run"),
+    ), pytest.raises(
+        ValueError,
+        match="instrument_scope_unsupported_or_unproven",
+    ):
+        deep_backfill_funding(
+            symbol,
+            datetime(2026, 8, 1, tzinfo=UTC),
+            dry_run=True,
+        )
+
+
+def test_funding_cli_rejects_unproven_scope_before_worker() -> None:
+    with patch(
+        "scripts.rdp_deep_backfill_funding.deep_backfill_funding",
+        side_effect=AssertionError("worker must not run"),
+    ):
+        result = main(
+            [
+                "--symbols",
+                "DOGE-USDT-SWAP",
+                "--target-start",
+                "2026-08-25",
+                "--dry-run",
+            ]
+        )
+
+    assert result == 2
+
+
 def test_dry_run_uses_observed_settlement_times_without_fixed_cadence() -> None:
     start = datetime(2026, 8, 1, tzinfo=UTC)
     end = datetime(2026, 8, 2, tzinfo=UTC)

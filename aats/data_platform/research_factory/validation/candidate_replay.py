@@ -15,7 +15,7 @@ from aats.data_platform.research_factory.validation.capital_eligibility import (
 )
 
 
-CLASSIFIER_VERSION = "capital_eligibility_classifier_v1"
+CLASSIFIER_VERSION = "capital_eligibility_classifier_v2"
 
 
 @dataclass(frozen=True, slots=True)

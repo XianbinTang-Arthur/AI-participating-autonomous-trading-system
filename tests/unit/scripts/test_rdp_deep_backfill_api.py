@@ -12,6 +12,28 @@ START = datetime(2026, 5, 16, tzinfo=UTC)
 END = datetime(2026, 5, 28, tzinfo=UTC)
 
 
+@pytest.mark.parametrize("symbol", ("DOGE-USDT-SWAP", "BTC-USDT-FUTURES"))
+def test_unproven_candle_scope_fails_before_settings_database_or_network(
+    symbol: str,
+) -> None:
+    with patch(
+        "aats.data_platform.config.get_settings",
+        side_effect=AssertionError("settings must not load"),
+    ), patch(
+        "scripts.rdp_deep_backfill_api._fetch_candles_page",
+        side_effect=AssertionError("network must not run"),
+    ), pytest.raises(
+        ValueError,
+        match="instrument_scope_unsupported_or_unproven",
+    ):
+        deep_backfill_one(
+            symbol,
+            "15m",
+            START,
+            dry_run=True,
+        )
+
+
 def test_refresh_existing_requires_bounded_aware_window() -> None:
     with patch("aats.data_platform.config.get_settings", return_value=MagicMock()):
         with pytest.raises(ValueError, match="refresh_end is required"):

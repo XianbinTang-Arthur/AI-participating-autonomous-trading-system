@@ -3,6 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from contextlib import contextmanager
+from unittest.mock import patch
+
+import pytest
 
 from scripts.rdp_import_official_history import (
     _deduplicate_gaps,
@@ -74,6 +78,143 @@ def test_official_import_valid_dry_run_has_no_database_or_network_side_effect(
 
     assert result == 2
     assert not raw.exists()
+
+
+def test_official_import_keeps_explicit_supported_spot_scope(tmp_path: Path) -> None:
+    raw = (tmp_path / "raw").resolve()
+
+    result = main(
+        [
+            "trade-rest",
+            "--symbol",
+            "ETH-USDT",
+            "--start",
+            "2026-08-01T00:00:00Z",
+            "--end",
+            "2026-08-02T00:00:00Z",
+            "--raw-archive-dir",
+            str(raw),
+        ]
+    )
+
+    assert result == 2
+    assert not raw.exists()
+
+
+def test_official_import_rejects_unproven_scope_before_database_or_network(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    raw = (tmp_path / "raw").resolve()
+
+    with patch(
+        "scripts.rdp_import_official_history.get_session",
+        side_effect=AssertionError("database must not be opened"),
+    ):
+        result = main(
+            [
+                "trade-rest",
+                "--symbol",
+                "DOGE-USDT-SWAP",
+                "--start",
+                "2026-08-01T00:00:00Z",
+                "--end",
+                "2026-08-02T00:00:00Z",
+                "--raw-archive-dir",
+                str(raw),
+                "--apply",
+                "--confirm",
+            ]
+        )
+
+    assert result == 4
+    assert "instrument_scope_unsupported_or_unproven" in capsys.readouterr().err
+    assert not raw.exists()
+
+
+def test_official_mark_rest_rejects_supported_spot_before_side_effect(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    raw = (tmp_path / "raw").resolve()
+
+    with (
+        patch(
+            "scripts.rdp_import_official_history.get_session",
+            side_effect=AssertionError("database must not be opened"),
+        ),
+        patch(
+            "scripts.rdp_import_official_history.httpx.Client",
+            side_effect=AssertionError("network client must not be opened"),
+        ),
+    ):
+        result = main(
+            [
+                "mark-rest",
+                "--symbol",
+                "ETH-USDT",
+                "--start",
+                "2026-08-01T00:00:00Z",
+                "--end",
+                "2026-08-02T00:00:00Z",
+                "--raw-archive-dir",
+                str(raw),
+                "--timeframe",
+                "1H",
+                "--apply",
+                "--confirm",
+            ]
+        )
+
+    assert result == 4
+    assert "instrument_scope_unsupported_or_unproven" in capsys.readouterr().err
+    assert not raw.exists()
+
+
+@pytest.mark.parametrize(
+    ("symbol", "expected_instrument_type"),
+    (("ETH-USDT", "spot"), ("ETH-USDT-SWAP", "swap")),
+)
+def test_official_import_persists_exact_lowercase_instrument_type(
+    tmp_path: Path,
+    symbol: str,
+    expected_instrument_type: str,
+) -> None:
+    captured: dict[str, object] = {}
+
+    @contextmanager
+    def fake_session():
+        yield object()
+
+    def capture_ingest_run(_session, **kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop_after_ingest_metadata")
+
+    with (
+        patch("scripts.rdp_import_official_history.get_session", fake_session),
+        patch(
+            "scripts.rdp_import_official_history.create_ingest_run",
+            side_effect=capture_ingest_run,
+        ),
+    ):
+        result = main(
+            [
+                "trade-rest",
+                "--symbol",
+                symbol,
+                "--start",
+                "2026-08-01T00:00:00Z",
+                "--end",
+                "2026-08-02T00:00:00Z",
+                "--raw-archive-dir",
+                str((tmp_path / "raw").resolve()),
+                "--apply",
+                "--confirm",
+            ]
+        )
+
+    assert result == 3
+    assert captured["instrument_type"] == expected_instrument_type
 
 
 def test_official_trade_file_dry_run_rejects_missing_primary_input(

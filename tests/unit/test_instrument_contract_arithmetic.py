@@ -5,6 +5,7 @@ from decimal import Decimal, localcontext
 import pytest
 
 from aats.domain.instrument_contract import (
+    InstrumentContract,
     InstrumentContractError,
     instrument_contract_from_metadata,
 )
@@ -355,6 +356,61 @@ def test_symbol_currency_and_instrument_identity_mismatch_fail_closed() -> None:
         instrument_contract_from_metadata(wrong_currency)
     with pytest.raises(InstrumentContractError, match="instrument_identity_mismatch"):
         instrument_contract_from_metadata(wrong_id)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"base_currency": "ETH"},
+        {"quote_currency": "USD"},
+        {"instrument_type": "FUTURES"},
+    ],
+)
+def test_direct_contract_construction_cannot_bypass_symbol_identity(
+    overrides: dict[str, str],
+) -> None:
+    values = {
+        "symbol": "BTC-USDT-SWAP",
+        "instrument_type": "SWAP",
+        "contract_type": "linear",
+        "base_currency": "BTC",
+        "quote_currency": "USDT",
+        "settle_currency": "USDT",
+        "contract_value": Decimal("0.01"),
+        "contract_multiplier": Decimal("1"),
+        "contract_value_currency": "BTC",
+        "lot_size": Decimal("1"),
+        "min_size": Decimal("1"),
+        "tick_size": Decimal("0.1"),
+    }
+    values.update(overrides)
+
+    with pytest.raises(InstrumentContractError, match="instrument_identity_mismatch"):
+        InstrumentContract(**values)
+
+
+@pytest.mark.parametrize("instrument_type", ["", "OPTION", "UNKNOWN"])
+def test_direct_spot_contract_requires_explicit_spot_quantity_type(
+    instrument_type: str,
+) -> None:
+    with pytest.raises(
+        InstrumentContractError,
+        match="contract_type_unknown_or_inconsistent",
+    ):
+        InstrumentContract(
+            symbol="BTC-USDT",
+            instrument_type=instrument_type,
+            contract_type="spot",
+            base_currency="BTC",
+            quote_currency="USDT",
+            settle_currency="USDT",
+            contract_value=Decimal("1"),
+            contract_multiplier=Decimal("1"),
+            contract_value_currency="BTC",
+            lot_size=Decimal("0.0001"),
+            min_size=Decimal("0.0001"),
+            tick_size=Decimal("0.1"),
+        )
 
 
 def test_missing_contract_value_or_multiplier_is_not_defaulted() -> None:

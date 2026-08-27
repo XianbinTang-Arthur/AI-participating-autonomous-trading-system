@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""执行已登记的官方历史恢复 campaign，并在每个阶段写入 checkpoint。"""
+"""历史 campaign 兼容入口；候选执行保持失败关闭。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign-id", required=True)
     parser.add_argument("--storage-root", required=True, type=Path)
-    parser.add_argument("--resume-running", action="store_true")
+    parser.add_argument(
+        "--resume-running",
+        action="store_true",
+        help="兼容参数；持久 fencing 完成前不会恢复执行",
+    )
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--confirm", action="store_true")
     args = parser.parse_args(argv)
@@ -38,6 +42,7 @@ def main(argv: list[str] | None = None) -> int:
                     "dry_run": True,
                     "campaign_id": args.campaign_id,
                     "storage_root": str(args.storage_root.expanduser().resolve()),
+                    "execution_available": False,
                     "live_side_effects": False,
                     "private_account_access": False,
                 },
@@ -54,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
             resume_running=args.resume_running,
         )
     except Exception as exc:
-        print(f"ERROR: {type(exc).__name__}", file=sys.stderr)
+        print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 3
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
     return 0

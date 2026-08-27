@@ -10,6 +10,11 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Mapping, Sequence
 
+from aats.domain.instrument_contract_snapshot import (
+    InstrumentContractSnapshot,
+    parse_instrument_contract_snapshot,
+)
+
 
 class SourceKind(StrEnum):
     AATS_WS_CAPTURE = "aats_ws_capture"
@@ -58,6 +63,7 @@ class DataSourceRecord:
     gap_manifest: Mapping[str, Any]
     license_usage_note: str
     truth_tier: TruthTier
+    instrument_contract_snapshot: InstrumentContractSnapshot | Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -118,13 +124,27 @@ class DataSourceRecord:
         ).hexdigest()
         if self.raw_sha256 != expected_aggregate:
             raise ValueError("source_raw_sha256_aggregate_mismatch")
+        if self.instrument_contract_snapshot is not None:
+            try:
+                snapshot = parse_instrument_contract_snapshot(
+                    self.instrument_contract_snapshot
+                )
+            except ValueError as exc:
+                raise ValueError(str(exc)) from exc
+            object.__setattr__(self, "instrument_contract_snapshot", snapshot)
 
     def canonical_dict(self) -> dict[str, Any]:
         payload = asdict(self)
+        snapshot = self.instrument_contract_snapshot
+        payload.pop("instrument_contract_snapshot", None)
         payload["source_kind"] = self.source_kind.value
         payload["truth_tier"] = self.truth_tier.value
         for key in ("retrieved_at", "coverage_start", "coverage_end"):
             payload[key] = _utc_iso(getattr(self, key))
+        if snapshot is not None:
+            if not isinstance(snapshot, InstrumentContractSnapshot):  # pragma: no cover
+                raise ValueError("instrument_snapshot_shape_invalid")
+            payload["instrument_contract_snapshot"] = snapshot.to_dict()
         return payload
 
 

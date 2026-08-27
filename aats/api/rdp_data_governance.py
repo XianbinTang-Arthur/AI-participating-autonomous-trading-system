@@ -16,11 +16,204 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from aats.data_platform.db import get_engine
+from aats.domain.instrument_scope import (
+    INSTRUMENT_SCOPE_UNSUPPORTED_REASON,
+    SUPPORTED_SYMBOLS_SPOT,
+    SUPPORTED_SYMBOLS_SWAP,
+)
 
 
 log = logging.getLogger(__name__)
 SCHEMA_VERSION = "rdp.data_governance.v1"
 _SNAPSHOT_CACHE_SECONDS = 30
+_CONTRACT_BINDING_POLICY_VERSION = "instrument-contract-binding-v1"
+_CONTRACT_ELIGIBILITY_SQL = """
+WITH bundle_contract_state AS (
+    SELECT
+        status,
+        eligibility_report,
+        component_sources,
+        eligibility_report -> 'instrument_contract_binding' AS binding,
+        CASE
+            WHEN jsonb_typeof(component_sources) = 'array' THEN
+                jsonb_array_length(component_sources) > 0
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(component_sources) AS component(value)
+                    WHERE jsonb_typeof(component.value) <> 'object'
+                       OR NULLIF(BTRIM(component.value ->> 'symbol'), '') IS NULL
+                )
+            ELSE FALSE
+        END AS components_well_formed,
+        CASE
+            WHEN jsonb_typeof(component_sources) = 'array' THEN
+                jsonb_array_length(component_sources) > 0
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(component_sources) AS component(value)
+                    WHERE UPPER(BTRIM(COALESCE(component.value ->> 'symbol', '')))
+                          <> ALL(CAST(:supported_spot_symbols AS TEXT[]))
+                )
+            ELSE FALSE
+        END AS all_spot_symbols,
+        CASE
+            WHEN jsonb_typeof(component_sources) = 'array' THEN
+                jsonb_array_length(component_sources) > 0
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(component_sources) AS component(value)
+                    WHERE UPPER(BTRIM(COALESCE(component.value ->> 'symbol', '')))
+                          <> ALL(CAST(:supported_swap_symbols AS TEXT[]))
+                )
+            ELSE FALSE
+        END AS all_swap_symbols
+    FROM meta.dataset_bundles
+), classified AS (
+    SELECT
+        *,
+        COALESCE(
+            status = 'ELIGIBLE'
+            AND components_well_formed
+            AND jsonb_typeof(binding) = 'object'
+            AND binding ->> 'policy_version' = :binding_policy_version
+            AND eligibility_report -> 'eligible' = 'true'::jsonb
+            AND eligibility_report -> 'reason_codes' = '[]'::jsonb
+            AND binding -> 'eligible' = 'true'::jsonb
+            AND binding -> 'reason_codes' = '[]'::jsonb
+            AND binding ->> 'evidence_fingerprint' ~ '^[0-9a-f]{64}$'
+            AND (
+                (
+                    binding -> 'required' = 'false'::jsonb
+                    AND all_spot_symbols
+                )
+                OR (
+                    binding -> 'required' = 'true'::jsonb
+                    AND all_swap_symbols
+                    AND binding ->> 'snapshot_digest' ~ '^[0-9a-f]{64}$'
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM jsonb_array_elements(component_sources) AS component(value)
+                        WHERE (component.value ->> 'instrument_snapshot_digest')
+                                  IS DISTINCT FROM (binding ->> 'snapshot_digest')
+                           OR COALESCE(
+                                  component.value ->> 'instrument_snapshot_source_id',
+                                  ''
+                              ) !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+                           OR jsonb_typeof(
+                                  component.value
+                                  -> 'provenance'
+                                  -> 'instrument_contract_snapshot'
+                              ) <> 'object'
+                           OR (
+                                  component.value
+                                  -> 'provenance'
+                                  -> 'instrument_contract_snapshot'
+                                  ->> 'snapshot_digest'
+                              ) IS DISTINCT FROM (binding ->> 'snapshot_digest')
+                           OR (
+                                  component.value
+                                  -> 'provenance'
+                                  -> 'instrument_contract_snapshot'
+                                  -> 'evidence'
+                                  ->> 'kind'
+                              ) IS DISTINCT FROM 'observed_forward'
+                           OR (
+                                  component.value
+                                  -> 'provenance'
+                                  -> 'instrument_contract_snapshot'
+                                  ->> 'schema'
+                              ) IS DISTINCT FROM
+                                  'aats.instrument_contract_snapshot.v1'
+                           OR (
+                                  component.value
+                                  -> 'provenance'
+                                  -> 'instrument_contract_snapshot'
+                                  ->> 'arithmetic_policy_id'
+                              ) IS DISTINCT FROM 'instrument-arithmetic/v1'
+                           OR (
+                                  component.value
+                                  -> 'provenance'
+                                  -> 'instrument_contract_snapshot'
+                                  ->> 'venue'
+                              ) IS DISTINCT FROM 'OKX'
+                           OR (
+                                  component.value
+                                  -> 'provenance'
+                                  -> 'instrument_contract_snapshot'
+                                  -> 'instrument'
+                                  ->> 'symbol'
+                              ) IS DISTINCT FROM (component.value ->> 'symbol')
+                           OR NOT EXISTS (
+                                SELECT 1
+                                FROM meta.data_source_registry AS registry
+                                WHERE registry.source_id = CASE
+                                          WHEN COALESCE(
+                                              component.value
+                                              ->> 'instrument_snapshot_source_id',
+                                              ''
+                                          ) !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+                                              THEN NULL
+                                          ELSE (
+                                              component.value
+                                              ->> 'instrument_snapshot_source_id'
+                                          )::uuid
+                                      END
+                                  AND registry.source_kind = 'okx_rest'
+                                  AND registry.provider = 'OKX'
+                                  AND registry.truth_tier = 'authoritative_external'
+                                  AND registry.source_locator = (
+                                      component.value
+                                      -> 'provenance'
+                                      -> 'instrument_contract_snapshot'
+                                      -> 'evidence'
+                                      ->> 'source_locator'
+                                  )
+                                  AND registry.schema_version = (
+                                      component.value
+                                      -> 'provenance'
+                                      -> 'instrument_contract_snapshot'
+                                      -> 'evidence'
+                                      ->> 'source_schema'
+                                  )
+                                  AND registry.source_metadata ->> 'record_type' =
+                                      'instrument_contract_snapshot_v1'
+                                  AND registry.source_metadata -> 'snapshot' =
+                                      component.value
+                                      -> 'provenance'
+                                      -> 'instrument_contract_snapshot'
+                            )
+                    )
+                )
+            ),
+            FALSE
+        ) AS contract_aware_eligible
+    FROM bundle_contract_state
+)
+SELECT
+    COUNT(*) AS bundle_total,
+    COUNT(*) FILTER (WHERE status = 'ELIGIBLE') AS raw_source_eligible,
+    COUNT(*) FILTER (WHERE contract_aware_eligible) AS contract_aware_eligible,
+    COUNT(*) FILTER (
+        WHERE status = 'ELIGIBLE'
+          AND jsonb_typeof(binding) IS DISTINCT FROM 'object'
+    ) AS legacy_unbound,
+    COUNT(*) FILTER (
+        WHERE status = 'ELIGIBLE'
+          AND all_swap_symbols
+          AND jsonb_typeof(binding) IS DISTINCT FROM 'object'
+    ) AS legacy_derivative_unbound,
+    COUNT(*) FILTER (
+        WHERE status = 'ELIGIBLE'
+          AND NOT all_spot_symbols
+          AND NOT all_swap_symbols
+    ) AS unsupported_instrument_scope,
+    COUNT(*) FILTER (
+        WHERE status = 'ELIGIBLE'
+          AND jsonb_typeof(binding) = 'object'
+          AND NOT contract_aware_eligible
+    ) AS contract_binding_failed
+FROM classified
+"""
 
 
 def build_data_governance_snapshot(root: Path) -> dict[str, Any]:
@@ -136,16 +329,21 @@ def _database_projection(root: Path | None = None) -> dict[str, Any]:
                     connection.execute(
                         text("SELECT set_config('statement_timeout', '3000ms', true)")
                     )
+                eligibility = _eligibility(connection)
                 output = {
                     "status": "available",
                     "historical_imports": _historical_imports(connection),
                     "live_collection": _live_collection(connection),
                     "archives": _archives(connection),
-                    "eligibility": _eligibility(connection),
+                    "eligibility": eligibility,
                     "rebuilds": _rebuilds(connection),
                     "sources": _sources(connection),
                     "gaps": _gaps(connection),
-                    "monitoring": _monitoring(connection, root),
+                    "monitoring": _monitoring(
+                        connection,
+                        root,
+                        eligibility=eligibility,
+                    ),
                 }
             finally:
                 transaction.rollback()
@@ -219,12 +417,103 @@ def _eligibility(connection) -> dict[str, Any]:
             "ORDER BY eligibility_mode, status"
         )
     ).mappings().all()
+    aggregate = connection.execute(
+        text(_CONTRACT_ELIGIBILITY_SQL),
+        {
+            "binding_policy_version": _CONTRACT_BINDING_POLICY_VERSION,
+            "supported_spot_symbols": list(SUPPORTED_SYMBOLS_SPOT),
+            "supported_swap_symbols": list(SUPPORTED_SYMBOLS_SWAP),
+        },
+    ).mappings().one()
+    bundle_count = int(aggregate["bundle_total"] or 0)
+    raw_eligible = int(aggregate["raw_source_eligible"] or 0)
+    contract_eligible = int(aggregate["contract_aware_eligible"] or 0)
+    legacy_unbound = int(aggregate["legacy_unbound"] or 0)
+    derivative_unbound = int(aggregate["legacy_derivative_unbound"] or 0)
+    unsupported_scope = int(aggregate.get("unsupported_instrument_scope") or 0)
+    binding_failed = int(aggregate["contract_binding_failed"] or 0)
+    raw_eligible_but_contract_blocked = max(raw_eligible - contract_eligible, 0)
+
+    reason_codes: list[str] = []
+    if not bundle_count:
+        status = "unknown"
+        reason_codes.append("dataset_bundle_evidence_missing")
+    elif raw_eligible_but_contract_blocked:
+        status = "blocked"
+        if unsupported_scope:
+            reason_codes.append(INSTRUMENT_SCOPE_UNSUPPORTED_REASON)
+        if derivative_unbound:
+            reason_codes.append("legacy_derivative_contract_metadata_unbound")
+        if legacy_unbound:
+            reason_codes.append("instrument_contract_binding_report_missing")
+        if binding_failed:
+            reason_codes.append("instrument_contract_binding_failed")
+    elif contract_eligible:
+        status = "available"
+    else:
+        status = "blocked"
+        reason_codes.append("no_contract_aware_eligible_bundle")
+
+    raw_ratio = raw_eligible / bundle_count if bundle_count else None
+    contract_ratio = contract_eligible / bundle_count if bundle_count else None
     return {
-        "status": "available",
+        "status": status,
+        "reason_codes": reason_codes,
         "states": [_safe_row(row) for row in rows],
-        "bundle_count": sum(int(row["bundle_count"]) for row in rows),
-        "next_action": "只让具备来源、覆盖、因果和校验和证据的 bundle 进入研究",
+        "bundle_count": bundle_count,
+        "raw_source_eligible_bundle_count": raw_eligible,
+        "contract_aware_eligible_bundle_count": contract_eligible,
+        "research_usable": False,
+        "eligibility_scope": "dataset_bundle_only",
+        "raw_source": {
+            "status": "available",
+            "eligible_bundle_count": raw_eligible,
+            "ineligible_bundle_count": max(bundle_count - raw_eligible, 0),
+            "eligibility_ratio": raw_ratio,
+            "supports_monetary_research": False,
+            "meaning": "仅证明既有来源、覆盖、因果与校验和资格，不证明衍生品金额单位正确",
+        },
+        "contract_aware": {
+            "status": status,
+            "policy_version": _CONTRACT_BINDING_POLICY_VERSION,
+            "research_usable": False,
+            "contract_bound_bundle_available": (
+                status == "available" and contract_eligible > 0
+            ),
+            "supports_monetary_research": False,
+            "eligible_bundle_count": contract_eligible,
+            "blocked_bundle_count": max(bundle_count - contract_eligible, 0),
+            "raw_eligible_but_contract_blocked_count": (
+                raw_eligible_but_contract_blocked
+            ),
+            "legacy_unbound_bundle_count": legacy_unbound,
+            "legacy_derivative_unbound_bundle_count": derivative_unbound,
+            "unsupported_instrument_scope_bundle_count": unsupported_scope,
+            "binding_failed_bundle_count": binding_failed,
+            "eligibility_ratio": contract_ratio,
+            "reason_codes": reason_codes,
+        },
+        "next_action": _eligibility_next_action(
+            status=status,
+            derivative_unbound=derivative_unbound,
+        ),
     }
+
+
+def _eligibility_next_action(*, status: str, derivative_unbound: int) -> str:
+    if derivative_unbound:
+        return (
+            "旧 ELIGIBLE 只代表来源/覆盖资格；衍生品必须绑定可校验的 "
+            "instrument snapshot 后按新版本重建"
+        )
+    if status == "blocked":
+        return "修复合约绑定或基础资格失败后，重新生成 bundle；禁止沿用旧收益结论"
+    if status == "unknown":
+        return "生成可验证的 bundle，并分别核对来源资格与合约感知资格"
+    return (
+        "contract-aware eligible bundle 仅可进入后续受控重建；"
+        "完成下游金额与 artifact 门禁前仍不得形成收益结论"
+    )
 
 
 def _rebuilds(connection) -> dict[str, Any]:
@@ -240,7 +529,7 @@ def _rebuilds(connection) -> dict[str, Any]:
         "status": "available",
         "recent": [_safe_row(row) for row in rows],
         "total_recent": len(rows),
-        "next_action": "失败运行保持证据；仅从 ELIGIBLE bundle 重建",
+        "next_action": "失败运行保持证据；仅从 contract-aware eligible bundle 重建",
     }
 
 
@@ -274,7 +563,12 @@ def _gaps(connection) -> dict[str, Any]:
     }
 
 
-def _monitoring(connection, root: Path | None) -> dict[str, Any]:
+def _monitoring(
+    connection,
+    root: Path | None,
+    *,
+    eligibility: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     continuity = connection.execute(
         text(
             "SELECT collector, channel, symbol, MAX(event_ts) AS latest_event_ts, "
@@ -292,9 +586,7 @@ def _monitoring(connection, root: Path | None) -> dict[str, Any]:
             "(SELECT COUNT(*) FROM meta.data_gap_records WHERE status IN ('OPEN','CLASSIFIED')) AS open_gaps, "
             "(SELECT COUNT(*) FROM meta.archive_partitions WHERE state IN ('DISCOVERED','ARCHIVING')) AS archive_backlog, "
             "(SELECT COUNT(*) FROM meta.archive_partitions WHERE state = 'FAILED') AS archive_failures, "
-            "(SELECT COUNT(*) FROM meta.data_rebuild_runs WHERE status = 'FAILED') AS rebuild_failures, "
-            "(SELECT COUNT(*) FROM meta.dataset_bundles) AS bundle_total, "
-            "(SELECT COUNT(*) FROM meta.dataset_bundles WHERE status = 'ELIGIBLE') AS bundle_eligible"
+            "(SELECT COUNT(*) FROM meta.data_rebuild_runs WHERE status = 'FAILED') AS rebuild_failures"
         )
     ).mappings().one()
     alerts: list[dict[str, str]] = []
@@ -363,11 +655,48 @@ def _monitoring(connection, root: Path | None) -> dict[str, Any]:
                 )
             )
 
-    bundle_total = int(aggregate["bundle_total"] or 0)
-    bundle_eligible = int(aggregate["bundle_eligible"] or 0)
-    eligibility_ratio = bundle_eligible / bundle_total if bundle_total else None
-    if bundle_total and bundle_eligible < bundle_total:
+    eligibility_view = eligibility or _eligibility(connection)
+    bundle_total = int(eligibility_view.get("bundle_count") or 0)
+    raw_view = eligibility_view.get("raw_source")
+    contract_view = eligibility_view.get("contract_aware")
+    raw_view = raw_view if isinstance(raw_view, dict) else {}
+    contract_view = contract_view if isinstance(contract_view, dict) else {}
+    raw_eligible = int(raw_view.get("eligible_bundle_count") or 0)
+    raw_ratio = raw_view.get("eligibility_ratio")
+    contract_ratio = contract_view.get("eligibility_ratio")
+    derivative_unbound = int(
+        contract_view.get("legacy_derivative_unbound_bundle_count") or 0
+    )
+    binding_failed = int(contract_view.get("binding_failed_bundle_count") or 0)
+    raw_contract_blocked = int(
+        contract_view.get("raw_eligible_but_contract_blocked_count") or 0
+    )
+    if bundle_total and raw_eligible < bundle_total:
         alerts.append(_monitor_alert("bundle_ineligible", "warning", "部分历史 bundle 未通过资格门"))
+    if derivative_unbound:
+        alerts.append(
+            _monitor_alert(
+                "derivative_bundle_contract_metadata_unbound",
+                "critical",
+                "旧衍生品 bundle 缺少可校验的 instrument snapshot，禁止用于金额、损益或收益结论",
+            )
+        )
+    elif binding_failed:
+        alerts.append(
+            _monitor_alert(
+                "bundle_contract_binding_failed",
+                "critical",
+                "bundle 合约快照、摘要或来源锚点校验失败，禁止用于研究结论",
+            )
+        )
+    elif raw_contract_blocked:
+        alerts.append(
+            _monitor_alert(
+                "bundle_contract_binding_blocked",
+                "warning",
+                "部分来源资格通过的 bundle 未通过合约感知资格门",
+            )
+        )
     severities = {item["severity"] for item in alerts}
     status = "critical" if "critical" in severities else "warning" if alerts else "healthy"
     return {
@@ -377,7 +706,8 @@ def _monitoring(connection, root: Path | None) -> dict[str, Any]:
         "critical_count": sum(item["severity"] == "critical" for item in alerts),
         "open_gap_count": int(aggregate["open_gaps"] or 0),
         "archive_backlog_count": int(aggregate["archive_backlog"] or 0),
-        "eligibility_ratio": eligibility_ratio,
+        "eligibility_ratio": raw_ratio,
+        "contract_aware_eligibility_ratio": contract_ratio,
         "disk": disk,
         "next_action": "先处理 critical 告警；禁止绕过数据资格与 retention 门" if alerts else "保持连续性、归档和磁盘监控",
     }

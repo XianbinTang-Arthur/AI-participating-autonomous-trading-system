@@ -259,7 +259,7 @@ hourly reliability cycle 会把治理快照不可用、collector 陈旧/drop、�
 
 ### 10.1 多日 campaign 的唯一执行顺序
 
-campaign 只调用公开市场数据，不访问账户私有接口、不启动 live profile，也不应用研究参数。计划时和执行前各做一次容量检查；计划、下载、每日导入、Silver 重建和 15m/1H Gold 均写 checkpoint。trade 的官方自然日按 UTC+8 分区，因此每个 UTC 日必须联合相邻两个官方文件，不能只按文件名猜测边界。
+campaign 的目标设计只调用公开市场数据，不访问账户私有接口、不启动 live profile，也不应用研究参数。但候选版本当前没有能够同时约束数据库、文件系统与网络副作用的持久 fencing，candle/funding Silver 也尚未不可变，因此完整执行入口保持冻结。trade 的官方自然日按 UTC+8 分区；未来恢复执行时，每个 UTC 日仍必须联合相邻两个官方文件，不能只按文件名猜测边界。
 
 以下示例覆盖 `[2026-07-22, 2026-08-21)` 30 个完整 UTC 日；执行时必须按官方可用日期重新确认：
 
@@ -272,19 +272,40 @@ CAMPAIGN_ROOT=/root/aats-data/rdp-campaigns/btc-swap-20260722-30d
   --manifest-output "$CAMPAIGN_ROOT/manifest.json"
 ```
 
-确认容量报告、日期和目标目录后，再以相同参数加 `--apply --confirm` 登记 campaign。可先独立预下载，也可由 runner 按日下载：
+确认容量报告、日期和目标目录后，只能在不可变 raw/manifest 时间证据验证器、
+snapshot registry 锚定与 G1 人工门禁均通过后，以相同参数加 `--apply --confirm`
+登记 campaign。当前代码尚无该时间证据验证器，所以 apply 必须失败关闭，上述命令仅是
+容量 dry-run，不是开工批准。
+
+独立 manifest 下载入口已停用：它无法用一个 UUID 字符串证明 registry 锚定或 campaign
+状态。完整 runner 同样未解锁；下面的兼容入口在 `--apply --confirm` 下固定于任何 campaign
+状态、文件系统、网络或业务数据库副作用之前失败：
 
 ```bash
-~/aats-venv/bin/python scripts/rdp_download_historical_campaign.py \
-  --manifest "$CAMPAIGN_ROOT/manifest.json" \
-  --target-dir "$CAMPAIGN_ROOT/downloads" --apply --confirm
-
 ~/aats-venv/bin/python scripts/rdp_run_historical_campaign.py \
   --campaign-id <campaign-uuid> --storage-root "$CAMPAIGN_ROOT" \
   --apply --confirm
 ```
 
-中断后使用同一 campaign ID、同一存储目录并增加 `--resume-running`。已下载文件只有在文件和 `.sha256.json` 侧车同时存在且哈希/长度一致时才复用；孤立文件或侧车不会被覆盖，必须先由操作员隔离。已成功 Silver/Gold 的恢复路径会重算输出指纹，不只相信状态字段。
+稳定 reason code 为
+`historical_campaign_execution_unavailable_until_persistent_fencing_and_immutable_silver`。
+`--resume-running` 仅为命令行兼容参数，不具备恢复能力。只有增加 schema-backed、跨数据库/
+文件系统/网络副作用的持久 execution fencing，完成 attempt 隔离与 stale recovery CAS，并让
+Silver 不可变、终态可逐行重验后，才允许另行设计和评审解锁；session advisory lock 或调用方
+token 不能冒充该能力。
+
+已下载文件只有在文件与 `.sha256.json` 侧车同时存在、哈希/长度一致、文件未超过 manifest
+固定上限且磁盘仍满足固定 reserve 时才复用；孤立文件或侧车不会被覆盖，必须先由操作员隔离。
+manifest 的容量校准值/倍率/版本不能由调用方降级；唯一文件 ceiling 总和受固定 raw budget 与
+safe available 双重约束。新下载禁用自动重定向，要求有效 `Content-Length`，同时受单文件声明
+上限、流式累计字节上限、connect/read timeout、15 分钟 wall-clock deadline 及逐块/结束后
+reserve 复查。
+
+当前 candle/funding Silver 尚不可变，Gold 固定阻断为
+`historical_gold_source_content_unsealed`。campaign 的 start/checkpoint/finish 和完整 runner 均由
+上述统一 reason code 失败关闭，既不能启动，也不能把旧 `SUCCEEDED` 记录短路为已验证成功。
+只有完成持久 fencing、不可变 Silver 与能够重建 plan、逐行重算 fingerprint 的只读终态
+verifier 后，才可重新开放状态机和成功终态。
 
 90 日必须先做容量 dry-run；当前校准下应返回 `capacity_projection_exceeds_safe_free_bytes`，不得增加 `--apply --confirm`：
 

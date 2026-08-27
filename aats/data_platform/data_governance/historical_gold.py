@@ -10,18 +10,28 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
-from typing import Any, Iterable
+from datetime import datetime, timedelta, timezone
+from typing import Any, Iterable, Mapping
 
 from sqlalchemy import text
 
 from aats.data_platform.data_governance.contracts import canonical_json_bytes
+from aats.data_platform.data_governance.instrument_lineage import (
+    instrument_snapshot_scope_reason,
+    instrument_snapshot_temporal_evidence_reason,
+    load_verified_instrument_contract_snapshot,
+)
+from aats.data_platform.data_governance.historical_rebuild import (
+    verified_historical_rebuild_output_fingerprints,
+)
 from aats.data_platform.gold.funding_aligner import align_funding_to_bars
 from aats.data_platform.models import candle_table_name, instrument_type_for_symbol
+from aats.domain.instrument_contract_snapshot import InstrumentContractSnapshot
 
 
-TRANSFORM_VERSION = "rdp-historical-gold-v1"
+TRANSFORM_VERSION = "rdp-historical-gold-v2"
 _GIT_COMMIT = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _SUPPORTED_TIMEFRAMES = {"15m": timedelta(minutes=15), "1H": timedelta(hours=1)}
 _PURPOSE_ROLES = {
@@ -36,6 +46,7 @@ _PURPOSE_ROLES = {
 @dataclass(frozen=True)
 class HistoricalGoldInput:
     bundle_id: str
+    bundle_key: str
     purpose: str
     role: str
     fingerprint: str
@@ -46,6 +57,8 @@ class HistoricalGoldInput:
     source_key: str
     source_row_count: int
     raw_partition_sha256: tuple[str, ...]
+    instrument_snapshot_digest: str | None
+    instrument_snapshot_source_id: str | None
     rebuild_output_fingerprint: str | None = None
 
 
@@ -100,6 +113,10 @@ def plan_historical_gold(
     if not _GIT_COMMIT.fullmatch(git_commit):
         raise ValueError("historical_gold_git_commit_invalid")
 
+    is_derivative = instrument_type_for_symbol(normalized_symbol) == "swap"
+    if is_derivative and funding_bundle_id is None:
+        raise ValueError("historical_gold_swap_requires_funding_bundle")
+
     candle = _load_input(session, candle_bundle_id, normalized_symbol)
     if candle.purpose != "ohlcv_research":
         raise ValueError("historical_gold_candle_bundle_purpose_invalid")
@@ -108,15 +125,11 @@ def plan_historical_gold(
         funding = _load_input(session, funding_bundle_id, normalized_symbol)
         if funding.purpose != "funding_research":
             raise ValueError("historical_gold_funding_bundle_purpose_invalid")
-    if instrument_type_for_symbol(normalized_symbol) == "swap" and funding is None:
-        raise ValueError("historical_gold_swap_requires_funding_bundle")
-
     start = coverage_start or candle.coverage_start
     end = coverage_end or candle.coverage_end
     _validate_window(start, end, timeframe)
-    all_inputs: list[HistoricalGoldInput] = [candle]
-    if funding is not None:
-        all_inputs.append(funding)
+    start = start.astimezone(timezone.utc)
+    end = end.astimezone(timezone.utc)
     seen = {candle.bundle_id, *(() if funding is None else (funding.bundle_id,))}
     auxiliaries: list[HistoricalGoldInput] = []
     for bundle_id in auxiliary_bundle_ids:
@@ -127,21 +140,33 @@ def plan_historical_gold(
             raise ValueError("historical_gold_auxiliary_role_invalid")
         item = _with_rebuild_evidence(session, item)
         auxiliaries.append(item)
-        all_inputs.append(item)
         seen.add(item.bundle_id)
+
+    auxiliaries.sort(key=lambda item: canonical_json_bytes(_input_content_identity(item)))
+    all_inputs: list[HistoricalGoldInput] = [candle]
+    if funding is not None:
+        all_inputs.append(funding)
+    all_inputs.extend(auxiliaries)
+    content_identities = [_input_content_identity(item) for item in all_inputs]
+    if len({canonical_json_bytes(item) for item in content_identities}) != len(
+        content_identities
+    ):
+        raise ValueError("historical_gold_duplicate_input_content")
 
     for item in (candle,) + (() if funding is None else (funding,)):
         if item.coverage_start > start or item.coverage_end < end:
             raise ValueError(f"historical_gold_bundle_coverage_insufficient:{item.role}")
     _validate_auxiliary_coverage(auxiliaries, start=start, end=end)
+    _validate_gold_instrument_binding(normalized_symbol, all_inputs)
+    _assert_gold_source_content_sealed(normalized_symbol, all_inputs)
 
     input_payload = {
-        "schema": "aats.historical_gold.inputs.v1",
+        "schema": "aats.historical_gold.inputs.v2",
         "symbol": normalized_symbol,
         "timeframe": timeframe,
         "coverage_start": start,
         "coverage_end": end,
-        "inputs": [_input_identity(item) for item in all_inputs],
+        "inputs": content_identities,
     }
     input_fingerprint = hashlib.sha256(canonical_json_bytes(input_payload)).hexdigest()
     operation_payload = {
@@ -168,6 +193,10 @@ def plan_historical_gold(
 
 
 def start_historical_gold(session, plan: HistoricalGoldPlan) -> tuple[str, str]:
+    _validate_gold_instrument_binding(plan.symbol, plan.inputs)
+    _assert_gold_source_content_sealed(plan.symbol, plan.inputs)
+    _verify_plan_current(session, plan)
+    _verify_auxiliary_material(session, plan)
     inserted = session.execute(
         text(
             """
@@ -193,7 +222,7 @@ def start_historical_gold(session, plan: HistoricalGoldPlan) -> tuple[str, str]:
             "coverage_start": plan.coverage_start,
             "coverage_end": plan.coverage_end,
             "input_bundles": json.dumps(
-                [_input_identity(item) for item in plan.inputs],
+                [_input_lineage(item) for item in plan.inputs],
                 sort_keys=True,
                 default=str,
             ),
@@ -207,13 +236,37 @@ def start_historical_gold(session, plan: HistoricalGoldPlan) -> tuple[str, str]:
 
     existing = session.execute(
         text(
-            "SELECT artifact_id, status, input_fingerprint "
+            "SELECT artifact_id, artifact_type, primary_bundle_id, symbol, "
+            "timeframe, coverage_start, coverage_end, input_bundles, status, "
+            "input_fingerprint, transform_version, git_commit "
             "FROM meta.historical_research_artifacts "
             "WHERE operation_key = :operation_key FOR UPDATE"
         ),
         {"operation_key": plan.operation_key},
     ).one()
-    if str(existing.input_fingerprint) != plan.input_fingerprint:
+    existing_inputs = existing.input_bundles
+    if isinstance(existing_inputs, str):
+        existing_inputs = json.loads(existing_inputs)
+    expected_inputs = json.loads(
+        json.dumps(
+            [_input_lineage(item) for item in plan.inputs],
+            sort_keys=True,
+            default=str,
+        )
+    )
+    if (
+        str(existing.artifact_type) != "gold_replay_bars"
+        or str(existing.primary_bundle_id) != plan.candle.bundle_id
+        or str(existing.symbol) != plan.symbol
+        or str(existing.timeframe) != plan.timeframe
+        or _canonical_time(existing.coverage_start)
+        != _canonical_time(plan.coverage_start)
+        or _canonical_time(existing.coverage_end) != _canonical_time(plan.coverage_end)
+        or existing_inputs != expected_inputs
+        or str(existing.input_fingerprint) != plan.input_fingerprint
+        or str(existing.transform_version) != plan.transform_version
+        or str(existing.git_commit) != plan.git_commit
+    ):
         raise RuntimeError("historical_gold_operation_identity_conflict")
     artifact_id = str(existing.artifact_id)
     if existing.status == "SUCCEEDED":
@@ -247,6 +300,8 @@ def execute_historical_gold(
     *,
     artifact_id: str,
 ) -> HistoricalGoldResult:
+    _validate_gold_instrument_binding(plan.symbol, plan.inputs)
+    _assert_gold_source_content_sealed(plan.symbol, plan.inputs)
     _verify_plan_current(session, plan)
     _verify_auxiliary_material(session, plan)
     candle_table = candle_table_name("silver", plan.symbol, plan.timeframe)
@@ -301,7 +356,8 @@ def execute_historical_gold(
         [row.ts for row in candles],
         funding_events,
     )
-    lineage = [_input_identity(item) for item in plan.inputs]
+    content_lineage = [_input_content_identity(item) for item in plan.inputs]
+    lineage = [_input_lineage(item) for item in plan.inputs]
     lineage_json = json.dumps(lineage, sort_keys=True, default=str)
     session.execute(
         text(
@@ -315,7 +371,7 @@ def execute_historical_gold(
     row_fingerprints: list[str] = []
     for row in candles:
         funding_rate, funding_ts, _ = funding_map.get(row.ts, (None, None, None))
-        material_payload = {
+        persisted_payload = {
             "symbol": plan.symbol,
             "timeframe": plan.timeframe,
             "ts": row.ts,
@@ -328,22 +384,31 @@ def execute_historical_gold(
             "is_closed": bool(row.confirm),
             "aligned_funding_rate": funding_rate,
             "funding_source_ts": funding_ts,
-            "source_candle_bundle_id": plan.candle.bundle_id,
-            "source_funding_bundle_id": (
-                None if plan.funding is None else plan.funding.bundle_id
-            ),
-            "source_lineage": lineage,
             "transform_version": plan.transform_version,
         }
         # The generated database artifact_id is deliberately excluded: two
         # clean databases must produce identical content fingerprints from the
         # same immutable inputs and transform version.
-        fingerprint = hashlib.sha256(canonical_json_bytes(material_payload)).hexdigest()
+        fingerprint_payload = {
+            **persisted_payload,
+            "ts": _canonical_time(row.ts),
+            "funding_source_ts": (
+                None if funding_ts is None else _canonical_time(funding_ts)
+            ),
+            "source_content_lineage": content_lineage,
+        }
+        fingerprint = hashlib.sha256(
+            canonical_json_bytes(fingerprint_payload)
+        ).hexdigest()
         row_fingerprints.append(fingerprint)
         values.append(
             {
                 "artifact_id": artifact_id,
-                **material_payload,
+                **persisted_payload,
+                "source_candle_bundle_id": plan.candle.bundle_id,
+                "source_funding_bundle_id": (
+                    None if plan.funding is None else plan.funding.bundle_id
+                ),
                 "source_lineage": lineage_json,
                 "output_fingerprint": fingerprint,
             }
@@ -379,7 +444,7 @@ def execute_historical_gold(
     quality_fingerprint = hashlib.sha256(canonical_json_bytes(quality)).hexdigest()
     quality["quality_fingerprint"] = quality_fingerprint
     artifact_index = {
-        "schema": "aats.historical_research_artifact_index.v1",
+        "schema": "aats.historical_research_artifact_index.v2",
         "artifact_id": artifact_id,
         "artifact_type": "gold_replay_bars",
         "relation": "gold.historical_replay_bars",
@@ -441,8 +506,9 @@ def fail_historical_gold(session, artifact_id: str, error_type: str) -> None:
 def _load_input(session, bundle_id: str, symbol: str) -> HistoricalGoldInput:
     row = session.execute(
         text(
-            "SELECT bundle_id, purpose, eligibility_mode, status, fingerprint, "
-            "dataset_version, coverage_start, coverage_end, component_sources "
+            "SELECT bundle_id, bundle_key, purpose, eligibility_mode, status, "
+            "fingerprint, dataset_version, coverage_start, coverage_end, "
+            "component_sources, eligibility_report "
             "FROM meta.dataset_bundles WHERE bundle_id = CAST(:bundle_id AS UUID)"
         ),
         {"bundle_id": bundle_id},
@@ -451,6 +517,10 @@ def _load_input(session, bundle_id: str, symbol: str) -> HistoricalGoldInput:
         raise ValueError("historical_gold_bundle_not_found")
     if row["eligibility_mode"] != "historical_research" or row["status"] != "ELIGIBLE":
         raise ValueError("historical_gold_bundle_not_eligible")
+    if not str(row["bundle_key"] or "").strip() or not re.fullmatch(
+        r"[0-9a-f]{64}", str(row["fingerprint"] or "")
+    ):
+        raise ValueError("historical_gold_bundle_identity_invalid")
     purpose = str(row["purpose"])
     role = _PURPOSE_ROLES.get(purpose)
     if role is None:
@@ -477,10 +547,29 @@ def _load_input(session, bundle_id: str, symbol: str) -> HistoricalGoldInput:
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("historical_gold_bundle_provenance_invalid") from exc
-    if row_count <= 0 or not hashes or any(not re.fullmatch(r"[0-9a-f]{64}", item) for item in hashes):
+    try:
+        uuid.UUID(source_id)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("historical_gold_bundle_provenance_invalid") from exc
+    if (
+        not source_key.strip()
+        or row_count <= 0
+        or not hashes
+        or any(not re.fullmatch(r"[0-9a-f]{64}", item) for item in hashes)
+    ):
         raise ValueError("historical_gold_bundle_material_invalid")
+    snapshot_digest, snapshot_source_id = _validated_instrument_snapshot_reference(
+        session,
+        component,
+        provenance=provenance,
+        eligibility_report=row["eligibility_report"],
+        symbol=symbol,
+        coverage_start=row["coverage_start"],
+        coverage_end=row["coverage_end"],
+    )
     return HistoricalGoldInput(
         bundle_id=str(row["bundle_id"]),
+        bundle_key=str(row["bundle_key"]),
         purpose=purpose,
         role=role,
         fingerprint=str(row["fingerprint"]),
@@ -491,7 +580,184 @@ def _load_input(session, bundle_id: str, symbol: str) -> HistoricalGoldInput:
         source_key=source_key,
         source_row_count=row_count,
         raw_partition_sha256=hashes,
+        instrument_snapshot_digest=snapshot_digest,
+        instrument_snapshot_source_id=snapshot_source_id,
     )
+
+
+def _validated_instrument_snapshot_reference(
+    session,
+    component: Mapping[str, Any],
+    *,
+    provenance: Mapping[str, Any],
+    eligibility_report: Any,
+    symbol: str,
+    coverage_start: datetime,
+    coverage_end: datetime,
+) -> tuple[str | None, str | None]:
+    report = eligibility_report
+    if isinstance(report, str):
+        try:
+            report = json.loads(report)
+        except json.JSONDecodeError as exc:
+            raise ValueError("historical_gold_eligibility_report_invalid") from exc
+    raw_snapshot = provenance.get("instrument_contract_snapshot")
+    digest_value = component.get("instrument_snapshot_digest")
+    source_id_value = component.get("instrument_snapshot_source_id")
+    binding = (
+        report.get("instrument_contract_binding")
+        if isinstance(report, Mapping)
+        else None
+    )
+    required = instrument_type_for_symbol(symbol) == "swap"
+    material_present = any(
+        value is not None
+        for value in (raw_snapshot, digest_value, source_id_value, binding)
+    )
+    if not material_present:
+        if required:
+            raise ValueError("historical_gold_instrument_contract_unbound")
+        return None, None
+    if (
+        not required
+        and raw_snapshot is None
+        and digest_value is None
+        and source_id_value is None
+    ):
+        _require_eligible_binding_report(
+            binding,
+            required=False,
+            snapshot_digest=None,
+        )
+        return None, None
+    if (
+        not isinstance(raw_snapshot, Mapping)
+        or not re.fullmatch(r"[0-9a-f]{64}", str(digest_value or ""))
+        or not isinstance(binding, Mapping)
+    ):
+        raise ValueError("historical_gold_instrument_contract_binding_invalid")
+    try:
+        snapshot_source_id = str(uuid.UUID(str(source_id_value)))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("historical_gold_instrument_contract_binding_invalid") from exc
+
+    try:
+        snapshot = InstrumentContractSnapshot.from_dict(raw_snapshot)
+        if instrument_snapshot_scope_reason(snapshot, symbol=symbol) is not None:
+            raise ValueError("instrument_snapshot_scope_mismatch")
+        snapshot.validate_window(
+            symbol=symbol,
+            start=coverage_start,
+            end=coverage_end,
+        )
+    except ValueError as exc:
+        raise ValueError("historical_gold_instrument_snapshot_invalid") from exc
+    if snapshot.evidence_kind != "observed_forward":
+        raise ValueError("historical_gold_instrument_snapshot_history_unverified")
+    digest = str(digest_value)
+    if snapshot.digest != digest:
+        raise ValueError("historical_gold_instrument_snapshot_digest_mismatch")
+    _require_eligible_binding_report(
+        binding,
+        required=required,
+        snapshot_digest=digest,
+    )
+    registered_snapshot = load_verified_instrument_contract_snapshot(
+        session,
+        snapshot_source_id=snapshot_source_id,
+    )
+    if registered_snapshot.to_dict() != snapshot.to_dict():
+        raise ValueError("historical_gold_instrument_snapshot_source_anchor_mismatch")
+    evidence_reason = instrument_snapshot_temporal_evidence_reason(
+        registered_snapshot
+    )
+    if evidence_reason is not None:
+        raise ValueError(evidence_reason)
+    return digest, snapshot_source_id
+
+
+def _require_eligible_binding_report(
+    binding: Any,
+    *,
+    required: bool,
+    snapshot_digest: str | None,
+) -> None:
+    expected_keys = {
+        "policy_version",
+        "required",
+        "eligible",
+        "snapshot_digest",
+        "reason_codes",
+        "evidence_fingerprint",
+    }
+    if not isinstance(binding, Mapping) or set(binding) != expected_keys:
+        raise ValueError("historical_gold_instrument_contract_binding_invalid")
+    raw_reasons = binding["reason_codes"]
+    if not isinstance(raw_reasons, (list, tuple)) or any(
+        not isinstance(reason, str) or not reason
+        for reason in raw_reasons
+    ):
+        raise ValueError("historical_gold_instrument_contract_binding_invalid")
+    if type(binding["required"]) is not bool or type(binding["eligible"]) is not bool:
+        raise ValueError("historical_gold_instrument_contract_binding_invalid")
+    material = {
+        "policy_version": binding["policy_version"],
+        "required": binding["required"],
+        "eligible": binding["eligible"],
+        "snapshot_digest": binding["snapshot_digest"],
+        "reason_codes": tuple(raw_reasons),
+    }
+    expected_material = {
+        "policy_version": "instrument-contract-binding-v1",
+        "required": required,
+        "eligible": True,
+        "snapshot_digest": snapshot_digest,
+        "reason_codes": (),
+    }
+    expected_fingerprint = hashlib.sha256(
+        canonical_json_bytes(material)
+    ).hexdigest()
+    if (
+        material != expected_material
+        or not re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(binding["evidence_fingerprint"] or ""),
+        )
+        or binding["evidence_fingerprint"] != expected_fingerprint
+    ):
+        raise ValueError("historical_gold_instrument_contract_binding_invalid")
+
+
+def _validate_derivative_contract_binding(
+    inputs: Iterable[HistoricalGoldInput],
+) -> None:
+    digests = {item.instrument_snapshot_digest for item in inputs}
+    if None in digests:
+        raise ValueError("historical_gold_instrument_contract_unbound")
+    if len(digests) != 1:
+        raise ValueError("historical_gold_instrument_snapshot_mismatch")
+
+
+def _validate_gold_instrument_binding(
+    symbol: str,
+    inputs: Iterable[HistoricalGoldInput],
+) -> None:
+    if instrument_type_for_symbol(symbol) == "swap":
+        _validate_derivative_contract_binding(inputs)
+
+
+def _assert_gold_source_content_sealed(
+    symbol: str,
+    inputs: Iterable[HistoricalGoldInput],
+) -> None:
+    # The current candle and funding Silver relations are mutable and are
+    # selected by dataset_version rather than by a sealed bundle/content
+    # fingerprint.  This affects spot as well as derivatives: a later merge can
+    # replace rows at the same (symbol, ts) while reusing dataset_version, then
+    # make those rows appear to belong to an older bundle.  A contract digest
+    # does not solve that content-lineage gap.  Keep this guard in plan, start
+    # and execute so neither a normal nor a hand-built plan can bypass it.
+    raise ValueError("historical_gold_source_content_unsealed")
 
 
 def _with_rebuild_evidence(session, item: HistoricalGoldInput) -> HistoricalGoldInput:
@@ -513,19 +779,35 @@ def _with_rebuild_evidence(session, item: HistoricalGoldInput) -> HistoricalGold
 
 def _verify_plan_current(session, plan: HistoricalGoldPlan) -> None:
     for item in plan.inputs:
-        row = session.execute(
+        locked_id = session.execute(
             text(
-                "SELECT fingerprint, status, eligibility_mode FROM meta.dataset_bundles "
+                "SELECT bundle_id FROM meta.dataset_bundles "
                 "WHERE bundle_id = CAST(:bundle_id AS UUID) FOR SHARE"
             ),
             {"bundle_id": item.bundle_id},
-        ).one()
-        if (
-            str(row.fingerprint) != item.fingerprint
-            or row.status != "ELIGIBLE"
-            or row.eligibility_mode != "historical_research"
-        ):
+        ).scalar_one_or_none()
+        if locked_id is None or str(locked_id) != item.bundle_id:
             raise RuntimeError("historical_gold_bundle_changed_or_ineligible")
+    try:
+        rebuilt = plan_historical_gold(
+            session,
+            symbol=plan.symbol,
+            timeframe=plan.timeframe,
+            candle_bundle_id=plan.candle.bundle_id,
+            funding_bundle_id=(
+                None if plan.funding is None else plan.funding.bundle_id
+            ),
+            auxiliary_bundle_ids=tuple(
+                item.bundle_id for item in plan.auxiliary
+            ),
+            coverage_start=plan.coverage_start,
+            coverage_end=plan.coverage_end,
+            git_commit=plan.git_commit,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("historical_gold_bundle_changed_or_ineligible") from exc
+    if rebuilt != plan:
+        raise RuntimeError("historical_gold_bundle_changed_or_ineligible")
 
 
 def _verify_auxiliary_material(session, plan: HistoricalGoldPlan) -> None:
@@ -578,29 +860,33 @@ def _verify_auxiliary_material(session, plan: HistoricalGoldPlan) -> None:
         ).mappings().one_or_none()
         if run is None:
             raise RuntimeError("historical_gold_auxiliary_rebuild_changed")
-        rows = session.execute(
-            text(
-                f"SELECT output_fingerprint FROM {table} "
-                "WHERE bundle_id = CAST(:bundle_id AS UUID) AND symbol = :symbol "
-                "AND ts >= :start AND ts < :end ORDER BY ts"
-            ),
-            {
-                "bundle_id": item.bundle_id,
-                "symbol": plan.symbol,
-                "start": item.coverage_start,
-                "end": item.coverage_end,
-            },
-        ).mappings().all()
-        observed_fingerprint = hashlib.sha256(
-            canonical_json_bytes(
+        row_fingerprints = verified_historical_rebuild_output_fingerprints(
+            session,
+            purpose=item.purpose,
+            bundle_id=item.bundle_id,
+            symbol=plan.symbol,
+            coverage_start=item.coverage_start,
+            coverage_end=item.coverage_end,
+            bundle_fingerprint=item.fingerprint,
+            instrument_snapshot_digest=item.instrument_snapshot_digest,
+        )
+        rebuild_material: dict[str, Any] = {
+            "git_commit": str(run["git_commit"]),
+            "transform_version": str(run["transform_version"]),
+            "row_fingerprints": row_fingerprints,
+        }
+        if str(run["transform_version"]) == "rdp-historical-silver-v2":
+            rebuild_material.update(
                 {
-                    "git_commit": str(run["git_commit"]),
-                    "transform_version": str(run["transform_version"]),
-                    "row_fingerprints": [row["output_fingerprint"] for row in rows],
+                    "schema": "aats.historical_rebuild.output.v2",
+                    "bundle_fingerprint": item.fingerprint,
+                    "instrument_snapshot_digest": item.instrument_snapshot_digest,
                 }
             )
+        observed_fingerprint = hashlib.sha256(
+            canonical_json_bytes(rebuild_material)
         ).hexdigest()
-        if not rows or observed_fingerprint != item.rebuild_output_fingerprint:
+        if not row_fingerprints or observed_fingerprint != item.rebuild_output_fingerprint:
             raise RuntimeError("historical_gold_auxiliary_output_fingerprint_mismatch")
 
 
@@ -619,20 +905,99 @@ def _verify_succeeded_artifact(session, artifact_id: str, plan: HistoricalGoldPl
     expected = _expected_rows(plan.coverage_start, plan.coverage_end, plan.timeframe)
     if int(row.row_count) != expected or int(row.actual_rows) != expected:
         raise RuntimeError("historical_gold_succeeded_artifact_incomplete")
+    if str(row.input_fingerprint) != plan.input_fingerprint:
+        raise RuntimeError("historical_gold_succeeded_artifact_identity_mismatch")
     if not re.fullmatch(r"[0-9a-f]{64}", str(row.output_fingerprint)):
         raise RuntimeError("historical_gold_succeeded_artifact_fingerprint_invalid")
-    row_fingerprints = session.execute(
+    persisted_rows = session.execute(
         text(
-            "SELECT output_fingerprint FROM gold.historical_replay_bars "
+            "SELECT symbol, timeframe, ts, open, high, low, close, volume, "
+            "quote_volume, is_closed, aligned_funding_rate, funding_source_ts, "
+            "source_candle_bundle_id, source_funding_bundle_id, source_lineage, "
+            "transform_version, output_fingerprint "
+            "FROM gold.historical_replay_bars "
             "WHERE artifact_id = CAST(:artifact_id AS UUID) ORDER BY ts"
         ),
         {"artifact_id": artifact_id},
-    ).scalars().all()
-    if any(not re.fullmatch(r"[0-9a-f]{64}", str(item)) for item in row_fingerprints):
-        raise RuntimeError("historical_gold_succeeded_row_fingerprint_invalid")
+    ).mappings().all()
+    if len(persisted_rows) != expected:
+        raise RuntimeError("historical_gold_succeeded_artifact_incomplete")
+    expected_lineage = json.loads(
+        json.dumps(
+            [_input_lineage(item) for item in plan.inputs],
+            sort_keys=True,
+            default=str,
+        )
+    )
+    expected_funding_bundle_id = (
+        None if plan.funding is None else plan.funding.bundle_id
+    )
+    row_fingerprints: list[str] = []
+    for persisted in persisted_rows:
+        lineage = persisted["source_lineage"]
+        if isinstance(lineage, str):
+            try:
+                lineage = json.loads(lineage)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    "historical_gold_succeeded_row_lineage_invalid"
+                ) from exc
+        if lineage != expected_lineage:
+            raise RuntimeError("historical_gold_succeeded_row_lineage_mismatch")
+        try:
+            content_lineage = [
+                item["content_identity"] for item in lineage
+            ]
+        except (KeyError, TypeError) as exc:
+            raise RuntimeError(
+                "historical_gold_succeeded_row_lineage_invalid"
+            ) from exc
+        if (
+            str(persisted["symbol"]) != plan.symbol
+            or str(persisted["timeframe"]) != plan.timeframe
+            or str(persisted["source_candle_bundle_id"])
+            != plan.candle.bundle_id
+            or (
+                None
+                if persisted["source_funding_bundle_id"] is None
+                else str(persisted["source_funding_bundle_id"])
+            )
+            != expected_funding_bundle_id
+            or str(persisted["transform_version"]) != plan.transform_version
+        ):
+            raise RuntimeError("historical_gold_succeeded_row_identity_mismatch")
+        fingerprint_payload = {
+            "symbol": str(persisted["symbol"]),
+            "timeframe": str(persisted["timeframe"]),
+            "ts": _canonical_time(persisted["ts"]),
+            "open": persisted["open"],
+            "high": persisted["high"],
+            "low": persisted["low"],
+            "close": persisted["close"],
+            "volume": persisted["volume"],
+            "quote_volume": persisted["quote_volume"],
+            "is_closed": bool(persisted["is_closed"]),
+            "aligned_funding_rate": persisted["aligned_funding_rate"],
+            "funding_source_ts": (
+                None
+                if persisted["funding_source_ts"] is None
+                else _canonical_time(persisted["funding_source_ts"])
+            ),
+            "transform_version": str(persisted["transform_version"]),
+            "source_content_lineage": content_lineage,
+        }
+        computed = hashlib.sha256(
+            canonical_json_bytes(fingerprint_payload)
+        ).hexdigest()
+        stored = str(persisted["output_fingerprint"] or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", stored):
+            raise RuntimeError("historical_gold_succeeded_row_fingerprint_invalid")
+        if stored != computed:
+            raise RuntimeError("historical_gold_succeeded_row_content_mismatch")
+        row_fingerprints.append(computed)
     observed = _aggregate_output_fingerprint(
-        str(row.input_fingerprint),
-        [str(item) for item in row_fingerprints],
+        plan.input_fingerprint,
+        row_fingerprints,
     )
     if observed != str(row.output_fingerprint):
         raise RuntimeError("historical_gold_succeeded_artifact_fingerprint_mismatch")
@@ -645,7 +1010,7 @@ def _aggregate_output_fingerprint(
     return hashlib.sha256(
         canonical_json_bytes(
             {
-                "schema": "aats.historical_gold.output.v1",
+                "schema": "aats.historical_gold.output.v2",
                 "input_fingerprint": input_fingerprint,
                 "row_fingerprints": row_fingerprints,
             }
@@ -666,7 +1031,7 @@ def _quality_report(
     if plan.funding is not None and len(funding_events) != plan.funding.source_row_count:
         reasons.append("funding_count_mismatch")
     return {
-        "schema": "aats.historical_gold.quality.v1",
+        "schema": "aats.historical_gold.quality.v2",
         "eligible": not reasons,
         "reason_codes": reasons,
         "expected_rows": expected,
@@ -681,20 +1046,35 @@ def _quality_report(
     }
 
 
-def _input_identity(item: HistoricalGoldInput) -> dict[str, Any]:
+def _input_content_identity(item: HistoricalGoldInput) -> dict[str, Any]:
     return {
-        "bundle_id": item.bundle_id,
+        "bundle_key": item.bundle_key,
         "purpose": item.purpose,
         "role": item.role,
         "fingerprint": item.fingerprint,
         "dataset_version": item.dataset_version,
-        "coverage_start": item.coverage_start,
-        "coverage_end": item.coverage_end,
-        "source_id": item.source_id,
+        "coverage_start": _canonical_time(item.coverage_start),
+        "coverage_end": _canonical_time(item.coverage_end),
         "source_key": item.source_key,
         "source_row_count": item.source_row_count,
         "raw_partition_sha256": item.raw_partition_sha256,
+        "instrument_snapshot_digest": item.instrument_snapshot_digest,
         "rebuild_output_fingerprint": item.rebuild_output_fingerprint,
+    }
+
+
+def _input_audit_reference(item: HistoricalGoldInput) -> dict[str, Any]:
+    return {
+        "bundle_id": item.bundle_id,
+        "source_id": item.source_id,
+        "instrument_snapshot_source_id": item.instrument_snapshot_source_id,
+    }
+
+
+def _input_lineage(item: HistoricalGoldInput) -> dict[str, Any]:
+    return {
+        "content_identity": _input_content_identity(item),
+        "audit_reference": _input_audit_reference(item),
     }
 
 
@@ -705,6 +1085,17 @@ def _validate_window(start: datetime, end: datetime, timeframe: str) -> None:
     interval = _SUPPORTED_TIMEFRAMES[timeframe].total_seconds()
     if seconds % interval:
         raise ValueError("historical_gold_window_not_timeframe_aligned")
+
+
+def _canonical_time(value: datetime | str) -> str:
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("historical_gold_window_invalid") from exc
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("historical_gold_window_invalid")
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _validate_auxiliary_coverage(

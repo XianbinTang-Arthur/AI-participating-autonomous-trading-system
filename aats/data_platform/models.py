@@ -5,15 +5,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Literal
+
+from aats.domain.instrument_scope import (
+    INSTRUMENT_SCOPE_UNSUPPORTED_REASON,
+    SUPPORTED_SYMBOLS as _SUPPORTED_SYMBOLS,
+    SUPPORTED_SYMBOLS_SPOT as _SUPPORTED_SYMBOLS_SPOT,
+    SUPPORTED_SYMBOLS_SWAP as _SUPPORTED_SYMBOLS_SWAP,
+    classify_instrument_scope,
+)
 
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-SUPPORTED_SYMBOLS_SPOT = ("BTC-USDT", "ETH-USDT")
-SUPPORTED_SYMBOLS_SWAP = ("BTC-USDT-SWAP", "ETH-USDT-SWAP")
-SUPPORTED_SYMBOLS = SUPPORTED_SYMBOLS_SPOT + SUPPORTED_SYMBOLS_SWAP
+SUPPORTED_SYMBOLS_SPOT = _SUPPORTED_SYMBOLS_SPOT
+SUPPORTED_SYMBOLS_SWAP = _SUPPORTED_SYMBOLS_SWAP
+SUPPORTED_SYMBOLS = _SUPPORTED_SYMBOLS
 SUPPORTED_TIMEFRAMES = ("1m", "5m", "15m", "1h")
 FUNDING_SYMBOLS = SUPPORTED_SYMBOLS_SWAP
 
@@ -34,9 +43,13 @@ def utc_now() -> datetime:
 # Table name helpers
 # ---------------------------------------------------------------------------
 
-def instrument_type_for_symbol(symbol: str) -> str:
-    """Return 'spot' or 'swap' based on symbol suffix."""
-    return "swap" if symbol.upper().endswith("-SWAP") else "spot"
+def instrument_type_for_symbol(symbol: str) -> Literal["spot", "swap"]:
+    """Return the table instrument type for an explicitly supported symbol."""
+
+    scope = classify_instrument_scope(symbol)
+    if scope == "unsupported":
+        raise ValueError(INSTRUMENT_SCOPE_UNSUPPORTED_REASON)
+    return scope
 
 
 def _validate_layer(layer: str) -> None:

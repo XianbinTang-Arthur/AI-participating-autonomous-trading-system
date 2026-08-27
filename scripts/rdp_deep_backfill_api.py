@@ -38,6 +38,11 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from aats.domain.instrument_scope import (
+    INSTRUMENT_SCOPE_UNSUPPORTED_REASON,
+    classify_instrument_scope,
+)
+
 if TYPE_CHECKING:
     import httpx
     from sqlalchemy.orm import Session
@@ -331,6 +336,7 @@ def deep_backfill_one(
     refresh_existing: bool = False,
     refresh_end: datetime | None = None,
     raw_archive_dir: Path | None = None,
+    instrument_contract_snapshot: Any | None = None,
 ) -> dict[str, Any]:
     """对单个 symbol+timeframe 执行深度回填.
 
@@ -361,6 +367,10 @@ def deep_backfill_one(
     -------
     dict  包含统计信息
     """
+    normalized_symbol = str(symbol or "").strip().upper()
+    if classify_instrument_scope(normalized_symbol) == "unsupported":
+        raise ValueError(INSTRUMENT_SCOPE_UNSUPPORTED_REASON)
+    symbol = normalized_symbol
     import httpx
 
     from aats.data_platform.config import get_settings
@@ -652,6 +662,7 @@ def deep_backfill_one(
             raw_hashes=stats["raw_partition_sha256"],
             gaps=stats["gaps"],
             coverage_ratio=stats["coverage_ratio"],
+            instrument_contract_snapshot=instrument_contract_snapshot,
         )
 
     # 5. 重建 Gold
@@ -688,6 +699,7 @@ def _persist_candle_bundle(
     raw_hashes: list[str],
     gaps: list[dict[str, str]],
     coverage_ratio: float,
+    instrument_contract_snapshot: Any | None = None,
 ) -> dict[str, Any]:
     from aats.data_platform.collectors.backfill.official_history_importers import (
         register_official_source,
@@ -725,6 +737,7 @@ def _persist_candle_bundle(
             raw_partition_sha256=raw_hashes,
             row_count=row_count,
             gaps=gaps,
+            instrument_contract_snapshot=instrument_contract_snapshot,
         )
         record_data_gaps(
             session,
@@ -956,6 +969,11 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    normalized_symbol = str(args.symbol or "").strip().upper()
+    if classify_instrument_scope(normalized_symbol) == "unsupported":
+        parser.error(INSTRUMENT_SCOPE_UNSUPPORTED_REASON)
+    args.symbol = normalized_symbol
 
     # 解析目标时间
     if args.target_start:
