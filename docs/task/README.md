@@ -1,7 +1,7 @@
 # AATS Task 与 SOW 历史索引
 
-> 文档状态：历史交付目录索引  
-> 最后核对：2026-08-26（目录与替代入口；RDP 数据治理任务状态已回填）
+> 文档状态：任务与交付历史证据索引（截至 2026-08-27）
+> 最后核对：2026-08-27（Research OS G0 bootstrap 交付记录已登记；其余历史状态边界不变）
 
 本目录保存任务书、SOW、阶段设计、实施记录和交付报告。它是工程可追溯性材料，不是当前系统说明；“完成”“通过”“上线”等措辞只对文件记录的基线和验证范围成立。
 
@@ -13,6 +13,30 @@
 - 引用历史任务时保留文件名、日期、commit 和验证范围；
 - 新任务材料继续写入本目录，不得写入 `docs/` 根层兼容区；
 - 同一任务有子目录时，以其 `README.md` 作为该任务入口。
+
+## AATS Research OS 独立建设计划
+
+- [`aats_research_os_program_plan_2026_08_26.md`](aats_research_os_program_plan_2026_08_26.md)：
+  从零建设独立研究证据平台的立项规划基线，覆盖目标架构、领域合同、WBS、G0--G8 阶段门、
+  30/60/90 日纵向切片、团队资源、测试、风险、Legacy 迁移和资本授权边界。项目启动已条件性
+  批准，但 G0 Gate 尚未通过；不代表新平台已实施，也不授权 live、真实资金或 Runtime 参数写入。
+- [`aats_research_os_g0_decision_record_2026_08_26.md`](aats_research_os_g0_decision_record_2026_08_26.md)：
+  G0 正式决议；确认独立仓库、BTC/ETH 永续楔子、Owner/Reviewer 规则、精简专业资源模式、
+  Binance 条件性第二来源、G0--G4 USD 120,000 预算硬上限和 Legacy Freeze。项目启动状态为
+  `APPROVED_WITH_CONDITIONS`，G0 证据门为 `OPEN / NOT PASSED`。
+- [`aats_research_os_g0_closure_and_g1_kickoff_plan_2026_08_26.md`](aats_research_os_g0_closure_and_g1_kickoff_plan_2026_08_26.md)：
+  十个工作日 G0 收口清单和 G0 通过后的首个 30 日 G1 Canonical Truth Kernel tranche；明确
+  Owner、依赖、证据、预算、停止线，以及条件关闭前允许和禁止的工作。
+- [`aats_research_os_g0_bootstrap_implementation_sow_2026_08_26.md`](aats_research_os_g0_bootstrap_implementation_sow_2026_08_26.md)：
+  G0 bootstrap 的历史实施基线，覆盖独立仓库骨架、合成领域合同、不可变 Raw、治理证据、测试、
+  回滚和验收；实际实现差异和现行状态以交付记录为准。
+- [`aats_research_os_g0_bootstrap_delivery_2026_08_27.md`](aats_research_os_g0_bootstrap_delivery_2026_08_27.md)：
+  截至核对日的交付快照；记录独立本地仓库、领域/治理/CI 合同、审查修复、任务书差异和真实阻断。
+  独立工程基线为 `22a465b06cd731a27cf92154190b1b480fa84d2b`，当前仍为
+  `G0_OPEN / G1_LOCKED`，无 remote/采集/168h/部署事实；动态 Gate 以独立仓库 current/readiness 为准。
+- [`aats_research_os_legacy_freeze_register_2026_08_26.md`](aats_research_os_legacy_freeze_register_2026_08_26.md)：
+  截至核对日的 Legacy Freeze 分类快照；区分仍须在旧系统完成的 P0/P1 安全/正确性修复、需例外审批的
+  现场事实、必须迁入 Research OS 的研究扩张和明确禁止事项。当前为程序性生效、技术强制部分实现。
 
 ## 2026-08-26 RDP 数据治理实施记录
 
