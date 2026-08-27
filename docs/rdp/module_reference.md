@@ -11,7 +11,7 @@
 | --- | --- |
 | `config.py` | `ResearchPlatformSettings`；读取 `RDP_DATABASE_URL`、live 只读库、采集和 artifact 配置；容器中可复用 `AATS_ACTIVE_PARAMETER_DB_URL` |
 | `db.py` | Engine/Session、迁移入口和数据库生命周期 |
-| `rdp_models.py` | `RdpBase` 的 102 张 ORM 表，覆盖 staging/bronze/silver/gold/meta/research/governance；ORM baseline 含 action proof 表，Batch B 仍为 18 个有序 stage |
+| `rdp_models.py` | `RdpBase` 的 102 张 ORM 表，覆盖 staging/bronze/silver/gold/meta/research/governance；ORM baseline 含 action proof 表。标准部署再含 7 张 Batch B SQL 治理表与 1 张迁移账本，当前物理库总数为 110；Batch B 为 18 个有序 stage |
 | `models.py` | 采集、replay 等轻量领域数据结构和表名解析 |
 | `live_query_adapter.py` | 主交易数据库只读查询适配层 |
 | `orderbook_diff_payload_contract.py` | orderbook diff payload 契约 |

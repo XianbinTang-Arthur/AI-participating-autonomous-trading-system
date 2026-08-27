@@ -9,7 +9,7 @@
 | --- | --- | --- | --- |
 | 静态 | Ruff | `ruff check aats/` 无错误 | 修复后重跑 |
 | 单元 | 全量 unit | 全部通过，无 warning 契约回退 | 停止部署 |
-| Schema | 102 张 ORM 表；18 个有序 Batch B stage，末项 `batch_b_19_historical_research_artifacts` | forward/rollback、ledger checksum、表、唯一键、CHECK 与 registry 一致 | 停止 RDP writer |
+| Schema | 102 张 ORM 表 + 7 张 Batch B SQL 治理表 + 1 张 migration ledger（当前物理总数 110）；18 个有序 Batch B stage，末项 `batch_b_19_historical_research_artifacts` | forward/rollback、ledger checksum、表、唯一键、CHECK 与 registry 一致 | 停止 RDP writer |
 | 配置 | derivatives Compose | 公共采集器存在、不加载 live env、七个应用容器 required | 停止部署 |
 | 配置 | canary | validator 通过、`deployable=false`、deploy 入口无注册 | 视为安全回退失败 |
 | 研究 | 历史审计 | 所有旧候选 `capital_eligible=false` | 禁止引用旧结果 |

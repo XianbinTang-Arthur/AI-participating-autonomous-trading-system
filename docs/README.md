@@ -125,7 +125,8 @@
 - `scripts/run_local.py` 现为明确迁移失败入口：不加载 profile/runtime，输出指引并 exit `2`；不是可用 paper loop，仓库外旧调用方仍需迁移。
 - JetStream 是 3 条 stream，全部 1 天上限/兜底；总声明容量 6.5 GiB，server 8 GiB。
 - RDP ORM 是 102 张表，分布为 staging 13 / bronze 21 / silver 16 / gold 9 /
-  meta 14 / research 3 / governance 26；旧材料中的 48/78/81/84/98/101 张均已过时。
+  meta 14 / research 3 / governance 26；标准部署另有 7 张 Batch B SQL 治理表和
+  1 张 migration ledger，当前现场物理总数为 110；旧材料中的 48/78/81/84/98/101 张均已过时。
 - RDP workflow 是 10 个定义、8 个 enabled；decision/release disabled，release 还禁止入队。
 - runtime active parameter 是 Postgres DB-only；JSON 文件不是 fallback。
 - direct `POST /rdp/parameters/apply` 已停用并固定返回 `release_required`；前向资本变更必须建立 canonical release。Operator rollback 需要 action token，启用中的 observation cycle 则通过 exact provenance、combo lock、attempt 和应用层 insert-once action proof 执行内部风险收敛；legacy/不确定状态进入 reconciliation。

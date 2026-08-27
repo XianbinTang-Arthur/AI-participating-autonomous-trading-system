@@ -93,7 +93,7 @@
 .\.venv\Scripts\python.exe scripts\rdp_detect_gaps.py
 ```
 
-`rdp_init_db.py` 是受控显式迁移入口，执行 ORM baseline、完整 Batch B ledger/checksum chain 和最终只读校验；当前 ORM 为 102 张表，Batch B 仍为 18 个有序 stage，末项名称是 `batch_b_19_historical_research_artifacts`。不要按旧的 48/78/81/84/98/101 表清单验收。`--ensure-schema` 为旧 CLI 名，在 daily ingest/replay 等业务 runner 中已收紧为只读 validate-only，不再执行 DDL。Live 部署不手工运行本节命令，只通过根 `scripts/deploy.sh` 的一次性综合 schema job。
+`rdp_init_db.py` 是受控显式迁移入口，执行 ORM baseline、完整 Batch B ledger/checksum chain 和最终只读校验；当前 ORM 为 102 张表。Batch B 仍为 18 个有序 stage，末项名称是 `batch_b_19_historical_research_artifacts`，并额外所有 7 张非 ORM 治理表与 `rdp_schema_migrations` 账本，所以标准部署物理库当前为 110 张。不要按旧的 48/78/81/84/98/101 表清单验收，也不要把 ORM 数量 102 当成物理库 exact count。`--ensure-schema` 为旧 CLI 名，在 daily ingest/replay 等业务 runner 中已收紧为只读 validate-only，不再执行 DDL。Live 部署不手工运行本节命令，只通过根 `scripts/deploy.sh` 的一次性综合 schema job。
 
 ### 5.2 历史数据治理
 

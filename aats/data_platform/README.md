@@ -28,7 +28,7 @@ RDP 是研究和治理子系统，不是实时交易执行器。
 
 ## 2. 数据架构
 
-`aats/data_platform/rdp_models.py::RdpBase` 当前声明 102 张表：
+`aats/data_platform/rdp_models.py::RdpBase` 当前声明 102 张 ORM 表：
 
 | Schema | 表数 | 主要职责 |
 | --- | ---: | --- |
@@ -40,6 +40,8 @@ RDP 是研究和治理子系统，不是实时交易执行器。
 | `research` | 3 | experiment 与研究结果 |
 | `governance` | 26 | 参数、推荐、发布、观察、应用层 action proof、任务队列、逻辑 Run/Step/Event、holdout、参数代次和运行状态 |
 | **合计** | **102** | — |
+
+标准部署后的 `aats_research` 物理库当前是 110 张表：上述 102 张 ORM 表，另加 Batch B SQL 所有的 7 张治理表（`apply_saga_operations`、`cost_calibration_runs`、`profile_research_runs`、`profile_type_review_streak`、`rdp_daemon_heartbeat`、`system_config`、`system_config_history`）和迁移账本 `rdp_schema_migrations`。覆盖审计扫描 102 张 ORM 表；部署验收同时要求这 8 张 migration-owned 表存在，不得把“ORM 数量 102”误写成“物理库恰好 102 张”。
 
 迁移定义位于 `aats/data_platform/migrations/`。显式前向入口是 `scripts/apply_schema_migrations.py`（部署综合作业）或兼容初始化入口 `scripts/rdp_init_db.py`；它们均执行 ORM baseline + 全部 18 个有序 Batch B stage（末项名称 `batch_b_19_historical_research_artifacts`），并在 `governance.rdp_schema_migrations` 保存 version/checksum。应用、daemon 和研究 job 不在启动期执行 DDL，只读校验 ORM table/column surface 与迁移账本。不能用旧文档中的“48/78/81/84/98/101 张表”或单纯“表存在”判断 schema 完整。
 

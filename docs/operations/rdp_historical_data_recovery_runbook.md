@@ -55,7 +55,7 @@ Windows 静态检查仍使用：
 
 ## 4. 第一步：只读覆盖审计
 
-覆盖审计在 PostgreSQL `REPEATABLE READ, READ ONLY` 快照中读取全部 102 张当前 ORM 表；有时间列的表只扫描给定窗口，无时间列的表只读 planner estimate。数据库已用完全一致的主键/唯一约束禁止重复时，审计直接报告重复为 0，不再重复执行高成本分组扫描。它不会建表、补数或修改状态。若目标库表数不等于 102，或 Batch B 账本没有完成全部 18 个有序 stage（末项 `batch_b_19_historical_research_artifacts`），说明当前 schema 未经标准部署，不能运行多日 campaign。
+覆盖审计在 PostgreSQL `REPEATABLE READ, READ ONLY` 快照中读取全部 102 张当前 ORM 表；有时间列的表只扫描给定窗口，无时间列的表只读 planner estimate。数据库已用完全一致的主键/唯一约束禁止重复时，审计直接报告重复为 0，不再重复执行高成本分组扫描。它不会建表、补数或修改状态。部署门禁应验证 102 张 ORM 表全部存在、Batch B 账本完成全部 18 个有序 stage（末项 `batch_b_19_historical_research_artifacts`），以及 7 张 Batch B SQL 治理表和迁移账本存在；当前标准物理总数为 110。不能再用“物理库恰好等于 102”判断 schema，否则会把合法 migration-owned 表误报为异常。
 
 ```bash
 cd ~/aats

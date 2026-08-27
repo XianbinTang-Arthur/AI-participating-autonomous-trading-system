@@ -30,7 +30,7 @@ AATS（AI Participating Autonomous Trading System）不是一个简单的“策�
 5. **成交是财务投影的核心事实输入。** `FillEvent` 驱动组合、余额、费用、已实现盈亏、lot、ledger、settlement 与 reconciliation；费用在系统内按正成本记录，并从余额/盈亏扣除。
 6. **四进程运行依赖 NATS 与 Redis。** exchange-coupled 的四进程模式若仍使用纯内存事件总线或纯内存热状态，启动会失败，而不是带着错误拓扑继续运行。
 7. **RDP 的研究结论默认不能直接改实盘。** Research Factory 明确禁止 runtime mutation、active parameter write、runtime config write 和 OKX write；研究产物先形成证据、verdict、recommendation，再进入审批、gate、发布和观察链路。
-8. **当前代码与若干旧文档存在漂移。** Phase 3Q 已把失效的 `scripts/run_local.py` 收口为明确迁移失败入口；Phase 3R 又修复 replay short-bias gate，并重写已漂移的参数映射参考；Phase 3S 增加基础 CI/warning gate，Phase 3T 再加入 Python hashed lock 与外部镜像 digest，但远端 required check、integration 和完整供应链扫描仍未启用；当前 RDP ORM 元数据是 102 张表；JetStream 主事件流当前代码默认 1 天而部分旧注释仍写 7 天。最新收益复核证明历史、OHLCV/funding 和微观结构三阶段累计 10/10 个唯一候选全部失败，当前项目不能因模拟部署健康而被描述为“接近盈利上线”。具体见第 26 章与[真实收益差距评估](profitability_gap_assessment_2026_08_25.md)。
+8. **当前代码与若干旧文档存在漂移。** Phase 3Q 已把失效的 `scripts/run_local.py` 收口为明确迁移失败入口；Phase 3R 又修复 replay short-bias gate，并重写已漂移的参数映射参考；Phase 3S 增加基础 CI/warning gate，Phase 3T 再加入 Python hashed lock 与外部镜像 digest，但远端 required check、integration 和完整供应链扫描仍未启用；当前 RDP ORM 元数据是 102 张表，标准部署另有 8 张 migration-owned 表，现场物理总数为 110；JetStream 主事件流当前代码默认 1 天而部分旧注释仍写 7 天。最新收益复核证明历史、OHLCV/funding 和微观结构三阶段累计 10/10 个唯一候选全部失败，当前项目不能因模拟部署健康而被描述为“接近盈利上线”。具体见第 26 章与[真实收益差距评估](profitability_gap_assessment_2026_08_25.md)。
 
 ## 1. 文档范围、方法与可信边界
 
@@ -1103,7 +1103,7 @@ RDP 与主交易库分离，负责：
 
 它不是主交易订单执行器。RDP 生成的研究候选不能直接调用 OKX。
 
-### 20.2 七个 schema、102 张表
+### 20.2 七个 schema、102 张 ORM 表（标准部署物理总数 110）
 
 | Schema | 数量 | 作用 |
 | --- | ---: | --- |
@@ -1550,7 +1550,7 @@ Phase 3E 工作区已把 root/RDP schema 所有权收口到部署期显式 job�
 
 ### 26.5 RDP 表数量旧说明已过时
 
-当前 `RdpBase.metadata` 是 102 张表、7 个 schema，分布为 `13/21/16/9/14/3/26`；旧 README/设计中出现的 48/78/81/84/98/101 等数量只能代表历史阶段。
+当前 `RdpBase.metadata` 是 102 张表、7 个 schema，分布为 `13/21/16/9/14/3/26`；标准部署另有 Batch B SQL 所有的 7 张治理表与 1 张迁移账本，因此现场物理总数是 110。旧 README/设计中出现的 48/78/81/84/98/101 等数量只能代表历史阶段。
 
 ### 26.6 JetStream 旧注释漂移（已在 2026-08-22 文档修复中更正）
 
@@ -2043,7 +2043,7 @@ strategy_sleeves
 
 ## 附录 C：RDP 81 表历史快照（原始全景基线）
 
-以下完整清单属于 `be9179e`，不得作为当前 schema 迁移目标。当前 ORM 为 102 张表，分布为 `staging=13 / bronze=21 / silver=16 / gold=9 / meta=14 / research=3 / governance=26`；现行数量与职责见 [`docs/rdp/module_reference.md`](../rdp/module_reference.md)，部署时仍必须以 ORM metadata、migration ledger 和目标数据库核验。
+以下完整清单属于 `be9179e`，不得作为当前 schema 迁移目标。当前 ORM 为 102 张表，分布为 `staging=13 / bronze=21 / silver=16 / gold=9 / meta=14 / research=3 / governance=26`；标准部署物理库另含 8 张 migration-owned 表，总数为 110。现行数量与职责见 [`docs/rdp/module_reference.md`](../rdp/module_reference.md)，部署时仍必须以 ORM metadata、migration ledger 和目标数据库核验。
 
 ### C.1 `staging`（11）
 

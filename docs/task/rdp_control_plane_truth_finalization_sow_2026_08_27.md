@@ -172,4 +172,13 @@
 - WSL2 RDP API/no-DB integration：`38 passed`；真实 PostgreSQL 回滚与证明 integration：`17 passed`。
 - Ruff（`aats/` 与全部改动 Python 文件）、`git diff --check`、30 份改动 Markdown 本地链接检查均通过。
 - 历史恢复 campaign `60e46f5e-e3e0-4090-b141-b53c92f1aa71` 的旧版 v1 30 日流程已 `SUCCEEDED`，但它不满足当前 v2 fencing、immutable Silver、source-aware Gold 与 row verifier 合同，因此不得据此解除当前 NO-GO 或宣称历史恢复已经按现行标准完成。
-- 本状态只表示代码与静态/单元/集成验证完成；derivatives 模拟发布仍必须由仓库规定入口执行并单独保留运行证据，且不授权 live、真实订单或参数应用。
+- 本状态表示代码、静态/单元/集成验证以及下述 derivatives 模拟发布基础检查已完成；它仍不授权 live、真实订单或参数应用，也不代表收益门禁通过。
+
+### 17.1 derivatives 模拟发布证据
+
+- 规定入口已从提交 `2de8da888ad15ed813a428c1fd41db31bbdbd1dd` 完成发布；runtime generation 为 `2de8da888ad1-20260827T233658Z-2045-5276`，证据包位于 WSL2 `/root/aats/deploy/wsl2-dev/runtime/deployment-evidence/20260827T233900515563Z-derivatives-2de8da888ad1.json`。
+- gateway、market、decision、execution、rdp-daemon、liquidations-daemon、microstructure-collector 七个必需应用容器均为 `running/healthy`；`/healthz` 与 `/ui/rdp` 返回 200。未认证读取 `/rdp/health` 返回 401，符合 read-access 门禁，不解释为组件故障。
+- ORM metadata 为 102 张；现场物理库为 110 张，其中额外 8 张均由 Batch B/ledger 所有。18 个 migration stage 完整，末项为 `batch_b_19_historical_research_artifacts`；action proof 表及 PK、FK、两个 UNIQUE 和三个 CHECK 均存在。
+- 发布后活动 RDP run/task/campaign 均为 0；新增 apply history、parameter release、action proof 与 active-parameter update 均为 0。历史 30 日 v1 campaign 仍为 `SUCCEEDED`，未被发布重启。
+- 七个核心应用自本次启动后的真实 `ERROR/CRITICAL/FATAL/Traceback` 数量均为 0；logger 名 `uvicorn.error` 下的 startup INFO 不计作错误。
+- 本次证据只证明模拟栈基础健康与控制面无副作用，不证明 trading-ready、收益能力、v2 历史恢复完成，也不授权 live。
