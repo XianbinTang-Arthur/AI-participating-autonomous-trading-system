@@ -1,6 +1,6 @@
 # RDP 衍生品回测 LF-B1.2 事件与证据内核实施任务书
 
-> 文档状态：现行实施任务书；LF-B1.2-A1 快照/事件/时效性/资金费率证据边界已完成本地静态验收，LF-B1.2 整体执行中、未验收
+> 文档状态：现行实施任务书；LF-B1.2-A1 与 A2 event-set 严格契约基础已完成本地静态验收，A2 formal reader/decision input 及 LF-B1.2 整体仍执行中、未验收
 > 最后核对：2026-08-28（起始基线 `main@0fb27c0a152c`；以本文档所在 HEAD 为准）
 > 上位设计：[`../design/rdp_derivatives_backtest_run_v1_adr_2026_08_28.md`](../design/rdp_derivatives_backtest_run_v1_adr_2026_08_28.md)
 > 上位任务：[`rdp_derivatives_phase2_promotion_evidence_producer_p1_sow_2026_08_28.md`](rdp_derivatives_phase2_promotion_evidence_producer_p1_sow_2026_08_28.md)
@@ -95,6 +95,13 @@ diagnostic 根，且不得包含收益、promotion metrics 或可被 qualificati
 - event JSONL 的 raw artifact digest 保留 locator 以证明确切字节；semantic event digest 只由
   `event_id`/排除 locator 的 identity body 聚合。manifest 必须同时绑定两者，不得让目录搬迁
   改变 semantic run identity，也不得因语义相同而忽略 raw bytes 漂移。
+- 每流 integrity summary 必须绑定固定 policy/version/fingerprint、检查 coverage、event count/digest 和
+  gap/duplicate/order/singleton-cardinality 零失败结果；它进入 semantic identity，但正式 reader 仍须从 raw
+  event 重算，不得把 summary 或 `passed=true` 当作 authority token。singleton kind 固定为
+  contract/funding/tradable/bar 并进入 policy fingerprint；mark/index 只要求同 timestamp 内 sequence 严格递增。
+- snapshot catalog 第 1 项是 warmup carry-in，不产生 phase 05；其余项与 contract stream 一一对应。
+  manifest 先关闭 count 与 first/last activation，第一遍 reader 再逐条核对 timestamp、四元 refs 和 event ID；
+  catalog 内不同 immutable snapshot 不得复用同一大小写无关 locator。
 
 ### 4.3 状态、发布和恢复
 
@@ -114,16 +121,18 @@ diagnostic 根，且不得包含收益、promotion metrics 或可被 qualificati
 
 ## 5. 实施顺序
 
-1. **LF-B1.2-A：snapshot 与 event 边界**
+1. **LF-B1.2-A：snapshot、event 与 formal-source 边界**
    - snapshot refs、payload schemas、稳定 loader、effective-window preflight；
    - event dataclasses/strict parser、固定 phase、逐流验证、deterministic merge、freshness cursor；
-   - canonical JSON/JSONL 与 resource limit helpers。
+   - canonical JSON/JSONL、metadata-preserving cursor、event-set 两遍 identity 与 resource limit helpers；
+   - exact feature record/parameter snapshot 输入及显式 checkpointable Decimal decision state；不得复用 mutable/
+     float `IndependentReplayAdapter`，不得接受调用方自报 order command。
 2. **LF-B1.2-B：reducer 与 golden path**
    - opening state、schedule activation、mark/index、funding、queued order、fill、position 和 liquidation；
    - decision adapter 只能消费 bar-close fact 并返回固定、纯、可重放命令；
    - 生成全部 ledger 的内存 canonical records。
-3. **LF-B1.2-C：event set、publisher 与 recovery**
-   - 两遍 event-set 验证、运行中 identity 重算；
+3. **LF-B1.2-C：publisher 与 recovery**
+   - 运行中 event-set identity 重算及 committed timestamp cursor；
    - immutable child/diagnostic publisher、manifest validator、exact checkpoint/recovery；
    - crash point、文件替换、并发 conflict、prefix drift 与恢复确定性测试。
 4. **LF-B1.2-D：独立复审与收口**
@@ -173,13 +182,27 @@ diagnostic 根，且不得包含收益、promotion metrics 或可被 qualificati
 - 已完成：LF-B1.1 严格合同与纯 Decimal 算术；LF-B1.2 现状审查和本任务书；LF-B1.2-A1 的
   immutable snapshot refs/loader、四元 effective-window、封闭事件联合类型、严格逐流/全局 merge、phase 40/55
   内部 barrier、mark/index freshness 与 funding continuity/settlement 验证；
+- LF-B1.2-A2 event-set 契约基础已完成：strict manifest/ref、六流 raw/semantic identity、hash-bound 且必须重算的
+  integrity summary、warmup carry-in catalog/phase-05 一致性、immutable snapshot locator、评价期 bar、固定资源上限、
+  restart cursor、4 MiB component/final gate 与 manifest raw path/size/SHA/canonical-byte 校验；该结果仍不包含文件 I/O
+  双遍 reader、真实 raw event 预检或运行时经济状态；
 - LF-B1.2-A1 本地静态验证：Ruff 通过；本目录聚焦测试 `204 passed`；连同共享 instrument arithmetic/snapshot
   回归 `255 passed`；Windows 全量 unit `6128 passed, 31 skipped, 259 subtests passed`。两名独立只读审查者均
   给出 PASS，未发现未关闭 P0/P1；未访问网络、数据库、live profile 或真实资金；
-- 执行中：LF-B1.2-B reducer/golden ledger 与 LF-B1.2-C event-set、publisher、checkpoint/recovery；
-- 未完成：canonical JSONL event-set 两遍读取、single-position reducer、正式 publisher/validator、exact
+- LF-B1.2-A2 契约基础本地静态验证：Ruff `aats/ --fix` 通过；衍生品回放目录 `236 passed`；Windows 全量 unit
+  `6160 passed, 31 skipped, 259 subtests passed`。两轮对抗复审逐项修复后最终无未关闭 P0/P1；未执行文件
+  reader、网络、数据库、WSL2、部署、live profile 或真实资金；
+- 执行中：LF-B1.2-A2 metadata-preserving 双遍 formal reader 与 sealed feature/Decimal decision input；完成后才进入 LF-B1.2-B reducer/golden ledger，
+  再进入 LF-B1.2-C publisher/checkpoint/recovery；
+- 未完成：canonical JSONL event-set 有界文件读取/两遍原始身份重算、feature/decision input、single-position reducer、正式 publisher/validator、exact
   checkpoint/recovery、正式数据运行接入和 UI/UX 全面重构；因此本任务书整体仍未验收；
-- 已登记的非阻断 P2：公开 `event_order_key()` 的独立抗对象篡改重验、snapshot loader 的 symlink/junction/
-  读取中替换/非法 UTF-8/重复 key/超限等 wrapper 级 fault-injection 补测、自定义 iterator 原生异常归一化，
-  以及 event/funding transition invariant 的后续去重；这些不得在最终 LF-B1.2 验收时遗留为未处置风险；
+- 本轮已关闭的审查项：公开 `event_order_key()` 全事件重验；event/funding 共用 strict snapshot transition；
+  integrity policy 明确并绑定 singleton kind 集；manifest ref 不再忽略 raw bytes；catalog/phase-05、评价期 bar、
+  `(ts,source_sequence)` boundary、wire array、casefold path、4 MiB aggregate/final gate 均失败关闭；
+- 已登记的非阻断 P2：snapshot loader 的 symlink/junction/读取中替换/非法 UTF-8/重复 key/超限等 wrapper 级
+  fault-injection 补测、自定义 iterator 原生异常归一化，以及 funding expected lattice 的增量化；这些不得在最终
+  LF-B1.2 验收时遗留为未处置风险；
+- reducer 开工前已冻结的 P1 设计修正：validated activation/decision step、feature/parameter 可重算输入、exact
+  lot-floor/price、经济子状态原子性与 IOC lifecycle 分离、open/queued snapshot switch 语义、timestamp-boundary
+  checkpoint，以及 formal publish 的 POSIX/WSL durability 边界；实现与故障测试仍未完成；
 - 外部边界：真实历史数据充分性、Research OS G0、真人 Owner/Reviewer/许可/预算、live 与资本晋级均未因本任务改变。

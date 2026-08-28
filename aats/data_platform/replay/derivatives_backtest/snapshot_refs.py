@@ -335,6 +335,78 @@ class DerivativesSnapshotRefsV1:
         )
 
 
+def validate_snapshot_transition(
+    active: DerivativesSnapshotRefsV1,
+    incoming: DerivativesSnapshotRefsV1,
+    *,
+    switch_ts: datetime,
+) -> tuple[DerivativesSnapshotRefsV1, DerivativesSnapshotRefsV1]:
+    """Validate one exact phase-05 transition and return defensive copies.
+
+    A transition may change any non-empty subset of the four schedules, but
+    every changed reference must close and open at the exact same timestamp.
+    Locator-only changes do not create a new economic identity and therefore
+    cannot authorize a phase-05 event.
+    """
+
+    point = require_utc_datetime(switch_ts, "snapshot_switch_ts")
+    if type(active) is not DerivativesSnapshotRefsV1:
+        raise DerivativesBacktestContractError("active_snapshot_set_invalid")
+    if type(incoming) is not DerivativesSnapshotRefsV1:
+        raise DerivativesBacktestContractError("incoming_snapshot_set_invalid")
+    try:
+        previous = DerivativesSnapshotRefsV1.from_dict(active.to_dict())
+        replacement = DerivativesSnapshotRefsV1.from_dict(incoming.to_dict())
+    except DerivativesBacktestContractError:
+        raise
+    except (AttributeError, KeyError, OverflowError, TypeError, ValueError) as exc:
+        raise DerivativesBacktestContractError(
+            "snapshot_transition_revalidation_failed"
+        ) from exc
+    if previous != active or replacement != incoming:
+        raise DerivativesBacktestContractError(
+            "snapshot_transition_revalidation_mismatch"
+        )
+    if previous.fingerprint == replacement.fingerprint:
+        raise DerivativesBacktestContractError("snapshot_activation_noop")
+
+    changed = False
+    for previous_ref, replacement_ref in zip(
+        (
+            previous.instrument,
+            previous.position_tier,
+            previous.execution_fee,
+            previous.funding_schedule,
+        ),
+        (
+            replacement.instrument,
+            replacement.position_tier,
+            replacement.execution_fee,
+            replacement.funding_schedule,
+        ),
+        strict=True,
+    ):
+        if previous_ref.fingerprint == replacement_ref.fingerprint:
+            previous_ref.validate_at(point)
+            replacement_ref.validate_at(point)
+            continue
+        changed = True
+        if previous_ref.snapshot_id == replacement_ref.snapshot_id:
+            raise DerivativesBacktestContractError("snapshot_identity_conflict")
+        if (
+            previous_ref.effective_to != point
+            or replacement_ref.effective_from != point
+        ):
+            raise DerivativesBacktestContractError(
+                "snapshot_transition_window_invalid",
+                field=replacement_ref.kind.value,
+            )
+        replacement_ref.validate_at(point)
+    if not changed:  # pragma: no cover - set fingerprint already proves this
+        raise DerivativesBacktestContractError("snapshot_activation_noop")
+    return previous, replacement
+
+
 __all__ = [
     "DERIVATIVES_SNAPSHOT_MAX_BYTES",
     "DERIVATIVES_SNAPSHOT_REF_SCHEMA",
@@ -342,4 +414,5 @@ __all__ = [
     "DerivativesSnapshotRefsV1",
     "ImmutableSnapshotRefV1",
     "SnapshotKindV1",
+    "validate_snapshot_transition",
 ]

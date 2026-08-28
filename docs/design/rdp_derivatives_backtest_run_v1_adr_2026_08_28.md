@@ -1,6 +1,6 @@
 # ADR：RDP `derivatives-backtest-run/v1` 首个衍生品回测纵向切片
 
-> 文档状态：设计提案（Proposed）；LF-B1.1 与 LF-B1.2-A1 证据边界已实施并完成本地静态验收，整体设计未批准、不可作为运行或晋级依据
+> 文档状态：设计提案（Proposed）；LF-B1.1、LF-B1.2-A1 与 A2 event-set 契约基础已实施并完成本地静态验收，整体设计未批准、不可作为运行或晋级依据
 > 最后核对：2026-08-28（起始代码基线 `main@96c772010767`；实施状态以本文档所在 HEAD 为准）
 > 核对范围：静态代码、测试契约、现行 LF-B 任务书与 Windows 全量单元回归；未执行正式 event-set/真实数据 replay、未验证目标数据、未部署
 > 待决策人：待实名任命的 RDP Owner、Independent Risk Reviewer、Data Lineage Reviewer
@@ -104,9 +104,9 @@ facade 也不能替代历史 source seal；正式 engine 必须继续从保留�
 | 模块 | 唯一职责 |
 | --- | --- |
 | `contracts.py` | frozen request/event/result/ledger 类型及严格验证 |
-| `event_source.py` | exact `derivatives-event-set/v1` 的稳定读取、预检、cursor 重放与流式身份复核 |
+| `event_source.py` | exact `derivatives-event-set/v1` 的稳定读取、预检、metadata-preserving cursor 重放与流式身份复核 |
 | `event_merge.py` | 单调输入流校验与确定性 k-way merge |
-| `engine.py` | 纯 `reduce_event(state,event)`、队列和 single-position 状态迁移；不做 I/O |
+| `engine.py` | 纯 `reduce_step(state,validated_step)`、队列和 single-position 状态迁移；不做 I/O |
 | `accounting.py` | Decimal fee/funding/PnL/margin/liquidation 纯函数 |
 | `freshness.py` | mark/index/funding schedule、age、gap 门禁 |
 | `metrics_v2.py` | 从 hash-bound 明细确定性重算 metrics |
@@ -122,14 +122,29 @@ facade 也不能替代历史 source seal；正式 engine 必须继续从保留�
 
 ## 5. 内部 API 与严格类型
 
-纯领域内核只暴露单事件 reducer：
+refs-only phase 05、内部 phase 40/55 和派生策略决策不能用一个裸 source-event 联合类型表达。纯领域内核因此
+只暴露单步骤 reducer：
 
 ```python
-def reduce_derivatives_event(
+def reduce_derivatives_step(
     state: DerivativesEngineStateV1,
-    event: DerivativeReplayEventV1,
+    step: DerivativesReducerStepV1,
 ) -> DerivativesReductionV1: ...
 ```
+
+`DerivativesReducerStepV1` 是封闭联合类型：普通 index/mark/funding/tradable source event、
+`ValidatedSnapshotActivationStepV1`、`DerivedLiquidationBarrierV1` 和
+`ValidatedIndependentDecisionStepV1`。它不接受裸 `ContractTierEffectiveEventV1` 或调用方自报 order command：
+
+- orchestrator 只能从第一遍已验证的 snapshot catalog，把 refs-only phase 05 丰富为 frozen activation step；
+  step 必须同时携带原 source event 与当前读取后重验的 `LoadedDerivativesSnapshotSetV1`，并再次证明 refs、
+  fingerprint、source event ID 和 effective timestamp 一致；reducer 不做路径、ambient、数据库或网络查找；
+- bar decision step 必须携带由 `feature_ref` 指向的 exact sealed feature record、exact parameter snapshot 和显式
+  checkpointable decision state。reducer 通过新的 Decimal-only、无隐藏 deque/float 的
+  `derivatives-independent-decision/v1` 重算 decision/order；不得复用当前 mutable `IndependentReplayAdapter`，也
+  不接受无法由这些输入重算的外部命令；
+- engine state 只保留当前 active snapshot/decision state，不保留未来 snapshot timeline；checkpoint 只序列化
+  当前身份和可重算状态，恢复时由重新 preflight 的 exact catalog 重建。
 
 资源、流式落盘和恢复由唯一 orchestrator 显式协调：
 
@@ -171,7 +186,13 @@ manifest 并发布；blocked 路径销毁正式 child staging 后，只能发布
   settlement timestamp/cadence、rate cap/floor 与不可变身份；不得硬编码 8 小时或由 event 自报 schedule；
 - exact `DerivativesEventSetRefV1`：`derivatives-event-set/v1` manifest 的 ID、路径、digest、size、
   artifact-set fingerprint、总 event-set fingerprint 与每条必需流的 schema/count/canonical event digest、
-  coverage、dataset version、transform policy/version 及父 raw partition hashes；
+  coverage、dataset version、transform policy/version 及父 raw partition hashes；每流还必须携带由固定
+  integrity policy、检查窗口、event count/digest、gap/duplicate/order/cardinality 零失败结果共同计算的
+  `integrity_evidence_digest`，consumer 必须从 raw events 重算而不是信任 producer 的布尔成功声明；
+- snapshot catalog 的第 1 项固定表示 `warmup_start` carry-in active set，不对应 phase 05 source event；之后每项与
+  contract stream 的一条 phase 05 event 一一对应。manifest 层先核对 `contract_event_count == catalog_count - 1`
+  及 first/last activation timestamp，正式 reader 再逐条核对 timestamp、四元 refs、event ID 和 catalog entry；
+  同一 snapshot ID 必须始终映射同一完整 ref，不同 immutable snapshot 不得复用大小写无关的相同 locator；
 - `start_ts`、`end_ts`、warmup boundary；窗口必须非空且为 UTC 15 分钟边界；
 - Step 2/3 round ID、candidate artifact digest/size、parameter typed fingerprint；这些仅是 child lineage，
   不等于 qualification；
@@ -247,6 +268,9 @@ diagnostic 目录同样不可覆盖：相同 `run_id + attempt_id` 仅允许 exa
 - end valuation 使用 `end_ts` 前最后一条、age `<=60s` 的 source-sealed mark，并同时要求有效 index；该
   `end_mark_ts < end_ts`，只形成最终盯市记录，不触发成交、funding 或 bar-close decision。缺 end mark/index
   时 run blocked，禁止用最后成交价或 bar close 补值。
+- 已在窗口内 `liquidated` 的 terminal child 不再要求 `end_ts` freshness；最终经济状态固定为 liquidation
+  timestamp 的 forced-close/equity records，但 orchestrator 仍须以 verify-only 模式 drain 剩余 event-set bytes，
+  证明第二遍实际输入身份完整。
 
 ## 7. 事件顺序与因果成交
 
@@ -277,6 +301,11 @@ close 后终止该 run。funding 的 `q(t-)` 必须在 funding ledger 显式保�
 full/partial/no-fill 并立即终结该订单；不得因零量、价格不利或结果不佳而跳到后续事件。窗口内不存在该事件时
 记录 `expired_no_next_tradable_event`；禁止 fallback 到 bar close、下一 bar close 或窗口外事件。
 
+fill price 精确等于该 `TradableEventV1.reference_price`，且必须通过 active contract 的 tick 校验；v1 不再在
+reducer 内添加第二层 slippage。`available_contracts` 是 source-sealed 可成交上限，fill quantity 使用 active
+contract 的 exact rational lot-floor（`max_participation=1`）对 `min(abs(order_remaining), available)` 向零取整；
+低于 min size 得到合法 no-fill。禁止把未对齐数量四舍五入放大，禁止跳过本事件等待更好价格/数量。
+
 queued order 在 single-position 模式下按 FIFO 处理；v1 每次 bar close 最多产生一个 live order。反向成交必须
 确定性拆为“先平旧仓、再开新仓”两个 accounting legs，共享一个 exchange fill identity，费用按两个 leg 的绝对
 contract 数量比例分摊：先按 opening leg 的绝对 notional 直接计算 opening fee，closing fee 固定为 total fee
@@ -285,6 +314,21 @@ contract 数量比例分摊：先按 opening leg 的绝对 notional 直接计算
 与 post-fill liquidation 校验全部通过才原子提交；opening leg 资金不足时两个 leg 都不提交、无 fee/ledger/state
 变化。这里“reduce-only close 不因 IM 拒绝”只适用于不含 opening leg 的纯减仓订单。任何 self-cross、并存
 long/short 或多订单竞态均失败关闭。
+
+“零提交”只约束经济子状态：反转或其他 risk-increasing provisional fill 若 margin/post-fill liquidation 校验
+失败，account、fee/fill/position/equity ledger 均不得变化；但 IOC order lifecycle 必须在本 tradable event 正常
+终结、清除 queue，并写唯一 rejection/cancellation 记录。phase 55 随后只复核已提交的当前经济状态，不得把被拒
+provisional fill 当成已成交。
+
+phase 05 发生任意 snapshot-set transition 时，v1 要求无 queued order；否则失败关闭，禁止取消、覆盖或把旧决策
+静默重绑定到新 schedule。instrument snapshot 若改变 contract fingerprint，只允许当前 flat；否则
+`instrument_change_with_open_state` 失败关闭，禁止用新 face value 重解释旧 `q/A`。tier、execution-fee 与 funding
+schedule 可在无 queued order 的 open position 期间按已验证 effective window 切换：现有仓位立即按新 tier
+验证，并在同 timestamp phase 40 执行强平检查。
+
+phase 60 若已有 live IOC，仍必须生成由 exact feature/parameter 重算的 decision fact 并推进显式 decision state，
+但不得创建或覆盖订单；结果固定为 `blocked_by_live_order`，原 IOC 保持到第一条严格更晚 tradable event 或 end
+expiry。adapter exception、非法输出或身份漂移是 run-level blocked，不得降级为 no-signal。
 
 ## 8. 数据完整性与 freshness 门禁
 
@@ -311,6 +355,11 @@ v1 不允许 freshness tolerance 随 run 任意调大。政策固定为：
   snapshot 重新打开第二遍执行。执行期间逐流重算 count/digest 和 total event-set fingerprint，结束时与 preflight
   typed-exact 比较。调用者不能注入任意 event object；两遍之间或恢复期间的 path/content identity 漂移立即转为
   `event_set_identity_changed` diagnostic，绝不发布正式 child run。
+- manifest 中的 integrity summary 只是 hash-bound expected result，不是 authority token。第一遍必须按固定
+  `derivatives-event-stream-integrity-policy/v1` 从 raw event 重新计算 gap、duplicate event ID、逐流
+  `(ts,source_sequence)` 顺序、singleton timestamp cardinality、检查窗口和 evidence digest；singleton kind
+  集合固定为 contract/funding/tradable/bar，mark/index 允许同 timestamp 下 source sequence 严格递增的多条事件；
+  该 kind 集合必须进入 policy fingerprint，任一字段不同即阻断。
 
 任何门禁失败都在第一次经济状态变更前阻断；运行中发现后续 gap 时销毁未发布成功结果并发布独立 failure
 diagnostic（不可带 promotion metrics）。不得 forward-fill、插值、使用 close proxy 或把 UNKNOWN 变成零值。
@@ -393,6 +442,10 @@ realized PnL 直接改变 `B`；平仓释放的 initial-margin capacity 只改�
 12. `result.json`；
 13. 最后写入的 `manifest.json`。
 
+start 时唯一一次 `F -> B` 转移定义为 `OpeningAccountTransferRecordV1`，写入 `event_ledger.jsonl` 的封闭 record
+union；首条 `equity_curve.jsonl` 同时记录 `T0/I0/F/B`。不存在额外的隐式 `account_ledger.jsonl`，consumer 必须
+从这两条 hash-bound 记录重算 opening identity 与现金恒等式。
+
 每个非 manifest 文件必须在 manifest 中有规范化相对路径、精确 byte size、lowercase SHA-256 与语义 schema。
 禁止 symlink、路径逃逸、重复路径、额外未声明文件。身份必须形成以下单向、无环 DAG：
 
@@ -426,9 +479,13 @@ consumer 不得解析后重新序列化来替代原始字节校验。
 资源边界由不可被环境变量或 request 覆盖的 `derivatives-backtest-resource-policy/v1` 冻结：单条 JSONL
 记录不超过 1 MiB，request/source/result/manifest 单文件不超过 4 MiB，checkpoint 不超过 8 MiB，单个 JSONL
 不超过 512 MiB，完整 child artifact set 不超过 2 GiB；总输入事件不超过 10,000,000，任一 source stream
-不超过 5,000,000，live queued order 上限为 1。实现阶段若验证后需要改变数值，必须发布新的 policy ID 并更新
-golden tests，不得静默放宽。超过边界返回稳定 `resource_limit_exceeded` 子原因并保持未发布状态；禁止截断、
-抽样后声称成功或依赖进程 OOM 作为门禁。
+不超过 5,000,000，event stream 集合精确为 6；snapshot catalog 不超过 512 个 activation，单流
+source-registry ID 不超过 64 个、parent raw partition SHA-256 不超过 4,096 个，live queued order 上限为 1。
+producer 在构造组合 DAG 前执行逐组件 aggregate budget，并在返回前复核完整 canonical manifest `<=4 MiB`；
+aggregate gate 为固定 envelope 预留 64 KiB，正式 reader 必须在 JSON 解析前执行同一 4 MiB raw byte gate。
+上述 collection cap 不能用于接受超大 manifest。实现阶段若验证后
+需要改变数值，必须发布新的 policy ID 并更新 golden tests，不得静默放宽。超过边界返回稳定
+`resource_limit_exceeded` 子原因并保持未发布状态；禁止截断、抽样后声称成功或依赖进程 OOM 作为门禁。
 
 ## 11. `phase2-promotion-metrics/v2` 可重算契约
 
@@ -464,10 +521,14 @@ v2 consumer、v2 shared policy 与 Decimal parser，并使 validator、candidate
 
 - 每个 run 使用 `run_id` 精确锁；并发 exact retry 只能有一个 writer。已存在 final directory 时，只有 request、
   source、policy 和 manifest fingerprint 全相同才返回 existing success；任一差异为 conflict。
-- checkpoint 只能存在 staging directory，采用原子 replace，包含 exact semantic request/event-set preflight/
+- checkpoint 只能存在 staging sibling metadata directory，采用原子 replace，包含 exact semantic request/event-set preflight/
   instrument/tier/execution-fee/funding-schedule 指纹、各输入流 restart cursor、最后 global event key、账户状态、queued order、ledger byte
   size/rolling SHA-256、资源计数和 checkpoint fingerprint。cursor 必须由 formal event source 解释，普通 iterable
   偏移或“已处理 N 条”不能作为恢复身份。
+- checkpoint 只允许在完整 timestamp group 的全部 source event、derived barrier、decision/order 和 ledger 已提交并
+  flush/fsync 后推进；merge/expander 的 look-ahead cursor 永远不是 committed cursor。每流 cursor 必须保留 exact
+  byte offset、LF record boundary、prefix byte/semantic hash、count 和 last source key；裸 event iterable 会丢失这些
+  元数据，不可用于恢复。
 - 恢复必须显式给出 run ID/staging path；禁止扫描 `latest`、artifact index 或相似目录。恢复前逐项复核 checkpoint
   与已写 ledger，并重新执行完整 event-set preflight；随后从每条流的 exact cursor 重放，重算前缀/后缀身份。
   不一致则隔离 staging 并从头用新 attempt 运行，不能跳过事件或接受调用方替换的 event iterable。
@@ -477,6 +538,9 @@ v2 consumer、v2 shared policy 与 Decimal parser，并使 validator、candidate
   得到逐字节相同的全部正式 child artifact。不同 `run_id/request_created_at` 可产生不同 byte artifact set，但相同
   业务输入与经济输出必须得到相同 semantic request/result/run fingerprint；publisher 时间不得写入任何正式 child
   payload。diagnostic attempt 身份与正式 child 身份完全分离。
+- formal publisher 所需的 file/parent-directory durability 在当前 Windows helper 中并未实现；在新增并故障注入验证
+  Win32 directory durability primitive 之前，正式发布/恢复只允许 POSIX/WSL，Windows 仅运行纯 schema、领域和
+  模拟 fault 测试，不得把 directory-fsync no-op 报告为持久化通过。
 
 ## 13. 测试与 golden vectors
 
@@ -571,6 +635,12 @@ arithmetic/snapshot `255 passed`；Windows 全量 unit `6128 passed, 31 skipped,
 只读审查者均给出 PASS、无未关闭 P0/P1。后者只覆盖 snapshot/event/freshness/funding 证据边界，不覆盖
 reducer、正式 event-set、checkpoint/recovery、publisher、PostgreSQL、WSL2、真实数据、UI 或收益。
 
-本 ADR 当前结论仅为“LF-B1.1 与 LF-B1.2-A1 可作为后续 reducer/发布/恢复纵向切片的已审查起点”。当前 Gold、mark/index、instrument
+LF-B1.2-A2 event-set 契约基础的增量静态证据为：Ruff `aats/ --fix` 通过；衍生品回放目录
+`236 passed`；Windows 全量 unit `6160 passed, 31 skipped, 259 subtests passed`；两轮对抗复审关闭
+manifest raw identity、integrity policy、catalog/phase-05、资源、边界、wire/path 等发现后，最终复审无未关闭
+P0/P1。该结果只证明内存 strict schema/fingerprint/resource/cursor contract，不包含有界文件 reader、两遍 raw
+bytes 重算、sealed feature/decision input、经济 reducer、publisher/recovery、正式数据运行、UI 或收益。
+
+本 ADR 当前结论仅为“LF-B1.1、LF-B1.2-A1 与 A2 event-set 契约基础可作为后续 formal reader/decision/reducer/发布/恢复纵向切片的已审查起点”。当前 Gold、mark/index、instrument
 snapshot、position-tier/MMR/liquidation-fee、execution-fee、funding-schedule snapshot 与 source seal 阻断仍开放；没有运行证据，没有 qualification round，没有部署授权，也没有任何真实资金
 副作用。故截至 2026-08-28：**LF-B 未完成，RDP 不可据此晋级或发布到实盘。**

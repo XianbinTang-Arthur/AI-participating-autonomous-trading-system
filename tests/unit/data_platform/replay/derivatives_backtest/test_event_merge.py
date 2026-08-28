@@ -22,6 +22,7 @@ from aats.data_platform.replay.derivatives_backtest.events import (
     ContractTierEffectiveEventV1,
     DerivativeEventKindV1,
     FundingSettlementEventV1,
+    IndexPriceEventV1,
     MarkPriceEventV1,
     TradableEventV1,
     event_order_key,
@@ -167,6 +168,44 @@ def test_merge_rejects_local_sequence_regression_without_sorting() -> None:
         list(merge_derivative_event_streams(streams))
 
     assert exc_info.value.code == "event_stream_order_invalid"
+
+
+@pytest.mark.parametrize(
+    ("kind", "name", "second"),
+    [
+        (
+            DerivativeEventKindV1.INDEX_PRICE,
+            "index",
+            lambda: IndexPriceEventV1.create(
+                ts=BASE_TS,
+                source_sequence=2,
+                source_ref=source_ref("index"),
+                price=Decimal("50002"),
+            ),
+        ),
+        (
+            DerivativeEventKindV1.MARK_PRICE,
+            "mark",
+            lambda: MarkPriceEventV1.create(
+                ts=BASE_TS,
+                source_sequence=2,
+                source_ref=source_ref("mark"),
+                price=Decimal("50003"),
+            ),
+        ),
+    ],
+)
+def test_merge_allows_multiple_price_events_at_one_timestamp(
+    kind,
+    name: str,
+    second,
+) -> None:
+    streams = streams_for(all_events())
+    streams[kind] = [all_events()[name], second()]
+
+    merged = list(merge_derivative_event_streams(streams))
+
+    assert sum(type(event) is type(streams[kind][0]) for event in merged) == 2
 
 
 @pytest.mark.parametrize(

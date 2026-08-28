@@ -322,6 +322,16 @@ def test_event_phase_policy_is_immutable() -> None:
     assert event_order_key(all_events()["mark"])[1] == 20
 
 
+def test_public_event_order_key_revalidates_mutated_event() -> None:
+    event = all_events()["mark"]
+    object.__setattr__(event.header, "source_sequence", 1 << 63)
+
+    with pytest.raises(DerivativesBacktestContractError) as exc_info:
+        event_order_key(event)
+
+    assert exc_info.value.code == "integer_out_of_bounds"
+
+
 def test_index_and_mark_are_distinct_closed_types() -> None:
     events = all_events()
 

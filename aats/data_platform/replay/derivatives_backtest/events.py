@@ -66,6 +66,14 @@ EXPECTED_EVENT_STREAM_ID_V1 = MappingProxyType(
         DerivativeEventKindV1.BAR_CLOSE: "bar-close",
     }
 )
+SINGLETON_EVENT_KINDS_PER_TIMESTAMP_V1 = frozenset(
+    {
+        DerivativeEventKindV1.CONTRACT_TIER_EFFECTIVE,
+        DerivativeEventKindV1.FUNDING_SETTLEMENT,
+        DerivativeEventKindV1.TRADABLE,
+        DerivativeEventKindV1.BAR_CLOSE,
+    }
+)
 BAR_FEATURE_STREAM_ID_V1 = "bar-features"
 
 
@@ -745,7 +753,9 @@ _EVENT_CLASS_BY_KIND = {
 }
 
 
-def event_order_key(event: DerivativeReplayEventV1) -> tuple[datetime, int, int, str]:
+def _unchecked_event_order_key(
+    event: DerivativeReplayEventV1,
+) -> tuple[datetime, int, int, str]:
     if type(event) not in set(_EVENT_CLASS_BY_KIND.values()):
         raise DerivativesBacktestContractError("event_type_invalid")
     return (
@@ -754,6 +764,22 @@ def event_order_key(event: DerivativeReplayEventV1) -> tuple[datetime, int, int,
         event.header.source_sequence,
         event.header.event_id,
     )
+
+
+def event_order_key(event: DerivativeReplayEventV1) -> tuple[datetime, int, int, str]:
+    """Return the fixed order key after strict full-event revalidation."""
+
+    if type(event) not in set(_EVENT_CLASS_BY_KIND.values()):
+        raise DerivativesBacktestContractError("event_type_invalid")
+    try:
+        validated = parse_derivative_replay_event(event.to_dict())
+    except DerivativesBacktestContractError:
+        raise
+    except (AttributeError, KeyError, OverflowError, TypeError, ValueError) as exc:
+        raise DerivativesBacktestContractError("event_revalidation_failed") from exc
+    if type(validated) is not type(event) or validated != event:
+        raise DerivativesBacktestContractError("event_revalidation_mismatch")
+    return _unchecked_event_order_key(validated)
 
 
 def _parse_header(payload: Mapping[str, Any]) -> ReplayEventHeaderV1:
@@ -910,6 +936,7 @@ __all__ = [
     "IndexPriceEventV1",
     "MarkPriceEventV1",
     "ReplayEventHeaderV1",
+    "SINGLETON_EVENT_KINDS_PER_TIMESTAMP_V1",
     "SourceRecordRefV1",
     "TradableEventV1",
     "event_order_key",

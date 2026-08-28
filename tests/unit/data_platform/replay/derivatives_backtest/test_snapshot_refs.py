@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
@@ -12,6 +13,7 @@ from aats.data_platform.replay.derivatives_backtest.snapshot_refs import (
     DerivativesSnapshotRefsV1,
     ImmutableSnapshotRefV1,
     SnapshotKindV1,
+    validate_snapshot_transition,
 )
 from tests.unit.data_platform.replay.derivatives_backtest._event_helpers import (
     BASE_TS,
@@ -153,3 +155,64 @@ def test_snapshot_fingerprint_excludes_local_locator() -> None:
 
     assert relocated.to_dict() != original.to_dict()
     assert relocated.fingerprint == original.fingerprint
+
+
+def test_snapshot_transition_requires_exact_half_open_switch() -> None:
+    switch_ts = BASE_TS + timedelta(hours=1)
+    original = snapshot_refs()
+    active = replace(
+        original,
+        instrument=replace(original.instrument, effective_to=switch_ts),
+    )
+    incoming = replace(
+        active,
+        instrument=replace(
+            active.instrument,
+            snapshot_id="00000000-0000-4000-8000-000000000101",
+            raw_sha256="c" * 64,
+            semantic_sha256="d" * 64,
+            source_seal_fingerprint="e" * 64,
+            effective_from=switch_ts,
+            effective_to=None,
+        ),
+    )
+
+    validated_active, validated_incoming = validate_snapshot_transition(
+        active,
+        incoming,
+        switch_ts=switch_ts,
+    )
+
+    assert validated_active == active
+    assert validated_incoming == incoming
+    assert validated_active is not active
+    assert validated_incoming is not incoming
+
+
+def test_snapshot_transition_rejects_noop_and_window_gap() -> None:
+    switch_ts = BASE_TS + timedelta(hours=1)
+    active = snapshot_refs()
+
+    with pytest.raises(DerivativesBacktestContractError) as noop_info:
+        validate_snapshot_transition(active, active, switch_ts=switch_ts)
+    assert noop_info.value.code == "snapshot_activation_noop"
+
+    closed = replace(
+        active,
+        instrument=replace(active.instrument, effective_to=switch_ts),
+    )
+    gapped = replace(
+        closed,
+        instrument=replace(
+            closed.instrument,
+            snapshot_id="00000000-0000-4000-8000-000000000102",
+            raw_sha256="c" * 64,
+            semantic_sha256="d" * 64,
+            source_seal_fingerprint="e" * 64,
+            effective_from=switch_ts + timedelta(microseconds=1),
+            effective_to=None,
+        ),
+    )
+    with pytest.raises(DerivativesBacktestContractError) as gap_info:
+        validate_snapshot_transition(closed, gapped, switch_ts=switch_ts)
+    assert gap_info.value.code == "snapshot_transition_window_invalid"

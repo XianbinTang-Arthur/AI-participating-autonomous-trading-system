@@ -24,11 +24,15 @@ from .events import (
     FundingSettlementEventV1,
     IndexPriceEventV1,
     MarkPriceEventV1,
+    SINGLETON_EVENT_KINDS_PER_TIMESTAMP_V1,
     TradableEventV1,
-    event_order_key,
+    _unchecked_event_order_key,
     parse_derivative_replay_event,
 )
-from .snapshot_refs import DerivativesSnapshotRefsV1
+from .snapshot_refs import (
+    DerivativesSnapshotRefsV1,
+    validate_snapshot_transition,
+)
 from .wire import (
     canonical_utc_timestamp,
     require_exact_int,
@@ -48,14 +52,6 @@ _EVENT_CLASS_BY_KIND = {
     DerivativeEventKindV1.TRADABLE: TradableEventV1,
     DerivativeEventKindV1.BAR_CLOSE: BarCloseEventV1,
 }
-_SINGLETON_EVENT_KINDS_PER_TIMESTAMP = frozenset(
-    {
-        DerivativeEventKindV1.CONTRACT_TIER_EFFECTIVE,
-        DerivativeEventKindV1.FUNDING_SETTLEMENT,
-        DerivativeEventKindV1.TRADABLE,
-        DerivativeEventKindV1.BAR_CLOSE,
-    }
-)
 _EVENT_KIND_BY_CLASS = {event_class: kind for kind, event_class in _EVENT_CLASS_BY_KIND.items()}
 
 
@@ -181,7 +177,7 @@ def _barrier(
     *,
     snapshot_set_fingerprint: str,
 ) -> DerivedLiquidationBarrierV1:
-    key = event_order_key(event)
+    key = _unchecked_event_order_key(event)
     return DerivedLiquidationBarrierV1(
         kind=kind,
         ts=event.header.ts,
@@ -194,44 +190,6 @@ def _barrier(
             snapshot_set_fingerprint,
         ),
     )
-
-
-def _validate_snapshot_transition(
-    active: DerivativesSnapshotRefsV1,
-    incoming: DerivativesSnapshotRefsV1,
-    *,
-    ts: datetime,
-) -> None:
-    if active.fingerprint == incoming.fingerprint:
-        raise DerivativesBacktestContractError("snapshot_activation_noop")
-    changed = False
-    for previous, replacement in zip(
-        (
-            active.instrument,
-            active.position_tier,
-            active.execution_fee,
-            active.funding_schedule,
-        ),
-        (
-            incoming.instrument,
-            incoming.position_tier,
-            incoming.execution_fee,
-            incoming.funding_schedule,
-        ),
-        strict=True,
-    ):
-        if previous.fingerprint == replacement.fingerprint:
-            continue
-        changed = True
-        if previous.snapshot_id == replacement.snapshot_id:
-            raise DerivativesBacktestContractError("snapshot_identity_conflict")
-        if previous.effective_to != ts or replacement.effective_from != ts:
-            raise DerivativesBacktestContractError(
-                "snapshot_transition_window_invalid",
-                field=replacement.kind.value,
-            )
-    if not changed:  # pragma: no cover - set fingerprint already proves this
-        raise DerivativesBacktestContractError("snapshot_activation_noop")
 
 
 def _revalidate_event(
@@ -298,7 +256,7 @@ def merge_derivative_event_streams(
             )
         if (
             previous is not None
-            and kind in _SINGLETON_EVENT_KINDS_PER_TIMESTAMP
+            and kind in SINGLETON_EVENT_KINDS_PER_TIMESTAMP_V1
             and local_key[0] == previous[0]
         ):
             raise DerivativesBacktestContractError(
@@ -308,7 +266,7 @@ def merge_derivative_event_streams(
         last_local[kind] = local_key
         heapq.heappush(
             heap,
-            (event_order_key(event), kind.value, kind, event),
+            (_unchecked_event_order_key(event), kind.value, kind, event),
         )
 
     for kind in DerivativeEventKindV1:
@@ -362,7 +320,7 @@ def expand_engine_barriers(
     pre_emitted_for_ts = False
     tradable_seen_for_ts = False
     while True:
-        current_key = event_order_key(current)
+        current_key = _unchecked_event_order_key(current)
         if previous_key is not None and current_key <= previous_key:
             raise DerivativesBacktestContractError("event_global_order_invalid")
         try:
@@ -370,7 +328,9 @@ def expand_engine_barriers(
         except StopIteration:
             following = None
 
-        following_key = None if following is None else event_order_key(following)
+        following_key = (
+            None if following is None else _unchecked_event_order_key(following)
+        )
         if following_key is not None and following_key <= current_key:
             raise DerivativesBacktestContractError("event_global_order_invalid")
         if (
@@ -378,7 +338,7 @@ def expand_engine_barriers(
             and following.header.ts == current.header.ts
             and type(following) is type(current)
             and _EVENT_KIND_BY_CLASS[type(current)]
-            in _SINGLETON_EVENT_KINDS_PER_TIMESTAMP
+            in SINGLETON_EVENT_KINDS_PER_TIMESTAMP_V1
         ):
             if type(current) is TradableEventV1:
                 raise DerivativesBacktestContractError(
@@ -390,15 +350,12 @@ def expand_engine_barriers(
             )
 
         if type(current) is ContractTierEffectiveEventV1:
-            _validate_snapshot_transition(
+            _previous, incoming_refs = validate_snapshot_transition(
                 active_snapshot_refs,
                 current.snapshot_refs,
-                ts=current.header.ts,
+                switch_ts=current.header.ts,
             )
-            current.snapshot_refs.validate_at(current.header.ts)
-            active_snapshot_refs = DerivativesSnapshotRefsV1.from_dict(
-                current.snapshot_refs.to_dict()
-            )
+            active_snapshot_refs = incoming_refs
             active_snapshot_set_fingerprint = active_snapshot_refs.fingerprint
         else:
             active_snapshot_refs.validate_at(current.header.ts)
@@ -489,7 +446,7 @@ def engine_step_order_key(
             validated.trigger_source_key[2],
             validated.barrier_id,
         )
-    return event_order_key(_revalidate_event(step))
+    return _unchecked_event_order_key(_revalidate_event(step))
 
 
 __all__ = [

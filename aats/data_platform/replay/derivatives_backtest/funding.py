@@ -39,6 +39,7 @@ from .snapshot_refs import (
     DerivativesSnapshotRefsV1,
     ImmutableSnapshotRefV1,
     SnapshotKindV1,
+    validate_snapshot_transition,
 )
 from .wire import (
     require_canonical_utc_timestamp,
@@ -451,35 +452,11 @@ def _validate_full_snapshot_transition(
     *,
     switch_ts: datetime,
 ) -> None:
-    if previous.refs.fingerprint == current.refs.fingerprint:
-        raise DerivativesBacktestContractError("snapshot_activation_noop")
-    for previous_ref, current_ref in zip(
-        (
-            previous.refs.instrument,
-            previous.refs.position_tier,
-            previous.refs.execution_fee,
-            previous.refs.funding_schedule,
-        ),
-        (
-            current.refs.instrument,
-            current.refs.position_tier,
-            current.refs.execution_fee,
-            current.refs.funding_schedule,
-        ),
-        strict=True,
-    ):
-        if previous_ref.fingerprint == current_ref.fingerprint:
-            continue
-        if previous_ref.snapshot_id == current_ref.snapshot_id:
-            raise DerivativesBacktestContractError("snapshot_identity_conflict")
-        if (
-            previous_ref.effective_to != switch_ts
-            or current_ref.effective_from != switch_ts
-        ):
-            raise DerivativesBacktestContractError(
-                "snapshot_transition_window_invalid",
-                field=current_ref.kind.value,
-            )
+    validate_snapshot_transition(
+        previous.refs,
+        current.refs,
+        switch_ts=switch_ts,
+    )
 
 
 def _revalidate_funding_event(
