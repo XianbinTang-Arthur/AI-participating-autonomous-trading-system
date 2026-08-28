@@ -1,8 +1,8 @@
 # ADR：RDP `derivatives-backtest-run/v1` 首个衍生品回测纵向切片
 
-> 文档状态：设计提案（Proposed）；未实施、未批准、不可作为运行或晋级依据
+> 文档状态：设计提案（Proposed）；LF-B1.1 纯合同/记账基础已实施并完成本地静态验收，整体设计未批准、不可作为运行或晋级依据
 > 最后核对：2026-08-28（代码基线 `main@96c772010767`；以本文档所在 HEAD 为准）
-> 核对范围：静态代码、测试契约、现行 LF-B 任务书；未执行回测、未验证目标数据、未部署
+> 核对范围：静态代码、测试契约、现行 LF-B 任务书与 Windows 全量单元回归；未执行衍生品 event replay、未验证目标数据、未部署
 > 待决策人：待实名任命的 RDP Owner、Independent Risk Reviewer、Data Lineage Reviewer
 > 生产决定：**REAL-MONEY PRODUCTION: NO-GO；CAPITAL PROMOTION: NO-GO**
 
@@ -27,7 +27,7 @@
 | promotion | 所有 v1 成功结果固定 `capital_promotion_eligible=false` |
 | exposure | 仅 Python 内部 API；无 HTTP、CLI、workflow 或 live 接口 |
 
-该切片的目标是先证明时间因果、永续合约记账、崩溃恢复和不可变证据链能够自洽；它不是交易所清算引擎的完整复制，也不是收益、容量或实盘安全证明。只有后续独立 qualification round 能把 exact Step 2/3 候选、source-sealed 数据、instrument snapshot、position-tier/MMR/liquidation-fee schedule snapshot 与一个或多个 child run 锚定；本 ADR 本身不解锁 Phase 6。
+该切片的目标是先证明时间因果、永续合约记账、崩溃恢复和不可变证据链能够自洽；它不是交易所清算引擎的完整复制，也不是收益、容量或实盘安全证明。只有后续独立 qualification round 能把 exact Step 2/3 候选、source-sealed 数据、instrument、position-tier/MMR/liquidation-fee、execution-fee、funding-schedule snapshot 与一个或多个 child run 锚定；本 ADR 本身不解锁 Phase 6。
 
 ## 2. 背景与当前真实边界
 
@@ -52,6 +52,13 @@
 6. 当前 `InstrumentContract` 只定义合约单位算术，不能证明历史时点适用的 position tier、MMR deduction、
    leverage ceiling 或 liquidation fee；当前尚无可接受的 immutable risk-schedule snapshot。仅有 contract
    fingerprint 不能启动本 v1。
+
+仓库当前只落地了 `aats/data_platform/replay/derivatives_backtest/` 下的 LF-B1.1：固定 BTC linear isolated
+作用域、canonical Decimal wire、instrument/tier/fee/funding/opening/position 合同，以及无 I/O 的 fee、funding、
+PnL、IM/MM、equity 与简化强平算术。它没有 snapshot loader、effective-window 验证、event-set、reducer、
+publisher、checkpoint/recovery、metrics、qualification、CLI、workflow、UI 或 live 接口；测试专用 facade
+也不能替代历史 `InstrumentContractSnapshot` 的来源证据。正式 engine 必须从保留原 bytes/digest 的已验证
+snapshot 派生该算术合同，而不是接收调用方自由构造的参数作为来源事实。
 
 因此，即使本内核通过合成 golden vectors，也只能证明代码合同；在上述数据与治理阻断关闭前，不得声称
 “可晋级”“可部署”“可产生真实收益”或“符合 OKX 实盘清算”。
@@ -86,8 +93,8 @@
 5. v1 的 `capital_promotion_eligible` 在 request 中不可配置，在 result、metrics 与 manifest 中必须恒为
    `false`；读到 `true` 视为 artifact corruption。
 6. final output directory 不可覆盖；没有完整且校验通过的最后一个 `manifest.json` 就不是可消费 child run。
-7. Instrument contract 与 position-tier/MMR/liquidation-fee schedule 是两个强制、独立、不可变的 parent；
-   任一缺失、失效或不覆盖整个窗口都在第一条经济事件前阻断。
+7. Instrument contract、position-tier/MMR/liquidation-fee、execution-fee 与 funding schedule 是四个强制、
+   独立、不可变的 parent；任一缺失、失效或不覆盖整个窗口都在第一条经济事件前阻断。
 
 ## 4. 组件边界与代码组织
 
@@ -153,17 +160,21 @@ manifest 并发布；blocked 路径销毁正式 child staging 后，只能发布
 - exact `InstrumentContractSnapshotRef`：snapshot ID、digest、source registry ID、`effective_from`、`effective_to`；
 - exact `PositionTierScheduleSnapshotRef`：snapshot ID、digest/size、source registry ID、每段 effective window、
   tier ID、notional lower/upper bound、max leverage、MMR、maintenance-margin deduction、liquidation fee rate；
-  v1 要求整个窗口仅命中一个 `tier_id=1`，任何 mark 或 projected fill 越出 tier-1 upper bound 都以
+  v1 要求整个窗口仅命中一个 `tier_id=1`，notional 区间固定为下界 `0`、上下界均 inclusive；任何当前 mark、
+  projected fill price 或 projected post-fill mark notional 越出 tier-1 upper bound 都以
   `position_tier_out_of_v1_scope` 终止，而不是套用下一档或继续近似；v1 同时要求该档
   `maintenance_margin_deduction=0`，非零时以 `position_tier_deduction_out_of_v1_scope` 阻断，不得忽略或近似；
 - exact `ExecutionFeeScheduleSnapshotRef`：maker/taker rate、fee asset=`USDT`、effective window 与不可变身份；
+  signed fee rate 必须满足 `-1 < rate < 1`，不得由 request 越过 schedule 值；
+- exact `FundingScheduleSnapshotRef`：snapshot ID、digest/size、source registry ID、逐段 effective window、
+  settlement timestamp/cadence、rate cap/floor 与不可变身份；不得硬编码 8 小时或由 event 自报 schedule；
 - exact `DerivativesEventSetRefV1`：`derivatives-event-set/v1` manifest 的 ID、路径、digest、size、
   artifact-set fingerprint、总 event-set fingerprint 与每条必需流的 schema/count/canonical event digest、
   coverage、dataset version、transform policy/version 及父 raw partition hashes；
 - `start_ts`、`end_ts`、warmup boundary；窗口必须非空且为 UTC 15 分钟边界；
 - Step 2/3 round ID、candidate artifact digest/size、parameter typed fingerprint；这些仅是 child lineage，
   不等于 qualification；
-- `OpeningAccountStateV1`：`free_cash_before_transfer_usdt`、一次性 `isolated_transfer_in_usdt`、固定 flat
+- `OpeningAccountStateV1`：`total_account_cash_before_transfer_usdt`、一次性 `isolated_transfer_in_usdt`、固定 flat
   carry-in position、无 open order；以及 start 前最后一条 source-sealed mark/index cursor；
 - `leverage`；MMR、maintenance deduction、liquidation fee 和 maker/taker fee 必须从上述 exact schedule
   snapshot 解析，不允许 request 用自由字段覆盖；不得存在隐藏默认值；
@@ -178,7 +189,7 @@ manifest 并发布；blocked 路径销毁正式 child staging 后，只能发布
 `DerivativeReplayEventV1` 只允许：
 
 - `ContractTierEffectiveEventV1(ts, event_id, source_sequence, contract_snapshot_ref, tier_schedule_ref,
-  execution_fee_schedule_ref)`；三个引用必须在同一 phase 一致生效，不能只切换其中一项；
+  execution_fee_schedule_ref, funding_schedule_ref)`；四个引用必须在同一 phase 一致生效，不能只切换其中一项；
 - `IndexPriceEventV1(ts, event_id, source_sequence, price, source_ref)`；
 - `MarkPriceEventV1(ts, event_id, source_sequence, price, source_ref)`；
 - `FundingSettlementEventV1(ts, event_id, source_sequence, rate, schedule_id, observed_at_ts, source_ref)`；
@@ -227,7 +238,7 @@ diagnostic 目录同样不可覆盖：相同 `run_id + attempt_id` 仅允许 exa
 - `BarCloseEvent.ts == bar_end_ts`；只有 close timestamp 位于半开窗口内的 bar 才产生 decision fact。
   `event.ts == end_ts` 永远属于下一窗口。
 - start carry-in 是强制边界：v1 只接受 `q=0`、`A=null`、无 queued order，但必须携带 start 前最后一条
-  source-sealed mark/index cursor、当时有效 contract/tier/fee schedule 与动态 funding schedule cursor；carry-in
+  source-sealed mark/index cursor、当时有效 contract/tier/execution-fee/funding schedule cursor；carry-in
   只建立 freshness/continuity 上下文，不计入事件数量、PnL 或策略 feature。
 - end valuation 使用 `end_ts` 前最后一条、age `<=60s` 的 source-sealed mark，并同时要求有效 index；该
   `end_mark_ts < end_ts`，只形成最终盯市记录，不触发成交、funding 或 bar-close decision。缺 end mark/index
@@ -237,7 +248,7 @@ diagnostic 目录同样不可覆盖：相同 `run_id + attempt_id` 仅允许 exa
 
 全局事件键固定为 `(ts, phase_priority, source_sequence, event_id)`；同一 timestamp 的 phase 顺序不可配置：
 
-1. `05` — contract/tier/fee schedule 生效切换并验证 tier-1；
+1. `05` — contract/tier/execution-fee/funding schedule 生效切换并验证 tier-1；
 2. `10` — index 更新；
 3. `20` — mark 更新；
 4. `30` — funding settlement，严格使用该 timestamp 的 `q(t-)`（同 timestamp fill 之前的仓位）；
@@ -256,7 +267,9 @@ close 后终止该 run。funding 的 `q(t-)` 必须在 funding ledger 显式保�
 
 queued order 在 single-position 模式下按 FIFO 处理；v1 每次 bar close 最多产生一个 live order。反向成交必须
 确定性拆为“先平旧仓、再开新仓”两个 accounting legs，共享一个 exchange fill identity，费用按两个 leg 的绝对
-contract 数量比例分摊，分摊余数归 closing leg。任何 self-cross、并存 long/short 或多订单竞态均失败关闭。
+contract 数量比例分摊：先按 opening leg 的绝对 notional 直接计算 opening fee，closing fee 固定为 total fee
+减 opening fee，因此任何 Decimal context 下的分摊余数都归 closing leg，且两 leg typed-exact 等于 total fee。
+任何 self-cross、并存 long/short 或多订单竞态均失败关闭。
 
 ## 8. 数据完整性与 freshness 门禁
 
@@ -270,11 +283,13 @@ v1 不允许 freshness tolerance 随 run 任意调大。政策固定为：
   禁止硬编码“每 8 小时”。窗口内每个动态 schedule timestamp 必须有且仅有一条
   `FundingSettlementEventV1`；缺失、重复、窗口错位均 blocked。`observed_at_ts <= ts`，且
   `ts - observed_at_ts` 不得超过该 timestamp 所属 schedule segment 的 cadence；否则
-  `funding_event_stale`。schedule 切换点与 settlement 同时发生时，先应用 phase 05 的新 schedule，再验证 event。
+  `funding_event_stale`。每个 segment 还必须封存 funding cap/floor；event rate 必须满足该区间及硬 sanity
+  `-1 < rate < 1`。schedule 切换点与 settlement 同时发生时，先应用 phase 05 的新 schedule，再验证 event。
 - Gold 中“最近 funding rate 对齐到每根 bar”的行不能转换成 settlement event，除非原始、已封存 funding
   记录能够证明 exact effective timestamp、rate、schedule 和内容 digest。
 - `derivatives-event-set/v1` 必须逐流绑定 schema、canonical event count/digest、raw partition hashes、dataset
-  version、coverage `[start,end)`、transform policy/version、gap/duplicate 结果和 instrument/tier/fee source
+  version、coverage `[start,end)`、transform policy/version、gap/duplicate 结果和 instrument/tier/execution-fee/
+  funding-schedule source
   reference。只绑定一个聚合 row count、调用方声明的 `source_ref` 或普通路径不合格。
 - orchestrator 在任何经济状态变化前完成第一遍 preflight：用稳定、有界 reader 验证 event-set manifest 与所有
   stream 的 byte hash/size、strict schema、count、canonical event digest、coverage 和父 seal；通过后从同一 immutable
@@ -318,8 +333,10 @@ diagnostic（不可带 promotion metrics）。不得 forward-fill、插值、使
    `maintenance_margin = max(0, notional(q,M) * mmr - d)`；
    `isolated_free_collateral = isolated_equity - initial_margin_required`。
 9. 新增风险的 fill 先构造 post-fill state，再要求 `isolated_equity_post >= initial_margin_required_post`；
-   同时要求 `L <= tier.max_leverage` 且 marked/projected notional 留在 tier-1；不满足 margin 时记录拒绝，
-   越 tier 则整个 run blocked。reduce-only close 不因 IM 拒绝。
+   同时要求 `L <= tier.max_leverage`，当前 position 的 mark notional、以 fill price 计算的 provisional notional、
+   以及以当前 mark 计算的 post-fill notional 都位于 inclusive tier-1；不满足 margin 时记录普通 order rejection，
+   越 tier 则整个 run blocked。provisional state 必须事务式暂存；拒绝时 q/A/B、fee/fill/position ledger 全部不变。
+   reduce-only close 不因 IM 拒绝。
 10. `liquidation_fee = notional(q,M) * r_l`；强平预计总成本为
     `forced_close_cost = notional(q,M) * r_force`。简化触发为
     `isolated_equity <= maintenance_margin + forced_close_cost`。触发后在当前 mark 全量 forced close，分别记录
@@ -330,9 +347,12 @@ diagnostic（不可带 promotion metrics）。不得 forward-fill、插值、使
 - long (`q>0`)：`P_liq = (A - (B+d)/(q*f)) / (1-rho)`；分子 `<=0` 时为 `null`；有效值向上取 tick；
 - short (`q<0`)：`P_liq = (A + (B+d)/(abs(q)*f)) / (1+rho)`；有效值向下取 tick。
 
+tick-aligned liquidation price 只用于偏保守诊断/展示；真实强平触发必须每个 accounting-sensitive timestamp
+按第 10 条原始不等式和未量化 Decimal mark 计算，不得拿已取 tick 的诊断价格替代判据。
+
 必须满足 `T0>=I0>0`、`L>=1`、`L<=tier.max_leverage`、`0<mmr<imr<=1`、`d=0`、`r_l>=0`、
 `0<rho<1`，且整个 marked/projected notional 始终位于 immutable tier-1 有效范围。v1 只允许 start 时一次
-`F -> B` 转移，且该 transfer 必须从 request 已绑定的 `free_cash_before_transfer_usdt` 精确扣除并写入首条
+`F -> B` 转移，且该 transfer 必须从 request 已绑定的 `total_account_cash_before_transfer_usdt` 精确扣除并写入首条
 account ledger；之后禁止手工或自动 top-up、运行中转入/转出，free cash 不得用于避免强平。fee、funding 与
 realized PnL 直接改变 `B`；平仓释放的 initial-margin capacity 只改变可用能力，不形成第二次现金转移。窗口结束
 仍有仓位时，不做虚构平仓，只报告 `open_position_at_end=true`、最后 source-sealed mark 下的
@@ -361,7 +381,8 @@ realized PnL 直接改变 `B`；平仓释放的 initial-margin capacity 只改�
 每个非 manifest 文件必须在 manifest 中有规范化相对路径、精确 byte size、lowercase SHA-256 与语义 schema。
 禁止 symlink、路径逃逸、重复路径、额外未声明文件。身份必须形成以下单向、无环 DAG：
 
-1. `semantic_request_fingerprint` 只对业务 scope、Step 2/3 candidate、event-set、contract/tier/fee snapshot、
+1. `semantic_request_fingerprint` 只对业务 scope、Step 2/3 candidate、event-set、contract/tier/execution-fee/
+   funding-schedule snapshot、
    opening state 和 policy IDs 求 canonical typed SHA-256，明确排除 `run_id`、`request_created_at`、本地路径和
    publisher 时间；
 2. request/source/各 ledger/metrics/result 依次写入并取得独立 byte hash；`result.json` 只引用已完成 subordinate
@@ -429,7 +450,7 @@ v2 consumer、v2 shared policy 与 Decimal parser，并使 validator、candidate
 - 每个 run 使用 `run_id` 精确锁；并发 exact retry 只能有一个 writer。已存在 final directory 时，只有 request、
   source、policy 和 manifest fingerprint 全相同才返回 existing success；任一差异为 conflict。
 - checkpoint 只能存在 staging directory，采用原子 replace，包含 exact semantic request/event-set preflight/
-  instrument/tier/fee 指纹、各输入流 restart cursor、最后 global event key、账户状态、queued order、ledger byte
+  instrument/tier/execution-fee/funding-schedule 指纹、各输入流 restart cursor、最后 global event key、账户状态、queued order、ledger byte
   size/rolling SHA-256、资源计数和 checkpoint fingerprint。cursor 必须由 formal event source 解释，普通 iterable
   偏移或“已处理 N 条”不能作为恢复身份。
 - 恢复必须显式给出 run ID/staging path；禁止扫描 `latest`、artifact index 或相似目录。恢复前逐项复核 checkpoint
@@ -460,11 +481,13 @@ v2 consumer、v2 shared policy 与 Decimal parser，并使 validator、candidate
 8. 独立复审：金融符号、时间因果、并发、资源上限、安全与文档无未关闭 P0/P1。
 
 首个合成 golden vector 使用测试专用 contract/tier snapshot（不声称是当前 OKX schedule）：`f=0.01 BTC`、
-`q=10`、`T0=I0=1000 USDT`、`F=0`、`A=50000`、`L=5`、`mmr=0.005`、`d=0`、
+`q=10`、`T0=I0=1002.5 USDT`、`F=0`、`A=50000`、`L=5`、`mmr=0.005`、`d=0`、
 taker `=0.0005`、liquidation fee `=0.0025`。
-开仓费为 `2.5 USDT`，开仓后 `B=997.5`；mark `51000` 时 `U=100`、equity `1097.5`、MM `25.5`。
+开仓费为 `2.5 USDT`，开仓后 `B=1000`，恰好满足 `IM=1000`；mark `51000` 时 `U=100`、
+equity `1100`、MM `25.5`。
 正 funding `0.0001` 时 long 支付 `0.51`；以 `52000` 平仓实现 `200`、平仓费 `2.6`，最终 equity
-`1194.39`。此时 `rho=0.008`，开仓后的 long 简化强平价为 `40347.8`（向上到 `0.1` tick）。
+`1196.89`，相对 `T0` 的 net PnL 为 `194.39`。此时 `rho=0.008`，开仓后的 long 简化强平价为
+`40322.6`（未离散值 `40322.580645161290322580645161290322580645161290323`，向上到 `0.1` tick）。
 同一 timestamp 的 tradable event 不得成交刚产生的 decision；下一条严格更晚事件才可成交。
 
 另冻结以下彼此独立的最小向量；测试期望值必须作为常量直接写入 fixture，不能调用生产 accounting 函数生成：
@@ -497,7 +520,7 @@ taker `=0.0005`、liquidation fee `=0.0025`。
 
 LF-B3 才能建立 `phase2_qualification_rounds/<round_id>`。其父 manifest 必须显式锚定 exact Step 2 ID、exact
 Step 3 ID、candidate digest/size/parameter fingerprint、本 ADR child manifest path/digest/size/run fingerprint、
-instrument snapshot 与 position-tier/MMR/liquidation-fee/fee schedule snapshot 的 ID/digest/effective window、
+instrument、position-tier/MMR/liquidation-fee、execution-fee 与 funding-schedule snapshot 的 ID/digest/effective window、
 source seal 和期望 combo 拓扑。managed DB snapshot 以同 round ID
 exact retry；任何漂移 conflict。Phase 6 只能显式接收 exact qualification round ID，禁止 latest/index fallback。
 
@@ -526,6 +549,10 @@ live profile 或真实资金验证。
 金融公式/符号、freshness 数值、source seal、instrument temporal lineage、强平模型限制、artifact schema 和
 `capital_promotion_eligible=false` 不变量。AI 生成、单元测试或模板填写不能替代该签字。
 
-本 ADR 当前结论仅为“可以据此开始实现合成、失败关闭的内部纵向切片”。当前 Gold、mark/index、instrument
-snapshot、position-tier/MMR/liquidation-fee schedule snapshot 与 source seal 阻断仍开放；没有运行证据，没有 qualification round，没有部署授权，也没有任何真实资金
+截至 2026-08-28，LF-B1.1 本地静态证据为：Ruff 通过；本模块 `72 passed`；连同共享 instrument arithmetic
+`114 passed`；Windows 全量 unit `5996 passed, 31 skipped, 259 subtests passed`；两轮独立只读复审均无
+未关闭 P0/P1。该证据只覆盖纯合同/记账，不覆盖 PostgreSQL、WSL2、事件因果、恢复、发布、真实数据或收益。
+
+本 ADR 当前结论仅为“LF-B1.1 纯合同/记账基础可作为后续合成纵向切片的已审查起点”。当前 Gold、mark/index、instrument
+snapshot、position-tier/MMR/liquidation-fee、execution-fee、funding-schedule snapshot 与 source seal 阻断仍开放；没有运行证据，没有 qualification round，没有部署授权，也没有任何真实资金
 副作用。故截至 2026-08-28：**LF-B 未完成，RDP 不可据此晋级或发布到实盘。**
