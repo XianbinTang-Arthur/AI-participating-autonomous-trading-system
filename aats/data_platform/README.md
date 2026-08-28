@@ -3,7 +3,7 @@
 > 项目定位声明：RDP 只在严格风控、可审计、可恢复、可治理的边界内为主交易系统提供研究证据和受控参数。完整定位见 [项目定位声明](../../docs/project_positioning.md)。
 
 > 文档状态：现行模块说明
-> 最后核对：2026-08-27（起始 HEAD `9c4112c6`，含当前 RDP 控制面收口候选；以本文档所在 HEAD 为准）
+> 最后核对：2026-08-28（LF-B1.1 基线 `bf7a24dfe0a3`；以本文档所在 HEAD 为准）
 > 核对范围：当前静态代码、迁移、配置和测试契约；既有 2026-08-26 运行证据仅作带日期历史快照，数据库覆盖、容器在线和 collector 连续性必须现场重验
 
 适用范围：`aats/data_platform/`、`scripts/rdp_*.py`、`configs/rdp_workflows/`、RDP API 与任务守护进程。
@@ -73,6 +73,7 @@ OKX REST / 历史 ZIP / live 只读事实
 | Public WS collectors | `collectors/microstructure_ws_collector.py`、`liquidations_ws_collector.py` | `trades`、BBO、books5、OI/funding/mark 与公共强平；保存连接代次、采样/接收时间、drop/flush/gap 证据 |
 | Data governance | `data_governance/`、`scripts/rdp_{audit,archive,import,rebuild}_*.py` | 只读覆盖审计、不可变 Parquet 归档、官方历史来源、双资格门与确定性历史重建 |
 | Research Factory | `research_factory/`、`research/` | 证据输入、实验、verdict、治理审查与人工应用设计 |
+| Derivatives backtest foundation | `replay/derivatives_backtest/` | LF-B1.1 的固定 BTC linear isolated 合同与纯 Decimal 记账；无 event source、publisher、workflow、qualification 或 live 接口，永久不可据此晋级 |
 
 标准 Compose 中 `aats-rdp-daemon` 随应用栈启动，命令为：
 

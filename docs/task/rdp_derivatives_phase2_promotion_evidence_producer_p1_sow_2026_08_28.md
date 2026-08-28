@@ -1,7 +1,7 @@
 # RDP 衍生品 Phase 2 晋级证据生产闭环 P1 任务书
 
-> 文档状态：现行实施任务书；LF-A 已在 `96c772010767` 完成提交与回归，LF-B 衍生品 producer 尚未完成
-> 最后核对：2026-08-28（起始基线 `main@c15ccd2d5057`，LF-A 基线 `96c772010767`；以本文档所在 HEAD 为准）
+> 文档状态：现行实施任务书；LF-A 已在 `96c772010767` 完成，LF-B1.1 纯合同/记账基础已在 `bf7a24dfe0a3` 完成，LF-B producer 整体尚未完成
+> 最后核对：2026-08-28（起始基线 `main@c15ccd2d5057`，LF-A `96c772010767`，LF-B1.1 `bf7a24dfe0a3`；以本文档所在 HEAD 为准）
 > 核对范围：完整 RDP 编排、Step 2/3 产物、`backtest-run/v2`、Phase 2 evidence consumer 与晋级选择器
 > 生产决定：**REAL-MONEY PRODUCTION: NO-GO**
 
@@ -146,10 +146,17 @@
    聚焦与全量回归，并已完成独立复审；验证计数与边界记录见
    [`rdp_formal_artifact_reader_hardening_sow_2026_08_28.md`](rdp_formal_artifact_reader_hardening_sow_2026_08_28.md#18-当前验证证据)。
    未推送、未部署，现场有效性仍未声称。
-2. **ADR 已形成但仍为 Proposed**：见
+2. **ADR 仍为 Proposed；LF-B1.1 已完成本地静态验收**：见
    [`../design/rdp_derivatives_backtest_run_v1_adr_2026_08_28.md`](../design/rdp_derivatives_backtest_run_v1_adr_2026_08_28.md)。
-   下一步依该 ADR 实现 strict JSON schema、独立 golden vectors 与固定失败关闭边界；ADR 文档存在不等于实现或批准。
-3. 实现单一 `BTC-USDT-SWAP independent_15m` 合成纵向切片，再扩展首轮精确四 combo；ETH 仅在 BTC
-   资格轮契约稳定后扩展。
-4. 新建独立 qualification round manifest/result/snapshot，并把 exact Step 2/3、instrument snapshot 与
+   `bf7a24dfe0a3` 新增固定 BTC linear isolated 作用域、canonical Decimal wire、严格
+   instrument/tier/fee/funding/account 合同，以及 fee、funding、PnL、IM/MM、equity 和简化强平纯算术；
+   raw fee 不能绕过 immutable schedule，所有结果永久不可晋级。Ruff、本模块 `72 passed`、共享算术合计
+   `114 passed`、Windows 全量 `5996 passed, 31 skipped, 259 subtests passed`，两名独立只读审查者均未发现
+   未关闭 P0/P1。该结果没有 event replay、PostgreSQL、WSL2、真实数据或运行验收，ADR 也未获真人批准。
+3. **下一未阻塞工程切片是 LF-B1.2**：实现 strict immutable snapshot refs/loader 与 effective-window preflight，
+   再实现 `derivatives-event-set/v1`、固定 phase order、single-position reducer、manifest-last publisher、
+   exact checkpoint/recovery 和合成 fault/determinism 测试。正式 engine 只能从保留原 bytes/digest 的已验证
+   snapshot 派生 LF-B1.1 算术合同，不得把调用方自由构造的 facade 当作历史来源事实。
+4. 在 LF-B1.2 合成纵向切片通过后，才扩展首轮精确四 combo；ETH 仅在 BTC 契约稳定后扩展。随后新建
+   qualification round manifest/result/snapshot，并把 exact Step 2/3、instrument snapshot 与
    四个子 manifest 锚定；完成并发、恢复、确定性与 PostgreSQL 验收后再接入 Phase 6。

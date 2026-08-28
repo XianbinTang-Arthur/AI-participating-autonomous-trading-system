@@ -11,5 +11,7 @@
 
 - [`rdp_derivatives_backtest_run_v1_adr_2026_08_28.md`](rdp_derivatives_backtest_run_v1_adr_2026_08_28.md)：
   RDP LF-B 首个 `BTC-USDT-SWAP independent_15m` 衍生品回测纵向切片 ADR。状态为 **Proposed**；
-  未实施、未取得实名 RDP Owner / Independent Risk Reviewer / Data Lineage Reviewer 批准，固定
-  `capital_promotion_eligible=false`，不得据此解锁资格轮、Phase 6、部署或真实资金行为。
+  LF-B1.1 纯合同/记账基础已在 `bf7a24dfe0a3` 完成本地静态验收，但 snapshot/event/reducer/publisher/
+  recovery/qualification 尚未实施，也未取得实名 RDP Owner / Independent Risk Reviewer /
+  Data Lineage Reviewer 批准；固定 `capital_promotion_eligible=false`，不得据此解锁资格轮、Phase 6、
+  部署或真实资金行为。

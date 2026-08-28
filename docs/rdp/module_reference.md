@@ -1,7 +1,7 @@
 # RDP 代码模块参考
 
 > 文档状态：现行模块说明
-> 最后核对：2026-08-27（起始 HEAD `9c4112c6`，含当前 RDP 控制面收口候选；以本文档所在 HEAD 为准）
+> 最后核对：2026-08-28（LF-B1.1 基线 `bf7a24dfe0a3`；以本文档所在 HEAD 为准）
 > 核对范围：当前 Python 文件、ORM metadata、router registry 与静态职责；不证明现场数据库或服务状态
 > RDP 总览：[`aats/data_platform/README.md`](../../aats/data_platform/README.md)
 
@@ -18,7 +18,7 @@
 
 ## 2. 目录总览
 
-当前 `aats/data_platform/` 有 235 个 Python 文件。目录职责如下；数量用于发现明显漏扫，不是公共 API 保证。
+当前 `aats/data_platform/` 有 243 个 Python 文件。目录职责如下；数量用于发现明显漏扫，不是公共 API 保证。
 
 | 目录 | Python 文件数 | 职责 |
 | --- | ---: | --- |
@@ -28,11 +28,11 @@
 | `merge/` | 5 | staging→bronze→silver、microstructure Silver 合并 |
 | `gold/` | 3 | funding 对齐、replay bar 构建 |
 | `jobs/` | 4 | checkpoint、run registry、gap repair |
-| `replay/` | 27 | replay core、strategy adapters、diagnostics、scan、reports |
+| `replay/` | 30 | SPOT replay core、strategy adapters、diagnostics、scan、reports，以及隔离的 LF-B1.1 衍生品合同/记账基础 |
 | `attribution/` | 6 | live/replay 对齐、瀑布归因、聚合、报告 |
 | `execution_realism/` | 9 | fill feasibility、slippage、cost、market alignment |
-| `decision_system/` | 10 | evidence、candidate、精确 promotion qualification/guard、decision、readiness、recommendation registry |
-| `governance/` | 29 | 参数/推荐/active set、Run/Attempt/Step/Event、任务队列、调度状态、snapshot、tuning 与 apply saga |
+| `decision_system/` | 11 | evidence、candidate、精确 promotion qualification/guard、decision、readiness、recommendation registry |
+| `governance/` | 33 | 参数/推荐/active set、Run/Attempt/Step/Event、任务队列、调度状态、snapshot、tuning 与 apply saga |
 | `data_governance/` | 13 | provenance、coverage、gap、continuity、不可变归档、双准入、bundle registry 与历史 Silver 重建 |
 | `production_workflow/` | 11 | gate、release、post-apply evidence、observation、rollback policy |
 | `operations/` | 16 | dispatcher、Run observer、scheduler、failure/retry、reliability、daemon health、tuning review |
@@ -43,6 +43,7 @@
 | `migrations/` | 3 | RDP schema 版本化迁移 |
 | `gates/` | 2 | gate 相关共享能力 |
 | `runtime/` | 2 | RDP runtime 辅助能力 |
+| `quality/` | 2 | 研究数据质量规则与报告辅助能力 |
 
 ## 3. 数据采集与数仓
 
@@ -69,6 +70,12 @@
 ### `replay/`
 
 包含逐 bar replay、directional/independent adapter、参数网格、批量扫描、诊断和 Markdown/JSON/CSV 产物。Replay 结论必须结合 execution realism 和 live attribution，不能直接视为可发布参数。
+
+`replay/derivatives_backtest/` 是独立的 LF-B1.1 内部基础层，只实现固定 `BTC-USDT-SWAP` linear isolated
+作用域的 strict canonical Decimal 合同与纯 fee/funding/PnL/margin/liquidation 算术。它没有 event source、
+snapshot loader、state reducer、artifact publisher、checkpoint、qualification、CLI、workflow、UI 或 live
+接口；测试 facade 也不是历史 instrument snapshot 来源证明。后续 engine 必须从已验证 immutable snapshot
+派生该合同，不能用自由构造值替代来源与 effective-window 证据。
 
 ### `attribution/`
 

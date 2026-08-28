@@ -65,8 +65,9 @@
 - [`rdp_derivatives_phase2_promotion_evidence_producer_p1_sow_2026_08_28.md`](rdp_derivatives_phase2_promotion_evidence_producer_p1_sow_2026_08_28.md)：
   记录“完整 RDP”缺少正式 Phase 2 晋级证据 producer 的结构性 P1。现有 v2 harness 仅支持 SPOT，
   legacy Step 2 只可审计；LF-A 先关闭 SPOT/SWAP scope 污染并暴露真实阻断，LF-B 再建设可重算、
-  manifest-last、managed snapshot 锚定的 linear perpetual 回测与 metrics 闭环。LF-B 未验收前保持
-  REAL-MONEY NO-GO，不能把阶段执行完成解释为可晋级研究完成。
+  manifest-last、managed snapshot 锚定的 linear perpetual 回测与 metrics 闭环。LF-B1.1 纯合同/记账
+  基础已在 `bf7a24dfe0a3` 静态验收；event/reducer/publisher/qualification 仍开放。LF-B 整体验收前保持
+  REAL-MONEY NO-GO，不能把基础代码或阶段执行完成解释为可晋级研究完成。
 - [`rdp_formal_artifact_reader_hardening_sow_2026_08_28.md`](rdp_formal_artifact_reader_hardening_sow_2026_08_28.md)：
   正式 research artifact 的有界、单描述符稳定读取加固记录；统一拒绝路径替换、读取中变化、符号链接、
   超限、非法 UTF-8、重复 JSON key 和非有限数值，并覆盖候选导入、parameter lineage、Phase 6
