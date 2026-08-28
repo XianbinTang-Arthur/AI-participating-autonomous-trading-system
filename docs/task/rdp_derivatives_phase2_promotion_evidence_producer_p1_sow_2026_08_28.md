@@ -1,7 +1,7 @@
 # RDP 衍生品 Phase 2 晋级证据生产闭环 P1 任务书
 
-> 文档状态：现行实施任务书；LF-A 实施候选已完成聚焦验证，LF-B 衍生品 producer 尚未完成
-> 最后核对：2026-08-28（起始基线 `main@c15ccd2d5057`，以本文档所在 HEAD 为准）
+> 文档状态：现行实施任务书；LF-A 已在 `96c772010767` 完成提交与回归，LF-B 衍生品 producer 尚未完成
+> 最后核对：2026-08-28（起始基线 `main@c15ccd2d5057`，LF-A 基线 `96c772010767`；以本文档所在 HEAD 为准）
 > 核对范围：完整 RDP 编排、Step 2/3 产物、`backtest-run/v2`、Phase 2 evidence consumer 与晋级选择器
 > 生产决定：**REAL-MONEY PRODUCTION: NO-GO**
 
@@ -83,8 +83,8 @@
 ### 4.2 LF-B1：衍生品回测领域合同
 
 - 新增独立 `derivatives-backtest-run/v1`，不放宽现有 SPOT `backtest-run/v2`。
-- 首个 instrument 仅 `BTC-USDT-SWAP` / `ETH-USDT-SWAP` linear USDT perpetual；inverse、dated futures、
-  options 明确失败关闭。
+- 首个纵向切片仅 `BTC-USDT-SWAP` linear USDT perpetual；ETH 必须等 BTC 合同、golden vectors 与失败关闭
+  边界稳定后作为独立扩展。inverse、dated futures、options 明确失败关闭。
 - 输入必须绑定 source-aware Gold bars、funding、mark/index 与 instrument master version；缺任一必需流时
   失败，不用 close 价格伪造 mark/index/funding。
 - 明确定义 initial capital、reporting currency、leverage、initial/maintenance margin、bankruptcy/liquidation
@@ -141,10 +141,14 @@
 
 ## 7. 当前下一步
 
-1. **LF-A 实施候选已完成**：symbol/scope 绑定、稳定
+1. **LF-A 已完成本地提交与回归**：symbol/scope 绑定、稳定
    `derivatives_phase2_promotion_evidence_unavailable`、Step 2 显式 symbol 与 readiness 审计投影均有
-   聚焦回归；仍须随本变更执行全量测试与独立复审。
-2. 形成 `derivatives-backtest-run/v1` ADR 与 JSON schema/golden vectors。
+   聚焦与全量回归，并已完成独立复审；验证计数与边界记录见
+   [`rdp_formal_artifact_reader_hardening_sow_2026_08_28.md`](rdp_formal_artifact_reader_hardening_sow_2026_08_28.md#18-当前验证证据)。
+   未推送、未部署，现场有效性仍未声称。
+2. **ADR 已形成但仍为 Proposed**：见
+   [`../design/rdp_derivatives_backtest_run_v1_adr_2026_08_28.md`](../design/rdp_derivatives_backtest_run_v1_adr_2026_08_28.md)。
+   下一步依该 ADR 实现 strict JSON schema、独立 golden vectors 与固定失败关闭边界；ADR 文档存在不等于实现或批准。
 3. 实现单一 `BTC-USDT-SWAP independent_15m` 合成纵向切片，再扩展首轮精确四 combo；ETH 仅在 BTC
    资格轮契约稳定后扩展。
 4. 新建独立 qualification round manifest/result/snapshot，并把 exact Step 2/3、instrument snapshot 与
