@@ -68,6 +68,12 @@
   manifest-last、managed snapshot 锚定的 linear perpetual 回测与 metrics 闭环。LF-B1.1 纯合同/记账
   基础已在 `bf7a24dfe0a3` 静态验收；event/reducer/publisher/qualification 仍开放。LF-B 整体验收前保持
   REAL-MONEY NO-GO，不能把基础代码或阶段执行完成解释为可晋级研究完成。
+- [`rdp_derivatives_backtest_lfb1_2_engine_evidence_sow_2026_08_28.md`](rdp_derivatives_backtest_lfb1_2_engine_evidence_sow_2026_08_28.md)：
+  LF-B1.2 事件与证据内核现行实施任务书；冻结 immutable snapshot loader、封闭事件联合类型、固定 phase、
+  freshness/funding continuity、single-position reducer、manifest-last publisher、exact checkpoint/recovery、
+  fault/determinism 与资源验收边界。LF-B1.2-A1 快照/事件/时效性/资金费率边界已完成本地静态验收；
+  reducer、event-set、publisher、checkpoint/recovery、正式运行接入和 UI/UX 全面重构仍未完成，不代表
+  producer、qualification、UI 或真实资金路径已解锁。
 - [`rdp_formal_artifact_reader_hardening_sow_2026_08_28.md`](rdp_formal_artifact_reader_hardening_sow_2026_08_28.md)：
   正式 research artifact 的有界、单描述符稳定读取加固记录；统一拒绝路径替换、读取中变化、符号链接、
   超限、非法 UTF-8、重复 JSON key 和非有限数值，并覆盖候选导入、parameter lineage、Phase 6

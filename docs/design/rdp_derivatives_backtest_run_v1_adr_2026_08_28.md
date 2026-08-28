@@ -1,8 +1,8 @@
 # ADR：RDP `derivatives-backtest-run/v1` 首个衍生品回测纵向切片
 
-> 文档状态：设计提案（Proposed）；LF-B1.1 纯合同/记账基础已实施并完成本地静态验收，整体设计未批准、不可作为运行或晋级依据
-> 最后核对：2026-08-28（代码基线 `main@96c772010767`；以本文档所在 HEAD 为准）
-> 核对范围：静态代码、测试契约、现行 LF-B 任务书与 Windows 全量单元回归；未执行衍生品 event replay、未验证目标数据、未部署
+> 文档状态：设计提案（Proposed）；LF-B1.1 与 LF-B1.2-A1 证据边界已实施并完成本地静态验收，整体设计未批准、不可作为运行或晋级依据
+> 最后核对：2026-08-28（起始代码基线 `main@96c772010767`；实施状态以本文档所在 HEAD 为准）
+> 核对范围：静态代码、测试契约、现行 LF-B 任务书与 Windows 全量单元回归；未执行正式 event-set/真实数据 replay、未验证目标数据、未部署
 > 待决策人：待实名任命的 RDP Owner、Independent Risk Reviewer、Data Lineage Reviewer
 > 生产决定：**REAL-MONEY PRODUCTION: NO-GO；CAPITAL PROMOTION: NO-GO**
 
@@ -53,12 +53,13 @@
    leverage ceiling 或 liquidation fee；当前尚无可接受的 immutable risk-schedule snapshot。仅有 contract
    fingerprint 不能启动本 v1。
 
-仓库当前只落地了 `aats/data_platform/replay/derivatives_backtest/` 下的 LF-B1.1：固定 BTC linear isolated
-作用域、canonical Decimal wire、instrument/tier/fee/funding/opening/position 合同，以及无 I/O 的 fee、funding、
-PnL、IM/MM、equity 与简化强平算术。它没有 snapshot loader、effective-window 验证、event-set、reducer、
-publisher、checkpoint/recovery、metrics、qualification、CLI、workflow、UI 或 live 接口；测试专用 facade
-也不能替代历史 `InstrumentContractSnapshot` 的来源证据。正式 engine 必须从保留原 bytes/digest 的已验证
-snapshot 派生该算术合同，而不是接收调用方自由构造的参数作为来源事实。
+仓库当前已落地 `aats/data_platform/replay/derivatives_backtest/` 下的 LF-B1.1 与 LF-B1.2-A1：固定 BTC linear
+isolated 作用域、canonical Decimal wire、instrument/tier/fee/funding/opening/position 合同、纯 Decimal 算术，
+以及 immutable snapshot refs/loader、effective-window、封闭事件联合类型、严格 merge/phase barrier、mark/index
+freshness 和 funding continuity/settlement 验证。它仍没有正式 event-set 两遍 reader、single-position reducer、
+publisher、checkpoint/recovery、metrics、qualification、CLI、workflow、UI 或 live 接口。现有 value object 和测试
+facade 也不能替代历史 source seal；正式 engine 必须继续从保留原 bytes/digest 的已验证 event-set/snapshot
+派生经济状态，而不是接收调用方自由构造的参数或派生 state 作为来源事实。
 
 因此，即使本内核通过合成 golden vectors，也只能证明代码合同；在上述数据与治理阻断关闭前，不得声称
 “可晋级”“可部署”“可产生真实收益”或“符合 OKX 实盘清算”。
@@ -200,8 +201,11 @@ manifest 并发布；blocked 路径销毁正式 child staging 后，只能发布
 accounting-sensitive timestamp 执行的自有 isolated-position 强平检查。`FundingSettlementEventV1` 必须是
 真实 settlement event；bar 上的 as-of/aligned funding feature 只能供策略观察，永远不能产生资金现金流。
 
-每个 source stream 必须按 `(ts, source_sequence)` 严格递增；event ID 全局唯一。内核不得悄悄排序、去重、
+每个 source stream 必须按 `(ts, source_sequence)` 严格递增；`source_sequence` 固定为非负
+signed-int64 范围 `0..2^63-1`；event ID 全局唯一。内核不得悄悄排序、去重、
 修正时间或覆盖冲突记录。序列化时间统一为带 `Z` 的 UTC RFC3339 微秒格式；内部使用 aware `datetime`。
+这些 Python value object 不是进程内安全 token；证据权威来自 event-set/snapshot raw bytes 预检，
+派生 state 在消费处必须保留并重验可重算的 event/ref 身份。
 
 ### 5.3 `CompletedDerivativesRunV1`
 
@@ -257,19 +261,30 @@ diagnostic 目录同样不可覆盖：相同 `run_id + attempt_id` 仅允许 exa
 7. `55` — post-fill 第二次 liquidation check，阻止费用/滑点或新仓使账户越过强平线；
 8. `60` — 15m bar-close strategy decision，并把新订单加入队列。
 
+phase `40/55` 是 engine policy 从已验证 source stream 确定性派生的内部 barrier，不是可由调用方或数据源
+注入的 source event。merge 以一个 source event look-ahead 在离开 timestamp 前、或首个 phase `>=50` 前插入
+一次 phase 40；v1 同一 timestamp 最多允许一条 `TradableEventV1`，该事件完成后插入 phase 55。barrier 不进入
+source event-set digest，但必须进入 event/accounting ledger；其 ID 由 timestamp、触发 source key、snapshot-set
+fingerprint 和固定 engine policy 确定性派生。这样既保证同 timestamp funding 先于强平，也保证仅有 mark/index
+更新的 timestamp 不会漏掉强平检查。
+
 若第一次强平触发，则立即取消全部 queued order，不再执行 phase 50/55/60；若第二次强平触发，则完成 forced
 close 后终止该 run。funding 的 `q(t-)` 必须在 funding ledger 显式保存，不能用同 timestamp fill 后仓位回算。
 
 同一 phase 内 `source_sequence` 相同或倒退即失败。一个 timestamp 的 bar-close decision 创建的订单不能回看
-该 timestamp 已处理的 tradable event。`next-tradable-event/v1` 定义为：订单提交后，满足 scope、价格 freshness、
-数量及执行约束且 `tradable.ts > decision.ts` 的第一条事件。不存在合格事件时记录
-`expired_no_next_tradable_event`；禁止 fallback 到 bar close、下一 bar close 或窗口外事件。
+该 timestamp 已处理的 tradable event。`next-tradable-event/v1` 冻结为 taker IOC：订单提交后，第一条
+`tradable.ts > decision.ts` 且 scope/source/freshness 合法的事件就是唯一解析点，按当时可用数量得到
+full/partial/no-fill 并立即终结该订单；不得因零量、价格不利或结果不佳而跳到后续事件。窗口内不存在该事件时
+记录 `expired_no_next_tradable_event`；禁止 fallback 到 bar close、下一 bar close 或窗口外事件。
 
 queued order 在 single-position 模式下按 FIFO 处理；v1 每次 bar close 最多产生一个 live order。反向成交必须
 确定性拆为“先平旧仓、再开新仓”两个 accounting legs，共享一个 exchange fill identity，费用按两个 leg 的绝对
 contract 数量比例分摊：先按 opening leg 的绝对 notional 直接计算 opening fee，closing fee 固定为 total fee
 减 opening fee，因此任何 Decimal context 下的分摊余数都归 closing leg，且两 leg typed-exact 等于 total fee。
-任何 self-cross、并存 long/short 或多订单竞态均失败关闭。
+反转订单整体属于 risk-increasing provisional transaction：只有 closing+opening 两个 leg 的 tier、fee、PnL、IM
+与 post-fill liquidation 校验全部通过才原子提交；opening leg 资金不足时两个 leg 都不提交、无 fee/ledger/state
+变化。这里“reduce-only close 不因 IM 拒绝”只适用于不含 opening leg 的纯减仓订单。任何 self-cross、并存
+long/short 或多订单竞态均失败关闭。
 
 ## 8. 数据完整性与 freshness 门禁
 
@@ -551,8 +566,11 @@ live profile 或真实资金验证。
 
 截至 2026-08-28，LF-B1.1 本地静态证据为：Ruff 通过；本模块 `72 passed`；连同共享 instrument arithmetic
 `114 passed`；Windows 全量 unit `5996 passed, 31 skipped, 259 subtests passed`；两轮独立只读复审均无
-未关闭 P0/P1。该证据只覆盖纯合同/记账，不覆盖 PostgreSQL、WSL2、事件因果、恢复、发布、真实数据或收益。
+未关闭 P0/P1。LF-B1.2-A1 的增量静态证据为：Ruff 通过；本目录 `204 passed`；连同共享 instrument
+arithmetic/snapshot `255 passed`；Windows 全量 unit `6128 passed, 31 skipped, 259 subtests passed`；两名独立
+只读审查者均给出 PASS、无未关闭 P0/P1。后者只覆盖 snapshot/event/freshness/funding 证据边界，不覆盖
+reducer、正式 event-set、checkpoint/recovery、publisher、PostgreSQL、WSL2、真实数据、UI 或收益。
 
-本 ADR 当前结论仅为“LF-B1.1 纯合同/记账基础可作为后续合成纵向切片的已审查起点”。当前 Gold、mark/index、instrument
+本 ADR 当前结论仅为“LF-B1.1 与 LF-B1.2-A1 可作为后续 reducer/发布/恢复纵向切片的已审查起点”。当前 Gold、mark/index、instrument
 snapshot、position-tier/MMR/liquidation-fee、execution-fee、funding-schedule snapshot 与 source seal 阻断仍开放；没有运行证据，没有 qualification round，没有部署授权，也没有任何真实资金
 副作用。故截至 2026-08-28：**LF-B 未完成，RDP 不可据此晋级或发布到实盘。**

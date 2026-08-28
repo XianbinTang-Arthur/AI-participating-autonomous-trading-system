@@ -1,6 +1,6 @@
 # RDP 衍生品 Phase 2 晋级证据生产闭环 P1 任务书
 
-> 文档状态：现行实施任务书；LF-A 已在 `96c772010767` 完成，LF-B1.1 纯合同/记账基础已在 `bf7a24dfe0a3` 完成，LF-B producer 整体尚未完成
+> 文档状态：现行实施任务书；LF-A 已在 `96c772010767` 完成，LF-B1.1 与 LF-B1.2-A1 已完成本地静态验收，LF-B producer 整体尚未完成
 > 最后核对：2026-08-28（起始基线 `main@c15ccd2d5057`，LF-A `96c772010767`，LF-B1.1 `bf7a24dfe0a3`；以本文档所在 HEAD 为准）
 > 核对范围：完整 RDP 编排、Step 2/3 产物、`backtest-run/v2`、Phase 2 evidence consumer 与晋级选择器
 > 生产决定：**REAL-MONEY PRODUCTION: NO-GO**
@@ -153,10 +153,13 @@
    raw fee 不能绕过 immutable schedule，所有结果永久不可晋级。Ruff、本模块 `72 passed`、共享算术合计
    `114 passed`、Windows 全量 `5996 passed, 31 skipped, 259 subtests passed`，两名独立只读审查者均未发现
    未关闭 P0/P1。该结果没有 event replay、PostgreSQL、WSL2、真实数据或运行验收，ADR 也未获真人批准。
-3. **下一未阻塞工程切片是 LF-B1.2**：实现 strict immutable snapshot refs/loader 与 effective-window preflight，
-   再实现 `derivatives-event-set/v1`、固定 phase order、single-position reducer、manifest-last publisher、
-   exact checkpoint/recovery 和合成 fault/determinism 测试。正式 engine 只能从保留原 bytes/digest 的已验证
-   snapshot 派生 LF-B1.1 算术合同，不得把调用方自由构造的 facade 当作历史来源事实。
+3. **LF-B1.2-A1 已完成本地静态验收，下一未阻塞工程切片是 LF-B1.2-B/C**：A1 已实现 strict immutable
+   snapshot refs/loader、effective-window、封闭 event contract、固定 phase/严格 merge、freshness 与 funding
+   continuity/settlement 验证；Ruff、本目录 `204 passed`、共享相关回归 `255 passed`、Windows 全量
+   `6128 passed, 31 skipped, 259 subtests passed`，两名独立只读审查者无未关闭 P0/P1。仍需实现
+   `derivatives-event-set/v1` 两遍 reader、single-position reducer、manifest-last publisher、exact checkpoint/
+   recovery 和合成 fault/determinism 测试。正式 engine 只能从保留原 bytes/digest 的已验证 event-set/snapshot
+   派生 LF-B1.1 算术合同，不得把调用方自由构造的 facade 或派生 state 当作历史来源事实。
 4. 在 LF-B1.2 合成纵向切片通过后，才扩展首轮精确四 combo；ETH 仅在 BTC 契约稳定后扩展。随后新建
    qualification round manifest/result/snapshot，并把 exact Step 2/3、instrument snapshot 与
    四个子 manifest 锚定；完成并发、恢复、确定性与 PostgreSQL 验收后再接入 Phase 6。
