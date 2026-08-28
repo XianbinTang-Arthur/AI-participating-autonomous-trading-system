@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import pathlib
@@ -48,6 +49,8 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from aats.data_platform.governance._atomic_io import immutable_json_write
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -55,6 +58,7 @@ logging.basicConfig(
 log = logging.getLogger("rdp_calibration_batch")
 
 _DEFAULT_ARTIFACT_ROOT = pathlib.Path("artifacts/research/calibration_batches")
+_BATCH_RESULT_PREFIX = "RDP_CALIBRATION_BATCH_RESULT_JSON="
 
 # ---------------------------------------------------------------------------
 # 内置预设（方式 B）
@@ -697,7 +701,7 @@ def _fmt(v: float | None) -> str:
 # 主流程
 # ---------------------------------------------------------------------------
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Calibration batch runner: lightweight batch replay for research calibration",
     )
@@ -728,6 +732,10 @@ def main() -> None:
     parser.add_argument("--start", help="Override batch start date (YYYY-MM-DD, UTC)")
     parser.add_argument("--end", help="Override batch end date (YYYY-MM-DD, UTC)")
     parser.add_argument("--dataset-version", default="v1.0")
+    parser.add_argument(
+        "--result-json",
+        help="可选的不可变运行结果 sidecar 路径，供父编排器精确绑定本次 batch",
+    )
     args = parser.parse_args()
 
     # 1. 加载 batch 规格
@@ -864,15 +872,50 @@ def main() -> None:
         print("")
         print(f"Artifacts: {batch_dir}")
 
-    # 退出码策略：
-    #   0 = 全部成功
-    #   2 = 部分成功（有成功也有失败）
-    #   3 = 全部失败
     if n_fail > 0 and n_ok > 0:
-        sys.exit(2)
+        status = "partial_success"
+        exit_code = 2
     elif n_fail > 0 and n_ok == 0:
-        sys.exit(3)
+        status = "failed"
+        exit_code = 3
+    else:
+        status = "succeeded"
+        exit_code = 0
+    summary_path = batch_dir / "batch_summary.json"
+    summary_bytes = summary_path.read_bytes()
+    result_payload = {
+        "schema_version": "aats.calibration_batch_result.v1",
+        "batch_run_id": batch_run_id,
+        "batch_dir": str(batch_dir.resolve()),
+        "summary_path": str(summary_path.resolve()),
+        "summary_sha256": hashlib.sha256(summary_bytes).hexdigest(),
+        "summary_size_bytes": len(summary_bytes),
+        "status": status,
+        "batch_name": spec.get("batch_name"),
+        "family": spec["family"],
+        "symbol": spec["symbol"],
+        "timeframe": spec["timeframe"],
+        "dataset_version": spec.get("dataset_version", "v1.0"),
+        "window": {"start": spec["start"], "end": spec["end"]},
+        "total_experiments": total,
+        "succeeded": n_ok,
+        "failed": n_fail,
+    }
+    if args.result_json:
+        immutable_json_write(result_payload, pathlib.Path(args.result_json))
+    print(
+        _BATCH_RESULT_PREFIX
+        + json.dumps(
+            result_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
+
+    # 退出码策略：0=全部成功，2=部分成功，3=全部失败。
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

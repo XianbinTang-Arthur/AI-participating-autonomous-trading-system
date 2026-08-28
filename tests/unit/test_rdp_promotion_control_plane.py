@@ -448,6 +448,8 @@ def test_process_authorization_binds_root_and_complete_recommendation_identity(
         **_apply_capable_rec("rec_auth_identity", "draft"),
         "source_round_id": "research_round_1",
         "evidence_bundle_ref": round_id,
+        "confidence": "high",
+        "reason": "immutable qualified rationale",
     }
     verdict = PromotionQualificationVerdict(
         required=True,
@@ -458,6 +460,7 @@ def test_process_authorization_binds_root_and_complete_recommendation_identity(
         qualified_round_id=round_id,
         detail="qualified",
         qualified_finished_at=datetime.now(timezone.utc).isoformat(),
+        parameter_values_fingerprint="a" * 64,
     )
 
     with patch(
@@ -472,6 +475,15 @@ def test_process_authorization_binds_root_and_complete_recommendation_identity(
     with pytest.raises(PromotionQualificationBlockedError) as exc_info:
         require_promotion_authorization(tmp_path, drifted, authorization)
     assert exc_info.value.verdict.reason_code == "promotion_authorization_invalid"
+    for field_name in ("confidence", "reason"):
+        drifted = dict(rec)
+        drifted[field_name] = "drifted"
+        with pytest.raises(PromotionQualificationBlockedError) as exc_info:
+            require_promotion_authorization(tmp_path, drifted, authorization)
+        assert (
+            exc_info.value.verdict.reason_code
+            == "promotion_authorization_invalid"
+        )
 
 
 def _qualified_authorization_fixture(
@@ -494,6 +506,7 @@ def _qualified_authorization_fixture(
         qualified_round_id=round_id,
         detail="qualified",
         qualified_finished_at=finished_at.isoformat(),
+        parameter_values_fingerprint="a" * 64,
     )
     return rec, verdict
 
@@ -685,6 +698,7 @@ def test_eligible_verdict_must_bind_exact_qualified_evidence(
         qualified_round_id=qualified_round_id,
         detail="synthetic verdict",
         qualified_finished_at=datetime.now(timezone.utc).isoformat(),
+        parameter_values_fingerprint="a" * 64,
     )
 
     guarded = validate_promotion_qualification_verdict(verdict, rec)
@@ -816,10 +830,12 @@ def test_registry_db_status_write_binds_exact_recommendation_identity() -> None:
         "symbol": "BTC-USDT-SWAP",
         "timeframe": "15m",
         "recommendation_type": "parameter_upgrade",
-        "target_parameter_set_id": "ps_1",
-        "source_round_id": "20260827_120000_aaaaaaaa",
-        "evidence_bundle_ref": "20260827_120000_aaaaaaaa",
-    }
+            "target_parameter_set_id": "ps_1",
+            "source_round_id": "20260827_120000_aaaaaaaa",
+            "confidence": None,
+            "reason": None,
+            "evidence_bundle_ref": "20260827_120000_aaaaaaaa",
+        }
 
 
 def _build_app() -> FastAPI:

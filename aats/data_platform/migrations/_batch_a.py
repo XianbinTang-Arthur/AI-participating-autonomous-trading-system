@@ -145,7 +145,9 @@ DISTRIBUTION_CHECKS: tuple[DistributionCheck, ...] = (
         title="parameter_sets.status",
         sql="SELECT status, COUNT(*) AS rows FROM governance.parameter_sets GROUP BY status ORDER BY status",
         # Mirrors VALID_PS_STATUSES in aats/data_platform/governance/_db_util.py.
-        allowlist=frozenset({"draft", "candidate", "frozen", "deprecated"}),
+        allowlist=frozenset(
+            {"draft", "candidate", "frozen", "released", "deprecated"}
+        ),
     ),
     DistributionCheck(
         check_id="7b",

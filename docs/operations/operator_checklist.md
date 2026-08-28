@@ -105,8 +105,9 @@
 
 ### manifest 校验失败
 
-1. 运行 `rdp_validate_artifacts.py --fix` 自动补全
-2. 如果仍有 error，手动检查 manifest 结构
+1. 只读运行 `rdp_validate_artifacts.py --phase <phase>` 定位字段和路径错误
+2. 停止使用该 round，不要原地修改 `round_manifest.json`
+3. legacy 证据必须迁移为新的 artifact/round，重新建立 digest 与 index，并经过审查
 
 ### 质量巡检 unhealthy
 

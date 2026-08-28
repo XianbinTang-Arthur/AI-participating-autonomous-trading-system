@@ -50,6 +50,9 @@ def _isolate_exact_round_qualification(monkeypatch: pytest.MonkeyPatch) -> None:
         reason_code="not_required",
         detail="not required in isolated workflow test",
     )
+    values_bound = SimpleNamespace(
+        to_dict=lambda: {"parameter_values_fingerprint": "a" * 64}
+    )
     monkeypatch.setattr(
         "aats.data_platform.decision_system.promotion_guard.promotion_qualification_failure",
         lambda *_args, **_kwargs: None,
@@ -57,6 +60,16 @@ def _isolate_exact_round_qualification(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "aats.data_platform.decision_system.promotion_qualification.evaluate_promotion_qualification",
         lambda *_args, **_kwargs: eligible,
+    )
+    monkeypatch.setattr(
+        "aats.data_platform.decision_system.promotion_guard."
+        "require_apply_promotion_qualification",
+        lambda *_args, **_kwargs: values_bound,
+    )
+    monkeypatch.setattr(
+        "aats.data_platform.governance.parameter_identity."
+        "parameter_values_fingerprint",
+        lambda _values: "a" * 64,
     )
     monkeypatch.setattr(
         "aats.data_platform.decision_system.recommendation_registry.has_explicit_governance_db_configuration",
@@ -441,6 +454,7 @@ def test_strict_evidence_freshness_rejects_unprovable_or_future_evidence(
             qualified_round_id=str(evidence_ref),
             detail="qualified",
             qualified_finished_at=finished_at,
+            parameter_values_fingerprint="a" * 64,
         )
     result = check_evidence_freshness({
         "environment": "prod",

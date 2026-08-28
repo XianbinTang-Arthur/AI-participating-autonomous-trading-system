@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -25,6 +26,9 @@ from aats.data_platform.research.profile_research_job import (
     run_profile_research,
     select_best_candidate,
     select_best_violating,
+)
+from aats.data_platform.governance.parameter_identity import (
+    parameter_values_fingerprint,
 )
 
 
@@ -164,6 +168,11 @@ def test_run_profile_research_product_writes_record() -> None:
     inserts = [c for c in session.calls if "INSERT INTO governance" in c[0]]
     assert any("recommendations" in c[0] for c in inserts)
     assert any("profile_research_runs" in c[0] for c in inserts)
+    parameter_insert = next(c for c in inserts if "parameter_sets" in c[0])
+    assert "typed_json_identity_sha256" in parameter_insert[0]
+    assert parameter_insert[1]["typed_json_identity_sha256"] == (
+        parameter_values_fingerprint(json.loads(parameter_insert[1]["vals"]))
+    )
 
 
 def test_run_profile_research_bad_candidates_no_upgrade() -> None:

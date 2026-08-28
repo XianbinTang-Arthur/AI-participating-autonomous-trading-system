@@ -37,6 +37,10 @@ from typing import Any, Callable, Iterable
 
 from sqlalchemy import text
 
+from aats.data_platform.governance.parameter_identity import (
+    parameter_values_fingerprint,
+)
+
 from aats.data_platform.gates.profile_gate import (
     check_profile_gate,
     compute_metrics_from_replay,
@@ -359,22 +363,29 @@ def _emit_upgrade_recommendation(
     """
     rec_id = f"rec-profile-{profile_id}-{uuid.uuid4().hex[:12]}"
     ps_id = f"ps-profile-{profile_id}-{uuid.uuid4().hex[:12]}"
+    candidate_values = candidate.point.values
+    typed_json_identity_sha256 = parameter_values_fingerprint(
+        candidate_values
+    )
 
     # 1. parameter_set
     research_session.execute(text("""
         INSERT INTO governance.parameter_sets
             (parameter_set_id, scope, scope_ref, family, timeframe,
              source_round_id, source_phase, dataset_version,
-             values, confidence, status, created_at)
+             values, typed_json_identity_sha256,
+             confidence, status, created_at)
         VALUES
             (:psid, 'profile', :pid, NULL, NULL,
              :rid, 'profile_research', 'v1.0',
-             :vals::jsonb, 'medium', 'draft', NOW())
+             :vals::jsonb, :typed_json_identity_sha256,
+             'medium', 'draft', NOW())
     """), {
         "psid": ps_id,
         "pid": profile_id,
         "rid": run_id,
-        "vals": json.dumps(candidate.point.values, ensure_ascii=False),
+        "vals": json.dumps(candidate_values, ensure_ascii=False),
+        "typed_json_identity_sha256": typed_json_identity_sha256,
     })
 
     # 2. recommendation

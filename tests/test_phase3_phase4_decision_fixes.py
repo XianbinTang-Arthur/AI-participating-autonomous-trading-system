@@ -18,10 +18,35 @@ from typing import Any
 import pytest
 
 from aats.data_platform.decision_system.evidence_bundle import (
+    COMBOS,
     PHASE2_PROMOTION_QUALIFICATION_POLICY,
 )
 
 _PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+def _succeeded_phase3_combos() -> dict[str, dict[str, Any]]:
+    return {
+        combo["key"]: {
+            "status": "succeeded",
+            "alignment_stats": {"aligned": 1, "unattributable": 0},
+        }
+        for combo in COMBOS
+    }
+
+
+def _succeeded_phase4_combos() -> dict[str, dict[str, Any]]:
+    return {
+        combo["key"]: {
+            "status": "succeeded",
+            "cost_summary": {
+                "cost_adjusted_edge_mean": 2.0,
+                "full_fill_ratio": 0.8,
+                "total_candidates": 10,
+            },
+        }
+        for combo in COMBOS
+    }
 
 
 # =========================================================================
@@ -493,6 +518,7 @@ class TestReadinessEvaluatorCheck2:
         if p3_round_count > 0:
             latest: dict[str, Any] = {
                 "round_id": "test_round",
+                "status": "succeeded",
                 "live_query_succeeded": True,
             }
             if p3_combos is not None:
@@ -527,18 +553,13 @@ class TestReadinessEvaluatorCheck2:
     def _get_check(result: dict[str, Any], name: str) -> dict[str, Any]:
         return next(c for c in result["checks"] if c["check"] == name)
 
-    def test_check2_passes_when_combos_succeeded(self):
-        """combos 有 succeeded → attribution_ok = True。"""
+    def test_check2_passes_when_exact_four_combos_succeeded(self):
+        """精确四个 combo 全部 succeeded → attribution_ok = True。"""
         from aats.data_platform.decision_system.readiness_evaluator import (
             evaluate_promotion_readiness,
         )
 
-        evidence = self._build_evidence(
-            p3_combos={
-                "independent_15m": {"status": "succeeded"},
-                "independent_1h": {"status": "succeeded"},
-            },
-        )
+        evidence = self._build_evidence(p3_combos=_succeeded_phase3_combos())
         result = evaluate_promotion_readiness(evidence, [], [])
 
         check2 = next(
@@ -547,17 +568,17 @@ class TestReadinessEvaluatorCheck2:
         )
         assert check2["passed"] is True, "combos 全部 succeeded 时应通过"
 
-    def test_check2_passes_when_combos_partial_success(self):
-        """combos 有部分 succeeded + 部分 failed → attribution_ok = True。"""
+    def test_check2_single_combo_failure_blocks_readiness(self):
+        """四个 combo 中任一 failed 必须阻断 attribution readiness。"""
         from aats.data_platform.decision_system.readiness_evaluator import (
             evaluate_promotion_readiness,
         )
 
+        combos = _succeeded_phase3_combos()
+        combos["directional_1h"]["status"] = "failed"
         evidence = self._build_evidence(
-            p3_combos={
-                "independent_15m": {"status": "succeeded"},
-                "independent_1h": {"status": "failed"},
-            },
+            p3_combos=combos,
+            p3_latest_extra={"status": "partial_success"},
         )
         result = evaluate_promotion_readiness(evidence, [], [])
 
@@ -565,7 +586,9 @@ class TestReadinessEvaluatorCheck2:
             c for c in result["checks"]
             if c["check"] == "attribution_no_severe_issue"
         )
-        assert check2["passed"] is True, "至少一个 combo 成功时应通过"
+        assert check2["passed"] is False
+        assert "directional_1h:failed" in check2["detail"]
+        assert result["readiness"] != "ready_for_next_live_test"
 
     def test_check2_fails_when_all_combos_failed(self):
         """combos 全部 failed → attribution_ok = False。"""
@@ -605,7 +628,8 @@ class TestReadinessEvaluatorCheck2:
             if c["check"] == "attribution_no_severe_issue"
         )
         assert check2["passed"] is False
-        assert "zero_exact_alignment" in check2["detail"]
+        assert "combo_count=0" in check2["detail"]
+        assert "missing=" in check2["detail"]
 
     def test_check2_no_status_no_combos_fails(self):
         """无 combos 且无 status/overall_status → unknown → 不通过。"""
@@ -625,16 +649,17 @@ class TestReadinessEvaluatorCheck2:
         )
         assert check2["passed"] is False
 
-    def test_check2_combo_partial_success_status(self):
-        """combo status = partial_success 应视为通过。"""
+    def test_check2_combo_partial_success_status_blocks(self):
+        """任何 combo status=partial_success 都必须阻断。"""
         from aats.data_platform.decision_system.readiness_evaluator import (
             evaluate_promotion_readiness,
         )
 
+        combos = _succeeded_phase3_combos()
+        combos["independent_15m"]["status"] = "partial_success"
         evidence = self._build_evidence(
-            p3_combos={
-                "independent_15m": {"status": "partial_success"},
-            },
+            p3_combos=combos,
+            p3_latest_extra={"status": "partial_success"},
         )
         result = evaluate_promotion_readiness(evidence, [], [])
 
@@ -642,7 +667,8 @@ class TestReadinessEvaluatorCheck2:
             c for c in result["checks"]
             if c["check"] == "attribution_no_severe_issue"
         )
-        assert check2["passed"] is True
+        assert check2["passed"] is False
+        assert "independent_15m:partial_success" in check2["detail"]
 
     def test_check2_no_phase3_data_fails_readiness(self):
         """无 Phase 3 数据必须 failed check；不能再"跳过即通过"。"""
@@ -829,6 +855,7 @@ class TestReadinessEvaluatorIntegration:
                     "independent_15m": {
                         "available": True,
                         "experiments_with_openings": 3,
+                        "max_opening_count": 3,
                         "mean_positive_edge_ratio": 0.4,
                     },
                 },
@@ -838,19 +865,11 @@ class TestReadinessEvaluatorIntegration:
                 "trusted_round_count": 1,
                 "latest_round": {
                     "round_id": "test",
+                    "status": "succeeded",
                     "overall_status": "succeeded",
                     "replay_only": False,
                     "live_query_succeeded": True,
-                    "combos": {
-                        "independent_15m": {
-                            "status": "succeeded",
-                            "alignment_stats": {"aligned": 1, "unattributable": 0},
-                        },
-                        "independent_1h": {
-                            "status": "succeeded",
-                            "alignment_stats": {"aligned": 1, "unattributable": 0},
-                        },
-                    },
+                    "combos": _succeeded_phase3_combos(),
                 },
             },
             "phase4_evidence": {
@@ -858,16 +877,8 @@ class TestReadinessEvaluatorIntegration:
                 "trusted_round_count": 1,
                 "latest_round": {
                     "round_id": "test",
-                    "combos": {
-                        "independent_15m": {
-                            "status": "succeeded",
-                            "cost_summary": {
-                                "cost_adjusted_edge_mean": 2.0,
-                                "full_fill_ratio": 0.8,
-                                "total_candidates": 10,
-                            },
-                        },
-                    },
+                    "status": "succeeded",
+                    "combos": _succeeded_phase4_combos(),
                 },
             },
             "phase5_governance_evidence": {
@@ -881,6 +892,8 @@ class TestReadinessEvaluatorIntegration:
             {
                 "decision": "promote_candidate",
                 "parameter_set_id": "ps_001",
+                "family": "independent",
+                "timeframe": "15m",
                 "score_ratio": 0.85,
             },
         ]
@@ -956,6 +969,7 @@ def _gate_evidence_with_overrides(
                 "independent_15m": {
                     "available": True,
                     "experiments_with_openings": 3,
+                    "max_opening_count": 3,
                     "mean_positive_edge_ratio": 0.4,
                 },
             },
@@ -965,15 +979,11 @@ def _gate_evidence_with_overrides(
             "trusted_round_count": 1,
             "latest_round": {
                 "round_id": "r1",
+                "status": "succeeded",
                 "replay_only": False,
                 "overall_status": "succeeded",
                 "live_query_succeeded": True,
-                "combos": {
-                    "independent_15m": {
-                        "status": "succeeded",
-                        "alignment_stats": {"aligned": 1, "unattributable": 0},
-                    },
-                },
+                "combos": _succeeded_phase3_combos(),
             },
         },
         "phase4_evidence": phase4 if phase4 is not None else {
@@ -981,16 +991,8 @@ def _gate_evidence_with_overrides(
             "trusted_round_count": 1,
             "latest_round": {
                 "round_id": "r1",
-                "combos": {
-                    "independent_15m": {
-                        "status": "succeeded",
-                        "cost_summary": {
-                            "cost_adjusted_edge_mean": 2.0,
-                            "full_fill_ratio": 0.8,
-                            "total_candidates": 10,
-                        },
-                    },
-                },
+                "status": "succeeded",
+                "combos": _succeeded_phase4_combos(),
             },
         },
         "phase5_governance_evidence": {
@@ -1002,7 +1004,13 @@ def _gate_evidence_with_overrides(
 
 
 _GATE_PROMOTE_CANDIDATES = [
-    {"decision": "promote_candidate", "parameter_set_id": "ps_001", "score_ratio": 0.85},
+    {
+        "decision": "promote_candidate",
+        "parameter_set_id": "ps_001",
+        "family": "independent",
+        "timeframe": "15m",
+        "score_ratio": 0.85,
+    },
 ]
 _GATE_FT_DECISIONS = [
     {"combo_key": "independent_15m", "decision": "keep_active", "confidence": "high"},
@@ -1098,15 +1106,17 @@ class TestReadinessGateHardening:
             evaluate_promotion_readiness,
         )
 
+        combos = _succeeded_phase4_combos()
+        for combo in combos.values():
+            combo["cost_summary"] = {}
         evidence = _gate_evidence_with_overrides(
             phase4={
                 "round_count": 1,
                 "trusted_round_count": 1,
                 "latest_round": {
                     "round_id": "r1",
-                    "combos": {
-                        "independent_15m": {"status": "succeeded", "cost_summary": {}},
-                    },
+                    "status": "succeeded",
+                    "combos": combos,
                 },
             },
         )
@@ -1118,6 +1128,146 @@ class TestReadinessGateHardening:
         )
         assert check["passed"] is False
         assert result["readiness"] == "not_ready_execution_issue"
+
+    def test_phase4_zero_candidate_combo_blocks_readiness(self):
+        """存在 cost_summary 但任一 combo 无候选时不能显示 execution ready。"""
+        from aats.data_platform.decision_system.readiness_evaluator import (
+            evaluate_promotion_readiness,
+        )
+
+        combos = _succeeded_phase4_combos()
+        combos["directional_1h"]["cost_summary"]["total_candidates"] = 0
+        evidence = _gate_evidence_with_overrides(
+            phase4={
+                "round_count": 1,
+                "trusted_round_count": 1,
+                "latest_round": {
+                    "round_id": "r_zero",
+                    "status": "succeeded",
+                    "combos": combos,
+                },
+            },
+        )
+
+        result = evaluate_promotion_readiness(
+            evidence,
+            _GATE_PROMOTE_CANDIDATES,
+            _GATE_FT_DECISIONS,
+        )
+        check = next(
+            item
+            for item in result["checks"]
+            if item["check"] == "execution_not_severe"
+        )
+        assert check["passed"] is False
+        assert result["readiness"] == "not_ready_execution_issue"
+
+    @pytest.mark.parametrize("adjusted_edge", [None, float("nan"), float("inf"), True])
+    def test_phase4_invalid_adjusted_edge_blocks_readiness(self, adjusted_edge):
+        """每个 combo 都必须提供有限的 cost-adjusted edge。"""
+        from aats.data_platform.decision_system.readiness_evaluator import (
+            evaluate_promotion_readiness,
+        )
+
+        combos = _succeeded_phase4_combos()
+        target_summary = combos["directional_1h"]["cost_summary"]
+        if adjusted_edge is None:
+            target_summary.pop("cost_adjusted_edge_mean")
+        else:
+            target_summary["cost_adjusted_edge_mean"] = adjusted_edge
+        evidence = _gate_evidence_with_overrides(
+            phase4={
+                "round_count": 1,
+                "trusted_round_count": 1,
+                "latest_round": {
+                    "round_id": "r_invalid_edge",
+                    "status": "succeeded",
+                    "combos": combos,
+                },
+            },
+        )
+
+        result = evaluate_promotion_readiness(
+            evidence,
+            _GATE_PROMOTE_CANDIDATES,
+            _GATE_FT_DECISIONS,
+        )
+
+        check = next(
+            item
+            for item in result["checks"]
+            if item["check"] == "execution_not_severe"
+        )
+        assert check["passed"] is False
+        assert result["readiness"] == "not_ready_execution_issue"
+
+    def test_phase4_single_combo_failure_blocks_readiness(self):
+        """四个 Phase 4 combo 中任一失败，不能由其余成功项掩盖。"""
+        from aats.data_platform.decision_system.readiness_evaluator import (
+            evaluate_promotion_readiness,
+        )
+
+        combos = _succeeded_phase4_combos()
+        combos["directional_1h"]["status"] = "failed"
+        evidence = _gate_evidence_with_overrides(
+            phase4={
+                "round_count": 1,
+                "trusted_round_count": 1,
+                "latest_round": {
+                    "round_id": "r_partial",
+                    "status": "partial_success",
+                    "overall_status": "partial_success",
+                    "combos": combos,
+                },
+            },
+        )
+
+        result = evaluate_promotion_readiness(
+            evidence,
+            _GATE_PROMOTE_CANDIDATES,
+            _GATE_FT_DECISIONS,
+        )
+        check = next(
+            c for c in result["checks"] if c["check"] == "execution_not_severe"
+        )
+        assert check["passed"] is False
+        assert "directional_1h:failed" in check["detail"]
+        assert result["readiness"] == "not_ready_execution_issue"
+
+    def test_partial_phase3_full_decision_path_cannot_be_ready(self):
+        """其余门全部通过时，Phase 3 单 combo 失败仍必须给出 attribution NO-GO。"""
+        from aats.data_platform.decision_system.readiness_evaluator import (
+            evaluate_promotion_readiness,
+        )
+
+        combos = _succeeded_phase3_combos()
+        combos["directional_15m"]["status"] = "failed"
+        evidence = _gate_evidence_with_overrides(
+            phase3={
+                "round_count": 1,
+                "trusted_round_count": 1,
+                "latest_round": {
+                    "round_id": "r_partial",
+                    "status": "partial_success",
+                    "overall_status": "partial_success",
+                    "replay_only": False,
+                    "live_query_succeeded": True,
+                    "combos": combos,
+                },
+            },
+        )
+
+        result = evaluate_promotion_readiness(
+            evidence,
+            _GATE_PROMOTE_CANDIDATES,
+            _GATE_FT_DECISIONS,
+        )
+
+        assert result["readiness"] == "not_ready_attribution_issue"
+        assert result["checks_failed"] == 1
+        assert result["promoted_candidates"] == [
+            {"parameter_set_id": "ps_001", "score_ratio": 0.85},
+        ]
 
     def test_critical_subset_only_no_longer_ready(self):
         """旧中径：research+governance+promote_candidate 通过但 attribution 失败，

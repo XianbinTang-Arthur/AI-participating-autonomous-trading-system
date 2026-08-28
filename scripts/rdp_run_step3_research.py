@@ -30,14 +30,36 @@ Phase 2 Step 3: independent 家族 6 组扩展参数 x 2 timeframe
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import logging
 import pathlib
+import re
 import sys
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
+
+from aats.data_platform.governance._atomic_io import immutable_json_write
+from aats.data_platform.governance._db_util import (
+    has_explicit_governance_db_configuration,
+)
+from aats.data_platform.governance._exceptions import DBUnavailableError
+from aats.data_platform.governance.research_artifact_contract import (
+    require_regular_round_file,
+    resolve_formal_round_dir,
+    validate_calibration_child_artifacts,
+    validate_scan_child_artifacts,
+)
+from aats.data_platform.governance.snapshot_db import (
+    ROUND_PHASE_STEP2,
+    ROUND_PHASE_STEP3,
+    load_research_round_snapshot,
+    research_round_snapshot_fingerprint,
+    save_research_round_snapshot,
+)
+from aats.data_platform.governance.typed_json_identity import typed_json_sha256
 
 # ── 日志（必须先于 Step 2 import，确保 basicConfig 生效）──
 log = logging.getLogger("rdp.step3")
@@ -63,15 +85,132 @@ _generate_single_ft_recommendations = _step2._generate_single_ft_recommendations
 _write_manifest = _step2._write_manifest
 _normalize_dataset_version = _step2._normalize_dataset_version
 _SYMBOL: str = _step2._SYMBOL
+_EXPECTED_STEP2_CALIBRATION_KEYS = tuple(
+    _step2._EXPECTED_STEP2_CALIBRATION_KEYS
+)
+_EXPECTED_STEP2_SCAN_KEYS = tuple(_step2._EXPECTED_STEP2_SCAN_KEYS)
+_EXPECTED_STEP2_CALIBRATION_TOPOLOGY = dict(
+    _step2._EXPECTED_STEP2_CALIBRATION_TOPOLOGY
+)
+_EXPECTED_STEP2_SCAN_TOPOLOGY = dict(_step2._EXPECTED_STEP2_SCAN_TOPOLOGY)
+_BATCH_RUN_ID_RE = _step2._BATCH_RUN_ID_RE
+_UUID_RE = _step2._UUID_RE
 
 # Step 3 校准定义（引用 Step 2 中已定义的 expanded groups）
 _CALIBRATION_DEFS: dict[str, dict[str, Any]] = _step2._CALIBRATION_DEFS
 
 # ── 常量 ──
 _DEFAULT_ARTIFACT_ROOT = pathlib.Path("artifacts/research/step3_rounds")
+_STEP3_RESULT_PREFIX = "RDP_STEP3_RESULT_JSON="
+_STEP2_ROUND_ID_RE = re.compile(r"^\d{8}_\d{6}_[0-9a-f]{8}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 # Step 3 只运行 independent 家族的扩展校准
-_EXPANDED_ROUND_KEYS = ["independent_15m_expanded", "independent_1h_expanded"]
+_EXPANDED_ROUND_KEYS = (
+    "independent_15m_expanded",
+    "independent_1h_expanded",
+)
+_EXPECTED_STEP3_COMBO_KEYS = frozenset(
+    {
+        "independent_15m",
+        "independent_1h",
+        "directional_15m",
+        "directional_1h",
+    }
+)
+_EXPECTED_STEP3_CALIBRATION_TOPOLOGY = {
+    key: (
+        str(_CALIBRATION_DEFS[key]["family"]),
+        str(_CALIBRATION_DEFS[key]["timeframe"]),
+        tuple(str(batch["key"]) for batch in _CALIBRATION_DEFS[key]["batches"]),
+    )
+    for key in _EXPANDED_ROUND_KEYS
+}
+
+
+def _manifest_result_set_is_valid(
+    results: Any,
+    *,
+    key_field: str,
+    expected_keys: tuple[str, ...],
+    require_complete_success: bool,
+    expected_topology: dict[str, tuple[Any, ...]] | None = None,
+) -> bool:
+    if not isinstance(results, list) or not all(
+        isinstance(item, dict) for item in results
+    ):
+        return False
+    keys = [item.get(key_field) for item in results]
+    statuses = [item.get("status") for item in results]
+    if (
+        not all(isinstance(key, str) and key for key in keys)
+        or len(set(keys)) != len(keys)
+        or not set(keys).issubset(expected_keys)
+        or not all(
+            status in {"succeeded", "partial_success", "failed"}
+            for status in statuses
+        )
+    ):
+        return False
+    if require_complete_success:
+        complete = bool(
+            len(results) == len(expected_keys)
+            and set(keys) == set(expected_keys)
+            and all(status == "succeeded" for status in statuses)
+        )
+        if not complete:
+            return False
+    if expected_topology is None:
+        return True
+    for item in results:
+        key = item[key_field]
+        expected = expected_topology[key]
+        if item.get("family") != expected[0] or item.get("timeframe") != expected[1]:
+            return False
+        if key_field == "round_key" and item.get("status") == "succeeded":
+            batches = item.get("batches")
+            if (
+                not isinstance(batches, list)
+                or not all(isinstance(batch, dict) for batch in batches)
+            ):
+                return False
+            batch_keys = [batch.get("key") for batch in batches]
+            if (
+                len(batch_keys) != len(expected[2])
+                or len(set(batch_keys)) != len(batch_keys)
+                or set(batch_keys) != set(expected[2])
+                or any(batch.get("status") != "succeeded" for batch in batches)
+                or any(
+                    not isinstance(batch.get("batch_run_id"), str)
+                    or _BATCH_RUN_ID_RE.fullmatch(batch["batch_run_id"]) is None
+                    or not isinstance(batch.get("batch_dir"), str)
+                    or not isinstance(batch.get("summary_sha256"), str)
+                    or _SHA256_RE.fullmatch(batch["summary_sha256"]) is None
+                    or type(batch.get("summary_size_bytes")) is not int
+                    or batch["summary_size_bytes"] <= 0
+                    for batch in batches
+                )
+            ):
+                return False
+        if key_field == "scan_key" and item.get("status") in {
+            "succeeded",
+            "partial_success",
+        }:
+            if (
+                not isinstance(item.get("scan_run_id"), str)
+                or _UUID_RE.fullmatch(item["scan_run_id"]) is None
+                or not isinstance(item.get("scan_dir"), str)
+                or not isinstance(item.get("comparison_sha256"), str)
+                or _SHA256_RE.fullmatch(item["comparison_sha256"]) is None
+                or type(item.get("comparison_size_bytes")) is not int
+                or item["comparison_size_bytes"] <= 0
+                or not isinstance(item.get("window"), dict)
+                or not isinstance(item.get("dataset_version"), str)
+                or not isinstance(item.get("grid_sha256"), str)
+                or _SHA256_RE.fullmatch(item["grid_sha256"]) is None
+            ):
+                return False
+    return True
 
 
 # =========================================================================
@@ -338,6 +477,8 @@ def _run_step3_calibration_round(
             bdef["file"], batch_artifact_root,
             ensure_schema=ensure, stop_on_error=stop_on_error,
             start=start, end=end, dataset_version=dataset_version,
+            expected_family=family,
+            expected_timeframe=timeframe,
         )
         result["_key"] = bdef["key"]
 
@@ -357,15 +498,21 @@ def _run_step3_calibration_round(
             break
 
     n_ok = sum(1 for b in batch_results if b["status"] == "succeeded")
+    n_partial = sum(1 for b in batch_results if b["status"] == "partial_success")
     n_fail = sum(1 for b in batch_results if b["status"] == "failed")
+    if n_fail > 0 and n_ok == 0 and n_partial == 0:
+        round_status = "failed"
+    elif n_fail > 0 or n_partial > 0:
+        round_status = "partial_success"
+    else:
+        round_status = "succeeded"
 
     return {
         "round_key": round_key,
         "family": family,
         "timeframe": timeframe,
         "batch_results": batch_results,
-        "status": ("succeeded" if n_fail == 0
-                   else ("failed" if n_ok == 0 else "partial_success")),
+        "status": round_status,
     }
 
 
@@ -377,6 +524,10 @@ def _run_step3_calibration_round(
 def _load_step2_baseline(
     step2_round_dir: pathlib.Path | None = None,
     step2_artifact_root: pathlib.Path | None = None,
+    *,
+    expected_dataset_version: str | None = None,
+    expected_symbol: str = _SYMBOL,
+    expected_window: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
     """加载 Step 2 的 parameter_candidates.json 作为基线。
 
@@ -385,34 +536,274 @@ def _load_step2_baseline(
     Returns:
         完整的 parameter_candidates 数据。未找到则返回空结构。
     """
-    # 优先：显式指定的目录
-    if step2_round_dir and step2_round_dir.exists():
-        candidates_file = step2_round_dir / "parameter_candidates.json"
-        if candidates_file.exists():
-            with candidates_file.open(encoding="utf-8") as f:
-                data = json.load(f)
-            log.info("Loaded Step 2 baseline from %s", candidates_file)
-            return data
+    def _missing() -> dict[str, Any]:
+        return {
+            "candidates": {},
+            "pending_validation": [],
+            "_validated_provenance": {"status": "missing"},
+        }
+
+    def _parse_aware_time(raw: Any) -> datetime:
+        if not isinstance(raw, str) or raw != raw.strip() or not raw:
+            raise ValueError("step2_manifest_time_invalid")
+        token = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        parsed = datetime.fromisoformat(token)
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("step2_manifest_time_timezone_missing")
+        return parsed.astimezone(timezone.utc)
+
+    def _validated(round_dir: pathlib.Path) -> dict[str, Any]:
+        round_dir, project_root = resolve_formal_round_dir(
+            round_dir,
+            phase_dir_name="step2_rounds",
+        )
+        round_id = round_dir.name
+        if _STEP2_ROUND_ID_RE.fullmatch(round_id) is None:
+            raise ValueError("step2_round_id_invalid")
+        candidates_path = round_dir / "parameter_candidates.json"
+        manifest_path = round_dir / "round_manifest.json"
+        candidate_bytes = require_regular_round_file(
+            candidates_path,
+            parent=round_dir,
+        )
+        manifest_bytes = require_regular_round_file(
+            manifest_path,
+            parent=round_dir,
+        )
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+        data = json.loads(candidate_bytes.decode("utf-8"))
+        if not isinstance(manifest, dict) or not isinstance(data, dict):
+            raise ValueError("step2_artifact_shape_invalid")
+        if (
+            manifest.get("schema_version") != "aats.step2_round.v1"
+            or manifest.get("phase") != "step2"
+            or manifest.get("round_id") != round_id
+            or manifest.get("status") not in {"succeeded", "partial_success"}
+            or data.get("schema_version") != "aats.step2_candidates.v1"
+            or data.get("round_id") != round_id
+            or not isinstance(data.get("candidates"), dict)
+        ):
+            raise ValueError("step2_artifact_identity_invalid")
+        require_complete_step2 = manifest.get("status") == "succeeded"
+        if not _manifest_result_set_is_valid(
+            manifest.get("calibrations"),
+            key_field="round_key",
+            expected_keys=_EXPECTED_STEP2_CALIBRATION_KEYS,
+            require_complete_success=require_complete_step2,
+            expected_topology=_EXPECTED_STEP2_CALIBRATION_TOPOLOGY,
+        ) or not _manifest_result_set_is_valid(
+            manifest.get("scans"),
+            key_field="scan_key",
+            expected_keys=_EXPECTED_STEP2_SCAN_KEYS,
+            require_complete_success=require_complete_step2,
+            expected_topology=_EXPECTED_STEP2_SCAN_TOPOLOGY,
+        ):
+            raise ValueError("step2_artifact_result_topology_invalid")
+        symbol = manifest.get("symbol")
+        dataset_version = manifest.get("dataset_version")
+        manifest_scope = manifest.get("scope")
+        candidate_scope = data.get("scope")
+        input_refs = manifest.get("input_refs")
+        window = manifest_scope.get("window") if isinstance(manifest_scope, dict) else None
+        candidate_keys = set(data.get("candidates", {}))
+        candidate_values = data.get("candidates", {})
+        pending_validation = data.get("pending_validation")
+        declared_candidate_keys = (
+            candidate_scope.get("combo_keys")
+            if isinstance(candidate_scope, dict)
+            else None
+        )
+        declared_manifest_keys = (
+            manifest_scope.get("combo_keys")
+            if isinstance(manifest_scope, dict)
+            else None
+        )
+        if (
+            not isinstance(symbol, str)
+            or symbol != expected_symbol
+            or not isinstance(dataset_version, str)
+            or not dataset_version
+            or not isinstance(manifest_scope, dict)
+            or manifest_scope.get("symbol") != symbol
+            or not isinstance(candidate_scope, dict)
+            or candidate_scope.get("symbol") != symbol
+            or candidate_scope.get("step") != "step2_candidates"
+            or not isinstance(declared_candidate_keys, list)
+            or len(declared_candidate_keys) != len(set(declared_candidate_keys))
+            or set(declared_candidate_keys) != candidate_keys
+            or candidate_scope.get("combo_count") != len(candidate_keys)
+            or not candidate_keys.issubset(_EXPECTED_STEP3_COMBO_KEYS)
+            or any(
+                not isinstance(values, dict) or not values
+                for values in candidate_values.values()
+            )
+            or not isinstance(pending_validation, list)
+            or any(
+                not isinstance(item, str)
+                or not item.strip()
+                or item != item.strip()
+                for item in pending_validation
+            )
+            or len(pending_validation) != len(set(pending_validation))
+            or (
+                manifest.get("status") == "succeeded"
+                and candidate_keys
+                != (_EXPECTED_STEP3_COMBO_KEYS - {"independent_15m"})
+            )
+            or (
+                manifest.get("status") == "succeeded"
+                and bool(pending_validation)
+            )
+            or not isinstance(declared_manifest_keys, list)
+            or set(declared_manifest_keys) != candidate_keys
+            or manifest_scope.get("combo_count") != len(candidate_keys)
+            or data.get("dataset_version") != dataset_version
+            or not isinstance(input_refs, dict)
+            or input_refs.get("dataset_version") != dataset_version
+            or input_refs.get("window") != window
+            or not isinstance(window, dict)
+            or set(window) != {"start", "end"}
+            or not isinstance(window.get("start"), str)
+            or not window["start"].strip()
+            or not isinstance(window.get("end"), str)
+            or not window["end"].strip()
+            or (expected_window is not None and window != expected_window)
+            or (
+                expected_dataset_version is not None
+                and dataset_version != expected_dataset_version
+            )
+        ):
+            raise ValueError("step2_artifact_scope_invalid")
+        validate_calibration_child_artifacts(
+            round_dir=round_dir,
+            calibrations=manifest.get("calibrations"),
+            expected_topology=_EXPECTED_STEP2_CALIBRATION_TOPOLOGY,
+            symbol=symbol,
+            dataset_version=dataset_version,
+            window=window,
+        )
+        validate_scan_child_artifacts(
+            project_root=project_root,
+            scans=manifest.get("scans"),
+            expected_topology=_EXPECTED_STEP2_SCAN_TOPOLOGY,
+            symbol=symbol,
+            dataset_version=dataset_version,
+            window=window,
+        )
+        digest_map = manifest.get("artifact_sha256")
+        size_map = manifest.get("artifact_size_bytes")
+        declared_digest = (
+            digest_map.get(candidates_path.name)
+            if isinstance(digest_map, dict)
+            else None
+        )
+        declared_size = (
+            size_map.get(candidates_path.name)
+            if isinstance(size_map, dict)
+            else None
+        )
+        if (
+            not isinstance(declared_digest, str)
+            or _SHA256_RE.fullmatch(declared_digest) is None
+            or type(declared_size) is not int
+            or declared_size != len(candidate_bytes)
+            or hashlib.sha256(candidate_bytes).hexdigest() != declared_digest
+        ):
+            raise ValueError("step2_candidate_digest_invalid")
+        started_at = _parse_aware_time(manifest.get("started_at"))
+        finished_at = _parse_aware_time(manifest.get("finished_at"))
+        round_started_at = datetime.strptime(
+            round_id[:15], "%Y%m%d_%H%M%S"
+        ).replace(tzinfo=timezone.utc)
+        if (
+            finished_at < started_at
+            or finished_at > datetime.now(timezone.utc)
+            or abs((started_at - round_started_at).total_seconds()) > 2.0
+        ):
+            raise ValueError("step2_manifest_time_invalid")
+        data["_validated_provenance"] = {
+            "round_id": round_id,
+            "status": manifest["status"],
+            "symbol": symbol,
+            "dataset_version": dataset_version,
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "candidate_sha256": declared_digest,
+            "window": dict(window),
+        }
+        return data
+
+    # 优先：显式指定的目录。存在却不可信时失败关闭，不回退其他 round。
+    if step2_round_dir is not None and not step2_round_dir.exists():
+        raise ValueError("step2_baseline_contract_invalid")
+    if step2_round_dir is not None:
+        try:
+            data = _validated(step2_round_dir)
+        except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("step2_baseline_contract_invalid") from exc
+        log.info("Loaded validated Step 2 baseline from %s", step2_round_dir)
+        return data
 
     # 自动查找最新的 step2 round (使用脚本位置推断项目根, 避免 CWD 依赖)
     _project_root = pathlib.Path(__file__).resolve().parent.parent
     root = step2_artifact_root or (_project_root / "artifacts" / "research" / "step2_rounds")
     if root.exists():
-        rounds = sorted(
-            [d for d in root.iterdir() if d.is_dir()],
-            key=lambda d: d.name,
-            reverse=True,
-        )
-        for rd in rounds:
-            cf = rd / "parameter_candidates.json"
-            if cf.exists():
-                with cf.open(encoding="utf-8") as f:
-                    data = json.load(f)
-                log.info("Auto-detected Step 2 baseline: %s", cf)
-                return data
+        round_dirs = [item for item in root.iterdir() if item.is_dir()]
+        if any(
+            round_dir.is_symlink()
+            or _STEP2_ROUND_ID_RE.fullmatch(round_dir.name) is None
+            for round_dir in round_dirs
+        ):
+            raise ValueError("step2_baseline_contract_invalid")
+        rounds: list[tuple[datetime, pathlib.Path]] = []
+        for round_dir in round_dirs:
+            if not round_dir.is_dir() or not _STEP2_ROUND_ID_RE.fullmatch(
+                round_dir.name
+            ):
+                continue
+            try:
+                generated_at = datetime.strptime(
+                    round_dir.name[:15], "%Y%m%d_%H%M%S"
+                ).replace(tzinfo=timezone.utc)
+            except ValueError as exc:
+                raise ValueError("step2_baseline_contract_invalid") from exc
+            rounds.append((generated_at, round_dir))
+        if rounds:
+            newest_second = max(item[0] for item in rounds)
+            newest_group = [
+                round_dir
+                for generated_at, round_dir in rounds
+                if generated_at == newest_second
+            ]
+            validated: list[tuple[datetime, dict[str, Any]]] = []
+            for round_dir in newest_group:
+                try:
+                    data = _validated(round_dir)
+                    started_at = datetime.fromisoformat(
+                        data["_validated_provenance"]["started_at"]
+                    )
+                except (
+                    OSError,
+                    UnicodeDecodeError,
+                    ValueError,
+                    json.JSONDecodeError,
+                ) as exc:
+                    raise ValueError("step2_baseline_contract_invalid") from exc
+                validated.append((started_at, data))
+            latest_data = max(validated, key=lambda item: item[0])[1]
+            latest_started_at = max(item[0] for item in validated)
+            if sum(item[0] == latest_started_at for item in validated) != 1:
+                raise ValueError("step2_baseline_contract_invalid")
+            log.info(
+                "Auto-detected validated Step 2 baseline: %s",
+                latest_data["_validated_provenance"]["round_id"],
+            )
+            return latest_data
+        if round_dirs:
+            raise ValueError("step2_baseline_contract_invalid")
 
     log.warning("No Step 2 baseline found. Merge phase will use defaults.")
-    return {"candidates": {}, "pending_validation": []}
+    return _missing()
 
 
 # =========================================================================
@@ -498,6 +889,11 @@ def _merge_recommendations(
     """
     merged: dict[str, dict[str, Any]] = {}
     s2_cands = step2_candidates.get("candidates", {})
+    step2_pending = {
+        str(item)
+        for item in step2_candidates.get("pending_validation", [])
+        if isinstance(item, str) and item.strip()
+    }
 
     # 收集所有目标 ft_keys
     all_ft_keys: set[str] = set()
@@ -515,10 +911,17 @@ def _merge_recommendations(
         s2 = s2_cands.get(ft_key, {})
         for pname in (_STEP2_BASE_PARAMS | _STEP3_EXPANDED_PARAMS):
             if pname in s2 and s2[pname] is not None:
+                pending_key = f"{pname} in {ft_key}"
                 m[pname] = {
                     "value": s2[pname],
-                    "confidence": "medium",
-                    "reason": "来自 Step 2 baseline",
+                    "confidence": (
+                        "low" if pending_key in step2_pending else "medium"
+                    ),
+                    "reason": (
+                        "来自 Step 2 baseline（待验证）"
+                        if pending_key in step2_pending
+                        else "来自 Step 2 baseline"
+                    ),
                     "source": "step2",
                 }
             elif pname in family_defaults:
@@ -809,6 +1212,8 @@ def _build_merged_parameter_candidates(
     constraint_result: dict[str, Any],
     round_id: str,
     output_path: pathlib.Path,
+    *,
+    dataset_version: str = "v1.0",
 ) -> pathlib.Path:
     """生成 parameter_candidates_merged.json。"""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -835,9 +1240,17 @@ def _build_merged_parameter_candidates(
                 ft_key,
             )
 
+    combo_keys = sorted(candidates)
     data = {
+        "schema_version": "aats.step3_candidates.v1",
         "round_id": round_id,
-        "scope": {"symbol": _SYMBOL, "step": "step3_merged"},
+        "dataset_version": dataset_version,
+        "scope": {
+            "symbol": _SYMBOL,
+            "step": "step3_merged",
+            "combo_keys": combo_keys,
+            "combo_count": len(combo_keys),
+        },
         "candidates": candidates,
         "pending_validation": pending_validation,
         "constraint_check": {
@@ -847,8 +1260,7 @@ def _build_merged_parameter_candidates(
         },
     }
 
-    with output_path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    immutable_json_write(data, output_path)
     log.info("Wrote parameter_candidates_merged.json -> %s", output_path)
     return output_path
 
@@ -1068,6 +1480,223 @@ def _build_step3_conclusion_report(
 # =========================================================================
 
 
+def _determine_step3_round_status(
+    *,
+    calibration_results: list[dict[str, Any]],
+    skip_calibration: bool,
+    skip_merge: bool,
+    step2_baseline: dict[str, Any],
+    constraint_result: dict[str, Any],
+    candidate_payload: dict[str, Any] | None,
+) -> str:
+    """Return the publishability status for one complete Step 3 round.
+
+    ``succeeded`` is deliberately narrow: every expected calibration, an
+    explicitly validated succeeded Step 2 baseline, a complete candidate
+    scope, no pending/default evidence, and a clean constraint pass must all
+    describe the same immutable round.  Any usable but incomplete result is
+    ``partial_success`` and is therefore imported only as ``draft``.
+    """
+
+    statuses = [str(item.get("status") or "") for item in calibration_results]
+    if statuses and all(status == "failed" for status in statuses):
+        return "failed"
+
+    calibration_keys = {
+        str(item.get("round_key") or "") for item in calibration_results
+    }
+    full_calibration = bool(
+        not skip_calibration
+        and len(calibration_results) == len(_EXPANDED_ROUND_KEYS)
+        and len(calibration_keys) == len(calibration_results)
+        and calibration_keys == set(_EXPANDED_ROUND_KEYS)
+        and statuses
+        and all(status == "succeeded" for status in statuses)
+    )
+    provenance = step2_baseline.get("_validated_provenance")
+    candidates = (
+        candidate_payload.get("candidates")
+        if isinstance(candidate_payload, dict)
+        else None
+    )
+    pending = (
+        candidate_payload.get("pending_validation")
+        if isinstance(candidate_payload, dict)
+        else None
+    )
+    clean_constraints = bool(
+        constraint_result.get("all_passed") is True
+        and not constraint_result.get("violations")
+        and not constraint_result.get("auto_fixes")
+    )
+    complete_candidates = bool(
+        isinstance(candidates, dict)
+        and set(candidates) == _EXPECTED_STEP3_COMBO_KEYS
+        and all(isinstance(values, dict) and values for values in candidates.values())
+        and isinstance(pending, list)
+        and not pending
+    )
+    trusted_upstream = bool(
+        isinstance(provenance, dict)
+        and provenance.get("status") == "succeeded"
+    )
+    if (
+        full_calibration
+        and not skip_merge
+        and trusted_upstream
+        and complete_candidates
+        and clean_constraints
+    ):
+        return "succeeded"
+    return "partial_success"
+
+
+def _publish_managed_step3_snapshot(
+    *,
+    project_root: pathlib.Path,
+    round_dir: pathlib.Path,
+    manifest_path: pathlib.Path,
+    candidate_path: pathlib.Path,
+    candidate_payload: dict[str, Any] | None,
+    round_id: str,
+    round_status: str,
+    started_at: str,
+    finished_at: str,
+    step2_provenance: dict[str, Any],
+    conclusion_path: pathlib.Path,
+) -> bool:
+    """Publish the immutable Step 3 root before exposing a success marker.
+
+    File-only development keeps its historical behavior.  Once a managed
+    governance DB is configured, however, the Step 2 parent and the Step 3
+    candidate must both be anchored in DB; a missing/conflicting snapshot is a
+    publication failure, not permission to fall back to mutable files.
+    """
+
+    project_root = project_root.resolve()
+    if not has_explicit_governance_db_configuration(project_root):
+        return True
+    expected_round_dir = (
+        project_root / "artifacts" / "research" / "step3_rounds" / round_id
+    )
+    try:
+        resolved_round_dir = round_dir.resolve(strict=True)
+        resolved_manifest = manifest_path.resolve(strict=True)
+        resolved_candidate = candidate_path.resolve(strict=True)
+        if (
+            resolved_round_dir != expected_round_dir
+            or resolved_manifest != resolved_round_dir / "round_manifest.json"
+            or resolved_candidate
+            != resolved_round_dir / "parameter_candidates_merged.json"
+            or resolved_manifest.is_symlink()
+            or resolved_candidate.is_symlink()
+            or not isinstance(candidate_payload, dict)
+        ):
+            return False
+        manifest_bytes = resolved_manifest.read_bytes()
+        candidate_bytes = resolved_candidate.read_bytes()
+        manifest_payload = json.loads(manifest_bytes.decode("utf-8"))
+        if not isinstance(manifest_payload, dict):
+            return False
+
+        step2_round_id = step2_provenance.get("round_id")
+        step2_candidate_sha256 = step2_provenance.get("candidate_sha256")
+        if (
+            not isinstance(step2_round_id, str)
+            or _STEP2_ROUND_ID_RE.fullmatch(step2_round_id) is None
+            or not isinstance(step2_candidate_sha256, str)
+            or _SHA256_RE.fullmatch(step2_candidate_sha256) is None
+        ):
+            return False
+        step2_snapshot = load_research_round_snapshot(
+            round_id=step2_round_id,
+            project_root=project_root,
+            require_managed_db_truth=True,
+        )
+        step2_manifest = (
+            step2_snapshot.get("manifest")
+            if isinstance(step2_snapshot, dict)
+            else None
+        )
+        step2_digests = (
+            step2_manifest.get("artifact_sha256")
+            if isinstance(step2_manifest, dict)
+            else None
+        )
+        if (
+            not isinstance(step2_snapshot, dict)
+            or step2_snapshot.get("data_source") != "db"
+            or step2_snapshot.get("phase") != ROUND_PHASE_STEP2
+            or step2_snapshot.get("round_id") != step2_round_id
+            or step2_snapshot.get("status") != "succeeded"
+            or not isinstance(step2_digests, dict)
+            or step2_digests.get("parameter_candidates.json")
+            != step2_candidate_sha256
+        ):
+            return False
+        step2_snapshot_sha256 = research_round_snapshot_fingerprint(
+            step2_snapshot
+        )
+        candidate_sha256 = hashlib.sha256(candidate_bytes).hexdigest()
+        reread_candidate_payload = json.loads(candidate_bytes.decode("utf-8"))
+        if (
+            typed_json_sha256(candidate_payload)
+            != typed_json_sha256(reread_candidate_payload)
+            or manifest_payload.get("artifact_sha256", {}).get(
+                candidate_path.name
+            )
+            != candidate_sha256
+            or manifest_payload.get("artifact_size_bytes", {}).get(
+                candidate_path.name
+            )
+            != len(candidate_bytes)
+        ):
+            return False
+
+        return save_research_round_snapshot(
+            round_id=round_id,
+            phase=ROUND_PHASE_STEP3,
+            status=round_status,
+            round_path=str(resolved_round_dir),
+            started_at=started_at,
+            finished_at=finished_at,
+            replay_only=False,
+            manifest_payload=manifest_payload,
+            summary_payload={
+                "parameter_candidates_merged": candidate_payload,
+            },
+            conclusion_payload={
+                "report_markdown_path": str(conclusion_path.resolve()),
+            },
+            artifacts_payload={
+                "round_dir": str(resolved_round_dir),
+                "manifest_path": str(resolved_manifest),
+                "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                "manifest_size_bytes": len(manifest_bytes),
+                "manifest_utf8": manifest_bytes.decode("utf-8"),
+                "candidate_path": str(resolved_candidate),
+                "candidate_sha256": candidate_sha256,
+                "candidate_size_bytes": len(candidate_bytes),
+                "candidate_utf8": candidate_bytes.decode("utf-8"),
+                "step2_round_id": step2_round_id,
+                "step2_candidate_sha256": step2_candidate_sha256,
+                "step2_snapshot_sha256": step2_snapshot_sha256,
+            },
+        )
+    except (
+        DBUnavailableError,
+        OSError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        log.warning(
+            "Managed Step3 snapshot publication validation failed (%s)",
+            type(exc).__name__,
+        )
+        return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Step 3 Research Orchestrator: "
@@ -1227,7 +1856,12 @@ def main() -> int:
             pathlib.Path(args.step2_round_dir)
             if args.step2_round_dir else None
         )
-        step2_baseline = _load_step2_baseline(step2_dir)
+        step2_baseline = _load_step2_baseline(
+            step2_dir,
+            expected_dataset_version=args.dataset_version,
+            expected_symbol=_SYMBOL,
+            expected_window={"start": args.start, "end": args.end},
+        )
         log.info(
             "Step 2 baseline: %d family/timeframe groups",
             len(step2_baseline.get("candidates", {})),
@@ -1262,6 +1896,7 @@ def main() -> int:
         _build_merged_parameter_candidates(
             merged, constraint_result, round_id,
             round_dir / "parameter_candidates_merged.json",
+            dataset_version=args.dataset_version,
         )
     else:
         log.info("Phase C: SKIPPED (--skip-merge)")
@@ -1274,24 +1909,14 @@ def main() -> int:
     log.info("Phase D: Conclusion Document")
     log.info("=" * 66)
 
+    conclusion_path = round_dir / "phase2_step3_research_conclusion.md"
     _build_step3_conclusion_report(
         calibration_results, all_rows,
         step3_recommendations, merged, constraint_result,
         step2_baseline, round_id,
-        round_dir / "phase2_step3_research_conclusion.md",
+        conclusion_path,
     )
 
-    # Manifest
-    finished_at = datetime.now(timezone.utc).isoformat()
-    _write_manifest(
-        calibration_results, [],  # Step 3 无 scan phase
-        round_id, started_at, finished_at,
-        round_dir / "round_manifest.json",
-    )
-
-    # ================================================================
-    # 最终汇总
-    # ================================================================
     cal_ok = sum(
         1 for cr in calibration_results if cr["status"] == "succeeded"
     )
@@ -1301,7 +1926,137 @@ def main() -> int:
     cal_fail = sum(
         1 for cr in calibration_results if cr["status"] == "failed"
     )
+    # Manifest is written last and binds the exact importable candidate bytes.
+    candidate_path = round_dir / "parameter_candidates_merged.json"
+    artifact_sha256: dict[str, str] = {}
+    artifact_size_bytes: dict[str, int] = {}
+    candidate_scope_keys: tuple[str, ...] = ()
+    candidate_payload: dict[str, Any] | None = None
+    if candidate_path.is_file():
+        candidate_bytes = candidate_path.read_bytes()
+        candidate_payload = json.loads(candidate_bytes.decode("utf-8"))
+        candidate_scope_keys = tuple(
+            str(key) for key in candidate_payload.get("candidates", {})
+        )
+        artifact_sha256[candidate_path.name] = hashlib.sha256(
+            candidate_bytes
+        ).hexdigest()
+        artifact_size_bytes[candidate_path.name] = len(candidate_bytes)
+    round_status = _determine_step3_round_status(
+        calibration_results=calibration_results,
+        skip_calibration=args.skip_calibration,
+        skip_merge=args.skip_merge,
+        step2_baseline=step2_baseline,
+        constraint_result=constraint_result,
+        candidate_payload=candidate_payload,
+    )
+    step2_provenance = step2_baseline.get("_validated_provenance")
+    if not isinstance(step2_provenance, dict):
+        step2_provenance = {"status": "missing"}
+    finished_at = datetime.now(timezone.utc).isoformat()
+    manifest_path = round_dir / "round_manifest.json"
+    _write_manifest(
+        calibration_results, [],  # Step 3 无 scan phase
+        round_id, started_at, finished_at,
+        manifest_path,
+        extra_manifest={
+            "schema_version": "aats.step3_round.v1",
+            "phase": "step3",
+            "status": round_status,
+            "dataset_version": args.dataset_version,
+            "scope": {
+                "symbol": _SYMBOL,
+                "families": sorted(
+                    {
+                        key.rsplit("_", 1)[0]
+                        for key in candidate_scope_keys
+                        if "_" in key
+                    }
+                ),
+                "timeframes": sorted(
+                    {
+                        key.rsplit("_", 1)[1].lower()
+                        for key in candidate_scope_keys
+                        if "_" in key
+                    }
+                ),
+                "combo_keys": sorted(candidate_scope_keys),
+                "combo_count": len(candidate_scope_keys),
+                "window": {"start": args.start, "end": args.end},
+            },
+            "input_refs": {
+                "dataset_version": args.dataset_version,
+                "window": {"start": args.start, "end": args.end},
+                "step2": {
+                    key: step2_provenance.get(key)
+                    for key in (
+                        "round_id",
+                        "status",
+                        "symbol",
+                        "dataset_version",
+                        "started_at",
+                        "finished_at",
+                        "candidate_sha256",
+                        "window",
+                    )
+                },
+            },
+            "artifact_sha256": artifact_sha256,
+            "artifact_size_bytes": artifact_size_bytes,
+        },
+        immutable=True,
+    )
 
+    if not _publish_managed_step3_snapshot(
+        project_root=pathlib.Path(__file__).resolve().parent.parent,
+        round_dir=round_dir,
+        manifest_path=manifest_path,
+        candidate_path=candidate_path,
+        candidate_payload=candidate_payload,
+        round_id=round_id,
+        round_status=round_status,
+        started_at=started_at,
+        finished_at=finished_at,
+        step2_provenance=step2_provenance,
+        conclusion_path=conclusion_path,
+    ):
+        log.error(
+            "Managed Step3 snapshot publication failed; refusing result marker "
+            "and downstream import for round %s",
+            round_id,
+        )
+        return 3
+
+    round_result_payload = {
+        "schema_version": "aats.step3_result.v1",
+        "phase": "step3",
+        "round_id": round_id,
+        "round_dir": str(round_dir.resolve()),
+        "candidate_path": str(candidate_path.resolve()),
+        "candidate_sha256": artifact_sha256.get(candidate_path.name),
+        "status": round_status,
+        "symbol": _SYMBOL,
+        "dataset_version": args.dataset_version,
+        "window": {"start": args.start, "end": args.end},
+        "step2_round_id": step2_provenance.get("round_id"),
+        "step2_candidate_sha256": step2_provenance.get(
+            "candidate_sha256"
+        ),
+    }
+    immutable_json_write(round_result_payload, round_dir / "round_result.json")
+    print(
+        _STEP3_RESULT_PREFIX
+        + json.dumps(
+            round_result_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
+
+    # ================================================================
+    # 最终汇总
+    # ================================================================
     log.info("")
     log.info("=" * 66)
     log.info("Step 3 completed:")
@@ -1352,9 +2107,9 @@ def main() -> int:
         print(f"Artifacts  : {round_dir}")
 
     # 退出码: 3=全部失败, 2=部分失败, 0=全部成功
-    if cal_fail > 0 and cal_ok == 0 and cal_partial == 0:
+    if round_status == "failed":
         return 3
-    if cal_fail > 0:
+    if round_status == "partial_success":
         return 2
     return 0
 

@@ -11,7 +11,16 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from aats.data_platform.governance.parameter_identity import (
+    parameter_values_fingerprint,
+)
+
 from .evidence_bundle import get_phase2_combo_stats, make_combo_key
+from .promotion_policy import (
+    P2_MIN_OPENING_COUNT,
+    P2_MIN_POSITIVE_EDGE_RATIO,
+    phase2_combo_meets_promotion_gate,
+)
 
 log = logging.getLogger(__name__)
 
@@ -22,10 +31,6 @@ CONFIDENCE_LEVELS = ("high", "medium", "low", "insufficient")
 
 
 # ── 评分维度 ─────────────────────────────────────────────────────────
-
-# Phase 2 研究维度
-P2_MIN_OPENING_COUNT = 1          # 至少有开仓信号
-P2_MIN_POSITIVE_EDGE_RATIO = 0.2  # 正 edge 比例 >= 20%
 
 # Phase 3 归因维度
 P3_STRATEGY_BLOCKED_THRESHOLD = 0.5  # strategy blocked 占比 > 50% 则降权
@@ -50,7 +55,7 @@ def _evaluate_phase2_score(
     result = {
         "dimension": "phase2_research",
         "score": 0.0,
-        "max_score": 3.0,
+        "max_score": 2.0,
         "promotion_evidence_qualified": False,
         "details": [],
     }
@@ -64,27 +69,27 @@ def _evaluate_phase2_score(
             f"{combo_key} 缺少 Phase 2 有效证据{reason_suffix}"
         )
         return result
-    result["promotion_evidence_qualified"] = True
-
     experiments_with_openings = agg.get("experiments_with_openings", 0)
     mean_edge_ratio = agg.get("mean_positive_edge_ratio", 0)
     max_opening = agg.get("max_opening_count", 0)
 
-    # 有开仓信号的实验
-    if experiments_with_openings > 0:
+    # 开仓是一个 hard-gate 维度；实验数量与单实验最大开仓数不重复计分。
+    if (
+        type(experiments_with_openings) is int
+        and experiments_with_openings >= P2_MIN_OPENING_COUNT
+        and type(max_opening) is int
+        and max_opening >= P2_MIN_OPENING_COUNT
+    ):
         result["score"] += 1.0
         result["details"].append(
-            f"{combo_key} 有 {experiments_with_openings} 个实验产生开仓信号"
+            f"{combo_key} 有 {experiments_with_openings} 个实验产生开仓信号，"
+            f"最大 opening_count={max_opening}"
         )
     else:
-        result["details"].append(f"{combo_key} 没有实验产生开仓信号")
-
-    # 最大 opening count
-    if max_opening >= P2_MIN_OPENING_COUNT:
-        result["score"] += 1.0
-        result["details"].append(f"{combo_key} 最大 opening_count={max_opening}")
-    else:
-        result["details"].append(f"{combo_key} opening_count 不足 (max={max_opening})")
+        result["details"].append(
+            f"{combo_key} opening 证据不足 "
+            f"(experiments={experiments_with_openings}, max={max_opening})"
+        )
 
     # 正 edge 比例
     if mean_edge_ratio >= P2_MIN_POSITIVE_EDGE_RATIO:
@@ -98,6 +103,10 @@ def _evaluate_phase2_score(
             f"({mean_edge_ratio:.3f} < {P2_MIN_POSITIVE_EDGE_RATIO})"
         )
 
+    result["promotion_evidence_qualified"] = (
+        phase2_combo_meets_promotion_gate(agg)
+    )
+
     return result
 
 
@@ -105,6 +114,9 @@ def _evaluate_phase3_score(
     evidence: dict[str, Any],
     family: str,
     timeframe: str,
+    *,
+    expected_source_round_id: str | None,
+    expected_values_fingerprint: str,
 ) -> dict[str, Any]:
     """Phase 3 维度评分."""
     result = {
@@ -112,6 +124,7 @@ def _evaluate_phase3_score(
         "score": 0.0,
         "max_score": 2.0,
         "details": [],
+        "parameter_identity_bound": False,
     }
 
     latest = evidence.get("latest_round")
@@ -125,6 +138,18 @@ def _evaluate_phase3_score(
     if not combo:
         result["details"].append(f"Phase 3 无 {combo_key} 数据")
         return result
+
+    if (
+        not expected_source_round_id
+        or combo.get("source_step3_round_id") != expected_source_round_id
+        or combo.get("parameter_values_fingerprint")
+        != expected_values_fingerprint
+    ):
+        result["details"].append(
+            f"Phase 3 {combo_key} 参数身份与候选不一致"
+        )
+        return result
+    result["parameter_identity_bound"] = True
 
     status = combo.get("status", "unknown")
     if status in ("succeeded", "partial_success"):
@@ -160,6 +185,9 @@ def _evaluate_phase4_score(
     evidence: dict[str, Any],
     family: str,
     timeframe: str,
+    *,
+    expected_source_round_id: str | None,
+    expected_values_fingerprint: str,
 ) -> dict[str, Any]:
     """Phase 4 维度评分."""
     result = {
@@ -167,6 +195,7 @@ def _evaluate_phase4_score(
         "score": 0.0,
         "max_score": 2.0,
         "details": [],
+        "parameter_identity_bound": False,
     }
 
     latest = evidence.get("latest_round")
@@ -176,6 +205,17 @@ def _evaluate_phase4_score(
 
     combo_key = f"{family}_{timeframe.lower()}"
     combo = latest.get("combos", {}).get(combo_key, {})
+    if (
+        not expected_source_round_id
+        or combo.get("source_step3_round_id") != expected_source_round_id
+        or combo.get("parameter_values_fingerprint")
+        != expected_values_fingerprint
+    ):
+        result["details"].append(
+            f"Phase 4 {combo_key} 参数身份与候选不一致"
+        )
+        return result
+    result["parameter_identity_bound"] = True
     cost = combo.get("cost_summary", {})
 
     if not cost:
@@ -262,15 +302,25 @@ def evaluate_parameter_set(
     family = parameter_set.get("family", "unknown")
     timeframe = parameter_set.get("timeframe", "unknown")
     ps_id = parameter_set.get("parameter_set_id", "unknown")
+    values_fingerprint = parameter_values_fingerprint(parameter_set.get("values"))
+    source_round_id = parameter_set.get("source_round_id")
 
     p2_score = _evaluate_phase2_score(
         evidence_bundle.get("phase2_evidence", {}), family, timeframe,
     )
     p3_score = _evaluate_phase3_score(
-        evidence_bundle.get("phase3_evidence", {}), family, timeframe,
+        evidence_bundle.get("phase3_evidence", {}),
+        family,
+        timeframe,
+        expected_source_round_id=source_round_id,
+        expected_values_fingerprint=values_fingerprint,
     )
     p4_score = _evaluate_phase4_score(
-        evidence_bundle.get("phase4_evidence", {}), family, timeframe,
+        evidence_bundle.get("phase4_evidence", {}),
+        family,
+        timeframe,
+        expected_source_round_id=source_round_id,
+        expected_values_fingerprint=values_fingerprint,
     )
     p5_score = _evaluate_governance_score(
         evidence_bundle.get("phase5_governance_evidence", {}),
@@ -286,7 +336,14 @@ def evaluate_parameter_set(
     phase2_promotion_qualified = bool(
         p2_score.get("promotion_evidence_qualified", False)
     )
-    if ratio >= 0.7 and phase2_promotion_qualified:
+    parameter_evidence_bound = bool(
+        p3_score.get("parameter_identity_bound")
+        and p4_score.get("parameter_identity_bound")
+    )
+    if not parameter_evidence_bound:
+        decision = "hold"
+        confidence = "insufficient"
+    elif ratio >= 0.7 and phase2_promotion_qualified:
         decision = "promote_candidate"
         confidence = "high" if ratio >= 0.85 else "medium"
     elif ratio >= 0.4:
@@ -304,6 +361,9 @@ def evaluate_parameter_set(
 
     return {
         "parameter_set_id": ps_id,
+        # Qualification and apply must prove the exact values evaluated in
+        # this Phase 6 round, not merely reuse a mutable parameter-set ID.
+        "parameter_values_fingerprint": values_fingerprint,
         # 保留参数集所属研究轮次，供 recommendation 写入
         # governance.recommendations.source_round_id。缺失该字段会让审批、
         # 发布与回滚链无法证明候选来自哪一轮研究。

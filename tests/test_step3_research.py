@@ -11,6 +11,7 @@
 """
 
 import importlib.util
+import hashlib
 import json
 import sys
 import tempfile
@@ -41,6 +42,165 @@ def check(name: str, condition: bool, detail: str = ""):
         failed += 1
 
 
+def _write_valid_step2_round(
+    root: Path,
+    *,
+    round_id: str,
+    started_at: str,
+    marker: float,
+) -> Path:
+    """Build the current immutable Step 2 producer/consumer contract."""
+
+    if root.name != "step2_rounds" or root.parent.name != "research":
+        root = root / "artifacts" / "research" / "step2_rounds"
+    round_dir = root / round_id
+    round_dir.mkdir(parents=True)
+    combo_keys = ["directional_15m", "directional_1h", "independent_1h"]
+    window = {"start": "2026-08-01", "end": "2026-08-27"}
+    candidate = {
+        "schema_version": "aats.step2_candidates.v1",
+        "round_id": round_id,
+        "dataset_version": "v1.0",
+        "scope": {
+            "symbol": "BTC-USDT-SWAP",
+            "step": "step2_candidates",
+            "combo_keys": combo_keys,
+            "combo_count": len(combo_keys),
+        },
+        "candidates": {
+            "independent_1h": {
+                "signal_edge_scale_bps": marker,
+                "min_confirm_ticks": 3,
+            },
+            "directional_15m": {"min_confirm_ticks": 2},
+            "directional_1h": {"min_confirm_ticks": 3},
+        },
+        "pending_validation": [],
+    }
+    candidate_bytes = json.dumps(candidate, sort_keys=True).encode("utf-8")
+    candidate_path = round_dir / "parameter_candidates.json"
+    candidate_path.write_bytes(candidate_bytes)
+    calibrations = []
+    child_index = 1
+    for round_key, (family, timeframe, batch_keys) in (
+        _s3._EXPECTED_STEP2_CALIBRATION_TOPOLOGY.items()
+    ):
+        batches = []
+        for batch_key in batch_keys:
+            batch_run_id = f"20260827_100000_{child_index:08x}"
+            child_index += 1
+            batch_dir = round_dir / "batches" / batch_run_id
+            batch_dir.mkdir(parents=True)
+            summary = {
+                "batch_run_id": batch_run_id,
+                "batch_name": f"{family}_{batch_key}_{timeframe.lower()}",
+                "family": family,
+                "symbol": "BTC-USDT-SWAP",
+                "timeframe": timeframe,
+                "dataset_version": "v1.0",
+                "window": f"{window['start']} ~ {window['end']}",
+                "total_experiments": 1,
+                "succeeded": 1,
+                "failed": 0,
+                "experiments": [
+                    {
+                        "label": f"{batch_key}_baseline",
+                        "experiment_id": (
+                            f"00000000-0000-4000-8000-{child_index:012x}"
+                        ),
+                        "status": "succeeded",
+                        "params": {"test_parameter": child_index},
+                    }
+                ],
+                "failures": [],
+            }
+            summary_bytes = json.dumps(summary, sort_keys=True).encode("utf-8")
+            (batch_dir / "batch_summary.json").write_bytes(summary_bytes)
+            batches.append({
+                "key": batch_key,
+                "batch_run_id": batch_run_id,
+                "batch_dir": str(batch_dir.resolve()),
+                "status": "succeeded",
+                "summary_sha256": hashlib.sha256(summary_bytes).hexdigest(),
+                "summary_size_bytes": len(summary_bytes),
+                "total_experiments": 1,
+                "succeeded": 1,
+                "failed": 0,
+            })
+        calibrations.append({
+            "round_key": round_key,
+            "family": family,
+            "timeframe": timeframe,
+            "status": "succeeded",
+            "batches": batches,
+        })
+
+    project_root = round_dir.parents[3]
+    scans = []
+    for scan_index, (scan_key, (family, timeframe)) in enumerate(
+        _s3._EXPECTED_STEP2_SCAN_TOPOLOGY.items(),
+        start=1,
+    ):
+        scan_run_id = f"00000000-0000-4000-8000-{scan_index:012x}"
+        scan_dir = (
+            project_root / "artifacts" / "research" / "experiments" / scan_run_id
+        )
+        scan_dir.mkdir(parents=True, exist_ok=True)
+        comparison_bytes = json.dumps(
+            {
+                "experiment_count": 1,
+                "comparison": [{"label": f"{scan_key}_baseline"}],
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+        (scan_dir / "comparison_summary.json").write_bytes(comparison_bytes)
+        scans.append({
+            "scan_key": scan_key,
+            "family": family,
+            "timeframe": timeframe,
+            "status": "succeeded",
+            "scan_run_id": scan_run_id,
+            "scan_dir": str(scan_dir.resolve()),
+            "comparison_sha256": hashlib.sha256(comparison_bytes).hexdigest(),
+            "comparison_size_bytes": len(comparison_bytes),
+            "window": window,
+            "dataset_version": "v1.0",
+            "grid_sha256": hashlib.sha256(scan_key.encode()).hexdigest(),
+            "total_combinations": 1,
+            "completed_count": 1,
+            "failed_count": 0,
+        })
+
+    manifest = {
+        "schema_version": "aats.step2_round.v1",
+        "round_id": round_id,
+        "phase": "step2",
+        "status": "succeeded",
+        "started_at": started_at,
+        "finished_at": started_at,
+        "symbol": "BTC-USDT-SWAP",
+        "dataset_version": "v1.0",
+        "scope": {
+            "symbol": "BTC-USDT-SWAP",
+            "combo_keys": combo_keys,
+            "combo_count": len(combo_keys),
+            "window": window,
+        },
+        "input_refs": {"dataset_version": "v1.0", "window": window},
+        "artifact_sha256": {
+            candidate_path.name: hashlib.sha256(candidate_bytes).hexdigest()
+        },
+        "artifact_size_bytes": {candidate_path.name: len(candidate_bytes)},
+        "calibrations": calibrations,
+        "scans": scans,
+    }
+    (round_dir / "round_manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    return round_dir
+
+
 # ══════════════════════════════════════════════════════════════
 # 1. Step 2 基线加载
 # ══════════════════════════════════════════════════════════════
@@ -48,34 +208,34 @@ print("=" * 60)
 print("1. Step 2 基线加载")
 print("=" * 60)
 
-# 1a: 不存在时返回空结构
-result = _s3._load_step2_baseline(
-    step2_round_dir=Path("/nonexistent_path"),
-    step2_artifact_root=Path("/also_nonexistent"),
-)
-check("不存在时返回空 candidates", result.get("candidates") == {})
-check("不存在时返回空 pending", result.get("pending_validation") == [])
+# 1a: 显式指定的目录不存在时失败关闭，不得回退默认值
+try:
+    _s3._load_step2_baseline(
+        step2_round_dir=Path("/nonexistent_path"),
+        step2_artifact_root=Path("/also_nonexistent"),
+    )
+except ValueError as exc:
+    check(
+        "显式目录不存在时失败关闭",
+        str(exc) == "step2_baseline_contract_invalid",
+    )
+else:
+    check("显式目录不存在时失败关闭", False, "did not raise ValueError")
 
 # 1b: 从临时目录加载
 with tempfile.TemporaryDirectory() as tmpdir:
     tmppath = Path(tmpdir)
-    s2_data = {
-        "round_id": "test_20260401",
-        "candidates": {
-            "independent_1h": {
-                "signal_edge_scale_bps": 12.0,
-                "min_confirm_ticks": 3,
-            },
-        },
-        "pending_validation": ["min_safe_net_edge_bps in independent_1h"],
-    }
-    (tmppath / "parameter_candidates.json").write_text(
-        json.dumps(s2_data), encoding="utf-8",
+    round_id = "20260827_100000_1234abcd"
+    round_dir = _write_valid_step2_round(
+        tmppath,
+        round_id=round_id,
+        started_at="2026-08-27T10:00:00+00:00",
+        marker=12.0,
     )
-    loaded = _s3._load_step2_baseline(step2_round_dir=tmppath)
+    loaded = _s3._load_step2_baseline(step2_round_dir=round_dir)
     check(
         "从临时目录加载成功",
-        loaded.get("round_id") == "test_20260401",
+        loaded.get("round_id") == round_id,
     )
     check(
         "candidates 内容正确",
@@ -85,19 +245,29 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # 1c: 自动查找最新 round
 with tempfile.TemporaryDirectory() as tmpdir:
     tmppath = Path(tmpdir)
-    # 创建两个 round 目录
-    (tmppath / "20260401_old").mkdir()
-    (tmppath / "20260402_new").mkdir()
-    old_data = {"round_id": "old", "candidates": {"x": {}}, "pending_validation": []}
-    new_data = {"round_id": "new", "candidates": {"y": {}}, "pending_validation": []}
-    (tmppath / "20260401_old" / "parameter_candidates.json").write_text(
-        json.dumps(old_data), encoding="utf-8",
+    _write_valid_step2_round(
+        tmppath,
+        round_id="20260827_090000_1111aaaa",
+        started_at="2026-08-27T09:00:00+00:00",
+        marker=11.0,
     )
-    (tmppath / "20260402_new" / "parameter_candidates.json").write_text(
-        json.dumps(new_data), encoding="utf-8",
+    _write_valid_step2_round(
+        tmppath,
+        round_id="20260827_100000_2222bbbb",
+        started_at="2026-08-27T10:00:00+00:00",
+        marker=13.0,
     )
-    auto = _s3._load_step2_baseline(step2_artifact_root=tmppath)
-    check("自动选择最新 round", auto.get("round_id") == "new")
+    auto = _s3._load_step2_baseline(
+        step2_artifact_root=tmppath / "artifacts" / "research" / "step2_rounds"
+    )
+    check(
+        "自动选择最新可信 round",
+        auto.get("round_id") == "20260827_100000_2222bbbb",
+    )
+    check(
+        "自动选择最新 round 的内容",
+        auto["candidates"]["independent_1h"]["signal_edge_scale_bps"] == 13.0,
+    )
 
 print()
 
@@ -309,12 +479,18 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
     _s3._build_merged_parameter_candidates(
         merged, constraint_ok, "test_round", out_path,
+        dataset_version="v2.0",
     )
 
     check("输出文件存在", out_path.exists())
 
     data = json.loads(out_path.read_text(encoding="utf-8"))
+    check(
+        "candidate schema 正确",
+        data["schema_version"] == "aats.step3_candidates.v1",
+    )
     check("round_id 正确", data["round_id"] == "test_round")
+    check("dataset_version 保真", data["dataset_version"] == "v2.0")
     check("scope.step=step3_merged", data["scope"]["step"] == "step3_merged")
     check("candidates 包含 independent_15m", "independent_15m" in data["candidates"])
     check("constraint_check.all_passed=True", data["constraint_check"]["all_passed"])

@@ -6,6 +6,11 @@ import logging
 from typing import Any
 
 from .evidence_bundle import COMBOS, get_phase2_combo_stats, make_combo_key
+from .promotion_policy import (
+    P2_MIN_OPENING_COUNT,
+    P2_MIN_POSITIVE_EDGE_RATIO,
+    phase2_combo_meets_promotion_gate,
+)
 
 log = logging.getLogger(__name__)
 
@@ -16,8 +21,8 @@ OPERATIONAL_STATUSES = (
     "require_review",
 )
 
-RULE_MIN_EXPERIMENTS_WITH_OPENINGS = 1
-RULE_MIN_POSITIVE_EDGE_RATIO = 0.15
+RULE_MIN_EXPERIMENTS_WITH_OPENINGS = P2_MIN_OPENING_COUNT
+RULE_MIN_POSITIVE_EDGE_RATIO = P2_MIN_POSITIVE_EDGE_RATIO
 RULE_MAX_FAILURE_RATIO = 0.85
 RULE_SEVERE_EXECUTION_COST = -5.0
 RULE_MIN_FILL_RATIO = 0.2
@@ -39,6 +44,9 @@ def decide_family_timeframe_status(
 
     p2 = evidence_bundle.get("phase2_evidence", {})
     p2_stats = get_phase2_combo_stats(p2, family, timeframe)
+    phase2_promotion_gate_passed = phase2_combo_meets_promotion_gate(
+        p2_stats
+    )
     if p2_stats.get("available"):
         exp_with_openings = p2_stats.get("experiments_with_openings", 0)
         mean_edge_ratio = p2_stats.get("mean_positive_edge_ratio", 0)
@@ -218,7 +226,11 @@ def decide_family_timeframe_status(
     positive_count = sum(1 for signal in signals if signal["signal"] == "positive")
     absent_count = sum(1 for signal in signals if signal["signal"] == "absent")
 
-    if severe_count > 0:
+    if p2_stats.get("available") and not phase2_promotion_gate_passed:
+        decision = "lower_priority"
+        confidence = "high"
+        reasons.insert(0, "目标 combo 未达到 Phase 2 资本晋级 hard gate")
+    elif severe_count > 0:
         decision = "pause"
         confidence = "high"
         reasons.insert(0, "存在严重负面信号")

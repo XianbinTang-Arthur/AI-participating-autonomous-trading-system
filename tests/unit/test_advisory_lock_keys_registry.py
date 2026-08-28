@@ -27,6 +27,8 @@ def test_registry_contains_known_purposes() -> None:
     """注册表必须包含当前路径依赖的 key；新加 key 必须同步更新此列表。"""
     assert "governance_scheduler_singleton" in ADVISORY_LOCK_KEYS
     assert "release_cycle_per_release" in ADVISORY_LOCK_KEYS
+    assert "parameter_candidate_import" in ADVISORY_LOCK_KEYS
+    assert "decision_round_publication" in ADVISORY_LOCK_KEYS
 
 
 def test_registry_values_are_postgres_bigint_safe() -> None:
@@ -46,8 +48,8 @@ def test_registry_values_are_pairwise_distinct() -> None:
     )
 
 
-def test_no_caller_hardcodes_0x4141_magic_numbers() -> None:
-    """静态扫：除了 _db_util.py 定义行外，源码里不允许出现 0x4141XXXX 字面量。
+def test_no_caller_hardcodes_governance_magic_numbers() -> None:
+    """静态扫：除了 _db_util.py 定义行外，源码里不允许出现 0x41XXXXXX 字面量。
 
     动机：运维迁移 / 重命名 purpose 时如果有人硬编码了同一把 key，会悄悄绕开
     注册表。这里锁死"注册表是唯一定义点"。
@@ -55,7 +57,7 @@ def test_no_caller_hardcodes_0x4141_magic_numbers() -> None:
     governance_dir = _PROJECT_ROOT / "aats"
     registry_source = _PROJECT_ROOT / "aats/data_platform/governance/_db_util.py"
 
-    pattern = re.compile(r"0x4141[0-9a-fA-F]{4}")
+    pattern = re.compile(r"0x41[0-9a-fA-F]{6}")
 
     offenders: list[tuple[pathlib.Path, int, str]] = []
     for path in governance_dir.rglob("*.py"):
@@ -70,7 +72,7 @@ def test_no_caller_hardcodes_0x4141_magic_numbers() -> None:
                 offenders.append((path, lineno, line.strip()))
 
     assert offenders == [], (
-        "发现硬编码的 0x4141XXXX advisory lock key，必须改走 "
+        "发现硬编码的 0x41XXXXXX advisory lock key，必须改走 "
         "ADVISORY_LOCK_KEYS[...]：\n"
         + "\n".join(f"  {p}:{n}: {s}" for p, n, s in offenders)
     )

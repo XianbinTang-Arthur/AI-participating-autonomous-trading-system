@@ -1711,6 +1711,11 @@ class ParameterSetModel(RdpBase):
             "status IN ('draft', 'candidate', 'frozen', 'released', 'deprecated')",
             name="ck_ps_status",
         ),
+        CheckConstraint(
+            "typed_json_identity_sha256 IS NULL OR "
+            "typed_json_identity_sha256 ~ '^[0-9a-f]{64}$'",
+            name="chk_parameter_sets_typed_json_identity_sha256",
+        ),
         {"schema": "governance"},
     )
 
@@ -1723,6 +1728,7 @@ class ParameterSetModel(RdpBase):
     source_phase = Column(String(64))
     dataset_version = Column(String(32), nullable=False, server_default=text("'v1.0'"))
     values = Column(JSONB, nullable=False)
+    typed_json_identity_sha256 = Column(String(64))
     confidence = Column(String(32))
     status = Column(String(32), nullable=False, server_default=text("'draft'"))
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
@@ -2573,6 +2579,11 @@ class DecisionRoundSnapshotModel(RdpBase):
     __table_args__ = (
         UniqueConstraint("round_id", name="uq_decision_round_snapshot_round_id"),
         Index("ix_decision_round_snapshot_finished", "finished_at"),
+        CheckConstraint(
+            "typed_json_identity_sha256 IS NULL OR "
+            "typed_json_identity_sha256 ~ '^[0-9a-f]{64}$'",
+            name="chk_decision_rounds_typed_json_identity_sha256",
+        ),
         {"schema": "governance"},
     )
 
@@ -2586,6 +2597,7 @@ class DecisionRoundSnapshotModel(RdpBase):
     promotion_readiness_json = Column(Text)
     manifest_json = Column(Text)
     conclusion_markdown = Column(Text)
+    typed_json_identity_sha256 = Column(String(64))
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
@@ -2612,6 +2624,11 @@ class ResearchRoundSnapshotModel(RdpBase):
         UniqueConstraint("round_id", name="uq_research_round_snapshot_round_id"),
         Index("ix_research_round_snapshot_phase_finished", "phase", "finished_at"),
         Index("ix_research_round_snapshot_phase_started", "phase", "started_at"),
+        CheckConstraint(
+            "typed_json_identity_sha256 IS NULL OR "
+            "typed_json_identity_sha256 ~ '^[0-9a-f]{64}$'",
+            name="chk_research_rounds_typed_json_identity_sha256",
+        ),
         {"schema": "governance"},
     )
 
@@ -2627,6 +2644,7 @@ class ResearchRoundSnapshotModel(RdpBase):
     summary_payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     conclusion_payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     artifacts_payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    typed_json_identity_sha256 = Column(String(64))
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 

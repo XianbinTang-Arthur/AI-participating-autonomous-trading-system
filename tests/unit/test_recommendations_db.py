@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from aats.data_platform.governance._exceptions import DBConflictError
 from aats.data_platform.governance.recommendations_db import (
     db_count_recommendations,
     db_find_recommendation,
@@ -91,7 +92,7 @@ class _FakeRecSession:
             return self._select(sql, p)
         raise AssertionError(f"Unexpected SQL in fake rec session: {sql[:80]}...")
 
-    # INSERT ... ON CONFLICT ... DO UPDATE ------------------------------
+    # INSERT ... ON CONFLICT ... identity verify ------------------------
 
     def _insert(self, params: dict[str, Any]) -> _FakeResult:
         rid = params["rec_id"]
@@ -117,10 +118,23 @@ class _FakeRecSession:
             "superseded_by_recommendation_id": params.get("superseded_by_rec_id"),
             "created_at": params.get("created_at"),
         }
-        # EXCLUDED.* 赋值 → 每列一律用新值覆盖（这里的测试不涉及 COALESCE 语义）
-        existing = self.rows.get(rid, {})
-        existing.update(row)
-        self.rows[rid] = existing
+        existing = self.rows.get(rid)
+        if existing is None:
+            self.rows[rid] = row
+            return _FakeResult([_FakeRow({"recommendation_id": rid})])
+        immutable_fields = (
+            "family",
+            "symbol",
+            "timeframe",
+            "recommendation_type",
+            "target_parameter_set_id",
+            "source_round_id",
+            "confidence",
+            "reason",
+            "evidence_bundle_ref",
+        )
+        if all(existing.get(field) == row.get(field) for field in immutable_fields):
+            return _FakeResult([_FakeRow({"recommendation_id": rid})])
         return _FakeResult([])
 
     # UPDATE ... WHERE recommendation_id = :rec_id AND status ... -------
@@ -295,6 +309,9 @@ def test_upsert_sql_does_not_erase_existing_source_round() -> None:
 
         def execute(self, statement, _params):
             self.statement = str(statement)
+            return _FakeResult(
+                [_FakeRow({"recommendation_id": "rec_lineage"})]
+            )
 
     session = _CaptureSession()
     db_upsert_recommendation(
@@ -308,25 +325,41 @@ def test_upsert_sql_does_not_erase_existing_source_round() -> None:
         source_round_id=None,
     )
 
-    assert "source_round_id                = COALESCE(" in session.statement
-    assert "governance.recommendations.source_round_id" in session.statement
+    assert "source_round_id IS NOT DISTINCT FROM EXCLUDED.source_round_id" in session.statement
+    assert "RETURNING recommendation_id" in session.statement
 
 
-def test_upsert_recommendation_overwrites_existing_fields() -> None:
+def test_upsert_recommendation_rejects_identity_replacement() -> None:
     session = _FakeRecSession()
     _seed_draft(session, "rec_A", family="independent", timeframe="15m")
-    db_upsert_recommendation(
-        session,  # type: ignore[arg-type]
-        recommendation_id="rec_A",
-        family="independent",
-        timeframe="15m",
-        recommendation_type="parameter_upgrade",
-        confidence="medium",  # 变了
-        reason="updated reason",
-        status="draft",
-    )
-    assert session.rows["rec_A"]["confidence"] == "medium"
-    assert session.rows["rec_A"]["reason"] == "updated reason"
+    with pytest.raises(
+        DBConflictError,
+        match="recommendation_immutable_identity_conflict",
+    ):
+        db_upsert_recommendation(
+            session,  # type: ignore[arg-type]
+            recommendation_id="rec_A",
+            family="independent",
+            timeframe="15m",
+            recommendation_type="parameter_upgrade",
+            confidence="medium",
+            reason="updated reason",
+            status="draft",
+        )
+    assert session.rows["rec_A"]["confidence"] == "high"
+    assert session.rows["rec_A"]["reason"] == "seeded for test"
+
+
+def test_idempotent_upsert_does_not_regress_lifecycle() -> None:
+    session = _FakeRecSession()
+    _seed_draft(session, "rec_A")
+    session.rows["rec_A"]["status"] = "approved"
+    session.rows["rec_A"]["approved_by"] = "reviewer"
+
+    _seed_draft(session, "rec_A")
+
+    assert session.rows["rec_A"]["status"] == "approved"
+    assert session.rows["rec_A"]["approved_by"] == "reviewer"
 
 
 def test_upsert_recommendation_rejects_invalid_status() -> None:
@@ -354,6 +387,8 @@ def test_status_update_identity_cas_rejects_same_id_row_replacement() -> None:
         "recommendation_type": "parameter_upgrade",
         "target_parameter_set_id": None,
         "source_round_id": "round_original",
+        "confidence": "high",
+        "reason": "unit test",
         "evidence_bundle_ref": "evidence_original",
     }
 
@@ -391,6 +426,8 @@ def test_status_update_identity_cas_uses_null_safe_bound_predicates() -> None:
         "recommendation_type": "parameter_upgrade",
         "target_parameter_set_id": None,
         "source_round_id": "round_1",
+        "confidence": "high",
+        "reason": "unit test",
         "evidence_bundle_ref": "round_1",
     }
     assert db_update_recommendation_status(

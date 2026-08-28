@@ -12,6 +12,8 @@ Usage:
 
 Exit codes:
     0 = 成功
+    2 = 输入/环境模式不合法
+    3 = managed control-plane 发布失败（整事务回滚）
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import argparse
 import json
 import logging
 import pathlib
+import re
 import sys
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -33,6 +36,7 @@ log = logging.getLogger("rdp_decision_round")
 _SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent
 _DECISION_RESULT_PREFIX = "RDP_DECISION_RESULT_JSON="
+_ROUND_ID_RE = re.compile(r"^\d{8}_\d{6}_[0-9a-f]{8}$")
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
@@ -47,12 +51,16 @@ from aats.data_platform.decision_system.readiness_evaluator import (
     evaluate_promotion_readiness,
 )
 from aats.data_platform.decision_system.recommendation_registry import (
+    planned_registry_stats,
+    publish_managed_decision_round,
     update_registries_from_round,
 )
 from aats.data_platform.decision_system.report_builder import (
     build_phase6_conclusion,
 )
-from aats.data_platform.governance._db_util import try_governance_db
+from aats.data_platform.governance._db_util import (
+    has_explicit_governance_db_configuration,
+)
 from aats.data_platform.governance.parameter_registry import load_registry
 
 
@@ -104,6 +112,7 @@ def _load_decision_parameter_sets(
     project_root: pathlib.Path,
     *,
     include_draft: bool,
+    offline_only: bool = False,
 ) -> list[dict]:
     """从 DB-first registry 读取本轮允许评估的参数集.
 
@@ -111,7 +120,11 @@ def _load_decision_parameter_sets(
     ``load_registry`` 前用文件存在性短路 DB 真源。
     """
     registry_path = project_root / "artifacts/governance/current_parameter_registry.json"
-    registry = load_registry(registry_path)
+    registry = (
+        load_registry(registry_path, skip_db=True)
+        if offline_only
+        else load_registry(registry_path)
+    )
     allowed_statuses = {"frozen", "candidate"}
     if include_draft:
         allowed_statuses.add("draft")
@@ -122,6 +135,53 @@ def _load_decision_parameter_sets(
     ]
 
 
+def _validate_expected_research_rounds(
+    evidence_bundle: dict,
+    *,
+    expected_step2_round_id: str | None,
+    expected_phase3_round_id: str | None,
+    expected_phase4_round_id: str | None,
+) -> None:
+    expected_research = {
+        "phase3_evidence": expected_phase3_round_id,
+        "phase4_evidence": expected_phase4_round_id,
+    }
+    provided = [
+        expected_step2_round_id is not None,
+        *(round_id is not None for round_id in expected_research.values()),
+    ]
+    if any(provided) and not all(provided):
+        raise ValueError("expected_research_round_chain_required")
+    if expected_step2_round_id is not None:
+        if _ROUND_ID_RE.fullmatch(expected_step2_round_id) is None:
+            raise ValueError("expected_research_round_id_invalid")
+        phase2_evidence = evidence_bundle.get("phase2_evidence")
+        if (
+            not isinstance(phase2_evidence, dict)
+            or phase2_evidence.get("round_selection_error") is not None
+            or phase2_evidence.get("canonical_step2_round_id")
+            != expected_step2_round_id
+            or not isinstance(
+                phase2_evidence.get("canonical_step2_snapshot_sha256"),
+                str,
+            )
+        ):
+            raise ValueError("phase2_evidence_expected_round_mismatch")
+    for evidence_key, expected_round_id in expected_research.items():
+        if expected_round_id is None:
+            continue
+        if _ROUND_ID_RE.fullmatch(expected_round_id) is None:
+            raise ValueError("expected_research_round_id_invalid")
+        phase_evidence = evidence_bundle.get(evidence_key)
+        latest = (
+            phase_evidence.get("latest_round")
+            if isinstance(phase_evidence, dict)
+            else None
+        )
+        if not isinstance(latest, dict) or latest.get("round_id") != expected_round_id:
+            raise ValueError(f"{evidence_key}_expected_round_mismatch")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Phase 6: Closed-Loop Decision Round",
@@ -130,9 +190,36 @@ def main() -> int:
     parser.add_argument("--include-draft", action="store_true",
                         help="同时评估 draft 状态的参数集（默认只看 frozen + candidate）")
     parser.add_argument("--no-print-summary", action="store_true")
+    parser.add_argument(
+        "--expected-step2-round-id",
+        help="本轮必须精确消费且与 Step 3 父身份一致的 Step 2 round ID",
+    )
+    parser.add_argument(
+        "--expected-phase3-round-id",
+        help="本轮必须精确消费的 Phase 3 round ID（与 Phase 4 参数成对使用）",
+    )
+    parser.add_argument(
+        "--expected-phase4-round-id",
+        help="本轮必须精确消费的 Phase 4 round ID（与 Phase 3 参数成对使用）",
+    )
+    parser.add_argument(
+        "--offline-file-mode",
+        action="store_true",
+        help=(
+            "仅用于无 managed governance DB 的显式离线开发；"
+            "不生成 DB 控制面真值"
+        ),
+    )
     args = parser.parse_args()
 
     project_root = pathlib.Path(args.artifact_root)
+    if args.offline_file_mode and has_explicit_governance_db_configuration(
+        project_root
+    ):
+        log.error(
+            "Offline file mode denied: managed governance DB is configured"
+        )
+        return 2
     started_at = datetime.now(timezone.utc).isoformat()
     round_id = (
         datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -150,7 +237,23 @@ def main() -> int:
     # ── Step 1: Evidence Bundle ──
     log.info("")
     log.info("[1/6] Building evidence bundle...")
-    evidence_bundle = build_evidence_bundle(project_root)
+    evidence_bundle = build_evidence_bundle(
+        project_root,
+        expected_step2_round_id=args.expected_step2_round_id,
+        expected_phase3_round_id=args.expected_phase3_round_id,
+        expected_phase4_round_id=args.expected_phase4_round_id,
+        expected_symbol="BTC-USDT-SWAP",
+    )
+    try:
+        _validate_expected_research_rounds(
+            evidence_bundle,
+            expected_step2_round_id=args.expected_step2_round_id,
+            expected_phase3_round_id=args.expected_phase3_round_id,
+            expected_phase4_round_id=args.expected_phase4_round_id,
+        )
+    except ValueError as exc:
+        log.error("Research round binding failed: %s", exc)
+        return 2
     completeness = evidence_bundle.get("evidence_completeness", {})
     log.info("  Phases with data: %s", completeness.get("phases_with_data", []))
     log.info("  Completeness: %.0f%%", completeness.get("completeness_ratio", 0) * 100)
@@ -175,6 +278,7 @@ def main() -> int:
     parameter_sets = _load_decision_parameter_sets(
         project_root,
         include_draft=args.include_draft,
+        offline_only=args.offline_file_mode,
     )
     log.info("  Parameter sets to evaluate: %d (statuses: %s)",
              len(parameter_sets), sorted(allowed_statuses))
@@ -231,22 +335,13 @@ def main() -> int:
              readiness_report["checks_total"])
     log.info("  -> %s", readiness_path)
 
-    # ── Step 5: Update Registries ──
+    # ── Step 5: Prepare one publication ──
     log.info("")
-    log.info("[5/6] Updating registries...")
-
-    registry_stats = update_registries_from_round(
-        round_id=round_id,
+    log.info("[5/6] Preparing control-plane publication...")
+    registry_stats = planned_registry_stats(
         upgrade_candidates=upgrade_candidates,
         ft_decisions=ft_decisions,
-        evidence_bundle=evidence_bundle,
-        rec_registry_path=project_root / "artifacts/decision_system/recommendation_registry.json",
-        decision_registry_path=project_root / "artifacts/decision_system/active_decision_registry.json",
-        bundle_index_path=project_root / "artifacts/decision_system/evidence_bundle_index.json",
-        evidence_summary_path=str(evidence_path),
     )
-    log.info("  Recommendations added: %d", registry_stats["recommendations_added"])
-    log.info("  Decisions updated: %d", registry_stats["decisions_updated"])
 
     # ── Step 6: Conclusion Document ──
     log.info("")
@@ -295,23 +390,77 @@ def main() -> int:
             "conclusion": "phase6_closed_loop_decision_conclusion.md",
         },
         "code_version": None,
-        "notes": None,
+        "publication_mode": (
+            "offline_file_only"
+            if args.offline_file_mode
+            else "managed_db_atomic"
+        ),
+        "notes": (
+            "Explicit offline development artifact; no managed DB truth was published."
+            if args.offline_file_mode
+            else None
+        ),
     }
+
+    # The succeeded manifest and machine-readable result marker are published
+    # only after the complete control-plane operation succeeds.  A managed DB
+    # outage or any child write failure therefore produces a non-zero process
+    # with no succeeded round manifest and no active-decision partial commit.
+    try:
+        if args.offline_file_mode:
+            registry_stats = update_registries_from_round(
+                round_id=round_id,
+                upgrade_candidates=upgrade_candidates,
+                ft_decisions=ft_decisions,
+                evidence_bundle=evidence_bundle,
+                rec_registry_path=(
+                    project_root
+                    / "artifacts/decision_system/recommendation_registry.json"
+                ),
+                decision_registry_path=(
+                    project_root
+                    / "artifacts/decision_system/active_decision_registry.json"
+                ),
+                bundle_index_path=(
+                    project_root
+                    / "artifacts/decision_system/evidence_bundle_index.json"
+                ),
+                evidence_summary_path=str(evidence_path),
+                offline_only=True,
+            )
+        else:
+            registry_stats = publish_managed_decision_round(
+                round_id=round_id,
+                started_at=started_at,
+                finished_at=finished_at,
+                upgrade_candidates=upgrade_candidates,
+                ft_decisions=ft_decisions,
+                evidence_bundle=evidence_bundle,
+                evidence_summary_path=str(evidence_path),
+                readiness_report=readiness_report,
+                manifest=manifest,
+                conclusion_markdown=conclusion_path.read_text(encoding="utf-8"),
+            )
+    except Exception as exc:
+        # Driver exception text can contain connection metadata.  The stable
+        # failure type is enough for operators; detailed diagnostics remain in
+        # controlled DB/service logs.
+        log.error(
+            "Decision round publication failed closed (failure_type=%s)",
+            type(exc).__name__,
+        )
+        return 3
+
+    if registry_stats != manifest["registry_stats"]:
+        log.error("Decision round publication count mismatch; refusing manifest")
+        return 3
+    log.info("  Recommendations added: %d", registry_stats["recommendations_added"])
+    log.info("  Decisions updated: %d", registry_stats["decisions_updated"])
+
     manifest_path = round_dir / "round_manifest.json"
     with manifest_path.open("w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False, default=str)
     log.info("  -> %s", manifest_path)
-    _persist_decision_round_snapshot_if_possible(
-        round_id=round_id,
-        started_at=started_at,
-        finished_at=finished_at,
-        evidence_bundle=evidence_bundle,
-        upgrade_candidates=upgrade_candidates,
-        ft_decisions=ft_decisions,
-        readiness_report=readiness_report,
-        manifest=manifest,
-        conclusion_markdown=conclusion_path.read_text(encoding="utf-8"),
-    )
 
     # ── Summary ──
     log.info("")
@@ -359,47 +508,6 @@ def main() -> int:
         print("State: recommendations generated only; live parameters were not applied")
 
     return 0
-
-
-def _persist_decision_round_snapshot_if_possible(
-    *,
-    round_id: str,
-    started_at: str,
-    finished_at: str,
-    evidence_bundle: dict,
-    upgrade_candidates: list[dict],
-    ft_decisions: list[dict],
-    readiness_report: dict,
-    manifest: dict,
-    conclusion_markdown: str,
-) -> None:
-    engine, ok = try_governance_db()
-    if not ok:
-        log.warning("Decision round snapshot: governance DB 不可用，跳过 DB snapshot 写入")
-        return
-    try:
-        from sqlalchemy.orm import Session
-
-        from aats.data_platform.governance.decision_rounds_db import (
-            db_upsert_decision_round_snapshot,
-        )
-
-        with Session(engine) as session, session.begin():
-            db_upsert_decision_round_snapshot(
-                session,
-                round_id=round_id,
-                started_at=started_at,
-                finished_at=finished_at,
-                evidence_bundle_summary=evidence_bundle,
-                parameter_upgrade_candidates=upgrade_candidates,
-                family_timeframe_decisions=ft_decisions,
-                promotion_readiness_assessment=readiness_report,
-                manifest=manifest,
-                conclusion_markdown=conclusion_markdown,
-            )
-    finally:
-        if engine is not None:
-            engine.dispose()
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ from aats.data_platform.decision_system.readiness_evaluator import (
     evaluate_promotion_readiness,
 )
 from aats.data_platform.decision_system.evidence_bundle import (
+    COMBOS,
     PHASE2_PROMOTION_QUALIFICATION_POLICY,
 )
 from aats.schemas.decision import DecisionContext
@@ -125,6 +126,7 @@ def _readiness_evidence(*, aligned: int, unattributable: int, live_ok: bool) -> 
                 "independent_15m": {
                     "available": True,
                     "experiments_with_openings": 1,
+                    "max_opening_count": 1,
                     "mean_positive_edge_ratio": 0.3,
                 }
             }
@@ -132,26 +134,34 @@ def _readiness_evidence(*, aligned: int, unattributable: int, live_ok: bool) -> 
         "phase3_evidence": {
             "round_count": 1,
             "latest_round": {
+                "status": "succeeded",
                 "replay_only": False,
                 "live_query_succeeded": live_ok,
                 "combos": {
-                    "independent_15m": {
+                    combo["key"]: {
                         "status": "succeeded",
                         "alignment_stats": {
                             "aligned": aligned,
                             "unattributable": unattributable,
                         },
                     }
+                    for combo in COMBOS
                 },
             },
         },
         "phase4_evidence": {
             "round_count": 1,
             "latest_round": {
+                "status": "succeeded",
                 "combos": {
-                    "independent_15m": {
-                        "cost_summary": {"total_candidates": 1},
+                    combo["key"]: {
+                        "status": "succeeded",
+                        "cost_summary": {
+                            "total_candidates": 1,
+                            "cost_adjusted_edge_mean": 0.0,
+                        },
                     }
+                    for combo in COMBOS
                 }
             },
         },
@@ -170,7 +180,15 @@ def _evaluate_phase3_gate(*, aligned: int, unattributable: int, live_ok: bool) -
             unattributable=unattributable,
             live_ok=live_ok,
         ),
-        [{"decision": "promote_candidate", "parameter_set_id": "ps_1", "score_ratio": 1.1}],
+        [
+            {
+                "decision": "promote_candidate",
+                "parameter_set_id": "ps_1",
+                "family": "independent",
+                "timeframe": "15m",
+                "score_ratio": 1.1,
+            }
+        ],
         [{"decision": "keep_active", "combo_key": "independent_15m", "confidence": "high"}],
     )
 
@@ -511,7 +529,6 @@ def test_phase3_child_receives_live_db_via_environment_not_command(monkeypatch) 
         return SimpleNamespace(returncode=1, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(rdp_run_phase3_round.subprocess, "run", _fake_run)
-    monkeypatch.setattr(rdp_run_phase3_round, "_list_subdirs", lambda _path: set())
     live_db_url = "postgresql://readonly:secret@example.invalid/aats"
 
     result = rdp_run_phase3_round._run_single_attribution(

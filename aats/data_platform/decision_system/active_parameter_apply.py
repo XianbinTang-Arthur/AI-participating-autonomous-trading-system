@@ -116,7 +116,10 @@ def load_apply_history(project_root: Path) -> dict[str, Any]:
                 ],
             }
         except Exception as exc:
-            log.warning("无法从 DB 加载 apply history: %s", exc)
+            log.warning(
+                "无法从 DB 加载 apply history (%s)",
+                type(exc).__name__,
+            )
         finally:
             if engine is not None:
                 engine.dispose()
@@ -191,7 +194,10 @@ def save_apply_history(history: dict[str, Any], project_root: Path) -> Path:
                         },
                     )
         except Exception as exc:
-            log.warning("apply history DB 同步失败: %s", exc)
+            log.warning(
+                "apply history DB 同步失败 (%s)",
+                type(exc).__name__,
+            )
         finally:
             if engine is not None:
                 engine.dispose()
@@ -320,22 +326,23 @@ def apply_approved_recommendation(
     # dry-run calls alike.  Keep this ahead of every parameter-registry read so
     # a dry run cannot act as a legacy-evidence disclosure/bypass path.
     from aats.data_platform.decision_system.promotion_guard import (
-        promotion_authorization_failure,
-        promotion_qualification_failure,
+        PromotionQualificationBlockedError,
+        require_apply_promotion_qualification,
     )
 
-    qualification_failure = (
-        promotion_authorization_failure(
+    try:
+        qualification_verdict = require_apply_promotion_qualification(
             project_root,
             rec,
-            promotion_authorization,
+            authorization=promotion_authorization,
         )
-        if promotion_authorization is not None
-        else promotion_qualification_failure(project_root, rec)
-    )
-    if qualification_failure is not None:
+    except PromotionQualificationBlockedError as exc:
+        qualification_failure = exc.to_dict()
         qualification_failure["environment"] = env
         return qualification_failure
+    qualified_values_fingerprint = qualification_verdict.to_dict().get(
+        "parameter_values_fingerprint"
+    )
 
     if policy["require_approval"] and not _approval_attestation_valid(rec):
         return {
@@ -396,6 +403,34 @@ def apply_approved_recommendation(
     if target_ps is None:
         return {"ok": False, "message": f"parameter_registry 中未找到 {ps_id}"}
 
+    from aats.data_platform.governance.parameter_identity import (
+        parameter_values_fingerprint,
+    )
+
+    try:
+        registry_values_fingerprint = parameter_values_fingerprint(
+            target_ps.get("values")
+        )
+    except ValueError:
+        return {
+            "ok": False,
+            "code": "parameter_values_invalid",
+            "message": "parameter registry 的 values 不是可验证 JSON object",
+            "environment": env,
+            "parameter_set_id": ps_id,
+        }
+    if registry_values_fingerprint != qualified_values_fingerprint:
+        return {
+            "ok": False,
+            "code": "parameter_set_evidence_fingerprint_mismatch",
+            "message": (
+                "parameter set 当前 values 与精确 Phase 6 资格证据不一致；"
+                "必须生成新的不可变参数集并重新审批"
+            ),
+            "environment": env,
+            "parameter_set_id": ps_id,
+        }
+
     family = target_ps["family"]
     timeframe = target_ps["timeframe"]
     values = target_ps["values"]
@@ -410,6 +445,7 @@ def apply_approved_recommendation(
         "recommendation_id": recommendation_id,
         "parameter_set_id": ps_id,
         "values": values,
+        "parameter_values_fingerprint": registry_values_fingerprint,
         "environment": env,
         "release_id": release_id,
     }
@@ -584,6 +620,8 @@ def apply_approved_recommendation(
             "recommendation_type",
             "target_parameter_set_id",
             "source_round_id",
+            "confidence",
+            "reason",
             "evidence_bundle_ref",
         )
         identity_matches = isinstance(locked_rec, dict)
@@ -663,6 +701,25 @@ def apply_approved_recommendation(
             source_round_id=expected_source_round_id,
             expected_values=expected_values,
         )
+        locked_values_fingerprint = None
+        if isinstance(locked_ps, dict):
+            try:
+                locked_values_fingerprint = parameter_values_fingerprint(
+                    locked_ps.get("values")
+                )
+            except ValueError:
+                locked_values_fingerprint = None
+            if locked_values_fingerprint != qualified_values_fingerprint:
+                return {
+                    "ok": False,
+                    "code": "parameter_set_evidence_fingerprint_mismatch",
+                    "message": (
+                        "锁内 parameter set values 与精确 Phase 6 资格证据不一致；"
+                        "本次 apply 已零资本写入阻断"
+                    ),
+                    "environment": env,
+                    "parameter_set_id": ps_id,
+                }
         parameter_set_identity_valid = bool(
             isinstance(locked_ps, dict)
             and locked_ps.get("parameter_set_id") == ps_id
@@ -673,6 +730,7 @@ def apply_approved_recommendation(
             and locked_ps.get("source_round_id") == expected_source_round_id
             and type(locked_ps.get("values")) is dict
             and locked_ps.get("values") == expected_values
+            and locked_values_fingerprint == qualified_values_fingerprint
             and locked_ps.get("status") in {"candidate", "frozen"}
         )
         if not parameter_set_identity_valid:
@@ -772,6 +830,37 @@ def apply_approved_recommendation(
                     if prior_apply is not None
                     else None
                 ),
+            }
+
+        # Locks may have been contended long enough for the short-lived
+        # authorization or underlying evidence window to expire.  Revalidate
+        # immediately before the first capital-state write, using the locked
+        # canonical recommendation.  A stale token/verdict must result in zero
+        # active/history/release/parameter lifecycle mutations.
+        try:
+            lock_in_verdict = require_apply_promotion_qualification(
+                project_root,
+                locked_rec,
+                authorization=promotion_authorization,
+            )
+        except PromotionQualificationBlockedError as exc:
+            lock_in_failure = exc.to_dict()
+            lock_in_failure["environment"] = env
+            lock_in_failure["code"] = "promotion_qualification_changed_at_lock_in"
+            return lock_in_failure
+        lock_in_fingerprint = lock_in_verdict.to_dict().get(
+            "parameter_values_fingerprint"
+        )
+        if lock_in_fingerprint != locked_values_fingerprint:
+            return {
+                "ok": False,
+                "code": "promotion_evidence_changed_at_lock_in",
+                "message": (
+                    "锁内最终资格证据与 parameter set 内容不一致；"
+                    "本次 apply 已零资本写入阻断"
+                ),
+                "environment": env,
+                "parameter_set_id": ps_id,
             }
 
         db_upsert_active_set(
@@ -1575,7 +1664,10 @@ def rollback_active_parameter_set(
             save_release_record(rolled_back_release, project_root)
             result["release_id"] = rolled_back_release.get("release_id")
     except Exception as exc:
-        log.warning("rollback 后同步 release history 失败: %s", exc)
+        log.warning(
+            "rollback 后同步 release history 失败 (%s)",
+            type(exc).__name__,
+        )
 
     result["operation_id"] = op_id
     result["message"] = (

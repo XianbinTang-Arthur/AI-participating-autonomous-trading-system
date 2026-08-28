@@ -1,8 +1,8 @@
 # AATS Task 与 SOW 历史索引
 
-> 文档状态：任务与交付历史证据索引（截至 2026-08-27）
-> 最后核对：2026-08-27（Research OS G0 bootstrap、RDP 衍生品合同 P0-A 与
-> P0-B LF-A 本地静态验收证据已登记；其余历史状态边界不变）
+> 文档状态：任务与交付历史证据索引（截至 2026-08-28）
+> 最后核对：2026-08-28（Research OS G0 bootstrap、RDP 衍生品合同 P0-A、
+> P0-B LF-A、参数内容身份、typed JSON、正式制品读取与衍生品 Phase 2 资格闭环任务已登记；其余历史状态边界不变）
 > 核对范围：任务文件存在性、索引与各任务自报状态；不把任务状态升级为运行时或生产事实
 
 本目录保存任务书、SOW、阶段设计、实施记录和交付报告。它是工程可追溯性材料，不是当前系统说明；“完成”“通过”“上线”等措辞只对文件记录的基线和验证范围成立。
@@ -52,6 +52,25 @@
   promotion readiness、canonical UTC、DB/mirror 状态边界、post-apply provenance、自动风险
   收敛与 action proof 的收口任务。当前状态以文件头为准；完整回归、独立复审和模拟运行前
   不得标记完成。
+- [`rdp_promotion_parameter_identity_p1_sow_2026_08_27.md`](rdp_promotion_parameter_identity_p1_sow_2026_08_27.md)：
+  参数晋级内容身份 LF-A；把 Phase 6 评估的精确参数值指纹贯穿 qualification、短时授权、
+  dry-run 与锁内 apply，并将官方 parameter/recommendation/decision-round writer 收口为同 ID
+  内容只写一次。Step 3 自动导入改为确定性 ID、部分导入可恢复、先补齐后 CAS 废弃，避免
+  并发 apply 将 `released` 覆盖成 `deprecated`。Stage 20 数据库原生 trigger/DELETE 防护仍待
+  真人审批，当前不得据此宣告生产就绪。
+- [`rdp_typed_json_identity_p1_sow_2026_08_28.md`](rdp_typed_json_identity_p1_sow_2026_08_28.md)：
+  修复 PostgreSQL JSONB 将 `1` 与 `1.0` 判等造成的不可变身份绕过；统一严格 JSON canonical
+  SHA-256，并为 parameter set、research round snapshot、decision round snapshot 增加持久摘要。
+  历史行不伪造类型来源，只在 exact retry 时安全补写；迁移与真实 PostgreSQL 测试完成前不代表现场生效。
+- [`rdp_derivatives_phase2_promotion_evidence_producer_p1_sow_2026_08_28.md`](rdp_derivatives_phase2_promotion_evidence_producer_p1_sow_2026_08_28.md)：
+  记录“完整 RDP”缺少正式 Phase 2 晋级证据 producer 的结构性 P1。现有 v2 harness 仅支持 SPOT，
+  legacy Step 2 只可审计；LF-A 先关闭 SPOT/SWAP scope 污染并暴露真实阻断，LF-B 再建设可重算、
+  manifest-last、managed snapshot 锚定的 linear perpetual 回测与 metrics 闭环。LF-B 未验收前保持
+  REAL-MONEY NO-GO，不能把阶段执行完成解释为可晋级研究完成。
+- [`rdp_formal_artifact_reader_hardening_sow_2026_08_28.md`](rdp_formal_artifact_reader_hardening_sow_2026_08_28.md)：
+  正式 research artifact 的有界、单描述符稳定读取加固记录；统一拒绝路径替换、读取中变化、符号链接、
+  超限、非法 UTF-8、重复 JSON key 和非有限数值，并覆盖候选导入、parameter lineage、Phase 6
+  qualification 与 evidence bundle 高价值消费者。该切片不改变研究阈值、数据库发布或 live 行为。
 
 - [`rdp_continuity_monitoring_correctness_p1_sow_2026_08_27.md`](rdp_continuity_monitoring_correctness_p1_sow_2026_08_27.md)：
   RDP 连续性监控与研究资格 LF-B 设计；拟引入 typed subscription catalog、default/registered/ACK

@@ -626,6 +626,7 @@ def test_approve_and_release_second_prewrite_qualification_failure_is_zero_write
         qualified_round_id=round_id,
         detail="qualified before write",
         qualified_finished_at=datetime.now(timezone.utc).isoformat(),
+        parameter_values_fingerprint="a" * 64,
     )
     blocked = PromotionQualificationVerdict(
         required=True,

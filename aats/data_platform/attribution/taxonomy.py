@@ -44,6 +44,8 @@ REASON_CODES: dict[str, list[str]] = {
         "score_below_entry_threshold",
         "score_not_stable",
         "net_edge_below_safe_minimum",
+        "cost_exceeds_max_acceptable",
+        "rebalance_cooldown",
         "no_intent_in_window",
         "intent_route_action_hold_current",
         "intent_route_action_advisory_only",

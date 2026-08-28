@@ -18,10 +18,16 @@ from aats.data_platform.governance.snapshot_db import (
     SNAPSHOT_QUALITY_MONITOR,
     is_snapshot_incomplete,
     load_governance_snapshot,
-    load_research_round_snapshot,
     load_latest_research_round_snapshot,
+    load_research_round_snapshot,
+    research_round_snapshot_fingerprint,
 )
 from aats.data_platform.governance.parameter_registry import load_registry
+from aats.data_platform.governance.research_artifact_contract import (
+    decode_strict_json_artifact,
+    read_stable_json_artifact,
+    read_stable_regular_artifact_file,
+)
 from aats.data_platform.replay.backtest.equity_builder import (
     REPLAY_RISK_METRIC_POLICY_ID,
 )
@@ -44,6 +50,7 @@ COMBOS: list[dict[str, str]] = [
 ]
 
 _UNTRUSTED_STATUSES: set[str] = {"deprecated", "failed"}
+_TRUSTED_TERMINAL_STATUSES: set[str] = {"succeeded", "partial_success"}
 _ROUND_DIR_PATTERN = re.compile(r"^\d{8}_\d{6}_[0-9a-f]{8}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
@@ -102,6 +109,9 @@ _PHASE2_PROMOTION_METRICS_NAME = "phase2_promotion_metrics.json"
 _PHASE2_PROMOTION_METRICS_KIND = "phase2_promotion_metrics"
 PHASE2_PROMOTION_QUALIFICATION_POLICY = "phase2-promotion-metrics/v1"
 _PHASE2_PROMOTION_METRICS_SCHEMA = PHASE2_PROMOTION_QUALIFICATION_POLICY
+DERIVATIVES_PHASE2_PROMOTION_EVIDENCE_UNAVAILABLE = (
+    "derivatives_phase2_promotion_evidence_unavailable"
+)
 _BACKTEST_ALLOWED_ARTIFACTS = (
     _BACKTEST_REQUIRED_ARTIFACTS | {_PHASE2_PROMOTION_METRICS_NAME}
 )
@@ -119,14 +129,83 @@ _PHASE2_PROMOTION_METRICS_KEYS = frozenset(
         "selectable_ratio",
     }
 )
+_FORMAL_EVIDENCE_JSON_MAX_BYTES = 16 * 1024 * 1024
+_FORMAL_BACKTEST_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024
+
+_PHASE4_COST_MEAN_PROJECTIONS: tuple[tuple[str, str], ...] = (
+    ("slippage_mean", "slippage"),
+    ("total_cost_mean", "total_execution_cost"),
+    ("cost_adjusted_edge_mean", "cost_adjusted_edge"),
+)
+
+
+def _governance_snapshot_data_source(
+    snapshot: dict[str, Any] | None,
+) -> str | None:
+    """Return the explicit provenance attached by the DB-first loader."""
+
+    if not isinstance(snapshot, dict):
+        return None
+    data_source = snapshot.get("data_source")
+    if isinstance(data_source, str) and data_source.strip():
+        return data_source.strip()
+    return "unknown"
+
+
+def _governance_evidence_source(snapshot: dict[str, Any] | None) -> str:
+    """Classify a governance snapshot without laundering fallback data.
+
+    ``governance_index`` is intentionally reserved for a row read from the
+    governance database.  Bootstrap and file-backed payloads remain useful for
+    audit/display, but their source is explicit so promotion gates cannot
+    mistake them for canonical DB truth.
+    """
+
+    data_source = _governance_snapshot_data_source(snapshot)
+    if data_source is None:
+        return "directory_scan"
+    if data_source == "db":
+        return "governance_index"
+    return f"governance_index_{data_source}"
+
+
+def _is_canonical_governance_snapshot(
+    snapshot: dict[str, Any] | None,
+) -> bool:
+    return _governance_snapshot_data_source(snapshot) == "db"
+
+
+def _project_execution_cost_summary(
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    """Expose one Phase 4 cost-summary shape to every decision consumer.
+
+    The producer stores distributions as nested objects such as
+    ``cost_adjusted_edge.mean``.  Decision consumers use stable flat aliases.
+    Preserve the complete producer payload while deriving those aliases;
+    already-flat legacy payloads remain readable when a distribution is absent.
+    """
+
+    projected = dict(summary)
+    for flat_field, distribution_field in _PHASE4_COST_MEAN_PROJECTIONS:
+        distribution = summary.get(distribution_field)
+        if isinstance(distribution, dict) and "mean" in distribution:
+            projected[flat_field] = distribution["mean"]
+        elif flat_field in summary:
+            projected[flat_field] = summary[flat_field]
+    return projected
 
 
 def _safe_load_json(path: pathlib.Path) -> dict | list | None:
     if not path.exists():
         return None
     try:
-        with path.open(encoding="utf-8") as f:
-            return json.load(f)
+        payload, _ = read_stable_json_artifact(
+            path,
+            parent=path.parent,
+            max_bytes=_FORMAL_EVIDENCE_JSON_MAX_BYTES,
+        )
+        return payload
     except Exception as exc:  # pragma: no cover - defensive
         log.warning("Failed to load JSON from %s: %s", path, exc)
         return None
@@ -136,20 +215,17 @@ def _strict_load_json_object(path: pathlib.Path) -> dict[str, Any] | None:
     """Load one standards-compliant, finite JSON object for evidence checks."""
 
     try:
-        with path.open(encoding="utf-8") as handle:
-            payload = json.load(
-                handle,
-                parse_constant=lambda token: (_raise_json_constant(token)),
-            )
-    except (OSError, ValueError):
+        payload, _ = read_stable_json_artifact(
+            path,
+            parent=path.parent,
+            max_bytes=_FORMAL_EVIDENCE_JSON_MAX_BYTES,
+            expected_type=dict,
+        )
+    except ValueError:
         return None
-    if not isinstance(payload, dict) or not _json_numbers_are_finite(payload):
+    if not _json_numbers_are_finite(payload):
         return None
     return payload
-
-
-def _raise_json_constant(token: str) -> None:
-    raise ValueError(f"non-finite JSON constant: {token}")
 
 
 def _json_numbers_are_finite(value: Any) -> bool:
@@ -168,11 +244,12 @@ def _json_numbers_are_finite(value: Any) -> bool:
 
 
 def _sha256_file(path: pathlib.Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(65536), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    payload = read_stable_regular_artifact_file(
+        path,
+        parent=path.parent,
+        max_bytes=_FORMAL_BACKTEST_ARTIFACT_MAX_BYTES,
+    )
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _load_hash_bound_json_object(
@@ -183,19 +260,23 @@ def _load_hash_bound_json_object(
     """Parse the exact bytes whose manifest hash is being trusted."""
 
     try:
-        payload_bytes = path.read_bytes()
-    except OSError:
+        payload_bytes = read_stable_regular_artifact_file(
+            path,
+            parent=path.parent,
+            max_bytes=_FORMAL_EVIDENCE_JSON_MAX_BYTES,
+        )
+    except ValueError:
         return None, "backtest_manifest_artifact_unreadable"
     if hashlib.sha256(payload_bytes).hexdigest() != expected_hash:
         return None, "backtest_manifest_artifact_changed_after_validation"
     try:
-        payload = json.loads(
-            payload_bytes.decode("utf-8"),
-            parse_constant=lambda token: (_raise_json_constant(token)),
+        payload = decode_strict_json_artifact(
+            payload_bytes,
+            expected_type=dict,
         )
-    except (UnicodeDecodeError, ValueError):
+    except ValueError:
         return None, "backtest_manifest_bound_json_invalid"
-    if not isinstance(payload, dict) or not _json_numbers_are_finite(payload):
+    if not _json_numbers_are_finite(payload):
         return None, "backtest_manifest_bound_json_invalid"
     return payload, "qualified"
 
@@ -210,9 +291,14 @@ def _resolve_evidence_path(
     if not candidate.is_absolute():
         candidate = root / candidate
     try:
+        supplied = candidate.absolute()
+        if supplied.is_symlink():
+            return None
         resolved = candidate.resolve(strict=True)
         resolved.relative_to(root)
     except (OSError, RuntimeError, ValueError):
+        return None
+    if resolved != supplied:
         return None
     return resolved
 
@@ -333,7 +419,7 @@ def _validate_backtest_manifest(
             return None, "backtest_manifest_artifact_missing"
         try:
             actual_hash = _sha256_file(artifact_path)
-        except OSError:
+        except (OSError, ValueError):
             return None, "backtest_manifest_artifact_unreadable"
         if actual_hash != expected_hash:
             return None, "backtest_manifest_artifact_hash_mismatch"
@@ -362,6 +448,7 @@ def _validated_promotion_metrics(
     default_artifact_dir: pathlib.Path | None,
     expected_family: str | None,
     expected_timeframe: str | None,
+    expected_symbol: str | None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Return only metrics that are schema-checked and hash-bound to v2 output."""
 
@@ -475,6 +562,16 @@ def _validated_promotion_metrics(
     raw_timeframe = normalize_timeframe_value(
         expected_timeframe or raw.get("timeframe")
     )
+    raw_symbol = expected_symbol or raw.get("symbol")
+    if (
+        not isinstance(raw_symbol, str)
+        or not raw_symbol.strip()
+        or raw_symbol != raw_symbol.strip()
+    ):
+        qualification["promotion_qualification_reason"] = (
+            "phase2_promotion_metrics_symbol_missing"
+        )
+        return None, qualification
     if (
         not isinstance(family, str)
         or not family.strip()
@@ -486,6 +583,8 @@ def _validated_promotion_metrics(
         or summary["config"].get("family") != family
         or normalize_timeframe_value(summary["config"].get("timeframe"))
         != timeframe
+        or manifest.get("instrument_symbol") != raw_symbol
+        or summary["config"].get("symbol") != raw_symbol
     ):
         qualification["promotion_qualification_reason"] = (
             "phase2_promotion_metrics_scope_mismatch"
@@ -586,6 +685,7 @@ def _build_phase2_diag_entry(
     default_artifact_dir: pathlib.Path | None = None,
     family: str | None = None,
     timeframe: str | None = None,
+    symbol: str | None = None,
     label: str | None = None,
     scan_key: str | None = None,
     scan_run_id: str | None = None,
@@ -596,12 +696,14 @@ def _build_phase2_diag_entry(
         default_artifact_dir=default_artifact_dir,
         expected_family=family,
         expected_timeframe=timeframe,
+        expected_symbol=symbol,
     )
     metric_source = verified_metrics or raw
     resolved_family = family or metric_source.get("family") or raw.get("family")
     resolved_timeframe = (
         timeframe or metric_source.get("timeframe") or raw.get("timeframe")
     )
+    resolved_symbol = symbol or metric_source.get("symbol") or raw.get("symbol")
     combo_key = make_combo_key(resolved_family, resolved_timeframe)
 
     entry: dict[str, Any] = {
@@ -609,6 +711,7 @@ def _build_phase2_diag_entry(
         "type": diag_type,
         "family": resolved_family,
         "timeframe": resolved_timeframe,
+        "symbol": resolved_symbol,
         "combo_key": combo_key,
         "total_bars": _coerce_int(metric_source.get("total_bars")),
         "opening_count": _coerce_int(metric_source.get("opening_count")),
@@ -749,11 +852,68 @@ def _artifact_dir(
     return candidate
 
 
-def _collect_latest_step2_round_diags(project_root: pathlib.Path) -> list[dict[str, Any]]:
-    snapshot = load_latest_research_round_snapshot(
-        phase=ROUND_PHASE_STEP2,
-        project_root=project_root,
+def _collect_latest_step2_round_diags(
+    project_root: pathlib.Path,
+    *,
+    require_managed_db_truth: bool = False,
+    expected_round_id: str | None = None,
+) -> tuple[
+    bool,
+    list[dict[str, Any]],
+    dict[str, Any] | None,
+    str | None,
+]:
+    """Return whether a canonical Step 2 round was selected and its diagnostics.
+
+    The boolean is deliberately independent of the diagnostics list.  A latest
+    round with zero usable rows is still the canonical round and must not be
+    supplemented with arbitrary older artifact-index experiments.
+    """
+
+    snapshot = (
+        load_research_round_snapshot(
+            round_id=expected_round_id,
+            project_root=project_root,
+            require_managed_db_truth=require_managed_db_truth,
+        )
+        if expected_round_id is not None
+        else load_latest_research_round_snapshot(
+            phase=ROUND_PHASE_STEP2,
+            project_root=project_root,
+            require_managed_db_truth=require_managed_db_truth,
+        )
     )
+    if snapshot is None and expected_round_id is not None:
+        log.warning(
+            "Phase2 证据收集: 指定 Step2 snapshot 不存在 (%s)",
+            expected_round_id,
+        )
+        return True, [], None, "expected_step2_snapshot_missing"
+    if isinstance(snapshot, dict) and (
+        snapshot.get("phase") != ROUND_PHASE_STEP2
+        or (
+            expected_round_id is not None
+            and snapshot.get("round_id") != expected_round_id
+        )
+    ):
+        log.warning(
+            "Phase2 证据收集: Step2 snapshot 身份不匹配 "
+            "(expected=%s actual=%s phase=%s)",
+            expected_round_id,
+            snapshot.get("round_id"),
+            snapshot.get("phase"),
+        )
+        return True, [], snapshot, "expected_step2_snapshot_identity_mismatch"
+    if (
+        isinstance(snapshot, dict)
+        and (require_managed_db_truth or expected_round_id is not None)
+        and snapshot.get("status") != "succeeded"
+    ):
+        log.warning(
+            "Phase2 证据收集: 指定 Step2 snapshot 非 succeeded (%s)",
+            snapshot.get("status"),
+        )
+        return True, [], snapshot, "expected_step2_snapshot_not_succeeded"
     # 缺 round_manifest.json 的 Step2 目录（残留/半成品）不能进入 Phase 2 证据链，
     # 否则会让 collect_phase2_evidence / _aggregate_phase2_stats 把不完整目录
     # 当成"experiments_with_openings>=1"的可交易证据，污染 promotion readiness。
@@ -763,7 +923,17 @@ def _collect_latest_step2_round_diags(project_root: pathlib.Path) -> list[dict[s
             "(round_id=%s)，按无可信证据处理",
             snapshot.get("round_id") if isinstance(snapshot, dict) else None,
         )
-        return []
+        return True, [], snapshot, "step2_snapshot_incomplete"
+    if (
+        require_managed_db_truth
+        and _governance_snapshot_data_source(snapshot) != "db"
+    ):
+        log.warning(
+            "Phase2 证据收集: latest round 来源=%s，不是治理 DB 真值，"
+            "按无可晋级证据处理",
+            _governance_snapshot_data_source(snapshot),
+        )
+        return True, [], snapshot, "step2_snapshot_not_db_truth"
     if snapshot:
         diags: list[dict[str, Any]] = []
         round_dir = _artifact_dir(
@@ -771,6 +941,17 @@ def _collect_latest_step2_round_diags(project_root: pathlib.Path) -> list[dict[s
             project_root=project_root,
         )
         summary = snapshot.get("summary", {}) or {}
+        manifest_payload = snapshot.get("manifest", {}) or {}
+        manifest_scope = (
+            manifest_payload.get("scope", {})
+            if isinstance(manifest_payload, dict)
+            else {}
+        )
+        round_symbol = (
+            manifest_scope.get("symbol")
+            if isinstance(manifest_scope, dict)
+            else None
+        )
         family_summary = summary.get("family_timeframe_summary", {}) or {}
         for index, item in enumerate(family_summary.get("experiments", [])):
             diags.append(
@@ -780,6 +961,7 @@ def _collect_latest_step2_round_diags(project_root: pathlib.Path) -> list[dict[s
                     diag_type="calibration_experiment",
                     project_root=project_root,
                     default_artifact_dir=round_dir,
+                    symbol=round_symbol,
                 ),
             )
 
@@ -792,19 +974,24 @@ def _collect_latest_step2_round_diags(project_root: pathlib.Path) -> list[dict[s
                     diag_type="parameter_scan_item",
                     project_root=project_root,
                     default_artifact_dir=round_dir,
+                    symbol=round_symbol,
                     scan_key=item.get("scan_key"),
                     scan_run_id=item.get("scan_run_id"),
                 ),
             )
         if diags:
-            return diags
+            return True, diags, snapshot, None
 
-    return []
+        return True, [], snapshot, None
+
+    return False, [], None, None
 
 
 def _finalize_phase2_stats(
     evidence: dict[str, Any],
     all_diags: list[dict[str, Any]],
+    *,
+    expected_symbol: str | None,
 ) -> None:
     eligible_diags = [
         diag for diag in all_diags if diag.get("promotion_eligible") is True
@@ -825,6 +1012,28 @@ def _finalize_phase2_stats(
         combo_stats[combo_key] = stats
 
     global_stats = _aggregate_phase2_stats(eligible_diags)
+    observed_symbols = {
+        diag.get("symbol")
+        for diag in all_diags
+        if isinstance(diag.get("symbol"), str) and diag.get("symbol")
+    }
+    target_symbol = expected_symbol
+    if target_symbol is None and len(observed_symbols) == 1:
+        target_symbol = next(iter(observed_symbols))
+    if eligible_diags:
+        promotion_evidence_status = "qualified_evidence_available"
+        promotion_evidence_reason = "qualified"
+    elif isinstance(target_symbol, str) and target_symbol.endswith("-SWAP"):
+        promotion_evidence_status = "unavailable"
+        promotion_evidence_reason = (
+            DERIVATIVES_PHASE2_PROMOTION_EVIDENCE_UNAVAILABLE
+        )
+    else:
+        promotion_evidence_status = "unavailable"
+        promotion_evidence_reason = "phase2_promotion_evidence_unavailable"
+    for stats in combo_stats.values():
+        if not stats.get("available"):
+            stats["fallback_reason"] = promotion_evidence_reason
     evidence["combo_stats"] = combo_stats
     evidence["global_stats"] = global_stats
     evidence["aggregate_stats"] = global_stats
@@ -842,18 +1051,27 @@ def _finalize_phase2_stats(
     evidence["promotion_ineligible_experiment_count"] = (
         len(all_diags) - len(eligible_diags)
     )
+    evidence["target_symbol"] = target_symbol
+    evidence["promotion_evidence_status"] = promotion_evidence_status
+    evidence["promotion_evidence_reason"] = promotion_evidence_reason
 
 
 def collect_phase2_evidence(
     project_root: pathlib.Path,
     *,
     artifact_index: dict[str, Any] | None = None,
+    require_managed_db_truth: bool = False,
+    expected_symbol: str | None = None,
+    expected_step2_round_id: str | None = None,
 ) -> dict[str, Any]:
     """收集 Phase 2 (Step 1/2) 研究证据。"""
     project_root = project_root.resolve(strict=False)
     evidence: dict[str, Any] = {
         "source": "phase2",
-        "evidence_source": "governance_index" if artifact_index else "directory_scan",
+        "evidence_source": _governance_evidence_source(artifact_index),
+        "governance_snapshot_data_source": _governance_snapshot_data_source(
+            artifact_index
+        ),
         "experiment_count": 0,
         "parameter_scan_count": 0,
         "experiments": [],
@@ -865,10 +1083,47 @@ def collect_phase2_evidence(
         "promotion_eligible_experiment_count": 0,
         "promotion_ineligible_experiment_count": 0,
         "promotion_qualification_policy": _PHASE2_PROMOTION_METRICS_SCHEMA,
+        "target_symbol": expected_symbol,
+        "expected_step2_round_id": expected_step2_round_id,
+        "canonical_step2_round_id": None,
+        "canonical_step2_snapshot_sha256": None,
+        "canonical_step2_snapshot_data_source": None,
+        "round_selection_error": None,
     }
 
     all_diags: list[dict[str, Any]] = []
-    canonical_step2_diags = _collect_latest_step2_round_diags(project_root)
+    (
+        canonical_step2_selected,
+        canonical_step2_diags,
+        canonical_step2_snapshot,
+        step2_selection_error,
+    ) = (
+        _collect_latest_step2_round_diags(
+            project_root,
+            require_managed_db_truth=require_managed_db_truth,
+            expected_round_id=expected_step2_round_id,
+        )
+    )
+    evidence["round_selection_error"] = step2_selection_error
+    if isinstance(canonical_step2_snapshot, dict):
+        evidence["canonical_step2_round_id"] = canonical_step2_snapshot.get(
+            "round_id"
+        )
+        evidence["canonical_step2_snapshot_data_source"] = (
+            _governance_snapshot_data_source(canonical_step2_snapshot)
+        )
+        if step2_selection_error is None:
+            try:
+                evidence["canonical_step2_snapshot_sha256"] = (
+                    research_round_snapshot_fingerprint(
+                        canonical_step2_snapshot
+                    )
+                )
+            except ValueError:
+                evidence["round_selection_error"] = (
+                    "step2_snapshot_identity_invalid"
+                )
+                canonical_step2_diags = []
     if canonical_step2_diags:
         all_diags.extend(canonical_step2_diags)
 
@@ -897,7 +1152,7 @@ def collect_phase2_evidence(
                     "experiment_count": comp.get("experiment_count"),
                     "comparison": comparison,
                 })
-                if not canonical_step2_diags:
+                if not canonical_step2_selected:
                     for index, item in enumerate(comparison):
                         all_diags.append(
                             _build_phase2_diag_entry(
@@ -908,6 +1163,7 @@ def collect_phase2_evidence(
                                 default_artifact_dir=artifact_path,
                                 family=artifact.get("family"),
                                 timeframe=artifact.get("timeframe"),
+                                symbol=artifact.get("symbol"),
                                 scan_key=artifact.get("artifact_id"),
                                 scan_run_id=artifact.get("artifact_id"),
                             ),
@@ -930,9 +1186,11 @@ def collect_phase2_evidence(
                 default_artifact_dir=artifact_path,
                 family=artifact.get("family"),
                 timeframe=artifact.get("timeframe"),
+                symbol=artifact.get("symbol"),
             )
             evidence["experiments"].append(entry)
-            all_diags.append(entry)
+            if not canonical_step2_selected:
+                all_diags.append(entry)
     else:
         log.warning("artifact_index 不存在，fallback 到目录扫描")
         exp_root = project_root / "artifacts/research/experiments"
@@ -954,7 +1212,7 @@ def collect_phase2_evidence(
                         "experiment_count": comp.get("experiment_count"),
                         "comparison": comparison,
                     })
-                    if not canonical_step2_diags:
+                    if not canonical_step2_selected:
                         for index, item in enumerate(comparison):
                             all_diags.append(
                                 _build_phase2_diag_entry(
@@ -981,9 +1239,25 @@ def collect_phase2_evidence(
                     default_artifact_dir=subdir,
                 )
                 evidence["experiments"].append(entry)
-                all_diags.append(entry)
+                if not canonical_step2_selected:
+                    all_diags.append(entry)
 
-    _finalize_phase2_stats(evidence, all_diags)
+    if (
+        require_managed_db_truth
+        and not _is_canonical_governance_snapshot(artifact_index)
+    ):
+        for diag in all_diags:
+            if diag.get("promotion_eligible") is True:
+                diag["promotion_eligible"] = False
+                reasons = diag.setdefault("promotion_ineligible_reasons", [])
+                if "governance_snapshot_not_db_truth" not in reasons:
+                    reasons.append("governance_snapshot_not_db_truth")
+
+    _finalize_phase2_stats(
+        evidence,
+        all_diags,
+        expected_symbol=expected_symbol,
+    )
     return evidence
 
 
@@ -993,6 +1267,8 @@ def _collect_round_evidence_from_index(
 ) -> list[dict[str, Any]]:
     trusted: list[dict[str, Any]] = []
     for round_info in active_round_index.get("all_rounds", []):
+        if not isinstance(round_info, dict):
+            continue
         if round_info.get("phase") != phase:
             continue
         if round_info.get("status") in _UNTRUSTED_STATUSES:
@@ -1001,16 +1277,123 @@ def _collect_round_evidence_from_index(
     return trusted
 
 
+def _select_round_evidence_from_index(
+    active_round_index: dict[str, Any],
+    *,
+    phase: str,
+    expected_round_id: str | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
+    """Select latest-compatible or one exact, trusted indexed round."""
+
+    indexed_rounds = active_round_index.get("all_rounds", [])
+    if not isinstance(indexed_rounds, list):
+        return [], [], "active_round_index_rounds_invalid"
+    phase_rounds = [
+        round_info
+        for round_info in indexed_rounds
+        if isinstance(round_info, dict) and round_info.get("phase") == phase
+    ]
+    if expected_round_id is None:
+        return (
+            _collect_round_evidence_from_index(active_round_index, phase),
+            phase_rounds,
+            None,
+        )
+    if _ROUND_DIR_PATTERN.fullmatch(expected_round_id) is None:
+        return [], phase_rounds, "expected_round_id_invalid"
+    matches = [
+        round_info
+        for round_info in indexed_rounds
+        if isinstance(round_info, dict)
+        and round_info.get("round_id") == expected_round_id
+    ]
+    if not matches:
+        return [], phase_rounds, "expected_round_not_indexed"
+    if len(matches) != 1:
+        return [], phase_rounds, "expected_round_index_ambiguous"
+    selected = matches[0]
+    if selected.get("phase") != phase:
+        return [], phase_rounds, "expected_round_phase_mismatch"
+    if selected.get("status") not in _TRUSTED_TERMINAL_STATUSES:
+        return [], phase_rounds, "expected_round_status_untrusted"
+    return [selected], phase_rounds, None
+
+
 def _enrich_round_from_manifest(
     round_info: dict[str, Any],
     phase: str,
     project_root: pathlib.Path,
+    *,
+    require_managed_db_truth: bool = False,
 ) -> dict[str, Any]:
+    parameter_lineage_fields = (
+        "parameter_values_fingerprint",
+        "resolved_parameter_values_fingerprint",
+        "source_step3_round_id",
+        "source_step3_candidate_sha256",
+    )
     round_id = round_info.get("round_id")
+
+    def _rejected_round_projection(
+        data_source: str,
+        selection_error: str,
+    ) -> dict[str, Any]:
+        return {
+            "round_id": round_id,
+            "started_at": round_info.get("started_at"),
+            "status": "unknown",
+            "data_source": data_source,
+            "replay_only": False,
+            "live_query_succeeded": False,
+            "parameter_input": None,
+            "combos": {},
+            "selection_error": selection_error,
+        }
+
     snapshot = (
-        load_research_round_snapshot(round_id=round_id, project_root=project_root)
+        load_research_round_snapshot(
+            round_id=round_id,
+            project_root=project_root,
+            require_managed_db_truth=require_managed_db_truth,
+        )
         if round_id else None
     )
+    if (
+        snapshot
+        and require_managed_db_truth
+        and _governance_snapshot_data_source(snapshot) != "db"
+    ):
+        return _rejected_round_projection(
+            _governance_snapshot_data_source(snapshot) or "unknown",
+            "round_snapshot_not_db_truth",
+        )
+    if (
+        snapshot
+        and require_managed_db_truth
+        and snapshot.get("round_id") != round_id
+    ):
+        return _rejected_round_projection(
+            _governance_snapshot_data_source(snapshot) or "unknown",
+            "round_snapshot_id_mismatch",
+        )
+    if (
+        snapshot
+        and require_managed_db_truth
+        and snapshot.get("phase") != phase
+    ):
+        return _rejected_round_projection(
+            _governance_snapshot_data_source(snapshot) or "unknown",
+            "round_snapshot_phase_mismatch",
+        )
+    if (
+        snapshot
+        and require_managed_db_truth
+        and snapshot.get("status") not in _TRUSTED_TERMINAL_STATUSES
+    ):
+        return _rejected_round_projection(
+            _governance_snapshot_data_source(snapshot) or "unknown",
+            "round_snapshot_status_untrusted",
+        )
     if snapshot:
         summary = snapshot.get("summary", {}) or {}
         manifest_payload = snapshot.get("manifest", {}) or {}
@@ -1019,14 +1402,18 @@ def _enrich_round_from_manifest(
             "round_id": snapshot.get("round_id"),
             "started_at": snapshot.get("started_at"),
             "status": snapshot.get("status", "unknown"),
+            "data_source": _governance_snapshot_data_source(snapshot),
             "replay_only": bool(snapshot.get("replay_only", False)),
             "live_query_succeeded": bool(
                 manifest_payload.get("live_query_succeeded", False)
             ),
+            "parameter_input": manifest_payload.get("parameter_input"),
             "combos": {},
         }
         for key, combo in combos.items():
             combo_data: dict[str, Any] = {"status": combo.get("status", "unknown")}
+            for field in parameter_lineage_fields:
+                combo_data[field] = combo.get(field)
             if phase == "phase3":
                 combo_data["live_query_succeeded"] = bool(
                     combo.get("live_query_succeeded", False)
@@ -1037,10 +1424,20 @@ def _enrich_round_from_manifest(
                     combo_data["attribution_summary"] = combo.get("attribution_summary")
                 if combo.get("top_failure_modes") is not None:
                     combo_data["top_failure_modes"] = combo.get("top_failure_modes")
-            elif phase == "phase4" and combo.get("cost_summary") is not None:
-                combo_data["cost_summary"] = combo.get("cost_summary")
+            elif phase == "phase4" and isinstance(
+                combo.get("cost_summary"), dict
+            ):
+                combo_data["cost_summary"] = _project_execution_cost_summary(
+                    combo["cost_summary"]
+                )
             enriched["combos"][key] = combo_data
         return enriched
+
+    if require_managed_db_truth:
+        return _rejected_round_projection(
+            "missing",
+            "round_snapshot_missing",
+        )
 
     round_dir = pathlib.Path(round_info.get("path", ""))
     manifest = _safe_load_json(round_dir / "round_manifest.json")
@@ -1051,14 +1448,18 @@ def _enrich_round_from_manifest(
         "round_id": round_info.get("round_id", round_dir.name),
         "started_at": round_info.get("started_at"),
         "status": round_info.get("status", manifest.get("overall_status", "unknown")),
+        "data_source": "file",
         "replay_only": bool(manifest.get("replay_only", False)),
         "live_query_succeeded": bool(manifest.get("live_query_succeeded", False)),
+        "parameter_input": manifest.get("parameter_input"),
         "combos": {},
     }
 
     for combo in manifest.get("combos", []):
         key = combo.get("key", "?")
         combo_data: dict[str, Any] = {"status": combo.get("status", "unknown")}
+        for field in parameter_lineage_fields:
+            combo_data[field] = combo.get(field)
         if phase == "phase3":
             combo_data["live_query_succeeded"] = bool(
                 combo.get("live_query_succeeded", False)
@@ -1080,15 +1481,10 @@ def _enrich_round_from_manifest(
                     combo_data["top_failure_modes"] = tfm
             elif phase == "phase4":
                 cost = _safe_load_json(run_path / "execution_cost_summary.json")
-                if cost:
-                    combo_data["cost_summary"] = {
-                        "total_candidates": cost.get("total_candidates", 0),
-                        "full_fill_ratio": cost.get("full_fill_ratio", 0),
-                        "slippage_mean": cost.get("slippage", {}).get("mean", 0),
-                        "total_cost_mean": cost.get("total_execution_cost", {}).get("mean", 0),
-                        "cost_adjusted_edge_mean": cost.get("cost_adjusted_edge", {}).get("mean", 0),
-                        "positive_edge_ratio": cost.get("positive_edge_ratio", 0),
-                    }
+                if isinstance(cost, dict) and cost:
+                    combo_data["cost_summary"] = (
+                        _project_execution_cost_summary(cost)
+                    )
 
         enriched["combos"][key] = combo_data
 
@@ -1099,10 +1495,20 @@ def collect_phase3_evidence(
     project_root: pathlib.Path,
     *,
     active_round_index: dict[str, Any] | None = None,
+    require_managed_db_truth: bool = False,
+    expected_round_id: str | None = None,
 ) -> dict[str, Any]:
+    require_db_truth = require_managed_db_truth or expected_round_id is not None
     evidence: dict[str, Any] = {
         "source": "phase3",
-        "evidence_source": "governance_index" if active_round_index else "directory_scan",
+        "evidence_source": _governance_evidence_source(active_round_index),
+        "governance_snapshot_data_source": _governance_snapshot_data_source(
+            active_round_index
+        ),
+        "round_snapshot_data_source": None,
+        "expected_round_id": expected_round_id,
+        "round_selection": "exact" if expected_round_id else "latest",
+        "round_selection_error": None,
         "round_count": 0,
         "trusted_round_count": 0,
         "skipped_untrusted": 0,
@@ -1112,17 +1518,58 @@ def collect_phase3_evidence(
 
     rounds: list[dict[str, Any]] = []
     if active_round_index:
-        trusted = _collect_round_evidence_from_index(active_round_index, "phase3")
-        evidence["trusted_round_count"] = len(trusted)
-        all_rounds = [
-            round_info for round_info in active_round_index.get("all_rounds", [])
-            if round_info.get("phase") == "phase3"
-        ]
+        trusted, all_rounds, selection_error = _select_round_evidence_from_index(
+            active_round_index,
+            phase="phase3",
+            expected_round_id=expected_round_id,
+        )
         evidence["round_count"] = len(all_rounds)
+        if (
+            require_db_truth
+            and not _is_canonical_governance_snapshot(active_round_index)
+        ):
+            evidence["skipped_untrusted"] = len(all_rounds)
+            evidence["round_selection_error"] = (
+                "active_round_index_not_db_truth"
+            )
+            return evidence
+        if selection_error is not None:
+            evidence["skipped_untrusted"] = len(all_rounds)
+            evidence["round_selection_error"] = selection_error
+            return evidence
+        evidence["trusted_round_count"] = len(trusted)
         evidence["skipped_untrusted"] = len(all_rounds) - len(trusted)
         for round_info in trusted:
-            rounds.append(_enrich_round_from_manifest(round_info, "phase3", project_root))
+            rounds.append(
+                _enrich_round_from_manifest(
+                    round_info,
+                    "phase3",
+                    project_root,
+                    require_managed_db_truth=require_db_truth,
+                )
+            )
+        if expected_round_id is not None and rounds:
+            selected = rounds[0]
+            selection_error = selected.get("selection_error")
+            if selected.get("round_id") != expected_round_id:
+                selection_error = "expected_round_snapshot_mismatch"
+            if selection_error:
+                evidence["round_snapshot_data_source"] = selected.get(
+                    "data_source"
+                )
+                evidence["round_selection_error"] = selection_error
+                evidence["trusted_round_count"] = 0
+                evidence["skipped_untrusted"] = len(all_rounds)
+                if selected.get("data_source") != "db":
+                    round_source = selected.get("data_source") or "unknown"
+                    evidence["evidence_source"] = (
+                        f"governance_index_round_{round_source}"
+                    )
+                return evidence
     else:
+        if expected_round_id is not None:
+            evidence["round_selection_error"] = "active_round_index_missing"
+            return evidence
         log.warning("active_round_index 不存在，Phase 3 fallback 到目录扫描")
         attr_root = project_root / "artifacts/research/attribution_rounds"
         if attr_root.exists():
@@ -1154,6 +1601,24 @@ def collect_phase3_evidence(
     if rounds:
         rounds.sort(key=lambda item: item.get("started_at") or "", reverse=True)
         evidence["latest_round"] = rounds[0]
+        evidence["round_snapshot_data_source"] = rounds[0].get("data_source")
+        if (
+            evidence["evidence_source"] == "governance_index"
+            and rounds[0].get("data_source") != "db"
+        ):
+            round_source = rounds[0].get("data_source") or "unknown"
+            evidence["evidence_source"] = (
+                f"governance_index_round_{round_source}"
+            )
+        if expected_round_id is not None:
+            if rounds[0].get("round_id") != expected_round_id:
+                evidence["round_selection_error"] = (
+                    "expected_round_snapshot_mismatch"
+                )
+            elif rounds[0].get("selection_error"):
+                evidence["round_selection_error"] = rounds[0][
+                    "selection_error"
+                ]
     return evidence
 
 
@@ -1161,10 +1626,20 @@ def collect_phase4_evidence(
     project_root: pathlib.Path,
     *,
     active_round_index: dict[str, Any] | None = None,
+    require_managed_db_truth: bool = False,
+    expected_round_id: str | None = None,
 ) -> dict[str, Any]:
+    require_db_truth = require_managed_db_truth or expected_round_id is not None
     evidence: dict[str, Any] = {
         "source": "phase4",
-        "evidence_source": "governance_index" if active_round_index else "directory_scan",
+        "evidence_source": _governance_evidence_source(active_round_index),
+        "governance_snapshot_data_source": _governance_snapshot_data_source(
+            active_round_index
+        ),
+        "round_snapshot_data_source": None,
+        "expected_round_id": expected_round_id,
+        "round_selection": "exact" if expected_round_id else "latest",
+        "round_selection_error": None,
         "round_count": 0,
         "trusted_round_count": 0,
         "skipped_untrusted": 0,
@@ -1174,17 +1649,58 @@ def collect_phase4_evidence(
 
     rounds: list[dict[str, Any]] = []
     if active_round_index:
-        trusted = _collect_round_evidence_from_index(active_round_index, "phase4")
-        evidence["trusted_round_count"] = len(trusted)
-        all_rounds = [
-            round_info for round_info in active_round_index.get("all_rounds", [])
-            if round_info.get("phase") == "phase4"
-        ]
+        trusted, all_rounds, selection_error = _select_round_evidence_from_index(
+            active_round_index,
+            phase="phase4",
+            expected_round_id=expected_round_id,
+        )
         evidence["round_count"] = len(all_rounds)
+        if (
+            require_db_truth
+            and not _is_canonical_governance_snapshot(active_round_index)
+        ):
+            evidence["skipped_untrusted"] = len(all_rounds)
+            evidence["round_selection_error"] = (
+                "active_round_index_not_db_truth"
+            )
+            return evidence
+        if selection_error is not None:
+            evidence["skipped_untrusted"] = len(all_rounds)
+            evidence["round_selection_error"] = selection_error
+            return evidence
+        evidence["trusted_round_count"] = len(trusted)
         evidence["skipped_untrusted"] = len(all_rounds) - len(trusted)
         for round_info in trusted:
-            rounds.append(_enrich_round_from_manifest(round_info, "phase4", project_root))
+            rounds.append(
+                _enrich_round_from_manifest(
+                    round_info,
+                    "phase4",
+                    project_root,
+                    require_managed_db_truth=require_db_truth,
+                )
+            )
+        if expected_round_id is not None and rounds:
+            selected = rounds[0]
+            selection_error = selected.get("selection_error")
+            if selected.get("round_id") != expected_round_id:
+                selection_error = "expected_round_snapshot_mismatch"
+            if selection_error:
+                evidence["round_snapshot_data_source"] = selected.get(
+                    "data_source"
+                )
+                evidence["round_selection_error"] = selection_error
+                evidence["trusted_round_count"] = 0
+                evidence["skipped_untrusted"] = len(all_rounds)
+                if selected.get("data_source") != "db":
+                    round_source = selected.get("data_source") or "unknown"
+                    evidence["evidence_source"] = (
+                        f"governance_index_round_{round_source}"
+                    )
+                return evidence
     else:
+        if expected_round_id is not None:
+            evidence["round_selection_error"] = "active_round_index_missing"
+            return evidence
         log.warning("active_round_index 不存在，Phase 4 fallback 到目录扫描")
         exec_root = project_root / "artifacts/research/execution_rounds"
         if exec_root.exists():
@@ -1216,10 +1732,32 @@ def collect_phase4_evidence(
     if rounds:
         rounds.sort(key=lambda item: item.get("started_at") or "", reverse=True)
         evidence["latest_round"] = rounds[0]
+        evidence["round_snapshot_data_source"] = rounds[0].get("data_source")
+        if (
+            evidence["evidence_source"] == "governance_index"
+            and rounds[0].get("data_source") != "db"
+        ):
+            round_source = rounds[0].get("data_source") or "unknown"
+            evidence["evidence_source"] = (
+                f"governance_index_round_{round_source}"
+            )
+        if expected_round_id is not None:
+            if rounds[0].get("round_id") != expected_round_id:
+                evidence["round_selection_error"] = (
+                    "expected_round_snapshot_mismatch"
+                )
+            elif rounds[0].get("selection_error"):
+                evidence["round_selection_error"] = rounds[0][
+                    "selection_error"
+                ]
     return evidence
 
 
-def collect_phase5_evidence(project_root: pathlib.Path) -> dict[str, Any]:
+def collect_phase5_evidence(
+    project_root: pathlib.Path,
+    *,
+    artifact_index: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     evidence: dict[str, Any] = {
         "source": "phase5_governance",
         "artifact_index_exists": False,
@@ -1232,10 +1770,12 @@ def collect_phase5_evidence(project_root: pathlib.Path) -> dict[str, Any]:
         "critical_failures": 0,
     }
 
-    artifact_index = load_governance_snapshot(
-        project_root,
-        snapshot_type=SNAPSHOT_ARTIFACT_INDEX,
-    )
+    if artifact_index is None:
+        artifact_index = load_governance_snapshot(
+            project_root,
+            snapshot_type=SNAPSHOT_ARTIFACT_INDEX,
+            require_managed_db_truth=True,
+        )
     if artifact_index:
         evidence["artifact_index_exists"] = True
         evidence["total_artifacts"] = artifact_index.get("summary", {}).get(
@@ -1271,6 +1811,7 @@ def collect_phase5_evidence(project_root: pathlib.Path) -> dict[str, Any]:
     quality_monitor = load_governance_snapshot(
         project_root,
         snapshot_type=SNAPSHOT_QUALITY_MONITOR,
+        require_managed_db_truth=True,
     )
     if isinstance(quality_monitor, dict):
         evidence["quality_monitor_exists"] = True
@@ -1281,30 +1822,65 @@ def collect_phase5_evidence(project_root: pathlib.Path) -> dict[str, Any]:
     return evidence
 
 
-def build_evidence_bundle(project_root: pathlib.Path) -> dict[str, Any]:
+def build_evidence_bundle(
+    project_root: pathlib.Path,
+    *,
+    expected_step2_round_id: str | None = None,
+    expected_phase3_round_id: str | None = None,
+    expected_phase4_round_id: str | None = None,
+    expected_symbol: str | None = None,
+) -> dict[str, Any]:
     artifact_index = load_governance_snapshot(
         project_root,
         snapshot_type=SNAPSHOT_ARTIFACT_INDEX,
+        require_managed_db_truth=True,
     )
     active_round_index = load_governance_snapshot(
         project_root,
         snapshot_type=SNAPSHOT_ACTIVE_ROUND_INDEX,
+        require_managed_db_truth=True,
     )
 
-    if artifact_index:
+    if _is_canonical_governance_snapshot(artifact_index):
         log.info("使用治理层 artifact_index 作为 Phase 2 证据来源")
+    elif artifact_index:
+        log.warning(
+            "artifact_index 来源=%s，仅供审计展示，不能标记为治理 DB 真值",
+            _governance_snapshot_data_source(artifact_index),
+        )
     else:
         log.warning("artifact_index.json 不存在，Phase 2 将 fallback 到目录扫描")
 
-    if active_round_index:
+    if _is_canonical_governance_snapshot(active_round_index):
         log.info("使用治理层 active_round_index 作为 Phase 3/4 证据来源")
+    elif active_round_index:
+        log.warning(
+            "active_round_index 来源=%s，仅供审计展示，不能标记为治理 DB 真值",
+            _governance_snapshot_data_source(active_round_index),
+        )
     else:
         log.warning("active_round_index.json 不存在，Phase 3/4 将 fallback 到目录扫描")
 
-    p2 = collect_phase2_evidence(project_root, artifact_index=artifact_index)
-    p3 = collect_phase3_evidence(project_root, active_round_index=active_round_index)
-    p4 = collect_phase4_evidence(project_root, active_round_index=active_round_index)
-    p5 = collect_phase5_evidence(project_root)
+    p2 = collect_phase2_evidence(
+        project_root,
+        artifact_index=artifact_index,
+        require_managed_db_truth=True,
+        expected_symbol=expected_symbol,
+        expected_step2_round_id=expected_step2_round_id,
+    )
+    p3 = collect_phase3_evidence(
+        project_root,
+        active_round_index=active_round_index,
+        require_managed_db_truth=True,
+        expected_round_id=expected_phase3_round_id,
+    )
+    p4 = collect_phase4_evidence(
+        project_root,
+        active_round_index=active_round_index,
+        require_managed_db_truth=True,
+        expected_round_id=expected_phase4_round_id,
+    )
+    p5 = collect_phase5_evidence(project_root, artifact_index=artifact_index)
 
     phases_with_data: list[str] = []
     if p2.get("experiment_count", 0) > 0 or p2.get("parameter_scan_count", 0) > 0:
@@ -1325,8 +1901,16 @@ def build_evidence_bundle(project_root: pathlib.Path) -> dict[str, Any]:
             "completeness_ratio": len(phases_with_data) / 4,
         },
         "governance_index_used": {
-            "artifact_index": artifact_index is not None,
-            "active_round_index": active_round_index is not None,
+            "artifact_index": _is_canonical_governance_snapshot(artifact_index),
+            "active_round_index": _is_canonical_governance_snapshot(
+                active_round_index
+            ),
+        },
+        "governance_index_data_source": {
+            "artifact_index": _governance_snapshot_data_source(artifact_index),
+            "active_round_index": _governance_snapshot_data_source(
+                active_round_index
+            ),
         },
         "phase2_evidence": p2,
         "phase3_evidence": p3,

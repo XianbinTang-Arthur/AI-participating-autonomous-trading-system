@@ -92,6 +92,105 @@ def test_strict_step2_empty_db_does_not_bootstrap_file(
     bootstrap.assert_not_called()
 
 
+def test_strict_exact_round_empty_db_does_not_bootstrap_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    round_dir = (
+        tmp_path
+        / "artifacts/research/execution_rounds/20260828_000000_deadbeef"
+    )
+    round_dir.mkdir(parents=True)
+    (round_dir / "round_manifest.json").write_text(
+        json.dumps(
+            {
+                "round_id": round_dir.name,
+                "phase": "phase4",
+                "status": "succeeded",
+            }
+        ),
+        encoding="utf-8",
+    )
+    _managed_empty_db(monkeypatch)
+    monkeypatch.setattr(
+        snapshot_db,
+        "db_load_research_round_snapshot",
+        lambda *_args, **_kwargs: None,
+    )
+    bootstrap = MagicMock()
+    monkeypatch.setattr(
+        snapshot_db,
+        "db_upsert_research_round_snapshot",
+        bootstrap,
+    )
+
+    payload = snapshot_db.load_research_round_snapshot(
+        round_id=round_dir.name,
+        project_root=tmp_path,
+        require_managed_db_truth=True,
+    )
+
+    assert payload is None
+    bootstrap.assert_not_called()
+
+
+def test_step3_file_can_never_lazy_bootstrap_over_producer_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    round_dir = (
+        tmp_path
+        / "artifacts/research/step3_rounds/20260828_000000_deadbeef"
+    )
+    round_dir.mkdir(parents=True)
+    (round_dir / "round_manifest.json").write_text(
+        json.dumps(
+            {
+                "round_id": round_dir.name,
+                "phase": "step3",
+                "status": "succeeded",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (round_dir / "parameter_candidates_merged.json").write_text(
+        json.dumps({"round_id": round_dir.name, "candidates": {}}),
+        encoding="utf-8",
+    )
+    _managed_empty_db(monkeypatch)
+    monkeypatch.setattr(
+        snapshot_db,
+        "db_load_research_round_snapshot",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        snapshot_db,
+        "db_load_latest_research_round_snapshot",
+        lambda *_args, **_kwargs: None,
+    )
+    bootstrap = MagicMock()
+    monkeypatch.setattr(
+        snapshot_db,
+        "db_upsert_research_round_snapshot",
+        bootstrap,
+    )
+
+    exact = snapshot_db.load_research_round_snapshot(
+        round_id=round_dir.name,
+        project_root=tmp_path,
+    )
+    latest = snapshot_db.load_latest_research_round_snapshot(
+        phase=snapshot_db.ROUND_PHASE_STEP3,
+        project_root=tmp_path,
+    )
+
+    assert exact is not None and exact["data_source"] == "file_untrusted"
+    assert latest is not None and latest["data_source"] == "file_untrusted"
+    assert exact["bootstrap_reason"] == "producer_managed_snapshot_required"
+    assert latest["bootstrap_reason"] == "producer_managed_snapshot_required"
+    bootstrap.assert_not_called()
+
+
 def test_strict_quality_snapshot_query_error_denies_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -107,6 +206,27 @@ def test_strict_quality_snapshot_query_error_denies_file(
         snapshot_db.load_governance_snapshot(
             tmp_path,
             snapshot_type=snapshot_db.SNAPSHOT_QUALITY_MONITOR,
+            require_managed_db_truth=True,
+        )
+
+
+def test_strict_exact_round_query_error_denies_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _managed_empty_db(monkeypatch)
+    monkeypatch.setattr(
+        snapshot_db,
+        "db_load_research_round_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("synthetic exact round read error")
+        ),
+    )
+
+    with pytest.raises(DBUnavailableError, match="stale file fallback denied"):
+        snapshot_db.load_research_round_snapshot(
+            round_id="20260828_000000_deadbeef",
+            project_root=tmp_path,
             require_managed_db_truth=True,
         )
 

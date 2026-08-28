@@ -25,11 +25,39 @@ from aats.data_platform.governance._db_util import (
     try_governance_db,
 )
 from aats.data_platform.governance._exceptions import (
+    DBConflictError,
     DBConstraintViolation,
     DBUnavailableError,
 )
+from aats.data_platform.governance.typed_json_identity import (
+    canonical_typed_json_bytes,
+    typed_json_sha256,
+)
 
 log = logging.getLogger(__name__)
+
+_STORAGE_MODE_FIELD = "_governance_storage_mode"
+_STORAGE_MODE_MANAGED_DB = "managed_db"
+_STORAGE_MODE_OFFLINE = "offline"
+_MISSING_FIELD = object()
+
+
+def _snapshot_fields(
+    record: dict[str, Any],
+    field_names: tuple[str, ...],
+) -> dict[str, Any]:
+    return {
+        field_name: record[field_name] if field_name in record else _MISSING_FIELD
+        for field_name in field_names
+    }
+
+
+def _restore_fields(record: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    for field_name, value in snapshot.items():
+        if value is _MISSING_FIELD:
+            record.pop(field_name, None)
+        else:
+            record[field_name] = value
 
 
 class RecommendationRegistryCASConflict(RuntimeError):
@@ -89,15 +117,59 @@ def _db_sync_recommendation(rec: dict[str, Any]) -> None:
             )
     except IntegrityError as exc:
         raise DBConstraintViolation(
-            f"recommendation {rec.get('recommendation_id')!r} violated DB constraint: {exc}"
+            "recommendation_write_constraint_violation: "
+            f"{rec.get('recommendation_id')!r}"
         ) from exc
     except OperationalError as exc:
         raise DBUnavailableError(
-            f"DB operational error while syncing recommendation {rec.get('recommendation_id')!r}: {exc}"
+            "recommendation_write_db_unavailable: "
+            f"{rec.get('recommendation_id')!r}"
         ) from exc
     finally:
         if engine is not None:
             engine.dispose()
+
+
+def _db_add_recommendation_atomic(rec: dict[str, Any]) -> dict[str, Any]:
+    """Commit one draft replacement and return the canonical DB snapshot."""
+
+    from sqlalchemy.exc import IntegrityError, OperationalError
+    from sqlalchemy.orm import Session
+
+    from aats.data_platform.governance.recommendations_db import (
+        db_insert_recommendation_superseding_drafts,
+        db_load_recommendation_registry,
+    )
+
+    engine, ok = try_governance_db()
+    if not ok or engine is None:
+        raise DBUnavailableError(
+            "governance DB unavailable while atomically adding recommendation"
+        )
+    try:
+        with Session(engine) as session, session.begin():
+            db_insert_recommendation_superseding_drafts(
+                session,
+                recommendation=rec,
+            )
+            canonical = db_load_recommendation_registry(session)
+            if not isinstance(canonical.get("recommendations"), list):
+                raise DBConstraintViolation(
+                    "recommendation_atomic_insert_readback_invalid"
+                )
+            return canonical
+    except DBConflictError:
+        raise
+    except IntegrityError as exc:
+        raise DBConstraintViolation(
+            "recommendation_atomic_insert_constraint_violation"
+        ) from exc
+    except OperationalError as exc:
+        raise DBUnavailableError(
+            "recommendation_atomic_insert_db_unavailable"
+        ) from exc
+    finally:
+        engine.dispose()
 
 
 def _db_update_rec_status(
@@ -163,16 +235,20 @@ def _db_update_rec_status(
                     "recommendation_type": rec.get("recommendation_type"),
                     "target_parameter_set_id": rec.get("target_parameter_set_id"),
                     "source_round_id": rec.get("source_round_id"),
+                    "confidence": rec.get("confidence"),
+                    "reason": rec.get("reason"),
                     "evidence_bundle_ref": rec.get("evidence_bundle_ref"),
                 },
             )
     except IntegrityError as exc:
         raise DBConstraintViolation(
-            f"recommendation {rec.get('recommendation_id')!r} status update violated constraint: {exc}"
+            "recommendation_status_constraint_violation: "
+            f"{rec.get('recommendation_id')!r}"
         ) from exc
     except OperationalError as exc:
         raise DBUnavailableError(
-            f"DB operational error while updating recommendation {rec.get('recommendation_id')!r}: {exc}"
+            "recommendation_status_db_unavailable: "
+            f"{rec.get('recommendation_id')!r}"
         ) from exc
     finally:
         if engine is not None:
@@ -182,6 +258,7 @@ def _db_update_rec_status(
 def _db_sync_active_decision(
     family: str, timeframe: str, current_status: str,
     active_parameter_set_id: str | None = None,
+    preserve_existing_active_parameter_set: bool = False,
     last_recommendation_id: str | None = None,
     notes: str | None = None,
 ) -> None:
@@ -206,6 +283,9 @@ def _db_sync_active_decision(
                 family=family, timeframe=timeframe,
                 current_status=current_status,
                 active_parameter_set_id=active_parameter_set_id,
+                preserve_existing_active_parameter_set=(
+                    preserve_existing_active_parameter_set
+                ),
                 last_recommendation_id=last_recommendation_id,
                 notes=notes,
             )
@@ -216,11 +296,11 @@ def _db_sync_active_decision(
                 )
     except IntegrityError as exc:
         raise DBConstraintViolation(
-            f"active_decision {family}/{timeframe} violated constraint: {exc}"
+            f"active_decision_constraint_violation: {family}/{timeframe}"
         ) from exc
     except OperationalError as exc:
         raise DBUnavailableError(
-            f"DB operational error while syncing active_decision {family}/{timeframe}: {exc}"
+            f"active_decision_db_unavailable: {family}/{timeframe}"
         ) from exc
     finally:
         if engine is not None:
@@ -365,6 +445,7 @@ def load_recommendation_registry(path: pathlib.Path, *, skip_db: bool = False) -
                 # DB 查询成功后，空表也是权威结果。不得让 JSON 审计副本复活已从
                 # DB 删除的 recommendation。version 仅用于随后刷新审计副本的 CAS。
                 registry["version"] = _read_disk_base_version(path)
+                registry[_STORAGE_MODE_FIELD] = _STORAGE_MODE_MANAGED_DB
                 return registry
             except Exception as exc:
                 if db_is_managed_truth:
@@ -385,9 +466,17 @@ def load_recommendation_registry(path: pathlib.Path, *, skip_db: bool = False) -
             )
 
     if not path.exists():
-        return {"generated_at": None, "recommendations": []}
+        return {
+            "generated_at": None,
+            "recommendations": [],
+            _STORAGE_MODE_FIELD: _STORAGE_MODE_OFFLINE,
+        }
     with path.open(encoding="utf-8") as f:
-        return json.load(f)
+        registry = json.load(f)
+    if not isinstance(registry, dict):
+        raise ValueError("recommendation registry must be a JSON object")
+    registry[_STORAGE_MODE_FIELD] = _STORAGE_MODE_OFFLINE
+    return registry
 
 
 def save_recommendation_registry(
@@ -449,7 +538,15 @@ def save_recommendation_registry(
 
     registry["generated_at"] = datetime.now(timezone.utc).isoformat()
     registry["version"] = expected_base_version + 1
-    atomic_json_write(registry, path)
+    # Storage routing is request-local metadata.  Persisting it would let a
+    # copied audit mirror dictate the next process' trust mode, so the disk
+    # payload deliberately excludes it.
+    disk_payload = {
+        key: value
+        for key, value in registry.items()
+        if key != _STORAGE_MODE_FIELD
+    }
+    atomic_json_write(disk_payload, path)
     log.info("保存 recommendation registry -> %s (v%d, %d items)",
              path, registry["version"], len(registry.get("recommendations", [])))
 
@@ -565,6 +662,10 @@ def create_recommendation(
     evidence_bundle_ref: str | None = None,
     status: str = "draft",
 ) -> dict[str, Any]:
+    if status != "draft":
+        raise ValueError(
+            "recommendation 初始 status 只能为 draft；终态必须通过专用 CAS 流程"
+        )
     return {
         "recommendation_id": _make_recommendation_id(),
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -596,57 +697,80 @@ def add_recommendation(
 
     已 approved / rejected 等终态记录不受影响。
     """
-    new_family = rec.get("family")
-    new_symbol = rec.get("symbol")
-    new_tf = rec.get("timeframe")
-    new_type = rec.get("recommendation_type")
     new_id = rec.get("recommendation_id")
+    storage_mode = registry.get(_STORAGE_MODE_FIELD)
+    if storage_mode not in {_STORAGE_MODE_MANAGED_DB, _STORAGE_MODE_OFFLINE}:
+        storage_mode = (
+            _STORAGE_MODE_MANAGED_DB
+            if has_explicit_governance_db_configuration()
+            else _STORAGE_MODE_OFFLINE
+        )
+    managed_db = storage_mode == _STORAGE_MODE_MANAGED_DB
 
+    immutable_fields = (
+        "family",
+        "symbol",
+        "timeframe",
+        "recommendation_type",
+        "target_parameter_set_id",
+        "source_round_id",
+        "confidence",
+        "reason",
+        "evidence_bundle_ref",
+    )
     for existing in registry.get("recommendations", []):
-        if (
-            existing.get("status") == "draft"
-            and existing.get("family") == new_family
-            and existing.get("symbol") == new_symbol
-            and existing.get("timeframe") == new_tf
-            and existing.get("recommendation_type") == new_type
-        ):
-            # CAS 语义：只有 DB 里此 rec 仍处于 draft 时才推进成 superseded。
-            # 如果另一个 operator 已经 approve/reject 掉了它，我们绝不能把
-            # 已批准的 rec 覆盖成 superseded——保留 rollback 快照，在 DB
-            # 返回 False（并发抢先）时回滚内存，让 JSON 与 DB 保持一致。
-            prev_snapshot = {
-                "status": existing["status"],
-                "superseded_at": existing.get("superseded_at"),
-                "superseded_by": existing.get("superseded_by"),
-                "superseded_by_recommendation_id": existing.get(
-                    "superseded_by_recommendation_id",
-                ),
-            }
+        if existing.get("recommendation_id") != new_id:
+            continue
+        if any(existing.get(field) != rec.get(field) for field in immutable_fields):
+            raise DBConflictError("recommendation_immutable_identity_conflict")
+        if rec.get("status", "draft") == "draft" and managed_db:
+            _db_sync_recommendation(rec)
+        elif existing.get("status") != rec.get("status"):
+            raise DBConflictError("recommendation_lifecycle_conflict")
+        return
+
+    if rec.get("status", "draft") != "draft":
+        raise ValueError(
+            "新增 recommendation 必须为 draft；禁止绕过审批状态机"
+        )
+    terminal_audit_fields = (
+        "approved_by",
+        "approved_at",
+        "rejected_by",
+        "rejected_at",
+        "superseded_by",
+        "superseded_at",
+        "superseded_by_recommendation_id",
+    )
+    if any(rec.get(field) is not None for field in terminal_audit_fields):
+        raise ValueError("draft recommendation 不能携带终态审计字段")
+
+    if managed_db:
+        canonical = _db_add_recommendation_atomic(rec)
+        registry["recommendations"] = canonical["recommendations"]
+        registry[_STORAGE_MODE_FIELD] = _STORAGE_MODE_MANAGED_DB
+        return
+
+    # Explicit file-only development mode keeps the legacy local state
+    # machine.  The subsequent save_recommendation_registry() version CAS is
+    # the concurrency boundary; managed deployments never enter this branch.
+    new_scope = tuple(
+        rec.get(field)
+        for field in ("family", "symbol", "timeframe", "recommendation_type")
+    )
+    superseded_at = rec.get("created_at") or datetime.now(timezone.utc).isoformat()
+    for existing in registry.get("recommendations", []):
+        existing_scope = tuple(
+            existing.get(field)
+            for field in ("family", "symbol", "timeframe", "recommendation_type")
+        )
+        if existing.get("status") == "draft" and existing_scope == new_scope:
             existing["status"] = "superseded"
-            existing["superseded_at"] = rec.get("created_at")
+            existing["superseded_at"] = superseded_at
             existing["superseded_by"] = "system"
             existing["superseded_by_recommendation_id"] = new_id
-            try:
-                db_result = _db_update_rec_status(
-                    existing, expected_current_status="draft",
-                )
-            except DBUnavailableError:
-                for key, value in prev_snapshot.items():
-                    existing[key] = value
-                raise
-            if db_result is False:
-                for key, value in prev_snapshot.items():
-                    existing[key] = value
-                log.warning(
-                    "add_recommendation: existing rec %s 状态已被其他进程抢先"
-                    "改写（非 draft），跳过自动 supersede 以避免覆盖 approved/rejected",
-                    existing.get("recommendation_id"),
-                )
-
-    # A-0.3：DB 真源写入成功后才 append 到内存并落审计副本，否则 DB 不可达时
-    # 内存里会残留一条 DB 无法回放的 recommendation，产生 split-brain。
-    _db_sync_recommendation(rec)
     registry.setdefault("recommendations", []).append(rec)
+    registry[_STORAGE_MODE_FIELD] = _STORAGE_MODE_OFFLINE
 
 
 def find_recommendation(
@@ -701,12 +825,10 @@ def approve_recommendation(
 
     # 保留 rollback 快照，DB 返回 False（竞态）时回滚内存状态，保证 JSON 与
     # DB 在并发情况下仍然一致。
-    prev_snapshot = {
-        "status": rec["status"],
-        "approved_by": rec.get("approved_by"),
-        "approved_at": rec.get("approved_at"),
-        "review_notes": rec.get("review_notes"),
-    }
+    prev_snapshot = _snapshot_fields(
+        rec,
+        ("status", "approved_by", "approved_at", "review_notes"),
+    )
     rec["status"] = "approved"
     rec["approved_by"] = approved_by
     rec["approved_at"] = datetime.now(timezone.utc).isoformat()
@@ -715,14 +837,12 @@ def approve_recommendation(
     try:
         db_result = _db_update_rec_status(rec, expected_current_status="draft")
     except (DBUnavailableError, DBConstraintViolation):
-        for key, value in prev_snapshot.items():
-            rec[key] = value
+        _restore_fields(rec, prev_snapshot)
         raise
     if db_result is False:
         # 并发：另一 operator 已经抢先转移了状态，回滚本次修改，让 JSON 保持
         # 与 DB 一致；调用方收到 None 后应提示"状态已被他人改写"。
-        for key, value in prev_snapshot.items():
-            rec[key] = value
+        _restore_fields(rec, prev_snapshot)
         log.warning(
             "approve: recommendation %s 状态被其他进程抢先改写，已回滚内存状态",
             recommendation_id,
@@ -751,12 +871,10 @@ def reject_recommendation(
         )
         return None
 
-    prev_snapshot = {
-        "status": rec["status"],
-        "rejected_by": rec.get("rejected_by"),
-        "rejected_at": rec.get("rejected_at"),
-        "review_notes": rec.get("review_notes"),
-    }
+    prev_snapshot = _snapshot_fields(
+        rec,
+        ("status", "rejected_by", "rejected_at", "review_notes"),
+    )
     rec["status"] = "rejected"
     rec["rejected_by"] = rejected_by
     rec["rejected_at"] = datetime.now(timezone.utc).isoformat()
@@ -764,13 +882,11 @@ def reject_recommendation(
         rec["review_notes"] = notes
     try:
         db_result = _db_update_rec_status(rec, expected_current_status="draft")
-    except DBUnavailableError:
-        for key, value in prev_snapshot.items():
-            rec[key] = value
+    except (DBUnavailableError, DBConstraintViolation):
+        _restore_fields(rec, prev_snapshot)
         raise
     if db_result is False:
-        for key, value in prev_snapshot.items():
-            rec[key] = value
+        _restore_fields(rec, prev_snapshot)
         log.warning(
             "reject: recommendation %s 状态被其他进程抢先改写，已回滚内存状态",
             recommendation_id,
@@ -809,13 +925,16 @@ def supersede_recommendation(
         )
         return None
 
-    prev_snapshot = {
-        "status": rec["status"],
-        "superseded_at": rec.get("superseded_at"),
-        "superseded_by": rec.get("superseded_by"),
-        "superseded_by_recommendation_id": rec.get("superseded_by_recommendation_id"),
-        "review_notes": rec.get("review_notes"),
-    }
+    prev_snapshot = _snapshot_fields(
+        rec,
+        (
+            "status",
+            "superseded_at",
+            "superseded_by",
+            "superseded_by_recommendation_id",
+            "review_notes",
+        ),
+    )
     rec["status"] = "superseded"
     rec["superseded_at"] = datetime.now(timezone.utc).isoformat()
     rec["superseded_by"] = actor
@@ -827,13 +946,11 @@ def supersede_recommendation(
         db_result = _db_update_rec_status(
             rec, expected_current_status=("draft", "approved"),
         )
-    except DBUnavailableError:
-        for key, value in prev_snapshot.items():
-            rec[key] = value
+    except (DBUnavailableError, DBConstraintViolation):
+        _restore_fields(rec, prev_snapshot)
         raise
     if db_result is False:
-        for key, value in prev_snapshot.items():
-            rec[key] = value
+        _restore_fields(rec, prev_snapshot)
         log.warning(
             "supersede: recommendation %s 状态被其他进程抢先改写，已回滚内存状态",
             recommendation_id,
@@ -873,6 +990,7 @@ def load_active_decision_registry(path: pathlib.Path, *, skip_db: bool = False) 
                     "从数据库加载 active decision registry (%d decisions)",
                     len(registry["decisions"]),
                 )
+                registry[_STORAGE_MODE_FIELD] = _STORAGE_MODE_MANAGED_DB
                 return registry
             except Exception as exc:
                 if db_is_managed_truth:
@@ -893,9 +1011,17 @@ def load_active_decision_registry(path: pathlib.Path, *, skip_db: bool = False) 
             )
 
     if not path.exists():
-        return {"generated_at": None, "decisions": []}
+        return {
+            "generated_at": None,
+            "decisions": [],
+            _STORAGE_MODE_FIELD: _STORAGE_MODE_OFFLINE,
+        }
     with path.open(encoding="utf-8") as f:
-        return json.load(f)
+        registry = json.load(f)
+    if not isinstance(registry, dict):
+        raise ValueError("active decision registry must be a JSON object")
+    registry[_STORAGE_MODE_FIELD] = _STORAGE_MODE_OFFLINE
+    return registry
 
 
 def save_active_decision_registry(
@@ -905,7 +1031,14 @@ def save_active_decision_registry(
 
     registry["generated_at"] = datetime.now(timezone.utc).isoformat()
     registry["version"] = registry.get("version", 0) + 1
-    atomic_json_write(registry, path)
+    atomic_json_write(
+        {
+            key: value
+            for key, value in registry.items()
+            if key != _STORAGE_MODE_FIELD
+        },
+        path,
+    )
     log.info("保存 active decision registry -> %s (v%d, %d items)",
              path, registry["version"], len(registry.get("decisions", [])))
 
@@ -918,10 +1051,18 @@ def upsert_active_decision(
     timeframe: str,
     current_status: str,
     active_parameter_set_id: str | None = None,
+    preserve_existing_active_parameter_set: bool = False,
     last_recommendation_id: str | None = None,
     notes: str | None = None,
 ) -> None:
     """更新或插入 family/timeframe 的 active decision."""
+    storage_mode = registry.get(_STORAGE_MODE_FIELD)
+    if storage_mode not in {_STORAGE_MODE_MANAGED_DB, _STORAGE_MODE_OFFLINE}:
+        storage_mode = (
+            _STORAGE_MODE_MANAGED_DB
+            if has_explicit_governance_db_configuration()
+            else _STORAGE_MODE_OFFLINE
+        )
     decisions = registry.setdefault("decisions", [])
     # timeframe 归一到小写一次，所有查找/写入/下游 DB 同步都走同一份，
     # 否则 "1H" / "1h" 会在 existing-match 阶段错位：combo_key 走小写但
@@ -947,10 +1088,27 @@ def upsert_active_decision(
     prev_snapshot: dict[str, Any] | None = None
     appended_index: int | None = None
 
+    effective_active_parameter_set_id = active_parameter_set_id
+    if (
+        preserve_existing_active_parameter_set
+        and active_parameter_set_id is not None
+    ):
+        raise ValueError(
+            "active_decision_preserve_parameter_set_cannot_replace"
+        )
+    if preserve_existing_active_parameter_set:
+        effective_active_parameter_set_id = (
+            existing.get("active_parameter_set_id")
+            if existing is not None
+            else None
+        )
+
     if existing:
         prev_snapshot = dict(existing)
         existing["current_status"] = current_status
-        existing["active_parameter_set_id"] = active_parameter_set_id
+        existing["active_parameter_set_id"] = (
+            effective_active_parameter_set_id
+        )
         existing["last_recommendation_id"] = last_recommendation_id
         existing["last_updated_at"] = now
         existing["timeframe"] = timeframe_norm
@@ -965,36 +1123,47 @@ def upsert_active_decision(
             "timeframe": timeframe_norm,
             "combo_key": combo_key,
             "current_status": current_status,
-            "active_parameter_set_id": active_parameter_set_id,
+            "active_parameter_set_id": effective_active_parameter_set_id,
             "last_recommendation_id": last_recommendation_id,
             "last_updated_at": now,
             "notes": notes,
         })
 
-    try:
-        _db_sync_active_decision(
-            family, timeframe_norm, current_status,
-            active_parameter_set_id=active_parameter_set_id,
-            last_recommendation_id=last_recommendation_id,
-            notes=notes,
-        )
-    except DBUnavailableError:
-        if existing is not None and prev_snapshot is not None:
-            existing.clear()
-            existing.update(prev_snapshot)
-        elif appended_index is not None:
-            # 防御性：并发 upsert 可能插入了新 entry，删除前检查索引仍指向我们 append
-            # 的那一行（它会是最后一条，因为我们刚 append 完）。
-            if appended_index < len(decisions):
-                decisions.pop(appended_index)
-        raise
+    if storage_mode == _STORAGE_MODE_MANAGED_DB:
+        try:
+            _db_sync_active_decision(
+                family, timeframe_norm, current_status,
+                active_parameter_set_id=active_parameter_set_id,
+                preserve_existing_active_parameter_set=(
+                    preserve_existing_active_parameter_set
+                ),
+                last_recommendation_id=last_recommendation_id,
+                notes=notes,
+            )
+        except (DBUnavailableError, DBConstraintViolation):
+            if existing is not None and prev_snapshot is not None:
+                existing.clear()
+                existing.update(prev_snapshot)
+            elif appended_index is not None:
+                # 防御性：删除本次 append 的行，不把 DB 失败伪装成内存成功。
+                if appended_index < len(decisions):
+                    decisions.pop(appended_index)
+            raise
+    registry[_STORAGE_MODE_FIELD] = storage_mode
 
 
 # ── Evidence Bundle Index ────────────────────────────────────────────
 
 
-def load_evidence_bundle_index(path: pathlib.Path) -> dict[str, Any]:
-    engine, ok = try_governance_db()
+def load_evidence_bundle_index(
+    path: pathlib.Path,
+    *,
+    skip_db: bool = False,
+) -> dict[str, Any]:
+    engine = None
+    ok = False
+    if not skip_db:
+        engine, ok = try_governance_db()
     if ok:
         try:
             from sqlalchemy.orm import Session
@@ -1005,17 +1174,30 @@ def load_evidence_bundle_index(path: pathlib.Path) -> dict[str, Any]:
 
             with Session(engine) as session:
                 registry = db_load_decision_evidence_bundle_index(session)
-            if registry.get("bundles"):
+            if isinstance(registry, dict):
+                registry.setdefault("bundles", [])
+                registry[_STORAGE_MODE_FIELD] = _STORAGE_MODE_MANAGED_DB
                 return registry
         except Exception as exc:
-            log.warning("evidence_bundle_index: DB read failed (%s), fallback to file", exc)
+            log.warning(
+                "evidence_bundle_index: DB read failed (%s), fallback to file",
+                type(exc).__name__,
+            )
         finally:
             if engine is not None:
                 engine.dispose()
     if not path.exists():
-        return {"generated_at": None, "bundles": []}
+        return {
+            "generated_at": None,
+            "bundles": [],
+            _STORAGE_MODE_FIELD: _STORAGE_MODE_OFFLINE,
+        }
     with path.open(encoding="utf-8") as f:
-        return json.load(f)
+        registry = json.load(f)
+    if not isinstance(registry, dict):
+        raise ValueError("evidence bundle index must be a JSON object")
+    registry[_STORAGE_MODE_FIELD] = _STORAGE_MODE_OFFLINE
+    return registry
 
 
 def save_evidence_bundle_index(
@@ -1024,7 +1206,16 @@ def save_evidence_bundle_index(
     from aats.data_platform.governance._atomic_io import atomic_json_write
 
     index["generated_at"] = datetime.now(timezone.utc).isoformat()
-    atomic_json_write(index, path)
+    atomic_json_write(
+        {
+            key: value
+            for key, value in index.items()
+            if key != _STORAGE_MODE_FIELD
+        },
+        path,
+    )
+    if index.get(_STORAGE_MODE_FIELD) == _STORAGE_MODE_OFFLINE:
+        return
     engine, ok = try_governance_db()
     if not ok:
         return
@@ -1039,7 +1230,10 @@ def save_evidence_bundle_index(
             for bundle in index.get("bundles", []):
                 db_upsert_decision_evidence_bundle(session, bundle)
     except Exception as exc:
-        log.warning("evidence_bundle_index: DB sync failed (%s)", exc)
+        log.warning(
+            "evidence_bundle_index: DB sync failed (%s)",
+            type(exc).__name__,
+        )
     finally:
         if engine is not None:
             engine.dispose()
@@ -1065,6 +1259,653 @@ def register_evidence_bundle(
 # ── 从 decision round 结果批量更新 ──────────────────────────────────
 
 
+def _build_round_recommendations(
+    *,
+    round_id: str,
+    upgrade_candidates: list[dict[str, Any]],
+    ft_decisions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Materialize the exact draft set owned by one decision round."""
+
+    recommendations: list[dict[str, Any]] = []
+    for candidate in upgrade_candidates:
+        candidate_decision = candidate.get("decision")
+        if candidate_decision not in {"promote_candidate", "reject"}:
+            continue
+        recommendations.append(
+            create_recommendation(
+                family=candidate["family"],
+                timeframe=candidate["timeframe"],
+                recommendation_type=(
+                    "parameter_upgrade"
+                    if candidate_decision == "promote_candidate"
+                    else "pause"
+                ),
+                target_parameter_set_id=candidate.get("parameter_set_id"),
+                source_round_id=candidate.get("source_round_id"),
+                confidence=candidate.get("confidence", "low"),
+                reason=candidate.get("reason", ""),
+                evidence_bundle_ref=round_id,
+            )
+        )
+
+    for decision in ft_decisions:
+        recommendation_type = decision.get("decision", "require_review")
+        if recommendation_type not in RECOMMENDATION_TYPES:
+            continue
+        recommendations.append(
+            create_recommendation(
+                family=decision["family"],
+                timeframe=decision["timeframe"],
+                recommendation_type=recommendation_type,
+                confidence=decision.get("confidence", "low"),
+                reason="; ".join(decision.get("reasons", [])),
+                evidence_bundle_ref=round_id,
+            )
+        )
+    return recommendations
+
+
+_CONTROL_PLANE_PUBLICATION_FIELD = "control_plane_publication"
+_RECOMMENDATION_PUBLICATION_IDENTITY_FIELDS = (
+    "recommendation_id",
+    "created_at",
+    "family",
+    "symbol",
+    "timeframe",
+    "recommendation_type",
+    "target_parameter_set_id",
+    "source_round_id",
+    "confidence",
+    "reason",
+    "evidence_bundle_ref",
+)
+
+
+def _canonical_json_value(value: Any) -> Any:
+    """Match the canonical JSON projection stored by the snapshot DB layer."""
+
+    return json.loads(canonical_typed_json_bytes(value).decode("utf-8"))
+
+
+def _canonical_publication_timestamp(value: str, *, context: str) -> str:
+    from aats.data_platform.governance._time_util import (
+        parse_iso_datetime_utc,
+    )
+
+    parsed = parse_iso_datetime_utc(value, context=context)
+    if parsed is None:
+        raise ValueError(f"{context}_required")
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _recommendation_publication_identity(
+    recommendation: dict[str, Any],
+    *,
+    producer_index: int | None = None,
+) -> dict[str, Any]:
+    identity = {
+        field: recommendation.get(field)
+        for field in _RECOMMENDATION_PUBLICATION_IDENTITY_FIELDS
+    }
+    identity["timeframe"] = str(identity.get("timeframe") or "").lower()
+    identity["symbol"] = str(
+        identity.get("symbol") or "BTC-USDT-SWAP"
+    ).upper()
+    if identity.get("created_at") is not None:
+        identity["created_at"] = _canonical_publication_timestamp(
+            str(identity["created_at"]),
+            context="decision_round.recommendation.created_at",
+        )
+    if producer_index is not None:
+        identity["producer_index"] = producer_index
+    return _canonical_json_value(identity)
+
+
+def _materialize_managed_round_recommendations(
+    *,
+    round_id: str,
+    finished_at: str,
+    upgrade_candidates: list[dict[str, Any]],
+    ft_decisions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build deterministic recommendation identities for a managed round."""
+
+    recommendations = _build_round_recommendations(
+        round_id=round_id,
+        upgrade_candidates=upgrade_candidates,
+        ft_decisions=ft_decisions,
+    )
+    for producer_index, recommendation in enumerate(recommendations):
+        recommendation["created_at"] = finished_at
+        identity_seed = {
+            "schema_version": "aats.phase6.recommendation_identity.v1",
+            "round_id": round_id,
+            "producer_index": producer_index,
+            "recommendation": {
+                field: recommendation.get(field)
+                for field in _RECOMMENDATION_PUBLICATION_IDENTITY_FIELDS
+                if field not in {"recommendation_id", "created_at"}
+            },
+        }
+        digest = typed_json_sha256(identity_seed)
+        recommendation["recommendation_id"] = f"rec_{digest}"
+    return recommendations
+
+
+def _build_control_plane_publication(
+    *,
+    round_id: str,
+    recommendations: list[dict[str, Any]],
+    upgrade_candidates: list[dict[str, Any]],
+    ft_decisions: list[dict[str, Any]],
+    bundle_entry: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Build the immutable mapping between snapshot and mutable control plane."""
+
+    promoted_by_combo: dict[str, str] = {}
+    for candidate in upgrade_candidates:
+        if candidate.get("decision") != "promote_candidate":
+            continue
+        combo_key = (
+            f"{candidate['family']}_"
+            f"{str(candidate['timeframe']).lower()}"
+        )
+        parameter_set_id = candidate.get("parameter_set_id")
+        if not isinstance(parameter_set_id, str) or not parameter_set_id:
+            raise ValueError(
+                f"promote_candidate_parameter_set_id_required:{combo_key}"
+            )
+        if combo_key in promoted_by_combo:
+            raise ValueError(
+                f"duplicate_promote_candidate_for_combo:{combo_key}"
+            )
+        promoted_by_combo[combo_key] = parameter_set_id
+
+    last_recommendation_by_combo: dict[str, str] = {}
+    recommendation_mapping: list[dict[str, Any]] = []
+    for producer_index, recommendation in enumerate(recommendations):
+        combo_key = (
+            f"{recommendation['family']}_"
+            f"{str(recommendation['timeframe']).lower()}"
+        )
+        last_recommendation_by_combo[combo_key] = str(
+            recommendation["recommendation_id"]
+        )
+        recommendation_mapping.append(
+            _recommendation_publication_identity(
+                recommendation,
+                producer_index=producer_index,
+            )
+        )
+
+    active_mapping: list[dict[str, Any]] = []
+    seen_active_combos: set[str] = set()
+    for decision in sorted(
+        ft_decisions,
+        key=lambda item: (
+            str(item.get("family") or "").lower(),
+            str(item.get("timeframe") or "").lower(),
+        ),
+    ):
+        family = str(decision.get("family") or "")
+        timeframe = str(decision.get("timeframe") or "").lower()
+        if not family or not timeframe:
+            raise ValueError("active_decision_identity_invalid")
+        current_status = decision.get("decision")
+        if not isinstance(current_status, str) or not current_status:
+            raise ValueError("active_decision_status_invalid")
+        combo_key = f"{family}_{timeframe}"
+        if combo_key in seen_active_combos:
+            raise ValueError(f"duplicate_active_decision_combo:{combo_key}")
+        seen_active_combos.add(combo_key)
+        replaces_parameter_set = combo_key in promoted_by_combo
+        active_mapping.append(
+            {
+                "family": family,
+                "symbol": str(
+                    decision.get("symbol") or "BTC-USDT-SWAP"
+                ).upper(),
+                "timeframe": timeframe,
+                "combo_key": combo_key,
+                "current_status": current_status,
+                "active_parameter_set_policy": (
+                    "replace_from_promote_candidate"
+                    if replaces_parameter_set
+                    else "preserve_existing"
+                ),
+                "active_parameter_set_id": promoted_by_combo.get(combo_key),
+                "last_recommendation_id": (
+                    last_recommendation_by_combo.get(combo_key)
+                ),
+                "notes": f"Decision round {round_id}",
+            }
+        )
+
+    publication = {
+        "schema_version": "aats.phase6.control_plane_publication.v1",
+        "recommendations": recommendation_mapping,
+        "active_decisions": active_mapping,
+        "evidence_bundle": _canonical_json_value(bundle_entry),
+    }
+    return _canonical_json_value(publication), promoted_by_combo
+
+
+def _expected_managed_round_snapshot(
+    *,
+    round_id: str,
+    started_at: str,
+    finished_at: str,
+    evidence_bundle: dict[str, Any],
+    upgrade_candidates: list[dict[str, Any]],
+    ft_decisions: list[dict[str, Any]],
+    readiness_report: dict[str, Any],
+    manifest: dict[str, Any],
+    conclusion_markdown: str,
+) -> dict[str, Any]:
+    return {
+        "round_id": round_id,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "evidence_bundle_summary": _canonical_json_value(evidence_bundle),
+        "parameter_upgrade_candidates": _canonical_json_value(
+            upgrade_candidates
+        ),
+        "family_timeframe_decisions": _canonical_json_value(ft_decisions),
+        "promotion_readiness_assessment": _canonical_json_value(
+            readiness_report
+        ),
+        "manifest": _canonical_json_value(manifest),
+        "conclusion_markdown": conclusion_markdown,
+    }
+
+
+def _typed_publication_digest(snapshot_identity: dict[str, Any]) -> str:
+    """Hash JSON with Python numeric types preserved (``1`` != ``1.0``)."""
+
+    return typed_json_sha256(snapshot_identity)
+
+
+def planned_registry_stats(
+    *,
+    upgrade_candidates: list[dict[str, Any]],
+    ft_decisions: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Return deterministic publication counts without mutating a truth source."""
+
+    recommendation_count = sum(
+        candidate.get("decision") in {"promote_candidate", "reject"}
+        for candidate in upgrade_candidates
+    ) + sum(
+        decision.get("decision", "require_review") in RECOMMENDATION_TYPES
+        for decision in ft_decisions
+    )
+    return {
+        "recommendations_added": int(recommendation_count),
+        "decisions_updated": len(ft_decisions),
+        "bundles_registered": 1,
+    }
+
+
+def publish_managed_decision_round(
+    *,
+    round_id: str,
+    started_at: str,
+    finished_at: str,
+    upgrade_candidates: list[dict[str, Any]],
+    ft_decisions: list[dict[str, Any]],
+    evidence_bundle: dict[str, Any],
+    evidence_summary_path: str,
+    readiness_report: dict[str, Any],
+    manifest: dict[str, Any],
+    conclusion_markdown: str,
+) -> dict[str, int]:
+    """Publish every canonical Phase 6 record in one DB transaction.
+
+    The immutable decision snapshot is the commit marker. Draft replacement,
+    active-decision CAS and the evidence-bundle row share its transaction, so
+    any failure rolls back the complete round. Managed JSON registries are
+    repairable audit mirrors and intentionally do not participate in this
+    PostgreSQL control-plane transaction.
+    """
+
+    from sqlalchemy.exc import IntegrityError, OperationalError
+    from sqlalchemy.orm import Session
+
+    from aats.data_platform.governance.decision_rounds_db import (
+        db_acquire_decision_round_publication_lock,
+        db_load_decision_round_snapshot,
+        db_upsert_decision_round_snapshot,
+    )
+    from aats.data_platform.governance.operational_state_db import (
+        db_get_decision_evidence_bundle,
+        db_insert_decision_evidence_bundle,
+    )
+    from aats.data_platform.governance.recommendations_db import (
+        db_find_recommendations_for_evidence_bundle,
+        db_insert_recommendation_superseding_drafts,
+        db_upsert_active_decision,
+    )
+
+    if (
+        not isinstance(round_id, str)
+        or not round_id.strip()
+        or len(round_id) > 128
+    ):
+        raise ValueError("decision_round_publication_round_id_invalid")
+    started_at_canonical = _canonical_publication_timestamp(
+        started_at,
+        context="decision_round.started_at",
+    )
+    finished_at_canonical = _canonical_publication_timestamp(
+        finished_at,
+        context="decision_round.finished_at",
+    )
+    if datetime.fromisoformat(finished_at_canonical) < datetime.fromisoformat(
+        started_at_canonical
+    ):
+        raise ValueError("decision_round_finished_before_started")
+    recommendations = _materialize_managed_round_recommendations(
+        round_id=round_id,
+        finished_at=finished_at_canonical,
+        upgrade_candidates=upgrade_candidates,
+        ft_decisions=ft_decisions,
+    )
+    stats = planned_registry_stats(
+        upgrade_candidates=upgrade_candidates,
+        ft_decisions=ft_decisions,
+    )
+    completeness = evidence_bundle.get("evidence_completeness", {})
+    bundle_entry = {
+        "round_id": round_id,
+        "evidence_summary_path": evidence_summary_path,
+        "phases_with_data": list(completeness.get("phases_with_data", [])),
+        "completeness_ratio": float(
+            completeness.get("completeness_ratio", 0) or 0.0
+        ),
+        "created_at": finished_at_canonical,
+    }
+    control_plane_publication, promoted_by_combo = (
+        _build_control_plane_publication(
+            round_id=round_id,
+            recommendations=recommendations,
+            upgrade_candidates=upgrade_candidates,
+            ft_decisions=ft_decisions,
+            bundle_entry=bundle_entry,
+        )
+    )
+
+    publication_manifest = _canonical_json_value(manifest)
+    if not isinstance(publication_manifest, dict):
+        raise ValueError("decision_round_manifest_invalid")
+    supplied_mapping = publication_manifest.get(
+        _CONTROL_PLANE_PUBLICATION_FIELD
+    )
+    if (
+        supplied_mapping is not None
+        and _typed_publication_digest({"value": supplied_mapping})
+        != _typed_publication_digest({"value": control_plane_publication})
+    ):
+        raise DBConflictError(
+            "decision_round_control_plane_publication_identity_conflict"
+        )
+    publication_manifest[_CONTROL_PLANE_PUBLICATION_FIELD] = (
+        control_plane_publication
+    )
+    supplied_digest = publication_manifest.pop(
+        "publication_identity_sha256",
+        None,
+    )
+    digest_identity = _expected_managed_round_snapshot(
+        round_id=round_id,
+        started_at=started_at_canonical,
+        finished_at=finished_at_canonical,
+        evidence_bundle=evidence_bundle,
+        upgrade_candidates=upgrade_candidates,
+        ft_decisions=ft_decisions,
+        readiness_report=readiness_report,
+        manifest=publication_manifest,
+        conclusion_markdown=conclusion_markdown,
+    )
+    publication_digest = _typed_publication_digest(digest_identity)
+    if supplied_digest is not None and supplied_digest != publication_digest:
+        raise DBConflictError(
+            "decision_round_publication_digest_conflict"
+        )
+    publication_manifest["publication_identity_sha256"] = (
+        publication_digest
+    )
+    expected_snapshot = _expected_managed_round_snapshot(
+        round_id=round_id,
+        started_at=started_at_canonical,
+        finished_at=finished_at_canonical,
+        evidence_bundle=evidence_bundle,
+        upgrade_candidates=upgrade_candidates,
+        ft_decisions=ft_decisions,
+        readiness_report=readiness_report,
+        manifest=publication_manifest,
+        conclusion_markdown=conclusion_markdown,
+    )
+
+    engine, ok = try_governance_db()
+    if not ok or engine is None:
+        raise DBUnavailableError("decision_round_managed_db_unavailable")
+    try:
+        with Session(engine) as session, session.begin():
+            db_acquire_decision_round_publication_lock(
+                session,
+                round_id=round_id,
+            )
+            existing_snapshot = db_load_decision_round_snapshot(
+                session,
+                round_id=round_id,
+            )
+            if existing_snapshot is not None:
+                existing_manifest = existing_snapshot.get("manifest")
+                if not isinstance(existing_manifest, dict):
+                    raise DBConflictError(
+                        "decision_round_publication_identity_conflict"
+                    )
+                existing_digest = existing_manifest.get(
+                    "publication_identity_sha256"
+                )
+                existing_digest_manifest = dict(existing_manifest)
+                existing_digest_manifest.pop(
+                    "publication_identity_sha256",
+                    None,
+                )
+                existing_digest_identity = dict(existing_snapshot)
+                existing_digest_identity["manifest"] = (
+                    existing_digest_manifest
+                )
+                if (
+                    existing_digest != publication_digest
+                    or _typed_publication_digest(existing_digest_identity)
+                    != existing_digest
+                    or _typed_publication_digest(existing_snapshot)
+                    != _typed_publication_digest(expected_snapshot)
+                ):
+                    raise DBConflictError(
+                        "decision_round_publication_identity_conflict"
+                    )
+
+                actual_bundle = db_get_decision_evidence_bundle(
+                    session,
+                    round_id=round_id,
+                )
+                if (
+                    actual_bundle is None
+                    or _typed_publication_digest({"value": actual_bundle})
+                    != _typed_publication_digest(
+                        {"value": bundle_entry}
+                    )
+                ):
+                    raise DBConflictError(
+                        "decision_round_evidence_bundle_identity_conflict"
+                    )
+
+                actual_recommendations = (
+                    db_find_recommendations_for_evidence_bundle(
+                        session,
+                        evidence_bundle_ref=round_id,
+                    )
+                )
+                actual_by_id = {
+                    str(item.get("recommendation_id")): item
+                    for item in actual_recommendations
+                }
+                expected_recommendations = control_plane_publication[
+                    "recommendations"
+                ]
+                if set(actual_by_id) != {
+                    str(item["recommendation_id"])
+                    for item in expected_recommendations
+                }:
+                    raise DBConflictError(
+                        "decision_round_recommendation_mapping_conflict"
+                    )
+                for expected_recommendation in expected_recommendations:
+                    recommendation_id = str(
+                        expected_recommendation["recommendation_id"]
+                    )
+                    actual_recommendation = actual_by_id.get(
+                        recommendation_id
+                    )
+                    if actual_recommendation is None:
+                        raise DBConflictError(
+                            "decision_round_recommendation_mapping_conflict"
+                        )
+                    actual_identity = _recommendation_publication_identity(
+                        actual_recommendation,
+                        producer_index=int(
+                            expected_recommendation["producer_index"]
+                        ),
+                    )
+                    if (
+                        _typed_publication_digest({"value": actual_identity})
+                        != _typed_publication_digest(
+                            {"value": expected_recommendation}
+                        )
+                    ):
+                        raise DBConflictError(
+                            "decision_round_recommendation_mapping_conflict"
+                        )
+                # active_decisions is deliberately not compared here: it is a
+                # mutable head and may have advanced after this immutable round.
+                # The snapshot mapping records the operation originally made.
+            else:
+                indexed_recommendations = list(enumerate(recommendations))
+                indexed_recommendations.sort(
+                    key=lambda item: (
+                        str(item[1].get("family") or "").lower(),
+                        str(
+                            item[1].get("symbol") or "BTC-USDT-SWAP"
+                        ).upper(),
+                        str(item[1].get("timeframe") or "").lower(),
+                        str(item[1].get("recommendation_type") or ""),
+                        item[0],
+                    )
+                )
+                for _index, recommendation in indexed_recommendations:
+                    db_insert_recommendation_superseding_drafts(
+                        session,
+                        recommendation=recommendation,
+                    )
+
+                for active_publication in control_plane_publication[
+                    "active_decisions"
+                ]:
+                    combo_key = str(active_publication["combo_key"])
+                    replaces_parameter_set = (
+                        active_publication["active_parameter_set_policy"]
+                        == "replace_from_promote_candidate"
+                    )
+                    updated = db_upsert_active_decision(
+                        session,
+                        family=str(active_publication["family"]),
+                        symbol=str(active_publication["symbol"]),
+                        timeframe=str(active_publication["timeframe"]),
+                        current_status=str(
+                            active_publication["current_status"]
+                        ),
+                        active_parameter_set_id=(
+                            promoted_by_combo.get(combo_key)
+                        ),
+                        preserve_existing_active_parameter_set=(
+                            not replaces_parameter_set
+                        ),
+                        last_recommendation_id=(
+                            active_publication["last_recommendation_id"]
+                        ),
+                        notes=str(active_publication["notes"]),
+                    )
+                    if updated is not True:
+                        # An automatic round may never clear a sticky safety
+                        # pause. Any mismatch aborts every round write.
+                        raise DBConflictError(
+                            "active_decision_sticky_pause_conflict:"
+                            f"{combo_key}"
+                        )
+
+                db_insert_decision_evidence_bundle(session, bundle_entry)
+                db_upsert_decision_round_snapshot(
+                    session,
+                    round_id=round_id,
+                    started_at=started_at_canonical,
+                    finished_at=finished_at_canonical,
+                    evidence_bundle_summary=expected_snapshot[
+                        "evidence_bundle_summary"
+                    ],
+                    parameter_upgrade_candidates=expected_snapshot[
+                        "parameter_upgrade_candidates"
+                    ],
+                    family_timeframe_decisions=expected_snapshot[
+                        "family_timeframe_decisions"
+                    ],
+                    promotion_readiness_assessment=expected_snapshot[
+                        "promotion_readiness_assessment"
+                    ],
+                    manifest=publication_manifest,
+                    conclusion_markdown=conclusion_markdown,
+                )
+                stored_snapshot = db_load_decision_round_snapshot(
+                    session,
+                    round_id=round_id,
+                )
+                if (
+                    stored_snapshot is None
+                    or _typed_publication_digest(stored_snapshot)
+                    != _typed_publication_digest(expected_snapshot)
+                ):
+                    raise DBConflictError(
+                        "decision_round_publication_commit_marker_conflict"
+                    )
+        manifest.clear()
+        manifest.update(publication_manifest)
+        return stats
+    except DBConflictError:
+        raise
+    except IntegrityError as exc:
+        raise DBConstraintViolation(
+            "decision_round_atomic_publication_constraint_violation"
+        ) from exc
+    except OperationalError as exc:
+        raise DBUnavailableError(
+            "decision_round_atomic_publication_db_unavailable"
+        ) from exc
+    finally:
+        try:
+            engine.dispose()
+        except Exception as exc:  # pragma: no cover - defensive pool cleanup
+            # The transaction outcome is already canonical.  Pool cleanup is
+            # not a business write and must not turn a committed round into a
+            # false process failure.
+            log.warning(
+                "decision_round_engine_dispose_degraded failure_type=%s",
+                type(exc).__name__,
+            )
+
+
 def update_registries_from_round(
     *,
     round_id: str,
@@ -1075,6 +1916,7 @@ def update_registries_from_round(
     decision_registry_path: pathlib.Path,
     bundle_index_path: pathlib.Path,
     evidence_summary_path: str,
+    offline_only: bool = False,
 ) -> dict[str, int]:
     """从 decision round 结果批量更新三个 registry.
 
@@ -1085,50 +1927,48 @@ def update_registries_from_round(
     stats = {"recommendations_added": 0, "decisions_updated": 0, "bundles_registered": 0}
 
     # 1. Recommendation registry
-    rec_reg = load_recommendation_registry(rec_registry_path)
+    rec_reg = (
+        load_recommendation_registry(rec_registry_path, skip_db=True)
+        if offline_only
+        else load_recommendation_registry(rec_registry_path)
+    )
+    if rec_reg.get(_STORAGE_MODE_FIELD) == _STORAGE_MODE_MANAGED_DB:
+        raise RuntimeError(
+            "managed decision rounds require publish_managed_decision_round"
+        )
 
-    for uc in upgrade_candidates:
-        # 只为有明确 decision 的参数创建 recommendation
-        if uc.get("decision") in ("promote_candidate", "reject"):
-            rec_type = "parameter_upgrade" if uc["decision"] == "promote_candidate" else "pause"
-            rec = create_recommendation(
-                family=uc["family"],
-                timeframe=uc["timeframe"],
-                recommendation_type=rec_type,
-                target_parameter_set_id=uc.get("parameter_set_id"),
-                source_round_id=uc.get("source_round_id"),
-                confidence=uc.get("confidence", "low"),
-                reason=uc.get("reason", ""),
-                evidence_bundle_ref=round_id,
-            )
-            add_recommendation(rec_reg, rec)
-            stats["recommendations_added"] += 1
-
-    for ftd in ft_decisions:
-        rec_type = ftd.get("decision", "require_review")
-        if rec_type in RECOMMENDATION_TYPES:
-            rec = create_recommendation(
-                family=ftd["family"],
-                timeframe=ftd["timeframe"],
-                recommendation_type=rec_type,
-                confidence=ftd.get("confidence", "low"),
-                reason="; ".join(ftd.get("reasons", [])),
-                evidence_bundle_ref=round_id,
-            )
-            add_recommendation(rec_reg, rec)
-            stats["recommendations_added"] += 1
+    for recommendation in _build_round_recommendations(
+        round_id=round_id,
+        upgrade_candidates=upgrade_candidates,
+        ft_decisions=ft_decisions,
+    ):
+        add_recommendation(rec_reg, recommendation)
+        stats["recommendations_added"] += 1
 
     save_recommendation_registry(rec_reg, rec_registry_path)
 
     # 2. Active decision registry
-    dec_reg = load_active_decision_registry(decision_registry_path)
+    dec_reg = (
+        load_active_decision_registry(decision_registry_path, skip_db=True)
+        if offline_only
+        else load_active_decision_registry(decision_registry_path)
+    )
 
     # 参数升级建议 → 关联 parameter_set_id
     promoted_by_ft: dict[str, str] = {}
     for uc in upgrade_candidates:
         if uc.get("decision") == "promote_candidate":
             ft_key = f"{uc['family']}_{uc['timeframe'].lower()}"
-            promoted_by_ft[ft_key] = uc.get("parameter_set_id", "")
+            parameter_set_id = uc.get("parameter_set_id")
+            if not isinstance(parameter_set_id, str) or not parameter_set_id:
+                raise ValueError(
+                    f"promote_candidate_parameter_set_id_required:{ft_key}"
+                )
+            if ft_key in promoted_by_ft:
+                raise ValueError(
+                    f"duplicate_promote_candidate_for_combo:{ft_key}"
+                )
+            promoted_by_ft[ft_key] = parameter_set_id
 
     last_rec_ids: dict[str, str] = {}
     for rec in rec_reg.get("recommendations", []):
@@ -1136,13 +1976,16 @@ def update_registries_from_round(
         last_rec_ids[ft_key] = rec["recommendation_id"]
 
     for ftd in ft_decisions:
-        ft_key = ftd.get("combo_key", "")
+        ft_key = f"{ftd['family']}_{str(ftd['timeframe']).lower()}"
         upsert_active_decision(
             dec_reg,
             family=ftd["family"],
             timeframe=ftd["timeframe"],
             current_status=ftd["decision"],
             active_parameter_set_id=promoted_by_ft.get(ft_key),
+            preserve_existing_active_parameter_set=(
+                ft_key not in promoted_by_ft
+            ),
             last_recommendation_id=last_rec_ids.get(ft_key),
             notes=f"Decision round {round_id}",
         )
@@ -1151,7 +1994,11 @@ def update_registries_from_round(
     save_active_decision_registry(dec_reg, decision_registry_path)
 
     # 3. Evidence bundle index
-    bi = load_evidence_bundle_index(bundle_index_path)
+    bi = (
+        load_evidence_bundle_index(bundle_index_path, skip_db=True)
+        if offline_only
+        else load_evidence_bundle_index(bundle_index_path)
+    )
     completeness = evidence_bundle.get("evidence_completeness", {})
     register_evidence_bundle(
         bi,

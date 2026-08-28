@@ -132,7 +132,7 @@ def load_strategy_tuning_registry(project_root: Path) -> dict[str, Any]:
         except Exception as exc:
             log.warning(
                 "strategy tuning registry: DB 读取失败 (%s)，回落 JSON 副本",
-                exc,
+                type(exc).__name__,
             )
             stale_reason = "db_read_failed"
         finally:
@@ -215,9 +215,12 @@ def save_strategy_tuning_registry(project_root: Path, registry: dict[str, Any]) 
                     if isinstance(proposal, dict):
                         db_upsert_strategy_tuning_proposal(session, proposal)
         except Exception as exc:
-            log.exception("strategy tuning registry DB 同步失败，保存未完成")
+            log.error(
+                "strategy tuning registry DB 同步失败，保存未完成 (%s)",
+                type(exc).__name__,
+            )
             raise RuntimeError(
-                f"strategy tuning registry DB 同步失败，状态未持久化到真源: {exc}"
+                "strategy tuning registry DB 同步失败，状态未持久化到真源"
             ) from exc
         finally:
             if engine is not None:
@@ -256,7 +259,10 @@ def load_strategy_tuning_overrides(project_root: Path) -> dict[str, Any]:
             with Session(engine) as session:
                 payload = db_load_strategy_tuning_overrides(session)
         except Exception as exc:
-            log.warning("strategy tuning overrides: DB 读取失败 (%s)", exc)
+            log.warning(
+                "strategy tuning overrides: DB 读取失败 (%s)",
+                type(exc).__name__,
+            )
             payload = None
         # 无 engine.dispose()：cached engine 的连接池需保活
 

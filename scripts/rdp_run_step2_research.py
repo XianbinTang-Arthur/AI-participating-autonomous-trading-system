@@ -38,15 +38,28 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import pathlib
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from aats.data_platform.governance._atomic_io import (
+    atomic_json_write,
+    immutable_json_write,
+)
+from aats.data_platform.governance._db_util import (
+    has_explicit_governance_db_configuration,
+)
+from aats.data_platform.governance.research_artifact_contract import (
+    validate_calibration_batch_summary,
+    validate_scan_comparison,
+)
 from aats.data_platform.governance.snapshot_db import (
     ROUND_PHASE_STEP2,
     save_research_round_snapshot,
@@ -61,6 +74,9 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 log = logging.getLogger("rdp_step2_research")
+
+_STEP2_RESULT_PREFIX = "RDP_STEP2_RESULT_JSON="
+_PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # =========================================================================
 # Step 2 固定范围 & 定义
@@ -275,11 +291,168 @@ _DEFAULT_SCAN_DEFS: dict[str, dict[str, Any]] = {
 }
 
 _DEFAULT_ARTIFACT_ROOT = pathlib.Path("artifacts/research/step2_rounds")
+_EXPECTED_STEP2_CALIBRATION_KEYS = (
+    "independent_1h",
+    "directional_15m",
+    "directional_1h",
+)
+_EXPECTED_STEP2_SCAN_KEYS = (
+    "independent_15m",
+    "independent_1h",
+    "directional_15m",
+    "directional_1h",
+)
+_EXPECTED_STEP2_COMBO_KEYS = frozenset(_EXPECTED_STEP2_CALIBRATION_KEYS)
+_EXPECTED_STEP2_CALIBRATION_TOPOLOGY = {
+    key: (
+        str(_CALIBRATION_DEFS[key]["family"]),
+        str(_CALIBRATION_DEFS[key]["timeframe"]),
+        tuple(str(batch["key"]) for batch in _CALIBRATION_DEFS[key]["batches"]),
+    )
+    for key in _EXPECTED_STEP2_CALIBRATION_KEYS
+}
+_EXPECTED_STEP2_SCAN_TOPOLOGY = {
+    "independent_15m": ("independent", "15m"),
+    "independent_1h": ("independent", "1H"),
+    "directional_15m": ("directional", "15m"),
+    "directional_1h": ("directional", "1H"),
+}
+_BATCH_RUN_ID_RE = re.compile(r"^\d{8}_\d{6}_[0-9a-f]{8}$")
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _normalize_dataset_version(value: str | None) -> str:
     normalized = (value or "v1.0").strip()
     return "v1.0" if normalized == "v1" else normalized
+
+
+def _result_set_is_exact_and_succeeded(
+    results: list[dict[str, Any]],
+    *,
+    key_field: str,
+    expected_keys: tuple[str, ...],
+    expected_topology: dict[str, tuple[Any, ...]],
+) -> bool:
+    keys = [item.get(key_field) for item in results]
+    if not (
+        len(results) == len(expected_keys)
+        and all(isinstance(key, str) and key for key in keys)
+        and len(set(keys)) == len(keys)
+        and set(keys) == set(expected_keys)
+        and all(item.get("status") == "succeeded" for item in results)
+    ):
+        return False
+    for item in results:
+        key = str(item[key_field])
+        expected = expected_topology[key]
+        if item.get("family") != expected[0] or item.get("timeframe") != expected[1]:
+            return False
+        if key_field == "round_key":
+            batches = item.get("batch_results")
+            if batches is None:
+                batches = item.get("batches")
+            if not isinstance(batches, list) or not all(
+                isinstance(batch, dict) for batch in batches
+            ):
+                return False
+            batch_keys = [
+                batch.get("_key", batch.get("key")) for batch in batches
+            ]
+            if (
+                len(batch_keys) != len(expected[2])
+                or len(set(batch_keys)) != len(batch_keys)
+                or set(batch_keys) != set(expected[2])
+                or any(batch.get("status") != "succeeded" for batch in batches)
+                or any(
+                    not isinstance(batch.get("batch_run_id"), str)
+                    or _BATCH_RUN_ID_RE.fullmatch(batch["batch_run_id"]) is None
+                    or not isinstance(batch.get("batch_dir"), str)
+                    or not isinstance(batch.get("summary_sha256"), str)
+                    or _SHA256_RE.fullmatch(batch["summary_sha256"]) is None
+                    or type(batch.get("summary_size_bytes")) is not int
+                    or batch["summary_size_bytes"] <= 0
+                    or type(batch.get("total_experiments")) is not int
+                    or type(batch.get("succeeded")) is not int
+                    or type(batch.get("failed")) is not int
+                    or batch["total_experiments"] <= 0
+                    or batch["succeeded"] != batch["total_experiments"]
+                    or batch["failed"] != 0
+                    for batch in batches
+                )
+            ):
+                return False
+        else:
+            if (
+                not isinstance(item.get("scan_run_id"), str)
+                or _UUID_RE.fullmatch(item["scan_run_id"]) is None
+                or not isinstance(item.get("scan_dir"), str)
+                or not isinstance(item.get("comparison_sha256"), str)
+                or _SHA256_RE.fullmatch(item["comparison_sha256"]) is None
+                or type(item.get("comparison_size_bytes")) is not int
+                or item["comparison_size_bytes"] <= 0
+                or not isinstance(item.get("window"), dict)
+                or not isinstance(item.get("dataset_version"), str)
+                or not isinstance(item.get("grid_sha256"), str)
+                or _SHA256_RE.fullmatch(item["grid_sha256"]) is None
+                or type(item.get("total_combinations")) is not int
+                or type(item.get("completed_count")) is not int
+                or type(item.get("failed_count")) is not int
+                or item["total_combinations"] <= 0
+                or item["completed_count"] != item["total_combinations"]
+                or item["failed_count"] != 0
+            ):
+                return False
+    return True
+
+
+def _determine_step2_round_status(
+    *,
+    calibration_results: list[dict[str, Any]],
+    scan_results: list[dict[str, Any]],
+    parameter_candidates_payload: dict[str, Any],
+    start: str | None,
+    end: str | None,
+) -> str:
+    """Return status only from an exact, unique Step 2 evidence topology."""
+
+    all_results = [*calibration_results, *scan_results]
+    if all_results and all(item.get("status") == "failed" for item in all_results):
+        return "failed"
+    calibration_complete = _result_set_is_exact_and_succeeded(
+        calibration_results,
+        key_field="round_key",
+        expected_keys=_EXPECTED_STEP2_CALIBRATION_KEYS,
+        expected_topology=_EXPECTED_STEP2_CALIBRATION_TOPOLOGY,
+    )
+    scan_complete = _result_set_is_exact_and_succeeded(
+        scan_results,
+        key_field="scan_key",
+        expected_keys=_EXPECTED_STEP2_SCAN_KEYS,
+        expected_topology=_EXPECTED_STEP2_SCAN_TOPOLOGY,
+    )
+    candidates = parameter_candidates_payload.get("candidates")
+    pending_validation = parameter_candidates_payload.get("pending_validation")
+    candidate_complete = bool(
+        isinstance(candidates, dict)
+        and set(candidates) == _EXPECTED_STEP2_COMBO_KEYS
+        and all(isinstance(values, dict) and values for values in candidates.values())
+        and isinstance(pending_validation, list)
+        and not pending_validation
+    )
+    if (
+        calibration_complete
+        and scan_complete
+        and isinstance(start, str)
+        and bool(start.strip())
+        and isinstance(end, str)
+        and bool(end.strip())
+        and candidate_complete
+    ):
+        return "succeeded"
+    return "partial_success"
 
 # =========================================================================
 # 1. 子进程：Calibration Batch
@@ -301,14 +474,21 @@ def _run_batch(
     start: str | None = None,
     end: str | None = None,
     dataset_version: str | None = None,
+    expected_family: str | None = None,
+    expected_timeframe: str | None = None,
 ) -> dict[str, Any]:
     """通过子进程调用 rdp_run_calibration_batch.py 运行单个 batch。"""
-    existing = _list_subdirs(batch_artifact_root)
+    result_sidecar = (
+        batch_artifact_root.parent
+        / "batch_results"
+        / f"{uuid4().hex}.json"
+    )
 
     cmd = [
         sys.executable, "scripts/rdp_run_calibration_batch.py",
         "--batch-file", str(batch_file),
         "--artifact-root", str(batch_artifact_root),
+        "--result-json", str(result_sidecar),
         "--no-print-summary",
     ]
     if ensure_schema:
@@ -323,43 +503,156 @@ def _run_batch(
         cmd.extend(["--dataset-version", _normalize_dataset_version(dataset_version)])
 
     log.info("  CMD: %s", " ".join(cmd))
-    proc = subprocess.run(cmd, capture_output=True)
+    proc = subprocess.run(cmd)
 
-    new_dirs = _list_subdirs(batch_artifact_root) - existing
-    if not new_dirs:
-        stderr_raw = proc.stderr or b""
-        stderr_tail = stderr_raw[-500:].decode("utf-8", errors="replace")
+    try:
+        result_payload = json.loads(result_sidecar.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return {
             "status": "failed",
             "exit_code": proc.returncode,
             "batch_run_id": None,
             "batch_dir": None,
             "summary": None,
-            "error": f"No artifact dir created. exit={proc.returncode}. {stderr_tail}",
+            "error": "calibration_batch_result_missing_or_invalid",
+        }
+    if not isinstance(result_payload, dict):
+        return {
+            "status": "failed",
+            "exit_code": proc.returncode,
+            "batch_run_id": None,
+            "batch_dir": None,
+            "summary": None,
+            "error": "calibration_batch_result_missing_or_invalid",
+        }
+    expected_status = {0: "succeeded", 2: "partial_success", 3: "failed"}.get(
+        proc.returncode
+    )
+    batch_run_id = result_payload.get("batch_run_id")
+    batch_dir_raw = result_payload.get("batch_dir")
+    summary_path_raw = result_payload.get("summary_path")
+    summary_sha256 = result_payload.get("summary_sha256")
+    summary_size_bytes = result_payload.get("summary_size_bytes")
+    try:
+        batch_spec = json.loads(pathlib.Path(batch_file).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        batch_spec = None
+    if (
+        result_payload.get("schema_version")
+        != "aats.calibration_batch_result.v1"
+        or expected_status is None
+        or result_payload.get("status") != expected_status
+        or not isinstance(batch_run_id, str)
+        or _BATCH_RUN_ID_RE.fullmatch(batch_run_id) is None
+        or not isinstance(batch_dir_raw, str)
+        or not isinstance(summary_path_raw, str)
+        or not isinstance(summary_sha256, str)
+        or _SHA256_RE.fullmatch(summary_sha256) is None
+        or type(summary_size_bytes) is not int
+        or not isinstance(batch_spec, dict)
+        or result_payload.get("batch_name") != batch_spec.get("batch_name")
+        or result_payload.get("family")
+        != (expected_family or batch_spec.get("family"))
+        or result_payload.get("symbol") != _SYMBOL
+        or result_payload.get("timeframe")
+        != (expected_timeframe or batch_spec.get("timeframe"))
+        or result_payload.get("dataset_version")
+        != _normalize_dataset_version(
+            dataset_version or batch_spec.get("dataset_version", "v1.0")
+        )
+        or result_payload.get("window")
+        != {
+            "start": start or batch_spec.get("start"),
+            "end": end or batch_spec.get("end"),
+        }
+    ):
+        return {
+            "status": "failed",
+            "exit_code": proc.returncode,
+            "batch_run_id": None,
+            "batch_dir": None,
+            "summary": None,
+            "error": "calibration_batch_result_contract_invalid",
+        }
+    batch_dir = pathlib.Path(batch_dir_raw)
+    summary_file = pathlib.Path(summary_path_raw)
+    expected_batch_dir = batch_artifact_root.resolve() / batch_run_id
+    expected_summary_file = expected_batch_dir / "batch_summary.json"
+    try:
+        if batch_dir.is_symlink() or summary_file.is_symlink():
+            raise ValueError
+        resolved_batch_dir = batch_dir.resolve(strict=True)
+        resolved_summary_file = summary_file.resolve(strict=True)
+        summary_bytes = resolved_summary_file.read_bytes()
+        summary = json.loads(summary_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        return {
+            "status": "failed",
+            "exit_code": proc.returncode,
+            "batch_run_id": None,
+            "batch_dir": None,
+            "summary": None,
+            "error": "calibration_batch_artifact_invalid",
+        }
+    if (
+        resolved_batch_dir != expected_batch_dir
+        or resolved_summary_file != expected_summary_file
+        or not isinstance(summary, dict)
+        or len(summary_bytes) != summary_size_bytes
+        or hashlib.sha256(summary_bytes).hexdigest() != summary_sha256
+        or summary.get("batch_run_id") != batch_run_id
+        or summary.get("batch_name") != result_payload.get("batch_name")
+        or summary.get("family") != result_payload.get("family")
+        or summary.get("symbol") != result_payload.get("symbol")
+        or summary.get("timeframe") != result_payload.get("timeframe")
+        or summary.get("dataset_version") != result_payload.get("dataset_version")
+        or summary.get("window")
+        != f"{result_payload['window']['start']} ~ {result_payload['window']['end']}"
+        or summary.get("total_experiments")
+        != result_payload.get("total_experiments")
+        or summary.get("succeeded") != result_payload.get("succeeded")
+        or summary.get("failed") != result_payload.get("failed")
+    ):
+        return {
+            "status": "failed",
+            "exit_code": proc.returncode,
+            "batch_run_id": None,
+            "batch_dir": None,
+            "summary": None,
+            "error": "calibration_batch_summary_identity_invalid",
+        }
+    try:
+        validate_calibration_batch_summary(
+            summary,
+            expected_counts=(
+                result_payload.get("total_experiments"),
+                result_payload.get("succeeded"),
+                result_payload.get("failed"),
+            ),
+            expected_status=expected_status,
+            expected_experiments=batch_spec.get("experiments"),
+        )
+    except ValueError:
+        return {
+            "status": "failed",
+            "exit_code": proc.returncode,
+            "batch_run_id": None,
+            "batch_dir": None,
+            "summary": None,
+            "error": "calibration_batch_summary_semantics_invalid",
         }
 
-    batch_run_id = sorted(new_dirs)[-1]
-    batch_dir = batch_artifact_root / batch_run_id
-
-    summary_file = batch_dir / "batch_summary.json"
-    summary: dict[str, Any] | None = None
-    if summary_file.exists():
-        with summary_file.open(encoding="utf-8") as f:
-            summary = json.load(f)
-
-    if proc.returncode == 0:
-        status = "succeeded"
-    elif proc.returncode == 2:
-        status = "partial_success"
-    else:
-        status = "failed"
-
     return {
-        "status": status,
+        "status": expected_status,
         "exit_code": proc.returncode,
         "batch_run_id": batch_run_id,
-        "batch_dir": str(batch_dir),
+        "batch_dir": str(resolved_batch_dir),
         "summary": summary,
+        "summary_sha256": summary_sha256,
+        "summary_size_bytes": summary_size_bytes,
+        "total_experiments": result_payload["total_experiments"],
+        "succeeded": result_payload["succeeded"],
+        "failed": result_payload["failed"],
         "error": None,
     }
 
@@ -400,6 +693,8 @@ def _run_calibration_round(
             start=start,
             end=end,
             dataset_version=dataset_version,
+            expected_family=family,
+            expected_timeframe=timeframe,
         )
         result["_key"] = bdef["key"]
 
@@ -419,14 +714,21 @@ def _run_calibration_round(
             break
 
     n_ok = sum(1 for b in batch_results if b["status"] == "succeeded")
+    n_partial = sum(1 for b in batch_results if b["status"] == "partial_success")
     n_fail = sum(1 for b in batch_results if b["status"] == "failed")
+    if n_fail > 0 and n_ok == 0 and n_partial == 0:
+        round_status = "failed"
+    elif n_fail > 0 or n_partial > 0:
+        round_status = "partial_success"
+    else:
+        round_status = "succeeded"
 
     return {
         "round_key": round_key,
         "family": family,
         "timeframe": timeframe,
         "batch_results": batch_results,
-        "status": "succeeded" if n_fail == 0 else ("failed" if n_ok == 0 else "partial_success"),
+        "status": round_status,
     }
 
 
@@ -439,6 +741,7 @@ def _run_scan(
     scan_key: str,
     scan_def: dict[str, Any],
     *,
+    result_root: pathlib.Path,
     ensure_schema: bool = False,
 ) -> dict[str, Any]:
     """通过子进程调用 rdp_run_parameter_scan.py 运行正式 scan。"""
@@ -457,6 +760,15 @@ def _run_scan(
     start = scan_def.get("start", "2026-03-31")
     end = scan_def.get("end", "2026-04-02")
     dataset_version = _normalize_dataset_version(scan_def.get("dataset_version", "v1.0"))
+    result_sidecar = result_root / f"{scan_key}.json"
+    canonical_grid = json.dumps(
+        grid,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    expected_grid_sha256 = hashlib.sha256(canonical_grid).hexdigest()
 
     cmd = [
         sys.executable, "scripts/rdp_run_parameter_scan.py",
@@ -467,23 +779,18 @@ def _run_scan(
         "--end", end,
         "--dataset-version", dataset_version,
         "--grid", json.dumps(grid, ensure_ascii=False),
+        "--result-json", str(result_sidecar),
     ]
     if ensure_schema:
         cmd.append("--ensure-schema")
 
     log.info("    CMD: %s", " ".join(cmd))
 
-    # 在 scan 之前记录已有目录
     scan_artifact_root = pathlib.Path("artifacts/research/experiments")
-    existing = _list_subdirs(scan_artifact_root)
-
-    proc = subprocess.run(cmd, capture_output=True)
-
-    # 发现新目录
-    new_dirs = _list_subdirs(scan_artifact_root) - existing
-    if not new_dirs:
-        stderr_raw = proc.stderr or b""
-        stderr_tail = stderr_raw[-500:].decode("utf-8", errors="replace")
+    proc = subprocess.run(cmd)
+    try:
+        result_payload = json.loads(result_sidecar.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return {
             "scan_key": scan_key,
             "family": family,
@@ -493,30 +800,161 @@ def _run_scan(
             "scan_run_id": None,
             "scan_dir": None,
             "comparison": None,
-            "error": f"No artifact dir created. exit={proc.returncode}. {stderr_tail}",
+            "error": "parameter_scan_result_missing_or_invalid",
         }
-
-    scan_run_id = sorted(new_dirs)[-1]
-    scan_dir = scan_artifact_root / scan_run_id
-
-    # 读 comparison_summary.json
-    comp_file = scan_dir / "comparison_summary.json"
+    if not isinstance(result_payload, dict):
+        return {
+            "scan_key": scan_key,
+            "family": family,
+            "timeframe": timeframe,
+            "status": "failed",
+            "exit_code": proc.returncode,
+            "scan_run_id": None,
+            "scan_dir": None,
+            "comparison": None,
+            "error": "parameter_scan_result_missing_or_invalid",
+        }
+    expected_status = {0: "succeeded", 2: "partial_success", 3: "failed"}.get(
+        proc.returncode
+    )
+    scan_run_id = result_payload.get("scan_run_id")
+    scan_dir_raw = result_payload.get("scan_dir")
+    comparison_path_raw = result_payload.get("comparison_path")
+    comparison_sha256 = result_payload.get("comparison_sha256")
+    comparison_size_bytes = result_payload.get("comparison_size_bytes")
+    if (
+        result_payload.get("schema_version") != "aats.parameter_scan_result.v1"
+        or expected_status is None
+        or result_payload.get("status") != expected_status
+        or not isinstance(scan_run_id, str)
+        or _UUID_RE.fullmatch(scan_run_id) is None
+        or not isinstance(scan_dir_raw, str)
+        or result_payload.get("family") != family
+        or result_payload.get("symbol") != _SYMBOL
+        or result_payload.get("timeframe") != timeframe
+        or result_payload.get("dataset_version") != dataset_version
+        or result_payload.get("window") != {"start": start, "end": end}
+        or result_payload.get("grid_sha256") != expected_grid_sha256
+        or type(result_payload.get("total_combinations")) is not int
+        or result_payload.get("total_combinations") != grid_size
+        or type(result_payload.get("completed_count")) is not int
+        or type(result_payload.get("failed_count")) is not int
+        or result_payload.get("completed_count") < 0
+        or result_payload.get("failed_count") < 0
+        or result_payload.get("completed_count")
+        + result_payload.get("failed_count")
+        != grid_size
+        or (
+            expected_status == "succeeded"
+            and (
+                result_payload.get("completed_count") != grid_size
+                or result_payload.get("failed_count") != 0
+            )
+        )
+        or (
+            expected_status == "partial_success"
+            and not (
+                0 < result_payload.get("completed_count") < grid_size
+                and 0 < result_payload.get("failed_count") < grid_size
+            )
+        )
+        or (
+            expected_status == "failed"
+            and (
+                result_payload.get("completed_count") != 0
+                or result_payload.get("failed_count") != grid_size
+            )
+        )
+    ):
+        return {
+            "scan_key": scan_key,
+            "family": family,
+            "timeframe": timeframe,
+            "status": "failed",
+            "exit_code": proc.returncode,
+            "scan_run_id": None,
+            "scan_dir": None,
+            "comparison": None,
+            "error": "parameter_scan_result_contract_invalid",
+        }
+    scan_dir = pathlib.Path(scan_dir_raw)
+    expected_scan_dir = scan_artifact_root.resolve() / scan_run_id
     comparison: dict[str, Any] | None = None
-    if comp_file.exists():
-        with comp_file.open(encoding="utf-8") as f:
-            comparison = json.load(f)
-
-    status = "succeeded" if proc.returncode == 0 else "failed"
+    try:
+        if scan_dir.is_symlink():
+            raise ValueError
+        resolved_scan_dir = scan_dir.resolve(strict=True)
+        if resolved_scan_dir != expected_scan_dir:
+            raise ValueError
+        if expected_status in {"succeeded", "partial_success"}:
+            if (
+                not isinstance(comparison_path_raw, str)
+                or not isinstance(comparison_sha256, str)
+                or _SHA256_RE.fullmatch(comparison_sha256) is None
+                or type(comparison_size_bytes) is not int
+            ):
+                raise ValueError
+            comp_file = pathlib.Path(comparison_path_raw)
+            if comp_file.is_symlink():
+                raise ValueError
+            resolved_comp_file = comp_file.resolve(strict=True)
+            if resolved_comp_file != resolved_scan_dir / "comparison_summary.json":
+                raise ValueError
+            comparison_bytes = resolved_comp_file.read_bytes()
+            if (
+                len(comparison_bytes) != comparison_size_bytes
+                or hashlib.sha256(comparison_bytes).hexdigest()
+                != comparison_sha256
+            ):
+                raise ValueError
+            comparison = json.loads(comparison_bytes.decode("utf-8"))
+            validate_scan_comparison(
+                comparison,
+                expected_counts=(
+                    result_payload.get("total_combinations"),
+                    result_payload.get("completed_count"),
+                    result_payload.get("failed_count"),
+                ),
+            )
+        elif any(
+            value is not None
+            for value in (
+                comparison_path_raw,
+                comparison_sha256,
+                comparison_size_bytes,
+            )
+        ):
+            raise ValueError
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        return {
+            "scan_key": scan_key,
+            "family": family,
+            "timeframe": timeframe,
+            "status": "failed",
+            "exit_code": proc.returncode,
+            "scan_run_id": None,
+            "scan_dir": None,
+            "comparison": None,
+            "error": "parameter_scan_artifact_identity_invalid",
+        }
 
     return {
         "scan_key": scan_key,
         "family": family,
         "timeframe": timeframe,
-        "status": status,
+        "status": expected_status,
         "exit_code": proc.returncode,
         "scan_run_id": scan_run_id,
-        "scan_dir": str(scan_dir),
+        "scan_dir": str(resolved_scan_dir),
         "comparison": comparison,
+        "comparison_sha256": comparison_sha256,
+        "comparison_size_bytes": comparison_size_bytes,
+        "window": {"start": start, "end": end},
+        "dataset_version": dataset_version,
+        "grid_sha256": expected_grid_sha256,
+        "total_combinations": result_payload["total_combinations"],
+        "completed_count": result_payload["completed_count"],
+        "failed_count": result_payload["failed_count"],
         "error": None,
     }
 
@@ -526,7 +964,7 @@ def _run_scan(
 # =========================================================================
 
 _FT_SUMMARY_COLUMNS = [
-    "family", "timeframe", "batch_name", "label", "experiment_id", "status",
+    "family", "symbol", "timeframe", "batch_name", "label", "experiment_id", "status",
     "opening_count", "blocked_count", "selectable_ratio",
     "execution_compatible_ratio",
     "mean_signal_edge_proxy_bps", "mean_funding_adjustment_bps",
@@ -552,6 +990,7 @@ def _collect_calibration_experiments(
             for exp in summary.get("experiments", []):
                 row = dict(exp)
                 row["family"] = family
+                row["symbol"] = _SYMBOL
                 row["timeframe"] = timeframe
                 row["batch_name"] = batch_name
                 all_rows.append(row)
@@ -610,6 +1049,7 @@ def _build_scan_comparison_summary(
         for exp in experiments:
             row = dict(exp)
             row["family"] = family
+            row["symbol"] = _SYMBOL
             row["timeframe"] = timeframe
             row["scan_key"] = scan_key
             row["scan_run_id"] = sr.get("scan_run_id")
@@ -1448,6 +1888,8 @@ def _build_parameter_candidates(
     all_recommendations: dict[str, dict[str, Any]],
     round_id: str,
     output_path: pathlib.Path,
+    *,
+    dataset_version: str = "v1.0",
 ) -> pathlib.Path:
     """生成 parameter_candidates.json。"""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1477,15 +1919,22 @@ def _build_parameter_candidates(
                 ft_key,
             )
 
+    combo_keys = sorted(candidates)
     data = {
+        "schema_version": "aats.step2_candidates.v1",
         "round_id": round_id,
-        "scope": {"symbol": _SYMBOL},
+        "dataset_version": dataset_version,
+        "scope": {
+            "symbol": _SYMBOL,
+            "step": "step2_candidates",
+            "combo_keys": combo_keys,
+            "combo_count": len(combo_keys),
+        },
         "candidates": candidates,
         "pending_validation": pending_validation,
     }
 
-    with output_path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    immutable_json_write(data, output_path)
     log.info("Wrote parameter_candidates.json -> %s", output_path)
     return output_path
 
@@ -1828,6 +2277,9 @@ def _write_manifest(
     started_at: str,
     finished_at: str,
     output_path: pathlib.Path,
+    *,
+    extra_manifest: dict[str, Any] | None = None,
+    immutable: bool = False,
 ) -> pathlib.Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1840,6 +2292,11 @@ def _write_manifest(
                 "batch_run_id": br.get("batch_run_id"),
                 "batch_dir": br.get("batch_dir"),
                 "status": br["status"],
+                "summary_sha256": br.get("summary_sha256"),
+                "summary_size_bytes": br.get("summary_size_bytes"),
+                "total_experiments": br.get("total_experiments"),
+                "succeeded": br.get("succeeded"),
+                "failed": br.get("failed"),
             })
         cal_summary.append({
             "round_key": cr["round_key"],
@@ -1858,6 +2315,14 @@ def _write_manifest(
             "status": sr["status"],
             "scan_run_id": sr.get("scan_run_id"),
             "scan_dir": sr.get("scan_dir"),
+            "comparison_sha256": sr.get("comparison_sha256"),
+            "comparison_size_bytes": sr.get("comparison_size_bytes"),
+            "window": sr.get("window"),
+            "dataset_version": sr.get("dataset_version"),
+            "grid_sha256": sr.get("grid_sha256"),
+            "total_combinations": sr.get("total_combinations"),
+            "completed_count": sr.get("completed_count"),
+            "failed_count": sr.get("failed_count"),
         })
 
     manifest = {
@@ -1868,9 +2333,19 @@ def _write_manifest(
         "calibrations": cal_summary,
         "scans": scan_summary,
     }
+    if extra_manifest:
+        protected = {"round_id", "started_at", "finished_at", "symbol"}
+        overlap = protected.intersection(extra_manifest)
+        if overlap:
+            raise ValueError(
+                f"extra_manifest cannot replace protected fields: {sorted(overlap)}"
+            )
+        manifest.update(extra_manifest)
 
-    with output_path.open("w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2, ensure_ascii=False)
+    if immutable:
+        immutable_json_write(manifest, output_path)
+    else:
+        atomic_json_write(manifest, output_path)
     log.info("Wrote round_manifest.json -> %s", output_path)
     return output_path
 
@@ -1984,7 +2459,7 @@ def main() -> None:
 
         batch_artifact_root = round_dir / "batches"
 
-        for round_key in ["independent_1h", "directional_15m", "directional_1h"]:
+        for round_key in _EXPECTED_STEP2_CALIBRATION_KEYS:
             cal_def = _CALIBRATION_DEFS[round_key]
             result = _run_calibration_round(
                 round_key, cal_def, batch_artifact_root,
@@ -2019,13 +2494,13 @@ def main() -> None:
             dataset_version=args.dataset_version,
         )
 
-        for scan_key in ["independent_15m", "independent_1h",
-                         "directional_15m", "directional_1h"]:
+        for scan_key in _EXPECTED_STEP2_SCAN_KEYS:
             if scan_key not in scan_defs:
                 log.warning("Scan def for %s not found, skipping", scan_key)
                 continue
             result = _run_scan(
                 scan_key, scan_defs[scan_key],
+                result_root=round_dir / "scan_results",
                 ensure_schema=args.ensure_schema,
             )
             scan_results.append(result)
@@ -2068,6 +2543,7 @@ def main() -> None:
         for exp in extract_comparison_rows(comp):
             row = dict(exp)
             row["family"] = sr["family"]
+            row["symbol"] = _SYMBOL
             row["timeframe"] = sr["timeframe"]
             row["scan_key"] = sr["scan_key"]
             row["scan_run_id"] = sr.get("scan_run_id")
@@ -2095,34 +2571,14 @@ def main() -> None:
         log.info("Generated recommendations for %s", ft_key)
 
     # C.4 输出 parameter_candidates
-    parameter_candidates_payload = {
-        "round_id": round_id,
-        "scope": {"symbol": _SYMBOL},
-        "candidates": {},
-        "pending_validation": [],
-    }
-    for ft_key, recs in all_recommendations.items():
-        candidate_values: dict[str, Any] = {}
-        for pname, prec in recs.items():
-            if pname.startswith("_"):
-                continue
-            if not isinstance(prec, dict) or "value" not in prec:
-                continue
-            if prec["value"] is None:
-                parameter_candidates_payload["pending_validation"].append(f"{pname} in {ft_key}")
-                continue
-            candidate_values[pname] = prec["value"]
-            if prec.get("confidence") == "low":
-                parameter_candidates_payload["pending_validation"].append(f"{pname} in {ft_key}")
-        if candidate_values:
-            parameter_candidates_payload["candidates"][ft_key] = candidate_values
-        else:
-            parameter_candidates_payload["pending_validation"].append(
-                f"candidate set missing in {ft_key}",
-            )
     _build_parameter_candidates(
         all_recommendations, round_id,
         round_dir / "parameter_candidates.json",
+        dataset_version=args.dataset_version,
+    )
+    parameter_candidates_path = round_dir / "parameter_candidates.json"
+    parameter_candidates_payload = json.loads(
+        parameter_candidates_path.read_text(encoding="utf-8")
     )
 
     # ================================================================
@@ -2140,61 +2596,60 @@ def main() -> None:
         conclusion_path,
     )
 
-    # Manifest
+    round_status = _determine_step2_round_status(
+        calibration_results=calibration_results,
+        scan_results=scan_results,
+        parameter_candidates_payload=parameter_candidates_payload,
+        start=args.start,
+        end=args.end,
+    )
+
+    # Manifest is published last and binds the immutable Step 2 candidate.
     finished_at = datetime.now(timezone.utc).isoformat()
-    manifest_payload = {
-        "round_id": round_id,
-        "started_at": started_at,
-        "finished_at": finished_at,
-        "symbol": _SYMBOL,
-        "calibrations": [],
-        "scans": [],
-    }
-    for cr in calibration_results:
-        manifest_payload["calibrations"].append({
-            "round_key": cr["round_key"],
-            "family": cr["family"],
-            "timeframe": cr["timeframe"],
-            "status": cr["status"],
-            "batches": [
-                {
-                    "key": br.get("_key"),
-                    "batch_run_id": br.get("batch_run_id"),
-                    "batch_dir": br.get("batch_dir"),
-                    "status": br["status"],
-                }
-                for br in cr.get("batch_results", [])
-            ],
-        })
-    for sr in scan_results:
-        manifest_payload["scans"].append({
-            "scan_key": sr["scan_key"],
-            "family": sr["family"],
-            "timeframe": sr["timeframe"],
-            "status": sr["status"],
-            "scan_run_id": sr.get("scan_run_id"),
-            "scan_dir": sr.get("scan_dir"),
-        })
     manifest_path = round_dir / "round_manifest.json"
+    parameter_candidates_bytes = parameter_candidates_path.read_bytes()
+    parameter_candidates_sha256 = hashlib.sha256(
+        parameter_candidates_bytes
+    ).hexdigest()
     _write_manifest(
         calibration_results, scan_results,
         round_id, started_at, finished_at,
         manifest_path,
+        extra_manifest={
+            "schema_version": "aats.step2_round.v1",
+            "phase": "step2",
+            "status": round_status,
+            "dataset_version": args.dataset_version,
+            "scope": {
+                "symbol": _SYMBOL,
+                "families": ["directional", "independent"],
+                "timeframes": ["15m", "1h"],
+                "combo_keys": sorted(
+                    parameter_candidates_payload.get("candidates", {})
+                ),
+                "combo_count": len(
+                    parameter_candidates_payload.get("candidates", {})
+                ),
+                "window": {"start": args.start, "end": args.end},
+            },
+            "input_refs": {
+                "dataset_version": args.dataset_version,
+                "window": {"start": args.start, "end": args.end},
+            },
+            "artifact_sha256": {
+                parameter_candidates_path.name: parameter_candidates_sha256
+            },
+            "artifact_size_bytes": {
+                parameter_candidates_path.name: len(parameter_candidates_bytes)
+            },
+        },
+        immutable=True,
     )
-    if not save_research_round_snapshot(
+    manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    snapshot_saved = save_research_round_snapshot(
         round_id=round_id,
         phase=ROUND_PHASE_STEP2,
-        status=(
-            "succeeded"
-            if not any(sr["status"] == "failed" for sr in scan_results)
-            and not any(cr["status"] == "failed" for cr in calibration_results)
-            else "failed"
-            if not any(
-                item["status"] in {"succeeded", "partial_success"}
-                for item in [*calibration_results, *scan_results]
-            )
-            else "partial_success"
-        ),
+        status=round_status,
         round_path=str(round_dir),
         started_at=started_at,
         finished_at=finished_at,
@@ -2215,8 +2670,42 @@ def main() -> None:
             "parameter_candidates_json": str(round_dir / "parameter_candidates.json"),
             "round_manifest_json": str(manifest_path),
         },
-    ):
-        log.warning("Step2 round snapshot DB upsert failed; file artifacts remain authoritative fallback")
+    )
+    if not snapshot_saved:
+        if has_explicit_governance_db_configuration(_PROJECT_ROOT):
+            log.error(
+                "Managed Step2 snapshot publication failed; refusing result marker "
+                "for round %s",
+                round_id,
+            )
+            sys.exit(3)
+        log.warning(
+            "Step2 round snapshot DB upsert unavailable; continuing in explicit "
+            "offline file mode"
+        )
+
+    round_result_payload = {
+        "schema_version": "aats.step2_result.v1",
+        "phase": "step2",
+        "round_id": round_id,
+        "round_dir": str(round_dir.resolve()),
+        "candidate_path": str(parameter_candidates_path.resolve()),
+        "candidate_sha256": parameter_candidates_sha256,
+        "status": round_status,
+        "symbol": _SYMBOL,
+        "dataset_version": args.dataset_version,
+        "window": {"start": args.start, "end": args.end},
+    }
+    immutable_json_write(round_result_payload, round_dir / "round_result.json")
+    print(
+        _STEP2_RESULT_PREFIX
+        + json.dumps(
+            round_result_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
 
     # ================================================================
     # 最终汇总
@@ -2264,12 +2753,10 @@ def main() -> None:
         print(f"Candidates: {round_dir / 'parameter_candidates.json'}")
         print(f"Artifacts : {round_dir}")
 
-    # 退出码
-    total_ok = cal_ok + scan_ok
-    total_fail = cal_fail + scan_fail
-    if total_fail > 0 and total_ok == 0 and cal_partial == 0:
+    # 退出码必须与持久化的 round status 一致。
+    if round_status == "failed":
         sys.exit(3)
-    elif total_fail > 0:
+    if round_status == "partial_success":
         sys.exit(2)
 
 

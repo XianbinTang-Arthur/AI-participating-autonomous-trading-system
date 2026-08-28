@@ -1,10 +1,10 @@
 """参数版本治理 — Parameter Registry.
 
 将分散在各 round 产物中的参数结论收口为受治理对象。
-每个 parameter set 有明确状态：draft / candidate / frozen / deprecated。
+每个 parameter set 有明确状态：draft / candidate / frozen / released / deprecated。
 
 数据存储策略（DB-first + 文件 fallback）:
-  - 写入: 同时写 DB + 文件（DB 失败不阻塞文件写入）
+  - 写入: 受管环境先提交 DB 再更新文件镜像；离线开发可使用文件
   - 读取: DB 优先 → 文件 fallback
   - DB 开关: 环境变量 AATS_ACTIVE_PARAMETER_DB_URL
 """
@@ -22,17 +22,23 @@ from ._db_util import (
     has_explicit_governance_db_configuration,
     try_governance_db,
 )
-from ._exceptions import DBUnavailableError
+from ._exceptions import DBConflictError, DBConstraintViolation, DBUnavailableError
+from .parameter_identity import parameter_set_immutable_identity
 
 log = logging.getLogger(__name__)
 
 
 def _db_sync_single(ps: dict[str, Any]) -> None:
-    """将单个 parameter_set dict 同步到 DB（best-effort）."""
+    """将单个 parameter_set dict 同步到 DB，受管环境失败关闭."""
     engine, ok = try_governance_db()
     if not ok:
+        if has_explicit_governance_db_configuration():
+            raise DBUnavailableError(
+                "governance DB unavailable while syncing parameter set"
+            )
         return
     try:
+        from sqlalchemy.exc import IntegrityError, OperationalError
         from sqlalchemy.orm import Session
 
         from .parameter_sets_db import db_upsert_parameter_set
@@ -55,40 +61,116 @@ def _db_sync_single(ps: dict[str, Any]) -> None:
                 deprecated_at=ps.get("deprecated_at"),
                 notes=ps.get("notes"),
             )
-    except Exception as exc:
-        log.warning("parameter_registry: DB 写入失败 (%s)", exc)
+    except DBConflictError:
+        raise
+    except IntegrityError as exc:
+        raise DBConstraintViolation(
+            "parameter set write violated governance DB constraint"
+        ) from exc
+    except OperationalError as exc:
+        raise DBUnavailableError(
+            "governance DB operational error while syncing parameter set"
+        ) from exc
     finally:
         if engine is not None:
             engine.dispose()
 
 
-def _db_update_status(ps_id: str, status: str, frozen_at: str | None, deprecated_at: str | None, notes: str | None) -> None:
-    """更新 DB 中的 parameter_set 状态（best-effort）."""
+def _db_update_status(
+    ps_id: str,
+    status: str,
+    frozen_at: str | None,
+    deprecated_at: str | None,
+    notes: str | None,
+    *,
+    expected_current_status: str,
+) -> bool:
+    """CAS 更新 DB 生命周期；受管 DB 不可用时失败关闭."""
     engine, ok = try_governance_db()
     if not ok:
-        return
+        if has_explicit_governance_db_configuration():
+            raise DBUnavailableError(
+                "governance DB unavailable while updating parameter set status"
+            )
+        return True
     try:
+        from sqlalchemy.exc import IntegrityError, OperationalError
         from sqlalchemy.orm import Session
 
         from .parameter_sets_db import db_update_parameter_set_status
 
         with Session(engine) as session, session.begin():
-            db_update_parameter_set_status(
+            return db_update_parameter_set_status(
                 session, ps_id,
                 status=status,
                 frozen_at=frozen_at,
                 deprecated_at=deprecated_at,
                 notes=notes,
+                expected_current_status=expected_current_status,
             )
-    except Exception as exc:
-        log.warning("parameter_registry: DB 状态更新失败 (%s)", exc)
+    except IntegrityError as exc:
+        raise DBConstraintViolation(
+            "parameter set status write violated governance DB constraint"
+        ) from exc
+    except OperationalError as exc:
+        raise DBUnavailableError(
+            "governance DB operational error while updating parameter set status"
+        ) from exc
+    finally:
+        if engine is not None:
+            engine.dispose()
+
+
+def _db_deprecate_superseded_candidate(
+    existing_parameter_set: dict[str, Any],
+    replacement_parameter_set: dict[str, Any],
+    *,
+    deprecated_at: str,
+    notes: str | None,
+) -> bool:
+    """Atomically bind importer supersession to a live replacement candidate."""
+
+    engine, ok = try_governance_db()
+    if not ok:
+        if has_explicit_governance_db_configuration():
+            raise DBUnavailableError(
+                "governance DB unavailable while superseding parameter candidate"
+            )
+        return True
+    try:
+        from sqlalchemy.exc import IntegrityError, OperationalError
+        from sqlalchemy.orm import Session
+
+        from .parameter_sets_db import db_deprecate_superseded_candidate
+
+        with Session(engine) as session, session.begin():
+            return db_deprecate_superseded_candidate(
+                session,
+                existing_parameter_set=existing_parameter_set,
+                replacement_parameter_set=replacement_parameter_set,
+                deprecated_at=deprecated_at,
+                notes=notes,
+            )
+    except DBConflictError:
+        raise
+    except IntegrityError as exc:
+        raise DBConstraintViolation(
+            "parameter candidate supersession violated governance DB constraint"
+        ) from exc
+    except OperationalError as exc:
+        raise DBUnavailableError(
+            "governance DB operational error while superseding parameter candidate"
+        ) from exc
     finally:
         if engine is not None:
             engine.dispose()
 
 # ── 状态定义 ─────────────────────────────────────────────────────────
 
-VALID_STATUSES: set[str] = {"draft", "candidate", "frozen", "deprecated"}
+# Initial/creatable states only. ``released`` is a valid persisted lifecycle
+# state, but must be reached through the guarded release/apply path rather than
+# by constructing a new parameter set directly in the registry.
+VALID_INITIAL_STATUSES: set[str] = {"draft", "candidate"}
 
 # ── Parameter Set 结构 ───────────────────────────────────────────────
 
@@ -111,8 +193,10 @@ def create_parameter_set(
     notes: str | None = None,
 ) -> dict[str, Any]:
     """创建一个新的 parameter set 记录."""
-    if status not in VALID_STATUSES:
-        raise ValueError(f"非法 status: {status}, 合法值: {sorted(VALID_STATUSES)}")
+    if status not in VALID_INITIAL_STATUSES:
+        raise ValueError(
+            f"非法初始 status: {status}, 合法值: {sorted(VALID_INITIAL_STATUSES)}"
+        )
 
     return {
         "parameter_set_id": _make_parameter_set_id(),
@@ -238,9 +322,22 @@ def save_registry(registry: dict[str, Any], path: pathlib.Path) -> None:
 
 
 def add_parameter_set(registry: dict[str, Any], ps: dict[str, Any]) -> None:
-    """向 registry 添加一个 parameter set."""
-    registry.setdefault("parameter_sets", []).append(ps)
+    """Add a parameter set without permitting same-ID content replacement."""
+
+    parameter_set_id = ps.get("parameter_set_id")
+    for existing in registry.get("parameter_sets", []):
+        if existing.get("parameter_set_id") != parameter_set_id:
+            continue
+        if parameter_set_immutable_identity(existing) != parameter_set_immutable_identity(ps):
+            raise DBConflictError("parameter_set_immutable_identity_conflict")
+        # Exact retry: verify the canonical DB row but do not duplicate the
+        # file mirror or let the retry regress lifecycle fields.
+        _db_sync_single(ps)
+        return
+
+    # DB truth must commit before the mutable audit mirror is changed.
     _db_sync_single(ps)
+    registry.setdefault("parameter_sets", []).append(ps)
 
 
 def find_parameter_sets(
@@ -300,15 +397,34 @@ def freeze_parameter_set(
             if ps["status"] == "frozen":
                 log.warning("parameter set %s 已经是 frozen 状态", parameter_set_id)
                 return False
-            if ps["status"] == "deprecated":
-                log.warning("parameter set %s 已 deprecated，不能冻结", parameter_set_id)
+            if ps["status"] not in {"draft", "candidate"}:
+                log.warning(
+                    "parameter set %s 状态为 %s，不能冻结",
+                    parameter_set_id,
+                    ps["status"],
+                )
+                return False
+            expected_status = str(ps["status"])
+            frozen_at = datetime.now(timezone.utc).isoformat()
+            if not _db_update_status(
+                parameter_set_id,
+                "frozen",
+                frozen_at,
+                None,
+                notes,
+                expected_current_status=expected_status,
+            ):
+                log.warning(
+                    "parameter set %s freeze CAS 冲突（expected=%s）",
+                    parameter_set_id,
+                    expected_status,
+                )
                 return False
             ps["status"] = "frozen"
-            ps["frozen_at"] = datetime.now(timezone.utc).isoformat()
+            ps["frozen_at"] = frozen_at
             if notes:
                 ps["notes"] = notes
             log.info("已冻结 parameter set: %s", parameter_set_id)
-            _db_update_status(parameter_set_id, "frozen", ps["frozen_at"], None, notes)
             return True
     log.error("未找到 parameter set: %s", parameter_set_id)
     return False
@@ -319,16 +435,58 @@ def deprecate_parameter_set(
     parameter_set_id: str,
     *,
     notes: str | None = None,
+    replacement_parameter_set: dict[str, Any] | None = None,
 ) -> bool:
     """将一个 parameter set 标记为 deprecated."""
     for ps in registry.get("parameter_sets", []):
         if ps["parameter_set_id"] == parameter_set_id:
+            if ps["status"] == "deprecated":
+                log.warning("parameter set %s 已经是 deprecated 状态", parameter_set_id)
+                return False
+            if ps["status"] not in {"draft", "candidate", "frozen"}:
+                log.warning(
+                    "parameter set %s 状态为 %s，不能通过 registry helper 废弃",
+                    parameter_set_id,
+                    ps["status"],
+                )
+                return False
+            expected_status = str(ps["status"])
+            deprecated_at = datetime.now(timezone.utc).isoformat()
+            if replacement_parameter_set is not None:
+                if replacement_parameter_set.get("status") != "candidate":
+                    log.warning(
+                        "替代参数集 %s 已不是 candidate，保留旧候选 %s",
+                        replacement_parameter_set.get("parameter_set_id"),
+                        parameter_set_id,
+                    )
+                    return False
+                updated = _db_deprecate_superseded_candidate(
+                    ps,
+                    replacement_parameter_set,
+                    deprecated_at=deprecated_at,
+                    notes=notes,
+                )
+            else:
+                updated = _db_update_status(
+                    parameter_set_id,
+                    "deprecated",
+                    None,
+                    deprecated_at,
+                    notes,
+                    expected_current_status=expected_status,
+                )
+            if not updated:
+                log.warning(
+                    "parameter set %s deprecate CAS 冲突（expected=%s）",
+                    parameter_set_id,
+                    expected_status,
+                )
+                return False
             ps["status"] = "deprecated"
-            ps["deprecated_at"] = datetime.now(timezone.utc).isoformat()
+            ps["deprecated_at"] = deprecated_at
             if notes:
                 ps["notes"] = notes
             log.info("已 deprecate parameter set: %s", parameter_set_id)
-            _db_update_status(parameter_set_id, "deprecated", None, ps["deprecated_at"], notes)
             return True
     log.error("未找到 parameter set: %s", parameter_set_id)
     return False
@@ -345,6 +503,7 @@ def import_from_parameter_candidates(
     dataset_version: str = "v1.0",
     symbol: str = "BTC-USDT-SWAP",
     initial_status: str = "draft",
+    candidate_data: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """从 parameter_candidates.json 导入参数.
 
@@ -356,8 +515,14 @@ def import_from_parameter_candidates(
       }
     }
     """
-    with candidates_path.open(encoding="utf-8") as f:
-        data = json.load(f)
+    if candidate_data is None:
+        with candidates_path.open(encoding="utf-8") as f:
+            data = json.load(f)
+    else:
+        # Auto-import passes the exact payload already bound to the completed
+        # round manifest.  Do not reopen a mutable path and accidentally combine
+        # metadata from one file version with parameter values from another.
+        data = candidate_data
 
     candidates = data.get("candidates", data)
     pending_validation = [

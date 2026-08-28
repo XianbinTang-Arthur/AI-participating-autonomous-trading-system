@@ -11,9 +11,39 @@ from typing import Any
 from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
-from ._db_util import parse_dt
+from ._db_util import ADVISORY_LOCK_KEYS, parse_dt
+from ._exceptions import DBConflictError
+from .typed_json_identity import canonical_typed_json_bytes, typed_json_sha256
 
 log = logging.getLogger(__name__)
+
+_DECISION_ROUND_PUBLICATION_LOCK_KEY = ADVISORY_LOCK_KEYS[
+    "decision_round_publication"
+]
+_DECISION_ROUND_JSON_IDENTITY_SCHEMA = (
+    "aats.decision_round_snapshot.typed_json.v1"
+)
+
+
+def db_acquire_decision_round_publication_lock(
+    session: Session,
+    *,
+    round_id: str,
+) -> None:
+    """Serialize one Phase 6 publication for the lifetime of its transaction."""
+
+    if not isinstance(round_id, str) or not round_id.strip():
+        raise ValueError("decision_round_publication_round_id_invalid")
+    session.execute(
+        text(
+            "SELECT pg_advisory_xact_lock("
+            ":namespace, hashtext(:round_id))"
+        ),
+        {
+            "namespace": _DECISION_ROUND_PUBLICATION_LOCK_KEY,
+            "round_id": round_id,
+        },
+    )
 
 
 def db_upsert_decision_round_snapshot(
@@ -30,7 +60,16 @@ def db_upsert_decision_round_snapshot(
     conclusion_markdown: str | None = None,
 ) -> None:
     now = datetime.now(timezone.utc)
-    session.execute(
+    canonical_json_payload = {
+        "schema": _DECISION_ROUND_JSON_IDENTITY_SCHEMA,
+        "evidence_bundle_summary": evidence_bundle_summary,
+        "parameter_upgrade_candidates": parameter_upgrade_candidates or [],
+        "family_timeframe_decisions": family_timeframe_decisions or [],
+        "promotion_readiness_assessment": promotion_readiness_assessment,
+        "manifest": manifest,
+    }
+    typed_json_identity_sha256 = typed_json_sha256(canonical_json_payload)
+    result = session.execute(
         text(
             """
             INSERT INTO governance.decision_round_snapshots
@@ -41,6 +80,7 @@ def db_upsert_decision_round_snapshot(
                  promotion_readiness_json,
                  manifest_json,
                  conclusion_markdown,
+                 typed_json_identity_sha256,
                  created_at,
                  updated_at)
             VALUES
@@ -51,18 +91,28 @@ def db_upsert_decision_round_snapshot(
                  :promotion_readiness_json,
                  :manifest_json,
                  :conclusion_markdown,
+                 :typed_json_identity_sha256,
                  :now,
                  :now)
             ON CONFLICT (round_id) DO UPDATE SET
-                started_at = EXCLUDED.started_at,
-                finished_at = EXCLUDED.finished_at,
-                evidence_summary_json = EXCLUDED.evidence_summary_json,
-                parameter_upgrade_candidates_json = EXCLUDED.parameter_upgrade_candidates_json,
-                family_timeframe_decisions_json = EXCLUDED.family_timeframe_decisions_json,
-                promotion_readiness_json = EXCLUDED.promotion_readiness_json,
-                manifest_json = EXCLUDED.manifest_json,
-                conclusion_markdown = EXCLUDED.conclusion_markdown,
-                updated_at = EXCLUDED.updated_at
+                typed_json_identity_sha256 = COALESCE(
+                    governance.decision_round_snapshots.typed_json_identity_sha256,
+                    EXCLUDED.typed_json_identity_sha256
+                )
+            WHERE governance.decision_round_snapshots.started_at IS NOT DISTINCT FROM EXCLUDED.started_at
+              AND governance.decision_round_snapshots.finished_at IS NOT DISTINCT FROM EXCLUDED.finished_at
+              AND governance.decision_round_snapshots.evidence_summary_json::text IS NOT DISTINCT FROM EXCLUDED.evidence_summary_json::text
+              AND governance.decision_round_snapshots.parameter_upgrade_candidates_json::text IS NOT DISTINCT FROM EXCLUDED.parameter_upgrade_candidates_json::text
+              AND governance.decision_round_snapshots.family_timeframe_decisions_json::text IS NOT DISTINCT FROM EXCLUDED.family_timeframe_decisions_json::text
+              AND governance.decision_round_snapshots.promotion_readiness_json::text IS NOT DISTINCT FROM EXCLUDED.promotion_readiness_json::text
+              AND governance.decision_round_snapshots.manifest_json::text IS NOT DISTINCT FROM EXCLUDED.manifest_json::text
+              AND governance.decision_round_snapshots.conclusion_markdown IS NOT DISTINCT FROM EXCLUDED.conclusion_markdown
+              AND (
+                    governance.decision_round_snapshots.typed_json_identity_sha256 IS NULL
+                    OR governance.decision_round_snapshots.typed_json_identity_sha256
+                       = EXCLUDED.typed_json_identity_sha256
+              )
+            RETURNING round_id
             """
         ),
         {
@@ -75,10 +125,13 @@ def db_upsert_decision_round_snapshot(
             "promotion_readiness_json": _to_json(promotion_readiness_assessment),
             "manifest_json": _to_json(manifest),
             "conclusion_markdown": conclusion_markdown,
+            "typed_json_identity_sha256": typed_json_identity_sha256,
             "now": now,
         },
     )
-    log.info("DB upsert decision_round_snapshot: %s", round_id)
+    if result.fetchone() is None:
+        raise DBConflictError("decision_round_snapshot_immutable_identity_conflict")
+    log.info("DB insert/verify decision_round_snapshot: %s", round_id)
 
 
 def db_load_latest_decision_round_snapshot(session: Session) -> dict[str, Any] | None:
@@ -207,7 +260,7 @@ def _db_timestamp_iso(value: datetime | None) -> str | None:
 def _to_json(payload: Any) -> str | None:
     if payload is None:
         return None
-    return json.dumps(payload, ensure_ascii=False, default=str)
+    return canonical_typed_json_bytes(payload).decode("utf-8")
 
 
 def _from_json(payload: str | None, default: Any) -> Any:

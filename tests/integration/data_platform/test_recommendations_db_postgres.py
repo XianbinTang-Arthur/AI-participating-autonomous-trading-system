@@ -2,7 +2,7 @@
 
 覆盖 P0-1 阶段 A 新增 / 对齐的 DB 接口：
 
-- ``db_upsert_recommendation``        — INSERT ... ON CONFLICT DO UPDATE 幂等
+- ``db_upsert_recommendation``        — INSERT / 完全相同身份重试；同 ID 换内容失败
 - ``db_get_recommendation``           — 按 id 读单条（别名 ``db_find_recommendation``）
 - ``db_list_recommendations``         — 带 filter + LIMIT/OFFSET 分页
 - ``db_count_recommendations``        — 带 filter 的 COUNT(*)
@@ -14,7 +14,7 @@
 
   1. governance schema 在 fresh DB 上能幂等创建（``create_rdp_schema`` 调了
      ``_migrate_governance_recommendations``）
-  2. ``ON CONFLICT (recommendation_id) DO UPDATE`` 和 ``UPDATE ... WHERE status IN``
+  2. ``ON CONFLICT`` 身份只写一次和 ``UPDATE ... WHERE status IN``
      的 SQL 真的跑在 Postgres 上（方言 / 约束 / 类型都对）
   3. 分页 / COUNT 的 ``ORDER BY created_at DESC`` 能按索引走，而不是顺序扫描
      （这里只验证结果正确，性能靠 Grafana / EXPLAIN 手工盯）
@@ -33,12 +33,16 @@ WSL2 上推荐入口：
 from __future__ import annotations
 
 import os
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 # 软依赖检查：testcontainers + psycopg2 可能没装
 try:
-    from testcontainers.postgres import PostgresContainer  # type: ignore[import-not-found]
+    from testcontainers.community.postgres import (  # type: ignore[import-not-found]
+        PostgresContainer,
+    )
 
     _TESTCONTAINERS_AVAILABLE = True
 except ImportError:  # pragma: no cover - 没装就跳过
@@ -83,6 +87,45 @@ def _make_rec_payload(
         "status": status,
         "created_at": created_at or datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _seed_rec_with_lifecycle(session: object, payload: dict) -> None:
+    from aats.data_platform.governance.recommendations_db import (
+        db_transition_recommendation_status,
+        db_upsert_recommendation,
+    )
+
+    desired_status = str(payload.get("status") or "draft")
+    draft = {
+        key: value
+        for key, value in payload.items()
+        if key
+        not in {
+            "approved_by",
+            "approved_at",
+            "rejected_by",
+            "rejected_at",
+            "superseded_by",
+            "superseded_at",
+            "superseded_by_recommendation_id",
+        }
+    }
+    draft["status"] = "draft"
+    db_upsert_recommendation(session, **draft)  # type: ignore[arg-type]
+    if desired_status != "draft":
+        actor_field = {
+            "approved": "approved_by",
+            "rejected": "rejected_by",
+            "superseded": "superseded_by",
+        }.get(desired_status)
+        db_transition_recommendation_status(
+            session,  # type: ignore[arg-type]
+            recommendation_id=str(payload["recommendation_id"]),
+            new_status=desired_status,
+            expected_current_status="draft",
+            actor=str(payload.get(actor_field or "") or "integration_seed"),
+            at=datetime.now(timezone.utc),
+        )
 
 
 @unittest.skipUnless(
@@ -135,12 +178,11 @@ class TestRecommendationsDbPostgresRoundTrip(unittest.TestCase):
 
         from aats.data_platform.governance.recommendations_db import (
             db_get_recommendation,
-            db_upsert_recommendation,
         )
 
         payload = _make_rec_payload("rec_m_r3_roundtrip")
         with Session(self.engine) as session, session.begin():  # type: ignore[arg-type]
-            db_upsert_recommendation(session, **payload)
+            _seed_rec_with_lifecycle(session, payload)
 
         with Session(self.engine) as session:  # type: ignore[arg-type]
             row = db_get_recommendation(session, "rec_m_r3_roundtrip")
@@ -154,10 +196,11 @@ class TestRecommendationsDbPostgresRoundTrip(unittest.TestCase):
         self.assertEqual(row["status"], "draft")
         self.assertEqual(row["confidence"], "high")
 
-    def test_upsert_is_idempotent_on_conflict(self) -> None:
-        """重复 upsert 同一个 recommendation_id 不报错，字段被刷新。"""
+    def test_upsert_exact_retry_is_idempotent_but_content_rebind_conflicts(self) -> None:
+        """完全相同重试成功；同一 ID 不能改绑到另一份业务内容。"""
         from sqlalchemy.orm import Session
 
+        from aats.data_platform.governance._exceptions import DBConflictError
         from aats.data_platform.governance.recommendations_db import (
             db_get_recommendation,
             db_upsert_recommendation,
@@ -171,14 +214,20 @@ class TestRecommendationsDbPostgresRoundTrip(unittest.TestCase):
         with Session(self.engine) as session, session.begin():  # type: ignore[arg-type]
             db_upsert_recommendation(session, **first)
         with Session(self.engine) as session, session.begin():  # type: ignore[arg-type]
-            db_upsert_recommendation(session, **second)
+            db_upsert_recommendation(session, **first)
+        with Session(self.engine) as session, session.begin():  # type: ignore[arg-type]
+            with self.assertRaisesRegex(
+                DBConflictError,
+                "recommendation_immutable_identity_conflict",
+            ):
+                db_upsert_recommendation(session, **second)
 
         with Session(self.engine) as session:  # type: ignore[arg-type]
             row = db_get_recommendation(session, "rec_m_r3_conflict")
 
         self.assertIsNotNone(row)
         assert row is not None
-        self.assertEqual(row["reason"], "second version")
+        self.assertEqual(row["reason"], "first version")
 
     def test_get_returns_none_for_unknown_id(self) -> None:
         from sqlalchemy.orm import Session
@@ -232,14 +281,13 @@ class TestRecommendationsDbPostgresRoundTrip(unittest.TestCase):
         from aats.data_platform.governance.recommendations_db import (
             db_get_recommendation,
             db_transition_recommendation_status,
-            db_upsert_recommendation,
         )
 
         payload = _make_rec_payload("rec_m_r3_cas_miss", status="approved")
         payload["approved_by"] = "earlier_operator"
         payload["approved_at"] = datetime.now(timezone.utc).isoformat()
         with Session(self.engine) as session, session.begin():  # type: ignore[arg-type]
-            db_upsert_recommendation(session, **payload)
+            _seed_rec_with_lifecycle(session, payload)
 
         with Session(self.engine) as session, session.begin():  # type: ignore[arg-type]
             ok = db_transition_recommendation_status(
@@ -267,13 +315,15 @@ class TestRecommendationsDbPostgresRoundTrip(unittest.TestCase):
         from aats.data_platform.governance.recommendations_db import (
             db_get_recommendation,
             db_transition_recommendation_status,
-            db_upsert_recommendation,
         )
 
         with Session(self.engine) as session, session.begin():  # type: ignore[arg-type]
-            db_upsert_recommendation(
+            _seed_rec_with_lifecycle(
                 session,
-                **_make_rec_payload("rec_m_r3_supersede_from_approved", status="approved"),
+                _make_rec_payload(
+                    "rec_m_r3_supersede_from_approved",
+                    status="approved",
+                ),
             )
 
         with Session(self.engine) as session, session.begin():  # type: ignore[arg-type]
@@ -313,6 +363,130 @@ class TestRecommendationsDbPostgresRoundTrip(unittest.TestCase):
         self.assertFalse(ok)
 
     # ------------------------------------------------------------------
+    # atomic draft replacement
+    # ------------------------------------------------------------------
+
+    def test_atomic_insert_supersedes_prior_draft_in_same_transaction(self) -> None:
+        """新 draft 可见时，同 scope 旧 draft 已在同一事务内被替代。"""
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.governance.recommendations_db import (
+            db_insert_recommendation_superseding_drafts,
+            db_list_recommendations,
+            db_upsert_recommendation,
+        )
+
+        old = _make_rec_payload("rec_atomic_old")
+        new = _make_rec_payload("rec_atomic_new")
+        with Session(self.engine) as session, session.begin():  # type: ignore[arg-type]
+            db_upsert_recommendation(session, **old)
+        with Session(self.engine) as session, session.begin():  # type: ignore[arg-type]
+            superseded = db_insert_recommendation_superseding_drafts(
+                session,
+                recommendation=new,
+            )
+
+        self.assertEqual(superseded, ["rec_atomic_old"])
+        with Session(self.engine) as session:  # type: ignore[arg-type]
+            rows = db_list_recommendations(session, family="independent")
+        by_id = {row["recommendation_id"]: row for row in rows}
+        self.assertEqual(by_id["rec_atomic_new"]["status"], "draft")
+        self.assertEqual(by_id["rec_atomic_old"]["status"], "superseded")
+        self.assertEqual(
+            by_id["rec_atomic_old"]["superseded_by_recommendation_id"],
+            "rec_atomic_new",
+        )
+
+    def test_atomic_insert_conflict_rolls_back_prior_draft_supersession(self) -> None:
+        """新 ID 身份冲突时，事务回滚且所有既有 draft 保持不变。"""
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.governance._exceptions import DBConflictError
+        from aats.data_platform.governance.recommendations_db import (
+            db_insert_recommendation_superseding_drafts,
+            db_list_recommendations,
+            db_upsert_recommendation,
+        )
+
+        old = _make_rec_payload("rec_atomic_rollback_old")
+        existing = _make_rec_payload("rec_atomic_rollback_conflict")
+        existing["reason"] = "immutable original"
+        conflicting = dict(existing)
+        conflicting["reason"] = "attempted rebind"
+        with Session(self.engine) as session, session.begin():  # type: ignore[arg-type]
+            db_upsert_recommendation(session, **old)
+            db_upsert_recommendation(session, **existing)
+
+        with self.assertRaisesRegex(
+            DBConflictError,
+            "recommendation_immutable_identity_conflict",
+        ):
+            with Session(self.engine) as session, session.begin():  # type: ignore[arg-type]
+                db_insert_recommendation_superseding_drafts(
+                    session,
+                    recommendation=conflicting,
+                )
+
+        with Session(self.engine) as session:  # type: ignore[arg-type]
+            rows = db_list_recommendations(session, family="independent")
+        by_id = {row["recommendation_id"]: row for row in rows}
+        self.assertEqual(by_id["rec_atomic_rollback_old"]["status"], "draft")
+        self.assertEqual(
+            by_id["rec_atomic_rollback_conflict"]["status"],
+            "draft",
+        )
+        self.assertEqual(
+            by_id["rec_atomic_rollback_conflict"]["reason"],
+            "immutable original",
+        )
+
+    def test_concurrent_atomic_inserts_leave_exactly_one_scope_draft(self) -> None:
+        """同 scope 并发 writer 经 advisory lock 串行化，只留下一个 draft。"""
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.governance.recommendations_db import (
+            db_insert_recommendation_superseding_drafts,
+            db_list_recommendations,
+            db_upsert_recommendation,
+        )
+
+        with Session(self.engine) as session, session.begin():  # type: ignore[arg-type]
+            db_upsert_recommendation(
+                session,
+                **_make_rec_payload("rec_atomic_concurrent_old"),
+            )
+
+        barrier = threading.Barrier(2)
+
+        def _insert(rec_id: str) -> None:
+            payload = _make_rec_payload(rec_id)
+            barrier.wait(timeout=10)
+            with Session(self.engine) as session, session.begin():  # type: ignore[arg-type]
+                db_insert_recommendation_superseding_drafts(
+                    session,
+                    recommendation=payload,
+                )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(_insert, "rec_atomic_concurrent_a"),
+                pool.submit(_insert, "rec_atomic_concurrent_b"),
+            ]
+            for future in futures:
+                future.result(timeout=30)
+
+        with Session(self.engine) as session:  # type: ignore[arg-type]
+            rows = db_list_recommendations(session, family="independent")
+        drafts = [row for row in rows if row["status"] == "draft"]
+        superseded = [row for row in rows if row["status"] == "superseded"]
+        self.assertEqual(len(drafts), 1)
+        self.assertIn(
+            drafts[0]["recommendation_id"],
+            {"rec_atomic_concurrent_a", "rec_atomic_concurrent_b"},
+        )
+        self.assertEqual(len(superseded), 2)
+
+    # ------------------------------------------------------------------
     # list + count
     # ------------------------------------------------------------------
 
@@ -323,7 +497,6 @@ class TestRecommendationsDbPostgresRoundTrip(unittest.TestCase):
         from aats.data_platform.governance.recommendations_db import (
             db_count_recommendations,
             db_list_recommendations,
-            db_upsert_recommendation,
         )
 
         base = datetime.now(timezone.utc) - timedelta(hours=1)
@@ -343,7 +516,7 @@ class TestRecommendationsDbPostgresRoundTrip(unittest.TestCase):
                 created_at=created.isoformat(),
             )
             with Session(self.engine) as session, session.begin():  # type: ignore[arg-type]
-                db_upsert_recommendation(session, **payload)
+                _seed_rec_with_lifecycle(session, payload)
 
         # 1) 只过 family=independent + status=draft → 3 条
         with Session(self.engine) as session:  # type: ignore[arg-type]

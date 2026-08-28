@@ -13,8 +13,11 @@ ARTIFACT_MIGRATION = ROOT / "aats/data_platform/migrations/batch_b_19_historical
 ARTIFACT_ROLLBACK = ROOT / "aats/data_platform/migrations/batch_b_19_historical_research_artifacts_rollback.sql"
 
 
-def test_data_governance_migration_is_last_and_transaction_wrapped() -> None:
-    assert BATCH_B_STAGES[-1] == "batch_b_19_historical_research_artifacts"
+def test_data_governance_migration_precedes_typed_identity_and_is_wrapped() -> None:
+    assert BATCH_B_STAGES[-2:] == (
+        "batch_b_19_historical_research_artifacts",
+        "batch_b_20_typed_json_identity",
+    )
     migration = MIGRATION.read_text(encoding="utf-8")
     rollback = ROLLBACK.read_text(encoding="utf-8")
 

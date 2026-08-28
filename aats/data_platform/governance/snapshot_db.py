@@ -18,7 +18,8 @@ from ._db_util import (
     parse_dt,
     try_governance_db,
 )
-from ._exceptions import DBUnavailableError
+from ._exceptions import DBConflictError, DBUnavailableError
+from .typed_json_identity import typed_json_sha256
 
 log = logging.getLogger(__name__)
 
@@ -27,8 +28,13 @@ SNAPSHOT_ACTIVE_ROUND_INDEX = "active_round_index"
 SNAPSHOT_QUALITY_MONITOR = "quality_monitor_summary"
 
 ROUND_PHASE_STEP2 = "phase2_step2"
+ROUND_PHASE_STEP3 = "phase2_step3"
 ROUND_PHASE_PHASE3 = "phase3"
 ROUND_PHASE_PHASE4 = "phase4"
+
+_RESEARCH_ROUND_JSON_IDENTITY_SCHEMA = (
+    "aats.research_round_snapshot.typed_json.v1"
+)
 
 _SNAPSHOT_FILE_MAP: dict[str, str] = {
     SNAPSHOT_ARTIFACT_INDEX: "artifacts/governance/artifact_index.json",
@@ -37,9 +43,11 @@ _SNAPSHOT_FILE_MAP: dict[str, str] = {
 }
 _ROUND_PHASE_ROOTS: dict[str, str] = {
     ROUND_PHASE_STEP2: "artifacts/research/step2_rounds",
+    ROUND_PHASE_STEP3: "artifacts/research/step3_rounds",
     ROUND_PHASE_PHASE3: "artifacts/research/attribution_rounds",
     ROUND_PHASE_PHASE4: "artifacts/research/execution_rounds",
 }
+_PRODUCER_ANCHORED_PHASES = frozenset({ROUND_PHASE_STEP3})
 _ROUND_DIR_PATTERN = re.compile(r"^\d{8}_\d{6}_[0-9a-f]{8}$")
 
 # 表示 snapshot 磁盘目录缺 round_manifest.json 的 data_source 标记。
@@ -93,6 +101,8 @@ def _build_round_snapshot_from_dir(
     round_dir: Path,
     phase: str,
 ) -> dict[str, Any] | None:
+    if not round_dir.is_dir() or round_dir.is_symlink():
+        return None
     manifest = _safe_load_json(round_dir / "round_manifest.json")
     manifest_synthesized = not isinstance(manifest, dict)
 
@@ -116,6 +126,25 @@ def _build_round_snapshot_from_dir(
             "family_timeframe_summary_json": str(round_dir / "family_timeframe_summary.json"),
             "scan_comparison_summary_json": str(round_dir / "scan_comparison_summary.json"),
             "parameter_candidates_json": str(round_dir / "parameter_candidates.json"),
+        }
+    elif phase == ROUND_PHASE_STEP3:
+        if manifest_synthesized:
+            manifest = {
+                "round_id": round_dir.name,
+                "started_at": None,
+                "finished_at": None,
+                "status": "unknown",
+            }
+        summary_payload = {
+            "parameter_candidates_merged": _safe_load_json(
+                round_dir / "parameter_candidates_merged.json"
+            ) or {},
+        }
+        artifacts_payload = {
+            "candidate_path": str(
+                round_dir / "parameter_candidates_merged.json"
+            ),
+            "manifest_path": str(round_dir / "round_manifest.json"),
         }
     elif phase == ROUND_PHASE_PHASE3:
         if manifest_synthesized:
@@ -182,6 +211,58 @@ def _build_round_snapshot_from_dir(
         "artifacts": artifacts_payload,
         "data_source": "file",
     }
+
+
+def research_round_snapshot_fingerprint(snapshot: dict[str, Any]) -> str:
+    """Hash the immutable business identity of one normalized DB snapshot.
+
+    Read-path annotations such as ``data_source`` and bootstrap diagnostics are
+    deliberately excluded.  Every field persisted by
+    :func:`db_upsert_research_round_snapshot` remains covered.
+    """
+
+    if not isinstance(snapshot, dict):
+        raise ValueError("research_round_snapshot_identity_invalid")
+    identity = {
+        key: snapshot.get(key)
+        for key in (
+            "round_id",
+            "phase",
+            "status",
+            "round_path",
+            "started_at",
+            "finished_at",
+            "replay_only",
+            "manifest",
+            "summary",
+            "conclusion",
+            "artifacts",
+        )
+    }
+    try:
+        return typed_json_sha256(
+            identity,
+        )
+    except ValueError as exc:
+        raise ValueError("research_round_snapshot_identity_invalid") from exc
+
+
+def _research_round_typed_json_identity(
+    *,
+    manifest_payload: dict[str, Any],
+    summary_payload: dict[str, Any],
+    conclusion_payload: dict[str, Any],
+    artifacts_payload: dict[str, Any],
+) -> str:
+    return typed_json_sha256(
+        {
+            "schema": _RESEARCH_ROUND_JSON_IDENTITY_SCHEMA,
+            "manifest": manifest_payload,
+            "summary": summary_payload,
+            "conclusion": conclusion_payload,
+            "artifacts": artifacts_payload,
+        }
+    )
 
 
 def db_upsert_governance_snapshot(
@@ -361,13 +442,31 @@ def db_upsert_research_round_snapshot(
     conclusion_payload: dict[str, Any] | None = None,
     artifacts_payload: dict[str, Any] | None = None,
 ) -> None:
-    session.execute(
+    """Insert one immutable round snapshot or verify an exact retry.
+
+    ``round_id`` is the permanent business identity for Phase 2/3/4 evidence.
+    A retry may observe the existing row only when every canonical field is
+    identical; replacing metadata, payloads, artifacts, or nested lineage
+    behind an existing ID fails closed.
+    """
+    canonical_manifest = manifest_payload or {}
+    canonical_summary = summary_payload or {}
+    canonical_conclusion = conclusion_payload or {}
+    canonical_artifacts = artifacts_payload or {}
+    typed_json_identity_sha256 = _research_round_typed_json_identity(
+        manifest_payload=canonical_manifest,
+        summary_payload=canonical_summary,
+        conclusion_payload=canonical_conclusion,
+        artifacts_payload=canonical_artifacts,
+    )
+    result = session.execute(
         text(
             """
             INSERT INTO governance.research_round_snapshots
                 (round_id, phase, status, round_path,
                  started_at, finished_at, replay_only,
                  manifest_payload, summary_payload, conclusion_payload, artifacts_payload,
+                 typed_json_identity_sha256,
                  created_at, updated_at)
             VALUES
                 (:round_id, :phase, :status, :round_path,
@@ -376,19 +475,29 @@ def db_upsert_research_round_snapshot(
                  CAST(:summary_payload AS jsonb),
                  CAST(:conclusion_payload AS jsonb),
                  CAST(:artifacts_payload AS jsonb),
+                 :typed_json_identity_sha256,
                  :now, :now)
             ON CONFLICT (round_id) DO UPDATE SET
-                phase = EXCLUDED.phase,
-                status = EXCLUDED.status,
-                round_path = EXCLUDED.round_path,
-                started_at = EXCLUDED.started_at,
-                finished_at = EXCLUDED.finished_at,
-                replay_only = EXCLUDED.replay_only,
-                manifest_payload = EXCLUDED.manifest_payload,
-                summary_payload = EXCLUDED.summary_payload,
-                conclusion_payload = EXCLUDED.conclusion_payload,
-                artifacts_payload = EXCLUDED.artifacts_payload,
-                updated_at = EXCLUDED.updated_at
+                typed_json_identity_sha256 = COALESCE(
+                    governance.research_round_snapshots.typed_json_identity_sha256,
+                    EXCLUDED.typed_json_identity_sha256
+                )
+            WHERE governance.research_round_snapshots.phase IS NOT DISTINCT FROM EXCLUDED.phase
+              AND governance.research_round_snapshots.status IS NOT DISTINCT FROM EXCLUDED.status
+              AND governance.research_round_snapshots.round_path IS NOT DISTINCT FROM EXCLUDED.round_path
+              AND governance.research_round_snapshots.started_at IS NOT DISTINCT FROM EXCLUDED.started_at
+              AND governance.research_round_snapshots.finished_at IS NOT DISTINCT FROM EXCLUDED.finished_at
+              AND governance.research_round_snapshots.replay_only IS NOT DISTINCT FROM EXCLUDED.replay_only
+              AND governance.research_round_snapshots.manifest_payload::text IS NOT DISTINCT FROM EXCLUDED.manifest_payload::text
+              AND governance.research_round_snapshots.summary_payload::text IS NOT DISTINCT FROM EXCLUDED.summary_payload::text
+              AND governance.research_round_snapshots.conclusion_payload::text IS NOT DISTINCT FROM EXCLUDED.conclusion_payload::text
+              AND governance.research_round_snapshots.artifacts_payload::text IS NOT DISTINCT FROM EXCLUDED.artifacts_payload::text
+              AND (
+                    governance.research_round_snapshots.typed_json_identity_sha256 IS NULL
+                    OR governance.research_round_snapshots.typed_json_identity_sha256
+                       = EXCLUDED.typed_json_identity_sha256
+              )
+            RETURNING round_id
             """
         ),
         {
@@ -399,13 +508,17 @@ def db_upsert_research_round_snapshot(
             "started_at": parse_dt(started_at),
             "finished_at": parse_dt(finished_at),
             "replay_only": replay_only,
-            "manifest_payload": json_dumps(manifest_payload or {}),
-            "summary_payload": json_dumps(summary_payload or {}),
-            "conclusion_payload": json_dumps(conclusion_payload or {}),
-            "artifacts_payload": json_dumps(artifacts_payload or {}),
+            "manifest_payload": json_dumps(canonical_manifest),
+            "summary_payload": json_dumps(canonical_summary),
+            "conclusion_payload": json_dumps(canonical_conclusion),
+            "artifacts_payload": json_dumps(canonical_artifacts),
+            "typed_json_identity_sha256": typed_json_identity_sha256,
             "now": _utcnow(),
         },
     )
+    if result.fetchone() is None:
+        raise DBConflictError("research_round_snapshot_immutable_identity_conflict")
+    log.info("DB insert/verify research round snapshot: %s (%s)", round_id, phase)
 
 
 def _normalize_round_snapshot_row(row: Any) -> dict[str, Any]:
@@ -556,7 +669,12 @@ def load_research_round_snapshot(
     *,
     round_id: str,
     project_root: Path | None = None,
+    require_managed_db_truth: bool = False,
 ) -> dict[str, Any] | None:
+    managed_truth = bool(
+        project_root is not None
+        and has_explicit_governance_db_configuration(project_root)
+    )
     engine, ok = try_governance_db()
     db_reachable = False
     if ok:
@@ -567,6 +685,12 @@ def load_research_round_snapshot(
             if snapshot is not None:
                 snapshot.setdefault("data_source", "db")
                 return snapshot
+
+            if require_managed_db_truth and managed_truth:
+                # Formal decision consumers may only use an already-persisted
+                # DB row.  A mutable file must not be promoted by lazy
+                # bootstrap during the same decision read.
+                return None
 
             # DB 可达但没有该 round：若磁盘有对应 round 目录，lazy bootstrap。
             # 这让升级到一个已有 research 磁盘产物、但 DB 表空的环境时，
@@ -579,6 +703,12 @@ def load_research_round_snapshot(
                     )
                     if built is None:
                         continue
+                    if phase in _PRODUCER_ANCHORED_PHASES:
+                        built["data_source"] = "file_untrusted"
+                        built["bootstrap_reason"] = (
+                            "producer_managed_snapshot_required"
+                        )
+                        return built
                     # 缺 round_manifest.json 的目录（残留/半成品/历史不完整 round）
                     # 绝不回灌进 DB。否则会把不完整 round 提升成"正式 completed 快照"，
                     # 污染下游所有 DB-first 消费者。这类目录只在 read-path 作为降级副本。
@@ -623,12 +753,22 @@ def load_research_round_snapshot(
                     return built
             return None
         except Exception as exc:  # pragma: no cover - defensive
+            if require_managed_db_truth and managed_truth:
+                raise DBUnavailableError(
+                    f"governance DB research round read failed for {round_id}; "
+                    "stale file fallback denied"
+                ) from exc
             log.warning("DB load research round snapshot failed (%s): %s", round_id, exc)
             db_reachable = False
         finally:
             if engine is not None:
                 engine.dispose()
 
+    if require_managed_db_truth and managed_truth:
+        raise DBUnavailableError(
+            f"governance DB unavailable for research round {round_id}; "
+            "stale file fallback denied"
+        )
     if project_root is None:
         return None
     for phase, rel_root in _ROUND_PHASE_ROOTS.items():
@@ -679,6 +819,12 @@ def load_latest_research_round_snapshot(
                             round_dir=round_dir, phase=phase,
                         )
                         if built is not None:
+                            if phase in _PRODUCER_ANCHORED_PHASES:
+                                built["data_source"] = "file_untrusted"
+                                built["bootstrap_reason"] = (
+                                    "producer_managed_snapshot_required"
+                                )
+                                return built
                             # 缺 manifest 的"最新"目录不回灌 DB：残留/半成品不能
                             # 作为官方 latest round 被所有 DB-first 消费者信任。
                             if built.get("manifest_synthesized"):

@@ -1,7 +1,7 @@
 # Parameter Apply 与 Rollback 操作指南
 
 > 文档状态：现行操作说明
-> 最后核对：2026-08-27（起始 HEAD `9c4112c6`，含当前 RDP 控制面收口候选；以本文档所在 HEAD 为准）
+> 最后核对：2026-08-27（起始 HEAD `c15ccd2d`，含参数内容身份 LF-A 候选；以本文档所在 HEAD 为准）
 > 核对范围：当前 API、治理数据库 writer、观察/效果评估/风险收敛路径和测试；不证明现场数据库、容器或参数状态
 
 > **Scope 边界：**本页的 `POST /rdp/parameters/apply|rollback` 是 combo
@@ -18,6 +18,12 @@
 - 当前可执行的前向入口只有 `POST /rdp/releases/create` 和 `POST /rdp/recommendations/{id}/approve-and-release`；`skip_apply=false` 时都要求 Operator write access 与 action-bound `apply` token。
 - Operator 直接回滚 API 要求独立的 action-bound `rollback` token。内部风险收敛任务不是 Operator API，不消费浏览器 token；其授权来自精确 release/provenance、combo lock、attempt 状态机和数据库终态证明。
 - 组合审批发布只接受进程内、完整 recommendation 身份绑定的晋级 capability；其有效期取“签发后 5 分钟”和“精确 Phase 6 证据满 168 小时”二者较早值，过期或时间结构异常时必须在参数读取和写入前拒绝。
+- Phase 6 候选必须保存版本化参数值 SHA-256；qualification、短时 capability、dry-run registry
+  和 combo/parameter 行锁内 DB values 必须逐层复算一致。旧候选缺指纹、同 ID values 漂移或
+  非有限/非 JSON 参数一律零资本写入失败，必须生成新参数集并重新运行 Phase 6，禁止原地补写。
+- 官方 parameter set、recommendation 与 decision-round snapshot writer 在应用层实行同 ID 内容
+  只写一次；生命周期另走 CAS。Stage 20 数据库 trigger 尚未获批，具备越权 SQL/superuser 的
+  直接修改仍是未关闭风险，不能把 LF-A 称为数据库原生不可变。
 - token actor 在启用认证时必须等于当前 session identity，且 token 受 HMAC、action 和 TTL 约束。
 - `POST /rdp/releases/create` 与 `POST /rdp/recommendations/{id}/approve-and-release` 在 `skip_apply=false` 时同样要求 `action=apply` 的短时 token；token 校验发生在 release/approve 写入之前。`skip_apply=true` 只创建治理记录，不要求 apply token。
 - `release_cycle` 自动调度已禁用且禁止任务入队。
@@ -26,7 +32,8 @@
 
 在任何前向参数变更前逐项确认：
 
-1. recommendation 存在、状态可转换；apply-capable recommendation 必须绑定精确 `evidence_bundle_ref`，对应 Phase 6 成功 round、当前资格策略和有效期均通过；
+1. recommendation 存在、状态可转换；apply-capable recommendation 必须绑定精确
+   `evidence_bundle_ref`，对应 Phase 6 成功 round、当前资格策略、有效期和候选参数值指纹均通过；
 2. Step2 integrity 没有 blocking reason；
 3. attribution、execution realism、readiness 支持该变更；
 4. `/rdp/health`、`/system/health`、recovery、reconciliation 可接受；
@@ -187,6 +194,9 @@ body:
 | `actor_mismatch` | token actor 与 session identity 不一致，停止并重新签发 |
 | `integrity_blocked=true` | 修复 Step2 evidence/integrity，不能继续前向 apply |
 | `promotion_qualification` 阻断 | 使用 recommendation 精确引用的 Phase 6 round 修复证据；不能用“最新 round”替旧 recommendation 背书 |
+| `promotion_candidate_values_fingerprint_invalid` | 旧/畸形 Phase 6 候选不具备前向资格；用当前代码重跑 decision round，不得手工补 hash |
+| `parameter_values_invalid` / `parameter_set_evidence_fingerprint_mismatch` | 当前 registry/锁内 DB values 无法证明与 Phase 6 完全一致；停止发布，创建新 ID、重跑研究和审批 |
+| `parameter_set_immutable_identity_conflict` / `recommendation_immutable_identity_conflict` | 同 ID 被尝试绑定到不同内容；保留原记录，调查 writer 或并发来源，禁止覆盖重试 |
 | `blocked_by_gate` | 保留 release 记录，修复 gate 原因后重新评估 |
 | `release_required` | direct apply 已停用；改用 release/approve-and-release 建立 canonical release |
 | apply failed | active/history/release 三方核对，禁止盲目重试 |

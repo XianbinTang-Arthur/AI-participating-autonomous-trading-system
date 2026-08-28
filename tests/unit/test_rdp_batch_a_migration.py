@@ -77,7 +77,9 @@ class TestExpectedCheckCoverage(unittest.TestCase):
         target = next(c for c in DISTRIBUTION_CHECKS if c.check_id == "7a")
         self.assertEqual(
             target.allowlist,
-            frozenset({"draft", "candidate", "frozen", "deprecated"}),
+            frozenset(
+                {"draft", "candidate", "frozen", "released", "deprecated"}
+            ),
         )
 
     def test_status_allowlist_for_recommendations_matches_check_constraint(self) -> None:

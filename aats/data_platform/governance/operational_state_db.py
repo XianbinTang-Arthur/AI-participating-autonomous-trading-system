@@ -17,7 +17,9 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ._db_util import ADVISORY_LOCK_KEYS, json_dumps, parse_dt
+from ._exceptions import DBConflictError
 from ._time_util import parse_iso_datetime_utc
+from .typed_json_identity import canonical_typed_json_bytes, typed_json_sha256
 
 log = logging.getLogger(__name__)
 
@@ -2623,33 +2625,144 @@ def db_find_release_effectiveness(session: Session, release_id: str) -> dict[str
     return _release_effectiveness_from_row(row)
 
 
-def db_upsert_decision_evidence_bundle(session: Session, entry: dict[str, Any]) -> None:
-    session.execute(
+def _decision_evidence_bundle_identity(entry: dict[str, Any]) -> dict[str, Any]:
+    """Return the canonical insert-once identity for one Phase 6 bundle."""
+
+    round_id = entry.get("round_id")
+    evidence_summary_path = entry.get("evidence_summary_path")
+    if not isinstance(round_id, str) or not round_id.strip():
+        raise ValueError("decision_evidence_bundle_round_id_invalid")
+    if (
+        not isinstance(evidence_summary_path, str)
+        or not evidence_summary_path.strip()
+    ):
+        raise ValueError("decision_evidence_bundle_summary_path_invalid")
+    created_at = parse_iso_datetime_utc(
+        entry.get("created_at"),
+        context="decision_evidence_bundle.created_at",
+    )
+    if created_at is None:
+        raise ValueError("decision_evidence_bundle_created_at_required")
+
+    identity = dict(entry)
+    identity.update(
+        {
+            "round_id": round_id,
+            "evidence_summary_path": evidence_summary_path,
+            "phases_with_data": list(entry.get("phases_with_data") or []),
+            "completeness_ratio": float(
+                entry.get("completeness_ratio") or 0.0
+            ),
+            "created_at": created_at.astimezone(timezone.utc).isoformat(),
+        }
+    )
+    return json.loads(canonical_typed_json_bytes(identity).decode("utf-8"))
+
+
+def db_get_decision_evidence_bundle(
+    session: Session,
+    *,
+    round_id: str,
+) -> dict[str, Any] | None:
+    """Load one evidence bundle with DB columns overlaid as canonical truth."""
+
+    row = session.execute(
+        text(
+            """
+            SELECT round_id, evidence_summary_path, phases_with_data,
+                   completeness_ratio, payload, created_at
+            FROM governance.decision_evidence_bundles
+            WHERE round_id = :round_id
+            LIMIT 1
+            """
+        ),
+        {"round_id": round_id},
+    ).fetchone()
+    if row is None:
+        return None
+    created_at = row.created_at
+    if created_at is not None:
+        if created_at.tzinfo is None or created_at.utcoffset() is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        else:
+            created_at = created_at.astimezone(timezone.utc)
+    return _with_authoritative_columns(
+        row.payload,
+        round_id=row.round_id,
+        evidence_summary_path=row.evidence_summary_path,
+        phases_with_data=list(row.phases_with_data or []),
+        completeness_ratio=float(row.completeness_ratio or 0.0),
+        created_at=created_at.isoformat() if created_at is not None else None,
+    )
+
+
+def db_insert_decision_evidence_bundle(
+    session: Session,
+    entry: dict[str, Any],
+) -> None:
+    """Insert one immutable bundle, accepting only an exact identity retry."""
+
+    expected = _decision_evidence_bundle_identity(entry)
+    existing = db_get_decision_evidence_bundle(
+        session,
+        round_id=expected["round_id"],
+    )
+    if existing is not None:
+        if typed_json_sha256(existing) != typed_json_sha256(expected):
+            raise DBConflictError(
+                "decision_evidence_bundle_immutable_identity_conflict"
+            )
+        return
+
+    result = session.execute(
         text(
             """
             INSERT INTO governance.decision_evidence_bundles
-                (round_id, evidence_summary_path, phases_with_data, completeness_ratio,
-                 payload, updated_at)
+                (round_id, evidence_summary_path, phases_with_data,
+                 completeness_ratio, payload, created_at, updated_at)
             VALUES
-                (:round_id, :evidence_summary_path, CAST(:phases_with_data AS jsonb), :completeness_ratio,
-                 CAST(:payload AS jsonb), :updated_at)
-            ON CONFLICT (round_id) DO UPDATE SET
-                evidence_summary_path = EXCLUDED.evidence_summary_path,
-                phases_with_data = EXCLUDED.phases_with_data,
-                completeness_ratio = EXCLUDED.completeness_ratio,
-                payload = EXCLUDED.payload,
-                updated_at = EXCLUDED.updated_at
+                (:round_id, :evidence_summary_path,
+                 CAST(:phases_with_data AS jsonb), :completeness_ratio,
+                 CAST(:payload AS jsonb), :created_at, :updated_at)
+            ON CONFLICT (round_id) DO NOTHING
+            RETURNING round_id
             """
         ),
         {
-            "round_id": entry.get("round_id"),
-            "evidence_summary_path": entry.get("evidence_summary_path"),
-            "phases_with_data": json_dumps(entry.get("phases_with_data") or []),
-            "completeness_ratio": float(entry.get("completeness_ratio") or 0.0),
-            "payload": json_dumps(entry),
+            "round_id": expected["round_id"],
+            "evidence_summary_path": expected["evidence_summary_path"],
+            "phases_with_data": json_dumps(expected["phases_with_data"]),
+            "completeness_ratio": expected["completeness_ratio"],
+            "payload": canonical_typed_json_bytes(expected).decode("utf-8"),
+            "created_at": parse_iso_datetime_utc(
+                expected["created_at"],
+                context="decision_evidence_bundle.created_at",
+            ),
             "updated_at": _utcnow(),
         },
     )
+    if result.fetchone() is not None:
+        return
+
+    # A non-Phase6 writer may have raced the INSERT.  It is safe only when it
+    # independently published the byte-equivalent immutable identity.
+    existing = db_get_decision_evidence_bundle(
+        session,
+        round_id=expected["round_id"],
+    )
+    if (
+        existing is None
+        or typed_json_sha256(existing) != typed_json_sha256(expected)
+    ):
+        raise DBConflictError(
+            "decision_evidence_bundle_immutable_identity_conflict"
+        )
+
+
+def db_upsert_decision_evidence_bundle(session: Session, entry: dict[str, Any]) -> None:
+    """Compatibility name for the now-immutable evidence-bundle insert."""
+
+    db_insert_decision_evidence_bundle(session, entry)
 
 
 def db_load_decision_evidence_bundle_index(session: Session) -> dict[str, Any]:

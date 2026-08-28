@@ -49,12 +49,19 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import pathlib
 import sys
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
+
+from aats.data_platform.governance._atomic_io import immutable_json_write
+from aats.data_platform.governance.parameter_identity import (
+    parameter_values_fingerprint,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,6 +71,16 @@ log = logging.getLogger("rdp_execution_realism")
 
 _DEFAULT_ARTIFACT_ROOT = pathlib.Path("artifacts/research/execution_rounds")
 _EXECUTION_EVIDENCE_SCHEMA_VERSION = "execution_cost_summary_v1"
+_RESULT_SCHEMA_VERSION = "aats.execution_realism_result.v1"
+_RESULT_MARKER_PREFIX = "RDP_EXECUTION_REALISM_RESULT_JSON="
+_RESULT_OUTPUT_FILES = {
+    "execution_alignment": "execution_alignment.csv",
+    "fill_feasibility_summary": "fill_feasibility_summary.csv",
+    "slippage_summary": "slippage_summary.csv",
+    "execution_cost_summary": "execution_cost_summary.json",
+    "replay_params_used": "replay_params_used.json",
+    "live_execution_realism_report": "live_execution_realism_report.md",
+}
 
 
 # =========================================================================
@@ -346,10 +363,6 @@ def _write_csv(
     fieldnames: list[str],
 ) -> pathlib.Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if not rows:
-        output_path.write_text("", encoding="utf-8")
-        return output_path
-
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
@@ -366,6 +379,72 @@ def _write_json(data: Any, output_path: pathlib.Path) -> pathlib.Path:
         json.dump(data, f, indent=2, ensure_ascii=False, default=str)
     log.info("Wrote JSON -> %s", output_path)
     return output_path
+
+
+def _result_output_evidence(run_dir: pathlib.Path) -> dict[str, dict[str, Any]]:
+    """Bind every output consumed by the round runner to exact immutable metadata."""
+
+    evidence: dict[str, dict[str, Any]] = {}
+    for key, filename in _RESULT_OUTPUT_FILES.items():
+        path = run_dir / filename
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError(f"execution_realism_result_output_invalid:{key}")
+        payload = path.read_bytes()
+        evidence[key] = {
+            "path": str(path.resolve(strict=True)),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size_bytes": len(payload),
+        }
+    return evidence
+
+
+def _publish_result_sidecar(
+    *,
+    result_json: str | None,
+    run_id: str,
+    run_dir: pathlib.Path,
+    family: str,
+    symbol: str,
+    timeframe: str,
+    dataset_version: str,
+    start: str,
+    end: str,
+    taker_fee_bps: float,
+    replay_params: dict[str, Any],
+    status: str,
+    exit_code: int,
+) -> dict[str, Any]:
+    result_payload = {
+        "schema_version": _RESULT_SCHEMA_VERSION,
+        "status": status,
+        "exit_code": exit_code,
+        "run_id": run_id,
+        "run_dir": str(run_dir.resolve(strict=True)),
+        "family": family,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "dataset_version": dataset_version,
+        "window": {"start": start, "end": end},
+        "taker_fee_bps": taker_fee_bps,
+        "resolved_parameter_values_fingerprint": parameter_values_fingerprint(
+            replay_params
+        ),
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "outputs": _result_output_evidence(run_dir),
+    }
+    if result_json:
+        immutable_json_write(result_payload, pathlib.Path(result_json))
+    print(
+        _RESULT_MARKER_PREFIX
+        + json.dumps(
+            result_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
+    return result_payload
 
 
 # =========================================================================
@@ -415,7 +494,7 @@ _SLIPPAGE_FIELDS = [
 # =========================================================================
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="One-shot Execution Realism: 市场微观结构可行性分析 (V1 bar-proxy)",
     )
@@ -431,6 +510,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--artifact-root", type=str, default=str(_DEFAULT_ARTIFACT_ROOT),
+    )
+    parser.add_argument(
+        "--result-json",
+        help="可选的不可变运行结果 sidecar 路径，供父编排器精确绑定本次运行",
     )
     parser.add_argument(
         "--benchmark-segment",
@@ -507,8 +590,11 @@ def main() -> None:
     )
 
     # 产物目录
-    artifact_root = pathlib.Path(args.artifact_root)
-    run_id = f"{args.family}_{args.timeframe}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    artifact_root = pathlib.Path(args.artifact_root).resolve()
+    run_id = (
+        f"{args.family}_{args.timeframe}_"
+        f"{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex}"
+    )
     run_dir = artifact_root / run_id
 
     log.info("=" * 60)
@@ -655,11 +741,27 @@ def main() -> None:
     print(f"Report: {run_dir / 'live_execution_realism_report.md'}")
     print(f"Artifacts: {run_dir}")
 
-    # 退出码
+    # 退出码与 sidecar status 必须保持一致。
     matched = sum(1 for r in aligned_rows if r.get("alignment_status") == "matched")
-    if total > 0 and matched == 0:
-        sys.exit(2)
+    exit_code = 2 if total > 0 and matched == 0 else 0
+    status = "partial_success" if exit_code == 2 else "succeeded"
+    _publish_result_sidecar(
+        result_json=args.result_json,
+        run_id=run_id,
+        run_dir=run_dir,
+        family=args.family,
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+        dataset_version=args.dataset_version,
+        start=args.start,
+        end=args.end,
+        taker_fee_bps=args.taker_fee_bps,
+        replay_params=replay_params.to_dict(),
+        status=status,
+        exit_code=exit_code,
+    )
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

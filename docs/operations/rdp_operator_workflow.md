@@ -1,7 +1,7 @@
 # RDP Operator 工作流 SOP
 
 > 文档状态：现行操作说明
-> 最后核对：2026-08-27（起始 HEAD `9c4112c6`，含当前 RDP 控制面收口候选；以本文档所在 HEAD 为准）
+> 最后核对：2026-08-28（起始 HEAD `c15ccd2d`，含参数内容身份与 Phase 3/4 子产物语义 LF-A 候选；以本文档所在 HEAD 为准）
 > 核对范围：当前 Operator API/UI、Run/attempt queue、发布资格和回滚风险收敛代码；不证明现场状态
 
 ## 1. 每日观察
@@ -25,7 +25,9 @@
 
 - source parameter set 和 evidence lineage 完整；
 - apply-capable recommendation 精确引用成功的 Phase 6 round，且当前 qualification policy、combo candidate、显式时区完成时间与 168 小时有效期均通过；系统会将合法时区偏移归一为 UTC，naive/未来/不一致时间失败关闭；
-- approve-and-release 内部签发的晋级 capability 最长只存活 5 分钟，并受上述证据剩余寿命进一步限制；它不可序列化或跨请求长期复用；
+- Phase 6 combo candidate 携带可复算的参数值指纹，且与当前 registry 及锁内 DB values 一致；
+  缺指纹的旧 round 或同 ID 内容漂移必须重新研究，不能手工补 hash 或借新 round 替旧证据背书；
+- approve-and-release 内部签发的晋级 capability 最长只存活 5 分钟，并受上述证据剩余寿命进一步限制；即使对象被序列化/反序列化，进程内 issuer identity 也无法恢复为有效授权，因此不能跨请求长期复用；
 - Step2 integrity 正常；
 - replay、attribution、execution realism 和 readiness 支持；
 - 结论不是只靠单次收益或短窗口；
@@ -95,6 +97,21 @@ UI 会自动从当前 session 申请短时 token；直接调用 API 时必须显
 - `succeeded_with_warnings` 表示任务完成但存在 allow-failure 或研究批次部分成功；`partially_succeeded` 表示硬失败前后仍有可用阶段产物，两者都不能写成完整成功。
 - 运行详情优先看 `run.error_summary` 和首个失败步骤；日志 tail 只是诊断补充，最后一个成功阶段不能覆盖前面的失败。
 - `research_cycle` 的完整 RDP 默认执行 Phase 3 live attribution。后台必须已注入只读 `RDP_LIVE_DATABASE_URL`；缺失或不可查询时任务失败关闭，不会隐式改成 replay-only。纯回放只允许维护者在受控 CLI 中显式使用 `--replay-only`，其结果不能通过发布 readiness。
+- full pipeline 只要包含 Step 2、Step 3、Phase 3 或 Phase 4，就必须在启动前提供同一非空
+  `--start/--end`（或 `--lookback-days`）；仅刷新既有治理数据并运行 Decision 时才可不带研究窗口。
+  Step 2/Step 3 日志应实时可见，后续阶段必须显示并消费本次运行 marker 绑定的精确产物；Phase 3/4
+  也必须分别返回绑定其 immutable manifest 与 Step 3 lineage 的唯一 `round_result.json` marker。
+  在 managed DB 环境，Step 2、Step 3、Phase 3、Phase 4 均须先成功写入对应的 exact research-round
+  snapshot，随后才能写入并输出本轮 `round_result.json` marker；snapshot 写入失败时阶段以非零退出，
+  不得短暂显示成功，也不得以文件自洽或 lazy bootstrap 继续。Step 3 snapshot 还须逐字锚定
+  candidate/manifest 及其 Step 2 父 snapshot。
+  Decision 还必须显式携带 `--expected-step2-round-id`，从治理 DB 读取该 exact snapshot 并把其
+  typed fingerprint 写入 Phase 2 evidence；promotion 校验会要求它与目标 Step 3 managed snapshot
+  固化的父 Step 2 ID/fingerprint 完全一致。运行期间出现更新的 Step 2 不能以 `latest` 替换本轮父证据。
+  出现 marker 缺失/重复、digest 不符、四 combo topology 不完整或 `step3_result_not_bound` 时停止，
+  不手工改为某个 latest 目录。仅续跑 Governance/Decision 时必须显式提供 Step 3、Phase 3、Phase 4
+  三份精确 result refs；Decision 只接受与 Step 3 父 Step 2 及这两个 Phase round ID 精确一致的
+  managed DB snapshot。
 - Phase 3 必须同时证明 live 查询成功、至少一个 `family + symbol + timeframe + signal_bar_start` 精确对齐，并且没有缺 lineage 的 live intent；旧 intent 不按 `created_at` 猜测或回填。
 
 完整 schedule 见 [平台运行手册](platform_runbook.md)。
@@ -106,6 +123,13 @@ UI 会自动从当前 session 申请短时 token；直接调用 API 时必须显
 | Recommendation 看不到 | 检查 DB-first registry、过滤条件和 source artifact；不要用禁用 CLI show |
 | Apply integrity blocked | 修复 Step2 evidence，不继续前向变更 |
 | Promotion qualification blocked / audit-only | 核对 recommendation 的精确 evidence round；不能用较新的健康 round 替代，也不能原地补写历史证据 |
+| Target combo Phase 2 hard gate blocked | 目标 combo 必须同时满足 opening 实验数 ≥ 1、最大 opening count ≥ 1、平均 positive-edge ratio ≥ 0.20；不得借用其他 combo 的 edge 或靠 Phase 3/4/治理高分覆盖 |
+| `derivatives_phase2_promotion_evidence_unavailable` | 当前 legacy Step 2 只有探索/审计证据，尚无与 SWAP instrument/参数身份绑定的资格轮；保持 hold，等待独立 derivatives qualification producer，禁止借用 SPOT bundle 或手工补 metrics |
+| Parameter fingerprint invalid / mismatch | 停止发布；确认 parameter set 未被同 ID 改写，用新 ID 重跑 Phase 6 与审批，不手改历史 snapshot |
+| Step 3 import `round_metadata_invalid` / `round_content_conflict` | 停止该轮导入；核对 current schema、round/symbol/dataset、manifest status、candidate size/SHA-256，以及 exact `phase2_step3`/Step 2 managed snapshot；不以文件回灌 DB，不覆盖或手改历史 artifact |
+| Step 3 import `import_lock_busy` | 已有 importer 持有 DB 全局锁；等待该次终态后重试，不并行启动第二条导入链 |
+| Step 3 import `supersession_deferred` | 新参数可能已安全入库，但旧候选缺少可证明的更早 manifest；保留双方，补齐真实 provenance 或人工审查，不能按目录名猜顺序 |
+| Phase 3/4 `child_result_invalid` / `child_artifact_invalid` | 停止该 combo；核对唯一 result marker、sidecar scope、UTC 时间、参数指纹及输出 SHA/size；若为 artifact invalid，再核对完整 CSV 表头、lineage、有限数值和明细/汇总重算结果。不得手动指定、复制“最新”子目录或修改历史产物 |
 | Gate blocked | 根据 failed checks 修复后重跑；不跳 gate |
 | Active set 与预期不符 | 停止发布，查 DB active set/history/release/runtime provenance |
 | DB active loader 失败 | runtime 已退化到 profile 参数；恢复数据库，不能靠 JSON fallback |

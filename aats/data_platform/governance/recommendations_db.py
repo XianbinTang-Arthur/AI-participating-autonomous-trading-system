@@ -18,9 +18,49 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ._db_util import VALID_REC_STATUSES, VALID_REC_TYPES, parse_dt
+from ._db_util import (
+    ADVISORY_LOCK_KEYS,
+    VALID_REC_STATUSES,
+    VALID_REC_TYPES,
+    parse_dt,
+)
+from ._exceptions import DBConflictError
 
 log = logging.getLogger(__name__)
+
+_RECOMMENDATION_TRANSITIONS = {
+    "draft": frozenset({"approved", "rejected", "superseded"}),
+    "approved": frozenset({"superseded"}),
+    "rejected": frozenset(),
+    "superseded": frozenset(),
+}
+_RECOMMENDATION_SCOPE_LOCK_KEY = ADVISORY_LOCK_KEYS[
+    "recommendation_scope_write"
+]
+
+
+def _validate_recommendation_transition(
+    *,
+    current_statuses: str | tuple[str, ...] | list[str] | None,
+    new_status: str,
+) -> None:
+    if current_statuses is None:
+        raise ValueError("recommendation_transition_requires_expected_status")
+    statuses = (
+        (current_statuses,)
+        if isinstance(current_statuses, str)
+        else tuple(current_statuses)
+    )
+    if not statuses or any(status not in VALID_REC_STATUSES for status in statuses):
+        raise ValueError("recommendation_transition_expected_status_invalid")
+    if any(
+        new_status not in _RECOMMENDATION_TRANSITIONS[current]
+        for current in statuses
+    ):
+        raise ValueError(
+            "recommendation_transition_not_allowed: "
+            f"{sorted(statuses)}->{new_status}"
+        )
 
 
 # =====================================================================
@@ -52,18 +92,41 @@ def db_upsert_recommendation(
     superseded_by_recommendation_id: str | None = None,
     created_at: str | None = None,
 ) -> None:
-    """UPSERT 一条 recommendation 记录.
+    """Insert a recommendation or verify an identity-equivalent retry.
 
-    INSERT ... ON CONFLICT (recommendation_id) DO UPDATE
+    Business content is insert-once.  Approval/rejection/supersession must use
+    the dedicated CAS transition functions below, so an old approval cannot be
+    rebound to a new target or evidence reference by an UPSERT.
     """
     if status not in VALID_REC_STATUSES:
-        raise ValueError(f"非法 recommendation status: {status!r}，合法值: {sorted(VALID_REC_STATUSES)}")
+        raise ValueError(
+            f"非法 recommendation status: {status!r}，合法值: "
+            f"{sorted(VALID_REC_STATUSES)}"
+        )
+    if status != "draft":
+        raise ValueError(
+            "recommendation 初始 status 只能为 'draft'；"
+            "approval/rejection/supersession 必须使用专用 CAS 转移"
+        )
+    if any(
+        value is not None
+        for value in (
+            approved_by,
+            approved_at,
+            rejected_by,
+            rejected_at,
+            superseded_by,
+            superseded_at,
+            superseded_by_recommendation_id,
+        )
+    ):
+        raise ValueError("draft recommendation 不能携带终态审计字段")
     if recommendation_type not in VALID_REC_TYPES:
         raise ValueError(
             f"非法 recommendation_type: {recommendation_type!r}，合法值: {sorted(VALID_REC_TYPES)}"
         )
 
-    session.execute(
+    result = session.execute(
         text("""
             INSERT INTO governance.recommendations
                 (recommendation_id, family, symbol, timeframe,
@@ -84,27 +147,17 @@ def db_upsert_recommendation(
                  :superseded_by, :superseded_at, :superseded_by_rec_id,
                  :created_at)
             ON CONFLICT (recommendation_id) DO UPDATE SET
-                family                         = EXCLUDED.family,
-                symbol                         = EXCLUDED.symbol,
-                timeframe                      = EXCLUDED.timeframe,
-                recommendation_type            = EXCLUDED.recommendation_type,
-                target_parameter_set_id        = EXCLUDED.target_parameter_set_id,
-                source_round_id                = COALESCE(
-                    EXCLUDED.source_round_id,
-                    governance.recommendations.source_round_id
-                ),
-                confidence                     = EXCLUDED.confidence,
-                reason                         = EXCLUDED.reason,
-                evidence_bundle_ref            = EXCLUDED.evidence_bundle_ref,
-                status                         = EXCLUDED.status,
-                approved_by                    = EXCLUDED.approved_by,
-                approved_at                    = EXCLUDED.approved_at,
-                review_notes                   = EXCLUDED.review_notes,
-                rejected_by                    = EXCLUDED.rejected_by,
-                rejected_at                    = EXCLUDED.rejected_at,
-                superseded_by                  = EXCLUDED.superseded_by,
-                superseded_at                  = EXCLUDED.superseded_at,
-                superseded_by_recommendation_id = EXCLUDED.superseded_by_recommendation_id
+                recommendation_id = governance.recommendations.recommendation_id
+            WHERE governance.recommendations.family IS NOT DISTINCT FROM EXCLUDED.family
+              AND governance.recommendations.symbol IS NOT DISTINCT FROM EXCLUDED.symbol
+              AND governance.recommendations.timeframe IS NOT DISTINCT FROM EXCLUDED.timeframe
+              AND governance.recommendations.recommendation_type IS NOT DISTINCT FROM EXCLUDED.recommendation_type
+              AND governance.recommendations.target_parameter_set_id IS NOT DISTINCT FROM EXCLUDED.target_parameter_set_id
+              AND governance.recommendations.source_round_id IS NOT DISTINCT FROM EXCLUDED.source_round_id
+              AND governance.recommendations.confidence IS NOT DISTINCT FROM EXCLUDED.confidence
+              AND governance.recommendations.reason IS NOT DISTINCT FROM EXCLUDED.reason
+              AND governance.recommendations.evidence_bundle_ref IS NOT DISTINCT FROM EXCLUDED.evidence_bundle_ref
+            RETURNING recommendation_id
         """),
         {
             "rec_id": recommendation_id,
@@ -129,8 +182,117 @@ def db_upsert_recommendation(
             "created_at": parse_dt(created_at) or datetime.now(timezone.utc),
         },
     )
-    log.info("DB upsert recommendation: %s (%s/%s, status=%s)",
+    if result.fetchone() is None:
+        raise DBConflictError("recommendation_immutable_identity_conflict")
+    log.info("DB insert/verify recommendation: %s (%s/%s, requested_status=%s)",
              recommendation_id, family, timeframe, status)
+
+
+def db_insert_recommendation_superseding_drafts(
+    session: Session,
+    *,
+    recommendation: dict[str, Any],
+) -> list[str]:
+    """Insert one draft and supersede prior same-scope drafts atomically."""
+
+    family = recommendation.get("family")
+    symbol = recommendation.get("symbol", "BTC-USDT-SWAP")
+    timeframe = str(recommendation.get("timeframe") or "").lower()
+    recommendation_type = recommendation.get("recommendation_type")
+    recommendation_id = recommendation.get("recommendation_id")
+    if not all(
+        isinstance(value, str) and value.strip()
+        for value in (
+            family,
+            symbol,
+            timeframe,
+            recommendation_type,
+            recommendation_id,
+        )
+    ):
+        raise ValueError("recommendation_atomic_insert_identity_invalid")
+
+    scope_key = "|".join(
+        (str(family), str(symbol), timeframe, str(recommendation_type))
+    )
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(:namespace, hashtext(:scope_key))"),
+        {"namespace": _RECOMMENDATION_SCOPE_LOCK_KEY, "scope_key": scope_key},
+    )
+    db_upsert_recommendation(
+        session,
+        recommendation_id=str(recommendation_id),
+        family=str(family),
+        timeframe=timeframe,
+        recommendation_type=str(recommendation_type),
+        confidence=str(recommendation.get("confidence") or "low"),
+        reason=str(recommendation.get("reason") or ""),
+        symbol=str(symbol),
+        target_parameter_set_id=recommendation.get("target_parameter_set_id"),
+        source_round_id=recommendation.get("source_round_id"),
+        evidence_bundle_ref=recommendation.get("evidence_bundle_ref"),
+        status="draft",
+        created_at=recommendation.get("created_at"),
+    )
+    canonical_new = session.execute(
+        text(
+            "SELECT status FROM governance.recommendations "
+            "WHERE recommendation_id = :rec_id FOR UPDATE"
+        ),
+        {"rec_id": recommendation_id},
+    ).fetchone()
+    if canonical_new is None or canonical_new.status != "draft":
+        raise DBConflictError("recommendation_lifecycle_conflict")
+
+    prior_rows = session.execute(
+        text(
+            """
+            SELECT recommendation_id
+            FROM governance.recommendations
+            WHERE family = :family
+              AND symbol = :symbol
+              AND timeframe = :timeframe
+              AND recommendation_type = :recommendation_type
+              AND status = 'draft'
+              AND recommendation_id != :recommendation_id
+            FOR UPDATE
+            """
+        ),
+        {
+            "family": family,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "recommendation_type": recommendation_type,
+            "recommendation_id": recommendation_id,
+        },
+    ).fetchall()
+    prior_ids = [str(row.recommendation_id) for row in prior_rows]
+    if prior_ids:
+        id_params = {
+            f"old_id_{index}": prior_id
+            for index, prior_id in enumerate(prior_ids)
+        }
+        placeholders = ", ".join(f":{key}" for key in id_params)
+        session.execute(
+            text(
+                f"""
+                UPDATE governance.recommendations
+                SET status = 'superseded',
+                    superseded_by = 'system',
+                    superseded_at = :superseded_at,
+                    superseded_by_recommendation_id = :new_rec_id
+                WHERE recommendation_id IN ({placeholders})
+                  AND status = 'draft'
+                """
+            ),
+            {
+                **id_params,
+                "superseded_at": parse_dt(recommendation.get("created_at"))
+                or datetime.now(timezone.utc),
+                "new_rec_id": recommendation_id,
+            },
+        )
+    return prior_ids
 
 
 def db_update_recommendation_status(
@@ -172,6 +334,13 @@ def db_update_recommendation_status(
         True 当且仅当 rowcount > 0（确实更新了一行）。False 表示 recommendation
         不存在，或 ``expected_current_status`` 过滤器不匹配。
     """
+    if status not in VALID_REC_STATUSES:
+        raise ValueError("recommendation_transition_status_invalid")
+    _validate_recommendation_transition(
+        current_statuses=expected_current_status,
+        new_status=status,
+    )
+
     set_parts = ["status = :status"]
     params: dict[str, Any] = {"rec_id": recommendation_id, "status": status}
 
@@ -222,6 +391,8 @@ def db_update_recommendation_status(
             "recommendation_type",
             "target_parameter_set_id",
             "source_round_id",
+            "confidence",
+            "reason",
             "evidence_bundle_ref",
         )
         unknown = set(expected_identity) - set(identity_columns)
@@ -305,6 +476,10 @@ def db_transition_recommendation_status(
             f"非法 recommendation status: {new_status!r}，"
             f"合法值: {sorted(VALID_REC_STATUSES)}"
         )
+    _validate_recommendation_transition(
+        current_statuses=expected_current_status,
+        new_status=new_status,
+    )
 
     at_value = parse_dt(at) if at is not None else datetime.now(timezone.utc)
 
@@ -461,6 +636,27 @@ def db_find_recommendations(
     return [_rec_row_to_dict(r) for r in rows]
 
 
+def db_find_recommendations_for_evidence_bundle(
+    session: Session,
+    *,
+    evidence_bundle_ref: str,
+) -> list[dict[str, Any]]:
+    """Load the complete recommendation set published by one Phase 6 round."""
+
+    rows = session.execute(
+        text(
+            f"""
+            SELECT {_REC_SELECT_COLUMNS}
+            FROM governance.recommendations
+            WHERE evidence_bundle_ref = :evidence_bundle_ref
+            ORDER BY recommendation_id ASC
+            """
+        ),
+        {"evidence_bundle_ref": evidence_bundle_ref},
+    ).fetchall()
+    return [_rec_row_to_dict(row) for row in rows]
+
+
 def _build_recommendations_filter(
     *,
     status: str | None,
@@ -587,12 +783,15 @@ def db_upsert_active_decision(
     current_status: str,
     symbol: str = "BTC-USDT-SWAP",
     active_parameter_set_id: str | None = None,
+    preserve_existing_active_parameter_set: bool = False,
     last_recommendation_id: str | None = None,
     notes: str | None = None,
 ) -> bool:
     """UPSERT 一条 active decision 记录.
 
-    INSERT ... ON CONFLICT (family, timeframe) DO UPDATE
+    ``preserve_existing_active_parameter_set`` is for non-promotion decision
+    rounds.  The value is resolved only after the shared combo lock and row
+    lock are held, so keep/pause/review cannot erase or race an applied set.
     """
     from .active_params_db import db_try_acquire_parameter_apply_lock
 
@@ -611,6 +810,13 @@ def db_upsert_active_decision(
         family=family,
         timeframe=timeframe_norm,
     )
+    if (
+        preserve_existing_active_parameter_set
+        and active_parameter_set_id is not None
+    ):
+        raise ValueError(
+            "active_decision_preserve_parameter_set_cannot_replace"
+        )
     # A safety pause is sticky.  Automated decision-round snapshots are not an
     # authorization to clear it; only a future explicit operator reconciliation
     # API may perform that transition.
@@ -625,6 +831,13 @@ def db_upsert_active_decision(
             current_status,
         )
         return False
+    effective_active_parameter_set_id = active_parameter_set_id
+    if preserve_existing_active_parameter_set:
+        effective_active_parameter_set_id = (
+            existing.get("active_parameter_set_id")
+            if isinstance(existing, dict)
+            else None
+        )
     session.execute(
         text("""
             INSERT INTO governance.active_decisions
@@ -650,7 +863,7 @@ def db_upsert_active_decision(
             "timeframe": timeframe_norm,
             "combo_key": combo_key,
             "status": current_status,
-            "active_ps_id": active_parameter_set_id,
+            "active_ps_id": effective_active_parameter_set_id,
             "last_rec_id": last_recommendation_id,
             "now": datetime.now(timezone.utc),
             "notes": notes,

@@ -18,6 +18,7 @@ _APPLY_TYPE = "parameter_upgrade"
 _AUTHORIZATION_ISSUER = object()
 _AUTHORIZATION_TTL = timedelta(minutes=5)
 _EXPLICIT_TIMEZONE_SUFFIX = re.compile(r"(?:Z|[+-][0-9]{2}:[0-9]{2})$")
+_PARAMETER_VALUES_FINGERPRINT = re.compile(r"^[0-9a-f]{64}$")
 _AUTHORIZATION_IDENTITY_FIELDS = (
     "recommendation_id",
     "family",
@@ -26,6 +27,8 @@ _AUTHORIZATION_IDENTITY_FIELDS = (
     "recommendation_type",
     "target_parameter_set_id",
     "source_round_id",
+    "confidence",
+    "reason",
     "evidence_bundle_ref",
 )
 log = logging.getLogger(__name__)
@@ -49,6 +52,7 @@ class _InvalidQualificationVerdict:
             "source_round_id": None,
             "qualified_round_id": None,
             "qualified_finished_at": None,
+            "parameter_values_fingerprint": None,
             "detail": self.detail,
         }
 
@@ -132,6 +136,9 @@ def _verdict_contract_is_valid(
         if eligible is True:
             evidence_bundle_ref = recommendation.get("evidence_bundle_ref")
             source_round_id = recommendation.get("source_round_id")
+            parameter_values_fingerprint = payload.get(
+                "parameter_values_fingerprint"
+            )
             return bool(
                 reason_code == "qualified"
                 and isinstance(evidence_bundle_ref, str)
@@ -143,6 +150,11 @@ def _verdict_contract_is_valid(
                 and payload.get("qualified_round_id") == evidence_bundle_ref
                 and isinstance(payload.get("qualified_finished_at"), str)
                 and bool(payload["qualified_finished_at"].strip())
+                and isinstance(parameter_values_fingerprint, str)
+                and _PARAMETER_VALUES_FINGERPRINT.fullmatch(
+                    parameter_values_fingerprint
+                )
+                is not None
             )
         return True
     return required is False and eligible is True and reason_code == "not_required"
@@ -402,6 +414,28 @@ def require_promotion_authorization(
     return verdict
 
 
+def require_apply_promotion_qualification(
+    project_root: Path,
+    recommendation: dict[str, Any],
+    *,
+    authorization: PromotionAuthorization | None = None,
+) -> Any:
+    """Return a values-bound verdict for one apply-capable recommendation."""
+
+    if recommendation.get("recommendation_type") != _APPLY_TYPE:
+        raise PromotionQualificationBlockedError(
+            str(recommendation.get("recommendation_id") or ""),
+            _not_apply_capable_verdict(),
+        )
+    if authorization is not None:
+        return require_promotion_authorization(
+            project_root,
+            recommendation,
+            authorization,
+        )
+    return require_promotion_qualification(project_root, recommendation)
+
+
 def promotion_authorization_failure(
     project_root: Path,
     recommendation: dict[str, Any],
@@ -410,10 +444,10 @@ def promotion_authorization_failure(
     """Return a structured failure for invalid composite-flow authorization."""
 
     try:
-        require_promotion_authorization(
+        require_apply_promotion_qualification(
             project_root,
             recommendation,
-            authorization,
+            authorization=authorization,
         )
     except PromotionQualificationBlockedError as exc:
         return exc.to_dict()
@@ -430,13 +464,8 @@ def promotion_qualification_failure(
     must never interpret ``keep_active``/``pause``/legacy unknown types merely
     because a malformed row happens to carry ``target_parameter_set_id``.
     """
-    if recommendation.get("recommendation_type") != _APPLY_TYPE:
-        return PromotionQualificationBlockedError(
-            str(recommendation.get("recommendation_id") or ""),
-            _not_apply_capable_verdict(),
-        ).to_dict()
     try:
-        require_promotion_qualification(project_root, recommendation)
+        require_apply_promotion_qualification(project_root, recommendation)
     except PromotionQualificationBlockedError as exc:
         return exc.to_dict()
     return None

@@ -37,6 +37,19 @@ ADVISORY_LOCK_KEYS: dict[str, int] = {
     # pg_try_advisory_xact_lock(namespace, hashtext(combo_key))：所有人工/API/
     # scheduler 参数 apply 共用的 combo 级事务锁。
     "parameter_apply_combo": 0x41504150,  # "APAP"
+    # pg_try_advisory_lock/pg_advisory_unlock：受管 DB 的 Step 3 参数候选导入
+    # 全局锁。覆盖 artifact 选择、DB 真源重读、插入和旧候选 CAS 废弃，避免
+    # 同一 round 的两个 importer 在不同 artifact 内容上各自提交一半真相。
+    "parameter_candidate_import": 0x41504349,  # "APCI"
+    # pg_advisory_xact_lock(namespace, hashtext(scope))：同一 recommendation
+    # family/symbol/timeframe/type 的 draft replacement 串行化，使“插入新 draft
+    # + supersede 旧 draft”在一个事务中原子完成。
+    "recommendation_scope_write": 0x41525243,  # "ARRC"
+    # pg_advisory_xact_lock(namespace, hashtext(round_id))：Phase 6 同一
+    # decision round 的完整 control-plane publication 串行化。锁必须先于
+    # snapshot identity 检查取得，保证 exact retry 是零写 no-op，漂移 retry
+    # 在 recommendations / active_decisions / evidence bundle 任一写入前失败。
+    "decision_round_publication": 0x41524450,  # "ARDP"
 }
 
 
@@ -49,7 +62,9 @@ _CACHED_GOVERNANCE_ENGINE: "Engine | None" = None
 _CACHED_GOVERNANCE_LOCK = threading.Lock()
 
 # 合法的 parameter_set 状态
-VALID_PS_STATUSES = frozenset({"draft", "candidate", "frozen", "deprecated"})
+VALID_PS_STATUSES = frozenset(
+    {"draft", "candidate", "frozen", "released", "deprecated"}
+)
 
 # 合法的 recommendation 状态
 VALID_REC_STATUSES = frozenset({"draft", "approved", "rejected", "superseded"})
@@ -96,7 +111,10 @@ def resolve_governance_db_url() -> str | None:
         settings_url = str(get_settings().database_url).strip()
         return settings_url or None
     except Exception as exc:  # pragma: no cover - defensive
-        log.debug("failed to resolve governance DB URL from RDP settings: %s", exc)
+        log.debug(
+            "failed to resolve governance DB URL from RDP settings (%s)",
+            type(exc).__name__,
+        )
         return None
 
 
@@ -172,7 +190,10 @@ def get_cached_governance_engine() -> "Engine | None":
             )
             return _CACHED_GOVERNANCE_ENGINE
         except Exception as exc:
-            log.debug("governance DB engine 初始化失败 (%s)", exc)
+            log.debug(
+                "governance DB engine 初始化失败 (%s)",
+                type(exc).__name__,
+            )
             return None
 
 
@@ -224,7 +245,10 @@ def try_governance_db():
             conn.execute(sa_text("SELECT 1"))
         return engine, True
     except Exception as exc:
-        log.debug("governance DB 不可用 (%s)，使用文件模式", exc)
+        log.debug(
+            "governance DB 不可用 (%s)，使用文件模式",
+            type(exc).__name__,
+        )
         return None, False
 
 
