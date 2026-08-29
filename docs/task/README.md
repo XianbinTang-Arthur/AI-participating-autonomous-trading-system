@@ -128,9 +128,14 @@
   不强制窗口。v1 -> v2 首发/回滚必须走标准 full-down。入口在任何 mutation 前取得固定
   `/tmp/aats-standard-deploy.lock` 的长寿命 WSL `flock`；只有 `AATS_DEPLOY_TEST_MODE=true` 的隔离
   测试可用 `AATS_DEPLOY_LOCK_FILE` 覆盖。Windows 3 秒 heartbeat / WSL 12 秒失联释放协议持有到
-  最终 evidence/report；新 holder 必须隔离等待 fresh predecessor lease 清除或过期。外部步骤 spawn
-  前复核锁、spawn 后登记 active child，丢锁或 `TERM/HUP/INT/EXIT` 均先终止并 wait 子进程树，再
-  停止 heartbeat、移除 lease、释放 flock。stop 七个
+  最终 evidence/report；新 holder 必须隔离等待 fresh predecessor lease 清除或过期，并等待同一作用域
+  内所有无 TTL 的 durable active marker 消失。外部步骤 spawn 前复核锁、spawn 后登记唯一 active
+  child；最终 launch 前可取消，launch 后丢锁或收到 `TERM/HUP/INT/EXIT` 时保留 lease/flock 并等待
+  guard 的实际完成证明，不能以杀死 `wsl.exe` 推断远端 mutation 已停止。WSL 命令以七字段 ACK 绑定
+  marker、语义退出码、I/O 模式及 stdout/stderr 字节数和 SHA-256；默认 `capture` 先写 `0600` 暂存、
+  验证后回放。缺失/畸形 ACK、transport 非零、输出或清理歧义均失败关闭；待成功释放改为状态 16，
+  既有非零状态不覆盖。标准代码同步是单个 ACK 支持的 WSL Git 事务，已证明的 dirty/branch 语义拒绝
+  会清理自身 marker，而 transport 歧义保留 poison marker。stop 七个
   应用后，以 ID/status/StartedAt/FinishedAt/RestartCount 和精确 Docker events 区间证明 quiescence。
   基础设施-only up 后、full-down 前执行第一次 loopback 全量分页只读 preflight；full-down 后重建
   基线，并在 infra/schema 后、app-up 前执行第二次。阻断或 quiescence 变化时保留 NATS，最终部署
@@ -138,9 +143,11 @@
   仍不能替代 drain 证明。LAST/NEW 的运行时重建受 strict delivery gate、非 ALL policy，以及
   “outstanding 超过目标”或“收缩窗口且 outstanding 非零”条件约束，自动重启也可能触发；full-down
   是额外发布门禁，不是运行时信号。真实 NATS
-  consumer-delete 集成已通过，锁竞争/释放/重取有窄 smoke；最后一次 NATS 健康窗修复后，当前候选
-  通过 `213` 项 FS-016 聚焦、`173` 项根级独立聚焦复跑和
-  `6430 passed / 31 skipped / 259 subtests passed` 全量单测，但真 Redis/NATS/Docker、标准
+  consumer-delete 集成已通过，锁竞争/释放/重取、WSL completion ACK、输出完整性、幂等 proof 重试与
+  marker cleanup 有窄 smoke；最后一次 NATS 健康窗与部署 completion protocol 修复后，当前候选通过
+  `213` 项 FS-016 聚焦、`173` 项根级独立聚焦
+  复跑、六项隔离 smoke 和 `6433 passed / 31 skipped / 259 subtests passed` 全量单测，但真
+  Redis/NATS/Docker、标准
   部署、网络/push/heartbeat/backlog stall、真实逐角色重启、双故障和下游 fencing 均为 `OPEN`；
   不能据本地候选宣称模拟栈已恢复或 live 已放行。
 - [`fs_019_operator_login_async_isolation_sow_2026_08_24.md`](fs_019_operator_login_async_isolation_sow_2026_08_24.md)：Operator 登录异步隔离、有界 worker、每进程限流与 dummy KDF；

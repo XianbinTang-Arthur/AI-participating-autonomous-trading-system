@@ -35,6 +35,56 @@ fi
 acquire_deploy_lock
 assert_deploy_lock_held "smoke-held"
 
+set +e
+wsl_ack_output="$(run_lock_supervised_wsl \
+    "wsl-ack-semantic-nonzero-smoke" default capture \
+    "printf 'ack-output'; exit 7")"
+wsl_ack_status=$?
+set -e
+if [[ "$wsl_ack_status" -ne 7 || "$wsl_ack_output" != "ack-output" ]]; then
+    printf 'WSL completion ack did not preserve output/status: status=%s output=%s\n' \
+        "$wsl_ack_status" "$wsl_ack_output" >&2
+    exit 89
+fi
+assert_no_owned_active_markers "wsl-ack semantic nonzero smoke"
+
+set +e
+wsl_root_ack_output="$(run_lock_supervised_wsl \
+    "wsl-root-ack-semantic-nonzero-smoke" root capture \
+    "printf 'root-ack-output'; exit 8")"
+wsl_root_ack_status=$?
+set -e
+if [[ "$wsl_root_ack_status" -ne 8 || "$wsl_root_ack_output" != "root-ack-output" ]]; then
+    printf 'WSL root completion ack did not preserve output/status: status=%s output=%s\n' \
+        "$wsl_root_ack_status" "$wsl_root_ack_output" >&2
+    exit 88
+fi
+assert_no_owned_active_markers "wsl-root-ack semantic nonzero smoke"
+
+sync_source_mount="$(windows_path_to_wsl_mount "$PROJECT_ROOT")"
+sync_source_branch="$(git -C "$PROJECT_ROOT" symbolic-ref --quiet --short HEAD)"
+sync_source_head="$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
+sync_target="/tmp/aats-deploy-sync-smoke-$DEPLOY_LOCK_TOKEN"
+printf -v sync_source_q '%q' "$sync_source_mount"
+printf -v sync_target_q '%q' "$sync_target"
+wsl_run "set -euo pipefail; test ! -e $sync_target_q; git clone -q $sync_source_q $sync_target_q; printf dirty >$sync_target_q/untracked-smoke.txt"
+sync_command="$(build_wsl_checkout_sync_command \
+    "$sync_source_mount" "$sync_target" "$sync_source_branch" "$sync_source_head")"
+set +e
+run_lock_supervised_wsl "wsl-sync-semantic-dirty-smoke" default capture "$sync_command"
+sync_dirty_status=$?
+set -e
+if [[ "$sync_dirty_status" -ne 22 ]]; then
+    printf 'dirty WSL sync refusal did not preserve semantic status: %s\n' \
+        "$sync_dirty_status" >&2
+    exit 87
+fi
+assert_no_owned_active_markers "wsl-sync semantic dirty refusal"
+wsl_run "rm -f -- $sync_target_q/untracked-smoke.txt"
+run_lock_supervised_wsl "wsl-sync-success-smoke" default capture "$sync_command" >/dev/null
+assert_no_owned_active_markers "wsl-sync success"
+wsl_run "rm -rf -- $sync_target_q"
+
 lock_file_q=""
 printf -v lock_file_q '%q' "$DEPLOY_LOCK_FILE"
 if MSYS_NO_PATHCONV=1 wsl -d "$DISTRO" bash -c "exec 8>>$lock_file_q; flock -n 8"; then
@@ -59,23 +109,54 @@ if ! MSYS_NO_PATHCONV=1 wsl -d "$DISTRO" bash -c "exec 8>>$lock_file_q; flock -n
 fi
 
 
-acquire_deploy_lock
-kill "$DEPLOY_LOCK_KEEPER_PID" 2>/dev/null || true
-wait "$DEPLOY_LOCK_KEEPER_PID" 2>/dev/null || true
-fast_marker="/tmp/aats-deploy-fast-side-effect-$$-$RANDOM"
-rm -f -- "$fast_marker"
+fast_suffix="$$-$RANDOM"
+fast_lock_file="/tmp/aats-standard-deploy-fast-loss-smoke-$fast_suffix.lock"
+fast_lease_path_file="$(mktemp)"
+fast_marker="/tmp/aats-deploy-fast-side-effect-$fast_suffix"
+rm -f -- "$fast_marker" "$fast_lease_path_file"
 set +e
-run_lock_supervised_external "pre-spawn-keeper-loss-smoke" \
-    bash -c ': > "$1"' _ "$fast_marker"
-fast_loss_status=$?
+AATS_TEST_ROOT="$PROJECT_ROOT" \
+AATS_DEPLOY_TEST_MODE=true \
+AATS_DEPLOY_LOCK_FILE="$fast_lock_file" \
+AATS_FAST_MARKER="$fast_marker" \
+AATS_FAST_LEASE_PATH_FILE="$fast_lease_path_file" \
+    bash -c '
+        set -euo pipefail
+        source "$AATS_TEST_ROOT/scripts/deploy.sh"
+        log_info() { :; }
+        log_ok() { :; }
+        log_warn() { :; }
+        log_error() { :; }
+        acquire_deploy_lock
+        printf "%s\n" "$DEPLOY_LOCK_LEASE_FILE" >"$AATS_FAST_LEASE_PATH_FILE"
+        kill "$DEPLOY_LOCK_KEEPER_PID" 2>/dev/null || true
+        wait "$DEPLOY_LOCK_KEEPER_PID" 2>/dev/null || true
+        set +e
+        run_lock_supervised_external "pre-spawn-keeper-loss-smoke" \
+            bash -c '\'' : >"$1" '\'' _ "$AATS_FAST_MARKER"
+        fast_status=$?
+        set -e
+        [[ "$fast_status" -eq 16 && ! -e "$AATS_FAST_MARKER" ]]
+        true
+        release_deploy_lock
+    '
+fast_release_status=$?
 set -e
-if [[ "$fast_loss_status" -ne 16 || -e "$fast_marker" ]]; then
-    printf 'keeper loss allowed a fast side effect before spawn fencing: status=%s marker=%s\n' \
-        "$fast_loss_status" "$([[ -e "$fast_marker" ]] && echo present || echo absent)" >&2
+if [[ "$fast_release_status" -ne 16 || -e "$fast_marker" ]]; then
+    printf 'keeper loss allowed a side effect or false-success release: status=%s marker=%s\n' \
+        "$fast_release_status" "$([[ -e "$fast_marker" ]] && echo present || echo absent)" >&2
     exit 101
 fi
-release_deploy_lock
-rm -f -- "$fast_marker"
+fast_lease_file="$(tr -d '\r\n' <"$fast_lease_path_file")"
+if [[ ! "$fast_lease_file" =~ ^/tmp/aats-standard-deploy-lease-[0-9a-f]{16}-[A-Za-z0-9._:-]+$ ]]; then
+    printf 'keeper-loss smoke did not report a safe lease path: %s\n' "$fast_lease_file" >&2
+    exit 102
+fi
+printf -v fast_lease_q '%q' "$fast_lease_file"
+printf -v fast_lock_q '%q' "$fast_lock_file"
+MSYS_NO_PATHCONV=1 wsl -d "$DISTRO" bash -c \
+    "rm -f -- $fast_lease_q $fast_lock_q"
+rm -f -- "$fast_marker" "$fast_lease_path_file"
 
 
 registration_suffix="$$-$RANDOM"
@@ -446,12 +527,39 @@ MSYS_NO_PATHCONV=1 wsl -d "$DISTRO" bash -c \
     "rm -f -- $wrapper_child_ready_q $wrapper_child_done_q $wrapper_second_marker_q $wrapper_successor_marker_q"
 
 
-acquire_deploy_lock
-kill "$DEPLOY_LOCK_KEEPER_PID" 2>/dev/null || true
-wait "$DEPLOY_LOCK_KEEPER_PID" 2>/dev/null || true
-takeover_marker="/tmp/aats-deploy-takeover-quarantine-$$-$RANDOM"
-rm -f -- "$takeover_marker"
+takeover_suffix="$$-$RANDOM"
+takeover_marker="/tmp/aats-deploy-takeover-quarantine-$takeover_suffix"
+takeover_lease_path_file="$(mktemp)"
+rm -f -- "$takeover_marker" "$takeover_lease_path_file"
+set +e
 AATS_DEPLOY_TEST_MODE=true \
+AATS_DEPLOY_TEST_LOCK_STALE_SECONDS=2 \
+AATS_DEPLOY_LOCK_FILE="$DEPLOY_LOCK_FILE" \
+AATS_TEST_ROOT="$PROJECT_ROOT" \
+AATS_TAKEOVER_LEASE_PATH_FILE="$takeover_lease_path_file" \
+    bash -c '
+        set -euo pipefail
+        source "$AATS_TEST_ROOT/scripts/deploy.sh"
+        log_info(){ :; }
+        log_ok(){ :; }
+        log_warn(){ :; }
+        log_error(){ :; }
+        acquire_deploy_lock
+        printf "%s\n" "$DEPLOY_LOCK_LEASE_FILE" >"$AATS_TAKEOVER_LEASE_PATH_FILE"
+        kill "$DEPLOY_LOCK_KEEPER_PID" 2>/dev/null || true
+        wait "$DEPLOY_LOCK_KEEPER_PID" 2>/dev/null || true
+        true
+        release_deploy_lock
+    '
+takeover_predecessor_status=$?
+set -e
+if [[ "$takeover_predecessor_status" -ne 16 ]]; then
+    printf 'lost-holder predecessor did not fail release closed: %s\n' \
+        "$takeover_predecessor_status" >&2
+    exit 102
+fi
+AATS_DEPLOY_TEST_MODE=true \
+AATS_DEPLOY_TEST_LOCK_STALE_SECONDS=2 \
 AATS_DEPLOY_LOCK_FILE="$DEPLOY_LOCK_FILE" \
 AATS_TEST_ROOT="$PROJECT_ROOT" \
 AATS_TAKEOVER_MARKER="$takeover_marker" \
@@ -460,43 +568,77 @@ takeover_pid=$!
 sleep 1
 if [[ -e "$takeover_marker" ]]; then
     printf 'fresh predecessor lease did not quarantine takeover\n' >&2
-    exit 102
+    exit 103
 fi
-release_deploy_lock
 set +e
 wait "$takeover_pid"
 takeover_status=$?
 set -e
 if [[ "$takeover_status" -ne 0 || ! -e "$takeover_marker" ]]; then
     printf 'takeover did not proceed after predecessor cleanup: status=%s\n' "$takeover_status" >&2
-    exit 103
+    exit 104
 fi
-rm -f -- "$takeover_marker"
+takeover_lease_file="$(tr -d '\r\n' <"$takeover_lease_path_file")"
+if [[ ! "$takeover_lease_file" =~ ^/tmp/aats-standard-deploy-lease-[0-9a-f]{16}-[A-Za-z0-9._:-]+$ ]]; then
+    printf 'takeover smoke did not report a safe predecessor lease path: %s\n' \
+        "$takeover_lease_file" >&2
+    exit 105
+fi
+printf -v takeover_lease_q '%q' "$takeover_lease_file"
+MSYS_NO_PATHCONV=1 wsl -d "$DISTRO" bash -c "rm -f -- $takeover_lease_q"
+rm -f -- "$takeover_marker" "$takeover_lease_path_file"
 
 
-acquire_deploy_lock
-linux_pid_file="/tmp/aats-deploy-supervisor-smoke-$DEPLOY_LOCK_TOKEN.pid"
-linux_marker="/tmp/aats-deploy-supervisor-smoke-$DEPLOY_LOCK_TOKEN.survived"
+loss_suffix="$$-$RANDOM"
+loss_lease_path_file="$(mktemp)"
+linux_pid_file="/tmp/aats-deploy-supervisor-smoke-$loss_suffix.pid"
+linux_marker="/tmp/aats-deploy-supervisor-smoke-$loss_suffix.survived"
 linux_pid_file_q=""
 linux_marker_q=""
 printf -v linux_pid_file_q '%q' "$linux_pid_file"
 printf -v linux_marker_q '%q' "$linux_marker"
 MSYS_NO_PATHCONV=1 wsl -d "$DISTRO" bash -c \
     "rm -f -- $linux_pid_file_q $linux_marker_q"
-(
-    sleep 1
-    kill "$DEPLOY_LOCK_KEEPER_PID" 2>/dev/null || true
-) &
-keeper_killer=$!
 set +e
-run_lock_supervised_external "keeper-loss-smoke" \
-    wsl -d "$DISTRO" bash -c \
-    "printf '%s\\n' \"\$BASHPID\" > $linux_pid_file_q; sleep 2; : > $linux_marker_q"
-loss_status=$?
+AATS_TEST_ROOT="$PROJECT_ROOT" \
+AATS_DEPLOY_TEST_MODE=true \
+AATS_DEPLOY_LOCK_FILE="$DEPLOY_LOCK_FILE" \
+AATS_LOSS_LEASE_PATH_FILE="$loss_lease_path_file" \
+AATS_LOSS_LINUX_PID_FILE="$linux_pid_file" \
+AATS_LOSS_LINUX_MARKER="$linux_marker" \
+    bash -c '
+        set -euo pipefail
+        source "$AATS_TEST_ROOT/scripts/deploy.sh"
+        log_info() { :; }
+        log_ok() { :; }
+        log_warn() { :; }
+        log_error() { :; }
+        acquire_deploy_lock
+        printf "%s\n" "$DEPLOY_LOCK_LEASE_FILE" >"$AATS_LOSS_LEASE_PATH_FILE"
+        pid_q=""
+        marker_q=""
+        printf -v pid_q "%q" "$AATS_LOSS_LINUX_PID_FILE"
+        printf -v marker_q "%q" "$AATS_LOSS_LINUX_MARKER"
+        (
+            sleep 1
+            kill "$DEPLOY_LOCK_KEEPER_PID" 2>/dev/null || true
+        ) &
+        keeper_killer=$!
+        set +e
+        run_lock_supervised_external "keeper-loss-smoke" \
+            wsl -d "$DISTRO" bash -c \
+            "printf '\''%s\\n'\'' \"\$BASHPID\" > $pid_q; sleep 2; : > $marker_q"
+        loss_status=$?
+        set -e
+        wait "$keeper_killer" 2>/dev/null || true
+        [[ "$loss_status" -eq 16 ]]
+        true
+        release_deploy_lock
+    '
+loss_release_status=$?
 set -e
-wait "$keeper_killer" 2>/dev/null || true
-if [[ "$loss_status" -ne 16 ]]; then
-    printf 'mid-step keeper loss did not fail closed: %s\n' "$loss_status" >&2
+if [[ "$loss_release_status" -ne 16 ]]; then
+    printf 'mid-step keeper loss did not fail closed: %s\n' "$loss_release_status" >&2
     exit 94
 fi
 if ! MSYS_NO_PATHCONV=1 wsl -d "$DISTRO" bash -c \
@@ -506,7 +648,15 @@ if ! MSYS_NO_PATHCONV=1 wsl -d "$DISTRO" bash -c \
 fi
 MSYS_NO_PATHCONV=1 wsl -d "$DISTRO" bash -c \
     "rm -f -- $linux_pid_file_q $linux_marker_q"
-release_deploy_lock
+loss_lease_file="$(tr -d '\r\n' <"$loss_lease_path_file")"
+if [[ ! "$loss_lease_file" =~ ^/tmp/aats-standard-deploy-lease-[0-9a-f]{16}-[A-Za-z0-9._:-]+$ ]]; then
+    printf 'mid-step keeper-loss smoke did not report a safe lease path: %s\n' \
+        "$loss_lease_file" >&2
+    exit 96
+fi
+printf -v loss_lease_q '%q' "$loss_lease_file"
+MSYS_NO_PATHCONV=1 wsl -d "$DISTRO" bash -c "rm -f -- $loss_lease_q"
+rm -f -- "$loss_lease_path_file"
 
 
 acquire_deploy_lock

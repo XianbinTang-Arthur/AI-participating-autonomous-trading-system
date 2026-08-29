@@ -675,6 +675,22 @@ def test_sync_to_wsl2_branch_drift_repair_does_not_swallow_checkout_failures() -
     assert "git -C $WSL_PROJECT fetch '$WIN_PROJECT_WSL' '$source_branch'" in text
 
 
+def test_standard_deploy_sync_is_one_acknowledged_wsl_git_transaction() -> None:
+    text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+    sync = text.split("step_sync() {", 1)[1].split("\n}", 1)[0]
+    builder = text.split("build_wsl_checkout_sync_command() {", 1)[1].split(
+        "\n}", 1
+    )[0]
+
+    assert "sync_to_wsl2.sh" not in sync
+    assert 'wsl_run "$sync_command"' in sync
+    assert "build_wsl_checkout_sync_command" in sync
+    assert "exit 22" in builder
+    assert "exit 23" in builder
+    assert "merge --ff-only FETCH_HEAD" in builder
+    assert '[[ "${wsl_head_after,,}" != "$source_head" ]]' in builder
+
+
 def test_deploy_script_rejects_dirty_synced_deploys() -> None:
     text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
 
@@ -1003,6 +1019,59 @@ def test_nats_target_root_scripts_use_exact_base64_transport() -> None:
     assert 'wsl_root_run_script "$root_script"' in cleanup
     assert 'wsl_root_run "set -euo pipefail' not in prepare
     assert 'wsl_root_run "set -euo pipefail' not in cleanup
+
+
+def test_marker_cleanup_requires_local_completion_or_remote_acknowledgement() -> None:
+    source = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+    helper = source.split("remove_proven_completed_active_marker() {", 1)[1].split(
+        "\n}", 1
+    )[0]
+    ack_builder = source.split("build_wsl_completion_wrapped_command() {", 1)[
+        1
+    ].split("\n}", 1)[0]
+    ack_finalizer = source.split("finalize_proven_wsl_completion() {", 1)[1].split(
+        "\n}", 1
+    )[0]
+    guard = source.split("run_supervised_command_guard() {", 1)[1].split(
+        "\n}", 1
+    )[0]
+    status_zero = guard.split("status-zero)", 1)[1].split(";;", 1)[0]
+    parent_cleanup = source.split("remove_active_supervision_artifacts() {", 1)[
+        1
+    ].split("\n}", 1)[0]
+
+    assert "for attempt in {1..10}" in helper
+    assert "rm -f --" in helper
+    assert source.count("remove_proven_completed_active_marker") == 4
+    assert guard.count('remove_proven_completed_active_marker "$marker_file"') == 2
+    assert 'if [[ "$status" -ne 0 ]]' in guard
+    assert "finalize_proven_wsl_completion" in guard
+    assert status_zero.index('if [[ "$status" -ne 0 ]]') < status_zero.index(
+        'remove_proven_completed_active_marker "$marker_file"'
+    )
+    assert ack_builder.index('bash -c "$remote_command"') < ack_builder.index(
+        "printf '%s\\\\t%s\\\\t%s"
+    )
+    assert '[[ -e "$completion_file" ]]' in ack_builder
+    assert "stdout_sha256" in ack_builder
+    assert "stderr_sha256" in ack_builder
+    assert 'ln -- "$completion_tmp" "$completion_file"' in ack_builder
+    assert "expected_marker_uid" in ack_builder
+    assert "os.O_EXCL" in source
+    assert '[[ "$ack_marker" == "$marker_file"' in ack_finalizer
+    assert '[[ "$ack_io_mode" == "$expected_io_mode" ]]' in ack_finalizer
+    assert "ack_stdout_sha256" in ack_finalizer
+    assert 'if [[ -e "$marker_file" ]]' in ack_finalizer
+    assert 'rm -f -- "$marker_file"' in ack_finalizer
+    assert "rm -f -- $completion_q" in ack_finalizer
+    assert "remove_proven_completed_active_marker" not in parent_cleanup
+    assert 'run_lock_supervised_wsl "WSL 命令" default "$io_mode"' in source
+    assert 'run_lock_supervised_wsl "WSL root 命令" root "$io_mode"' in source
+    assert 'if [[ "$status" -ne 0 ]]' in guard.split("wsl-ack)", 1)[1]
+    assert 'cat -- "$stdout_file"' in guard
+    assert 'if ! cat -- "$stdout_file"' in guard
+    assert "sha256sum -- \"$stdout_file\"" in guard
+    assert "assert_no_owned_active_markers" in source
 
 
 @pytest.mark.parametrize(
@@ -2920,9 +2989,35 @@ def test_deploy_holds_one_long_lived_wsl_lock_across_all_mutations() -> None:
     assert release.index("terminate_active_supervised_process") < release.index(
         "remove_deploy_lock_lease"
     )
+    assert release.index("assert_no_owned_active_markers") < release.index(
+        "remove_deploy_lock_lease"
+    )
+    assert release.count('abort_deploy_lock_release "$original_status"') == 4
+    final_marker_check = release.rindex('assert_no_owned_active_markers')
+    snapshot_cleanup = release.index("cleanup_nats_target_env_snapshot")
+    lease_cleanup = release.index("remove_deploy_lock_lease")
+    assert snapshot_cleanup < final_marker_check < lease_cleanup
+    assert release.index(
+        'assert_deploy_lock_held "释放部署锁前最终确认"'
+    ) < lease_cleanup
+    abort_release = text.split("abort_deploy_lock_release() {", 1)[1].split(
+        "\n}", 1
+    )[0]
+    assert "trap - EXIT" in abort_release
+    assert 'exit "$original_status"' in abort_release
+    assert "exit 16" in abort_release
+    assert "DEPLOY_LOCK_HELD=false" in release
+    assert release.rindex("trap - EXIT") > release.index("DEPLOY_LOCK_HELD=false")
     assert "DEPLOY_ACTIVE_PROCESS_PID" in supervisor
-    assert supervisor.index("assert_deploy_lock_held") < supervisor.index('"$@" &')
-    assert 'run_supervised_command_guard "$marker_file" "$@" &' in text
+    assert supervisor.index("assert_no_owned_active_markers") < supervisor.index(
+        "mktemp -d"
+    )
+    assert supervisor.index("assert_deploy_lock_held") < supervisor.index(
+        '"${supervised_command[@]}" &'
+    )
+    assert "run_supervised_command_guard \\\n" in text
+    assert '"$marker_file" "$completion_mode" "$completion_file" "$user_mode"' in text
+    assert '"$io_mode" "$gate_dir" "$@" &' in text
     assert '"test ! -e $marker_q"' in text
 
     harness = (
@@ -2934,13 +3029,15 @@ def test_deploy_holds_one_long_lived_wsl_lock_across_all_mutations() -> None:
     assert "mid-step keeper loss did not fail closed" in harness
     assert "retain exclusion until the supervised WSL child finished" in harness
     assert "production lock-path override was not rejected" in harness
-    assert "keeper loss allowed a fast side effect" in harness
+    assert "keeper loss allowed a side effect or false-success release" in harness
     assert "fresh predecessor lease did not quarantine takeover" in harness
     assert "TERM deployment shell did not exit 143" in harness
     assert "retain exclusion until the supervised WSL child finished" in harness
     assert "successor crossed stale lease while prior SIGKILL mutation was active" in harness
     assert "wrapper hard-crash allowed successor overlap" in harness
     assert "wrapper hard-crash poison allowed a second command to start" in harness
+    assert "wsl-ack-semantic-nonzero-smoke" in harness
+    assert "WSL completion ack did not preserve output/status" in harness
 
 
 def test_deploy_requires_clean_wsl_checkout_even_when_sync_is_skipped() -> None:

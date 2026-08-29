@@ -189,9 +189,18 @@
   应用健康预算为 210 秒。v1 -> v2 首发/回滚禁止 rolling 或 mixed version；标准入口在任何 mutation
   前取得长寿命 WSL `flock`。生产锁路径固定为 `/tmp/aats-standard-deploy.lock`，仅
   `AATS_DEPLOY_TEST_MODE=true` 的隔离测试可通过 `AATS_DEPLOY_LOCK_FILE` 覆盖；Windows 3 秒
-  heartbeat / WSL 12 秒失联释放协议持有到最终证据和报告。新 holder 取得 flock 后仍等待任何
-  fresh predecessor lease 清除或过期。每个外部步骤 spawn 前围栏、spawn 后登记 active child；
-  丢锁或 `TERM/HUP/INT/EXIT` 都先终止并 wait 子进程树，再停止 heartbeat、移除 lease 和释放 flock。
+  heartbeat / WSL 12 秒失联释放协议持有到最终证据和报告。新 holder 取得 flock 后，必须同时等待
+  任一 fresh predecessor lease 清除或过期、同一作用域内任一 durable active marker 消失；active
+  marker 没有 TTL，不会因等待 12 秒而自动失效。每个外部步骤 spawn 前围栏、spawn 后登记唯一
+  active child。最终 launch 前可通过 cancel handshake 证明未发生 mutation；launch 后收到失锁或
+  `TERM/HUP/INT/EXIT` 时不以终止 `wsl.exe` 推断 daemon/WSL 端 mutation 已停止，而是保留 lease/flock
+  并等待同步 guard 取得完成证明。父进程或 guard 硬丢失时，durable marker 留存并阻断后继接管。
+  完成语义分为已知本地进程返回、只允许零状态清理的未分类 transport、以及 WSL-side completion
+  acknowledgement；默认 WSL `capture` 以 `0600` 暂存 stdout/stderr，远端 ACK 绑定 marker、语义退出码、
+  I/O 模式、两路字节数与 SHA-256，本地逐项验证后才回放输出并传播远端语义状态。缺失/畸形 ACK、
+  初次 client 非零、输出不一致、回放失败或 marker/ACK 清理不确定都以 16 失败关闭并保留阻断证据；
+  释放阶段若原流程待成功则改为 16，原本非零状态保持不变。标准代码同步也已改为单个 ACK 支持的
+  WSL Git 事务；dirty checkout、分支不匹配等已证明的语义拒绝不留下 poison marker，transport 歧义则保留。
   入口停净七个已知应用后记录容器 ID/status/StartedAt/FinishedAt/RestartCount，并在 preflight
   前后查询精确时间窗内的 Docker lifecycle events；基础设施-only up 后、full-down 前执行第一次
   loopback 全量分页只读 durable preflight，full-down 后重建基线，infra/schema 后、app up 前执行
@@ -207,8 +216,10 @@
   标准部署。LAST/NEW 运行时重建仅受 strict delivery gate、非 ALL policy，以及
   “outstanding 超过目标”或“收缩窗口且 outstanding 非零”条件约束，自动重启也可能触发；标准
   full-down 是额外发布门禁，不是运行时信号。
-  当前候选在最后一次 NATS 健康窗修复后已通过 `213` 项 FS-016 聚焦回归、`173` 项根级独立聚焦
-  复跑、五项隔离 smoke 和 `6430 passed / 31 skipped / 259 subtests passed` 全量单测；真
+  当前候选在最后一次 NATS 健康窗及 WSL completion ACK、输出完整性、幂等 proof、marker cleanup、
+  durable marker scan 与单事务代码同步修复后已通过 `213` 项
+  FS-016 聚焦回归、`173` 项根级独立聚焦复跑、六项隔离 smoke 和
+  `6433 passed / 31 skipped / 259 subtests passed` 全量单测；真
   Redis/NATS/Docker 故障注入、标准
   部署、逐角色重启、双故障与下游 fencing 均 `OPEN`，真实资金继续 `NO-GO`。详见现行
   [`task/fs_016_runtime_readiness_lease_restart_safety_p0_sow_2026_08_28.md`](task/fs_016_runtime_readiness_lease_restart_safety_p0_sow_2026_08_28.md)

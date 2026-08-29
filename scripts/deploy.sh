@@ -120,6 +120,7 @@ DEPLOY_LOCK_KEEPER_PID=""
 DEPLOY_LOCK_HEARTBEAT_PID=""
 DEPLOY_LOCK_LEASE_FILE=""
 DEPLOY_LOCK_WRITER_FD=""
+DEPLOY_WSL_DEFAULT_UID=""
 APP_QUIESCENCE_SNAPSHOT=""
 DEPLOY_ACTIVE_PROCESS_PID=""
 DEPLOY_ACTIVE_PROCESS_CONTEXT=""
@@ -156,20 +157,20 @@ while [[ $# -gt 0 ]]; do
 done
 
 wsl_run() {
-    local local_docker_command
+    local local_docker_command io_mode="${2:-capture}"
     local_docker_command="export DOCKER_HOST='unix:///var/run/docker.sock'; unset DOCKER_CONTEXT; $1"
     if [[ "$DEPLOY_LOCK_HELD" == true ]]; then
-        run_lock_supervised_external "WSL 命令" wsl -d "$DISTRO" bash -c "$local_docker_command"
+        run_lock_supervised_wsl "WSL 命令" default "$io_mode" "$local_docker_command"
     else
         wsl -d "$DISTRO" bash -c "$local_docker_command"
     fi
 }
 
 wsl_root_run() {
-    local local_docker_command
+    local local_docker_command io_mode="${2:-capture}"
     local_docker_command="export DOCKER_HOST='unix:///var/run/docker.sock'; unset DOCKER_CONTEXT; $1"
     if [[ "$DEPLOY_LOCK_HELD" == true ]]; then
-        run_lock_supervised_external "WSL root 命令" wsl -d "$DISTRO" -u root bash -c "$local_docker_command"
+        run_lock_supervised_wsl "WSL root 命令" root "$io_mode" "$local_docker_command"
     else
         wsl -d "$DISTRO" -u root bash -c "$local_docker_command"
     fi
@@ -193,6 +194,106 @@ wsl_root_run_script() {
     wsl_root_run "printf '%s' '$encoded' | base64 --decode | bash"
 }
 
+windows_path_to_wsl_mount() {
+    local path="$1" drive rest
+    case "$path" in
+        /mnt/[a-zA-Z]/*)
+            printf '%s\n' "$path"
+            ;;
+        /[a-zA-Z]/*)
+            drive="${path:1:1}"
+            printf '/mnt/%s%s\n' "${drive,,}" "${path:2}"
+            ;;
+        [a-zA-Z]:*)
+            drive="${path:0:1}"
+            rest="${path:2}"
+            rest="${rest//\\//}"
+            printf '/mnt/%s%s\n' "${drive,,}" "$rest"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+build_wsl_checkout_sync_command() {
+    local source_path="$1" target_path="$2" source_branch="$3" source_head="$4"
+    local source_q target_q branch_q head_q sync_script
+    if [[ "$source_path" != /mnt/[a-zA-Z]/* || "$target_path" != /* \
+        || "$source_path" == *$'\n'* || "$target_path" == *$'\n'* \
+        || ! "$source_head" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        return 1
+    fi
+    if [[ -n "$source_branch" ]] \
+        && ! git check-ref-format --branch "$source_branch" >/dev/null 2>&1; then
+        return 1
+    fi
+    printf -v source_q '%q' "$source_path"
+    printf -v target_q '%q' "$target_path"
+    printf -v branch_q '%q' "$source_branch"
+    printf -v head_q '%q' "${source_head,,}"
+    printf -v sync_script '%s\n' \
+        'set -euo pipefail' \
+        "source_path=$source_q" \
+        "target_path=$target_q" \
+        "source_branch=$branch_q" \
+        "source_head=$head_q" \
+        'if [[ ! -d "$target_path/.git" ]]; then' \
+        '    printf "[ERROR] WSL2 目标不是 Git checkout: %s\n" "$target_path" >&2' \
+        '    exit 21' \
+        'fi' \
+        'if ! git -C "$target_path" diff --quiet --ignore-submodules=none -- || ! git -C "$target_path" diff --cached --quiet --ignore-submodules=none -- || [[ -n "$(git -C "$target_path" ls-files --others --exclude-standard)" ]]; then' \
+        '    printf "[ERROR] WSL2 checkout 存在未提交改动，拒绝同步: %s\n" "$target_path" >&2' \
+        '    exit 22' \
+        'fi' \
+        'wsl_branch=$(git -C "$target_path" symbolic-ref --quiet --short HEAD 2>/dev/null || printf "(detached)")' \
+        'if [[ -n "$source_branch" && "$wsl_branch" != "$source_branch" ]]; then' \
+        '    case "$wsl_branch" in' \
+        '        worktree-agent-*|"(detached)")' \
+        '            git -C "$target_path" fetch "$source_path" "$source_branch"' \
+        '            git -C "$target_path" checkout "$source_branch" 2>/dev/null \
+                || git -C "$target_path" checkout -b "$source_branch" FETCH_HEAD' \
+        '            ;;' \
+        '        *)' \
+        '            printf "[ERROR] WSL2 分支 %s 与 Windows 分支 %s 不一致，拒绝覆盖\n" "$wsl_branch" "$source_branch" >&2' \
+        '            exit 23' \
+        '            ;;' \
+        '    esac' \
+        'fi' \
+        'if [[ -n "$source_branch" ]]; then' \
+        '    git -C "$target_path" fetch "$source_path" "$source_branch"' \
+        '    if git -C "$target_path" show-ref --verify --quiet "refs/heads/$source_branch"; then' \
+        '        git -C "$target_path" checkout "$source_branch"' \
+        '    else' \
+        '        git -C "$target_path" checkout -b "$source_branch" FETCH_HEAD' \
+        '    fi' \
+        '    git -C "$target_path" merge --ff-only FETCH_HEAD' \
+        'else' \
+        '    git -C "$target_path" fetch "$source_path" "$source_head"' \
+        '    git -C "$target_path" checkout --detach FETCH_HEAD' \
+        'fi' \
+        'wsl_head_after=$(git -C "$target_path" rev-parse HEAD)' \
+        'if [[ "${wsl_head_after,,}" != "$source_head" ]]; then' \
+        '    printf "[ERROR] 同步后 WSL2 HEAD %s 不等于 Windows HEAD %s\n" "$wsl_head_after" "$source_head" >&2' \
+        '    exit 24' \
+        'fi' \
+        'git -C "$target_path" log --oneline -3'
+    printf '%s' "$sync_script"
+}
+
+abort_deploy_lock_release() {
+    local original_status="$1"
+    # A non-zero return from an EXIT trap does not replace the shell's pending
+    # exit status.  Once lock cleanup becomes ambiguous, terminate explicitly:
+    # preserve an existing failure, or turn an otherwise-successful deploy into
+    # a deterministic fail-closed status.
+    trap - EXIT
+    if [[ "$original_status" -ne 0 ]]; then
+        exit "$original_status"
+    fi
+    exit 16
+}
+
 release_deploy_lock() {
     local original_status=$?
     # EXIT/HUP/INT/TERM may arrive while a Windows, WSL, Git, sync, or Docker
@@ -206,7 +307,14 @@ release_deploy_lock() {
         # Releasing the keeper here would turn an uncertain cleanup into two
         # concurrent deploy owners, so deliberately leave the lock fail-closed.
         log_error "受监督部署步骤未能确认终止；保留 WSL2 锁与 active marker，禁止自动接管"
-        return "$original_status"
+        abort_deploy_lock_release "$original_status"
+    fi
+    if ! assert_no_owned_active_markers "释放部署锁"; then
+        # wsl_run is frequently evaluated in command substitutions.  Shell
+        # variables set by those subshells do not propagate, but the WSL marker
+        # is durable and must still prevent this parent from killing the keeper.
+        log_error "子 shell 留下未决 active marker；保留 lease/flock 等待显式恢复"
+        abort_deploy_lock_release "$original_status"
     fi
     if ! cleanup_deployment_lifecycle_monitor; then
         # The monitor is read-only and has a bounded self-timeout, so it cannot
@@ -219,6 +327,20 @@ release_deploy_lock() {
         # cleanup is therefore not a credential leak, but retain a visible
         # warning because stale root-owned deployment inputs should not pile up.
         log_warn "NATS 目标参数只读快照未确认清理；下次标准部署会使用新的唯一快照"
+    fi
+    if ! assert_no_owned_active_markers "释放部署锁前最终确认"; then
+        # Snapshot cleanup above is itself a supervised root WSL mutation.  It
+        # can create a new durable marker after the initial release check; do
+        # not drop the keeper or report success when its transport is ambiguous.
+        log_error "清理阶段留下未决 active marker；保留 lease/flock 等待显式恢复"
+        abort_deploy_lock_release "$original_status"
+    fi
+    if ! assert_deploy_lock_held "释放部署锁前最终确认"; then
+        # A completion acknowledgement may have proven the command and removed
+        # its marker while final acknowledgement cleanup still failed.  The
+        # supervision poison flag must likewise make a pending success fail.
+        log_error "清理阶段未保持可信部署锁/监督状态；拒绝报告成功"
+        abort_deploy_lock_release "$original_status"
     fi
     if [[ "$DEPLOY_LOCK_HELD" == true ]]; then
         if [[ -n "$DEPLOY_LOCK_HEARTBEAT_PID" ]]; then
@@ -241,7 +363,13 @@ release_deploy_lock() {
             wait "$DEPLOY_LOCK_KEEPER_PID" 2>/dev/null || true
         fi
         DEPLOY_LOCK_HELD=false
+        DEPLOY_LOCK_HEARTBEAT_PID=""
+        DEPLOY_LOCK_KEEPER_PID=""
+        DEPLOY_LOCK_LEASE_FILE=""
+        DEPLOY_LOCK_WRITER_FD=""
+        DEPLOY_WSL_DEFAULT_UID=""
     fi
+    trap - EXIT
     return "$original_status"
 }
 
@@ -291,22 +419,26 @@ acquire_deploy_lock() {
     printf -v stale_q '%q' "$DEPLOY_LOCK_STALE_SECONDS"
     coproc AATS_DEPLOY_LOCK_KEEPER {
         export MSYS_NO_PATHCONV=1
-        exec wsl -d "$DISTRO" bash -c "set -euo pipefail; umask 077; : >$lease_file_q; chmod 600 -- $lease_file_q; exec 9>>$lock_file_q; if ! flock -n 9; then rm -f -- $lease_file_q; printf 'BUSY\\n'; exit 75; fi; while ! python3 -c 'import glob, os, sys, time; own, lease_glob, active_glob, stale=sys.argv[1:5]; now=time.time(); fresh_other=any(path != own and now - os.stat(path).st_mtime <= float(stale) for path in glob.glob(lease_glob)); sys.exit(1 if fresh_other or glob.glob(active_glob) else 0)' $lease_file_q $lease_glob_q $active_glob_q $stale_q 2>/dev/null; do touch -- $lease_file_q; sleep 0.2; done; touch -- $lease_file_q; printf 'ACQUIRED:%s\\n' $token_q; while python3 -c 'import glob, os, sys, time; lease, active_glob, stale=sys.argv[1:4]; lease_fresh=time.time() - os.stat(lease).st_mtime <= float(stale); sys.exit(0 if lease_fresh or glob.glob(active_glob) else 1)' $lease_file_q $active_glob_q $stale_q 2>/dev/null; do sleep 0.2; done; rm -f -- $lease_file_q; exit 77"
+        exec wsl -d "$DISTRO" bash -c "set -euo pipefail; umask 077; : >$lease_file_q; chmod 600 -- $lease_file_q; exec 9>>$lock_file_q; if ! flock -n 9; then rm -f -- $lease_file_q; printf 'BUSY\\n'; exit 75; fi; while ! python3 -c 'import glob, os, sys, time; own, lease_glob, active_glob, stale=sys.argv[1:5]; now=time.time(); fresh_other=any(path != own and now - os.stat(path).st_mtime <= float(stale) for path in glob.glob(lease_glob)); sys.exit(1 if fresh_other or glob.glob(active_glob) else 0)' $lease_file_q $lease_glob_q $active_glob_q $stale_q 2>/dev/null; do touch -- $lease_file_q; sleep 0.2; done; touch -- $lease_file_q; printf 'ACQUIRED:%s:%s\\n' $token_q \"\$(id -u)\"; while python3 -c 'import glob, os, sys, time; lease, active_glob, stale=sys.argv[1:4]; lease_fresh=time.time() - os.stat(lease).st_mtime <= float(stale); sys.exit(0 if lease_fresh or glob.glob(active_glob) else 1)' $lease_file_q $active_glob_q $stale_q 2>/dev/null; do sleep 0.2; done; rm -f -- $lease_file_q; exit 77"
     }
     DEPLOY_LOCK_KEEPER_PID="$AATS_DEPLOY_LOCK_KEEPER_PID"
     coproc_reader="${AATS_DEPLOY_LOCK_KEEPER[0]}"
     coproc_writer="${AATS_DEPLOY_LOCK_KEEPER[1]}"
     DEPLOY_LOCK_WRITER_FD="$coproc_writer"
-    if ! IFS= read -r -t 30 handshake <&"$coproc_reader" || [[ "$handshake" != "ACQUIRED:$DEPLOY_LOCK_TOKEN" ]]; then
+    if ! IFS= read -r -t 30 handshake <&"$coproc_reader" \
+        || [[ "${handshake%:*}" != "ACQUIRED:$DEPLOY_LOCK_TOKEN" \
+            || ! "${handshake##*:}" =~ ^[0-9]+$ ]]; then
         kill "$DEPLOY_LOCK_KEEPER_PID" 2>/dev/null || true
         wait "$DEPLOY_LOCK_KEEPER_PID" 2>/dev/null || true
         eval "exec ${coproc_writer}>&-" 2>/dev/null || true
         eval "exec ${coproc_reader}<&-" 2>/dev/null || true
         DEPLOY_LOCK_TOKEN=""
+        DEPLOY_WSL_DEFAULT_UID=""
         log_error "另一个标准部署正在运行，或 WSL2 长寿命 flock holder 无法建立: $DEPLOY_LOCK_FILE"
         log_error "拒绝并发修改同一 WSL2 模拟栈；不要绕过锁或并行手工启动 Docker 应用容器"
         exit 14
     fi
+    DEPLOY_WSL_DEFAULT_UID="${handshake##*:}"
     eval "exec ${coproc_reader}<&-"
     DEPLOY_LOCK_HELD=true
     deploy_lock_heartbeat_loop "$$" &
@@ -333,23 +465,26 @@ assert_deploy_lock_held() {
     fi
 }
 
-terminate_supervised_process_tree() {
-    local process_pid="$1" windows_pid
-    # The child can exit between the caller's kill -0 and this lookup.  Cleanup
-    # runs from EXIT traps under errexit/pipefail, so an empty ps result must not
-    # abort lock release halfway through.
-    windows_pid="$(ps -p "$process_pid" -o winpid= 2>/dev/null | tr -d '[:space:]')" || true
-    if [[ "$windows_pid" =~ ^[1-9][0-9]*$ ]]; then
-        MSYS_NO_PATHCONV=1 taskkill.exe /PID "$windows_pid" /T /F >/dev/null 2>&1 || true
+assert_no_owned_active_markers() {
+    local context="$1" active_glob active_glob_q probe
+    if [[ ! "$DEPLOY_LOCK_SCOPE" =~ ^[0-9a-f]{16}$ \
+        || ! "$DEPLOY_LOCK_TOKEN" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+        log_error "当前部署缺少有效的 marker scope/token；拒绝确认 $context"
+        return 16
     fi
-    kill -TERM "$process_pid" 2>/dev/null || true
-    sleep 0.2
-    kill -KILL "$process_pid" 2>/dev/null || true
+    active_glob="/tmp/aats-standard-deploy-active-$DEPLOY_LOCK_SCOPE-$DEPLOY_LOCK_TOKEN-*"
+    printf -v active_glob_q '%q' "$active_glob"
+    if ! probe="$(MSYS_NO_PATHCONV=1 wsl -d "$DISTRO" bash -c \
+        "python3 -c 'import glob, sys; print(\"ACTIVE\" if glob.glob(sys.argv[1]) else \"CLEAR\")' $active_glob_q" \
+        2>/dev/null | tr -d '\r')" || [[ "$probe" != CLEAR ]]; then
+        log_error "当前部署仍有未闭合 active marker，拒绝 $context"
+        return 16
+    fi
 }
 
 terminate_active_supervised_process() {
     local process_pid="$DEPLOY_ACTIVE_PROCESS_PID"
-    if [[ -n "$DEPLOY_ACTIVE_GATE_DIR" ]]; then
+    if [[ -n "$DEPLOY_ACTIVE_GATE_DIR" && -d "$DEPLOY_ACTIVE_GATE_DIR" ]]; then
         # Wake a wrapper that has been registered but not yet granted its final
         # launch capability.  Without this cancellation handshake an EXIT trap
         # could wait forever while the wrapper waits for authorization.
@@ -383,6 +518,202 @@ terminate_active_supervised_process() {
     DEPLOY_ACTIVE_PROCESS_CONTEXT=""
 }
 
+remove_proven_completed_active_marker() {
+    local marker_file="$1" marker_q attempt
+    if [[ ! "$marker_file" =~ ^/tmp/aats-standard-deploy-active-[0-9a-f]{16}-[A-Za-z0-9._:-]+-[1-9][0-9]*$ ]]; then
+        return 16
+    fi
+    printf -v marker_q '%q' "$marker_file"
+    # This helper is intentionally callable only by the command guard after
+    # its synchronous child returned, or by the wrapper before final launch.
+    # A transient wsl.exe failure must not permanently poison the global lock,
+    # but the parent still cannot use this helper to erase an ambiguous marker.
+    for attempt in {1..10}; do
+        if MSYS_NO_PATHCONV=1 wsl -d "$DISTRO" bash -c \
+            "rm -f -- $marker_q; test ! -e $marker_q" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    return 16
+}
+
+build_wsl_completion_wrapped_command() {
+    local remote_command="$1" marker_file="$2" completion_file="$3" io_mode="$4"
+    local expected_marker_uid="$5"
+    local expected_completion encoded marker_q completion_q wrapped
+    if [[ ! "$marker_file" =~ ^/tmp/aats-standard-deploy-active-[0-9a-f]{16}-[A-Za-z0-9._:-]+-[1-9][0-9]*$ \
+        || ! "$completion_file" =~ ^/tmp/aats-standard-deploy-completion-[0-9a-f]{16}-[A-Za-z0-9._:-]+-[1-9][0-9]*$ ]]; then
+        return 16
+    fi
+    expected_completion="${marker_file/aats-standard-deploy-active-/aats-standard-deploy-completion-}"
+    if [[ "$completion_file" != "$expected_completion" || -z "$remote_command" \
+        || ( "$io_mode" != capture && "$io_mode" != quiet && "$io_mode" != stream ) \
+        || ! "$expected_marker_uid" =~ ^[0-9]+$ ]]; then
+        return 16
+    fi
+    if ! encoded="$(printf '%s' "$remote_command" | base64 | tr -d '\r\n')" \
+        || [[ -z "$encoded" || ! "$encoded" =~ ^[A-Za-z0-9+/=]+$ ]]; then
+        return 16
+    fi
+    printf -v marker_q '%q' "$marker_file"
+    printf -v completion_q '%q' "$completion_file"
+    # The completion record is written by the WSL-side wrapper only after the
+    # real remote command has returned.  In capture mode it also binds the exact
+    # byte lengths and SHA-256 digests replayed over wsl.exe.  This is a
+    # transport-completion proof inside the current WSL UID trust boundary, not
+    # a cryptographic authentication boundary against that same UID.
+    printf -v wrapped '%s\n' \
+        'set +e' \
+        "completion_file=$completion_q" \
+        "marker_file=$marker_q" \
+        "io_mode='$io_mode'" \
+        "expected_marker_uid='$expected_marker_uid'" \
+        'if [[ -e "$completion_file" ]]; then exit 126; fi' \
+        '[[ -f "$marker_file" && ! -L "$marker_file" ]] || exit 124' \
+        "marker_metadata=\$(stat -c '%u|%a|%s' -- \"\$marker_file\")" \
+        '[[ "$marker_metadata" == "$expected_marker_uid|600|0" ]] || exit 124' \
+        "remote_command=\$(printf '%s' '$encoded' | base64 --decode)" \
+        'decode_status=$?' \
+        'if [[ "$decode_status" -ne 0 ]]; then exit 125; fi' \
+        'umask 077' \
+        'stdout_tmp=""' \
+        'stderr_tmp=""' \
+        'completion_tmp=""' \
+        "trap 'rm -f -- \"\$stdout_tmp\" \"\$stderr_tmp\" \"\$completion_tmp\"' EXIT HUP INT TERM" \
+        'if [[ "$io_mode" == capture ]]; then' \
+        '    stdout_tmp=$(mktemp "${completion_file}.stdout.XXXXXX") || exit 125' \
+        '    stderr_tmp=$(mktemp "${completion_file}.stderr.XXXXXX") || exit 125' \
+        '    bash -c "$remote_command" >"$stdout_tmp" 2>"$stderr_tmp"' \
+        '    remote_status=$?' \
+        '    stdout_size=$(wc -c <"$stdout_tmp" | tr -d "[:space:]")' \
+        '    stderr_size=$(wc -c <"$stderr_tmp" | tr -d "[:space:]")' \
+        "    stdout_sha256=\$(sha256sum -- \"\$stdout_tmp\" | awk '{print \$1}')" \
+        "    stderr_sha256=\$(sha256sum -- \"\$stderr_tmp\" | awk '{print \$1}')" \
+        '    [[ "$stdout_size" =~ ^[0-9]+$ && "$stderr_size" =~ ^[0-9]+$ ]] || exit 125' \
+        '    [[ "$stdout_sha256" =~ ^[0-9a-f]{64}$ && "$stderr_sha256" =~ ^[0-9a-f]{64}$ ]] || exit 125' \
+        'else' \
+        '    bash -c "$remote_command"' \
+        '    remote_status=$?' \
+        '    stdout_size=-' \
+        '    stderr_size=-' \
+        '    stdout_sha256=-' \
+        '    stderr_sha256=-' \
+        'fi' \
+        'completion_tmp=$(mktemp "${completion_file}.tmp.XXXXXX") || exit 125' \
+        "printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' $marker_q \"\$remote_status\" \"\$io_mode\" \"\$stdout_size\" \"\$stdout_sha256\" \"\$stderr_size\" \"\$stderr_sha256\" >\"\$completion_tmp\" || exit 125" \
+        'chmod 600 -- "$completion_tmp" || exit 125' \
+        'ln -- "$completion_tmp" "$completion_file" || exit 125' \
+        'rm -f -- "$completion_tmp"' \
+        'completion_tmp=""' \
+        'if [[ "$io_mode" == capture ]]; then' \
+        '    cat -- "$stdout_tmp" || exit 123' \
+        '    cat -- "$stderr_tmp" >&2 || exit 123' \
+        'fi' \
+        'rm -f -- "$stdout_tmp" "$stderr_tmp"' \
+        'stdout_tmp=""' \
+        'stderr_tmp=""' \
+        'trap - EXIT HUP INT TERM' \
+        'exit 0'
+    printf '%s' "$wrapped"
+}
+
+finalize_proven_wsl_completion() {
+    local marker_file="$1" completion_file="$2" user_mode="$3" io_mode="$4"
+    local expected_stdout_size="$5" expected_stdout_sha256="$6"
+    local expected_stderr_size="$7" expected_stderr_sha256="$8"
+    local expected_marker_uid="$9"
+    local expected_completion marker_q completion_q proof_script encoded proof attempt
+    local -a wsl_args=(-d "$DISTRO")
+    if [[ ! "$marker_file" =~ ^/tmp/aats-standard-deploy-active-[0-9a-f]{16}-[A-Za-z0-9._:-]+-[1-9][0-9]*$ \
+        || ! "$completion_file" =~ ^/tmp/aats-standard-deploy-completion-[0-9a-f]{16}-[A-Za-z0-9._:-]+-[1-9][0-9]*$ ]]; then
+        return 16
+    fi
+    expected_completion="${marker_file/aats-standard-deploy-active-/aats-standard-deploy-completion-}"
+    if [[ "$completion_file" != "$expected_completion" \
+        || ( "$io_mode" != capture && "$io_mode" != quiet && "$io_mode" != stream ) \
+        || ! "$expected_marker_uid" =~ ^[0-9]+$ ]]; then
+        return 16
+    fi
+    if [[ "$io_mode" == capture ]]; then
+        if [[ ! "$expected_stdout_size" =~ ^[0-9]+$ \
+            || ! "$expected_stderr_size" =~ ^[0-9]+$ \
+            || ! "$expected_stdout_sha256" =~ ^[0-9a-f]{64}$ \
+            || ! "$expected_stderr_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+            return 16
+        fi
+    elif [[ "$expected_stdout_size" != - || "$expected_stdout_sha256" != - \
+        || "$expected_stderr_size" != - || "$expected_stderr_sha256" != - ]]; then
+        return 16
+    fi
+    case "$user_mode" in
+        default) ;;
+        root) wsl_args+=(-u root) ;;
+        *) return 16 ;;
+    esac
+    printf -v marker_q '%q' "$marker_file"
+    printf -v completion_q '%q' "$completion_file"
+    printf -v proof_script '%s\n' \
+        'set -euo pipefail' \
+        "marker_file=$marker_q" \
+        "completion_file=$completion_q" \
+        "expected_io_mode='$io_mode'" \
+        "expected_stdout_size='$expected_stdout_size'" \
+        "expected_stdout_sha256='$expected_stdout_sha256'" \
+        "expected_stderr_size='$expected_stderr_size'" \
+        "expected_stderr_sha256='$expected_stderr_sha256'" \
+        "expected_marker_uid='$expected_marker_uid'" \
+        '[[ -f "$completion_file" && ! -L "$completion_file" && -O "$completion_file" ]]' \
+        "metadata=\$(stat -c '%a|%s|%F' -- \"\$completion_file\")" \
+        "IFS='|' read -r mode size file_type <<<\"\$metadata\"" \
+        '[[ "$mode" == 600 && "$file_type" == "regular file" && "$size" =~ ^[1-9][0-9]{0,3}$ ]]' \
+        '(( size <= 1024 ))' \
+        'mapfile -t records <"$completion_file"' \
+        '[[ "${#records[@]}" -eq 1 ]]' \
+        "IFS=\$'\\t' read -r ack_marker ack_status ack_io_mode ack_stdout_size ack_stdout_sha256 ack_stderr_size ack_stderr_sha256 ack_extra <<<\"\${records[0]}\"" \
+        '[[ "$ack_marker" == "$marker_file" && -z "$ack_extra" && "$ack_status" =~ ^([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$ ]]' \
+        '[[ "$ack_io_mode" == "$expected_io_mode" ]]' \
+        '[[ "$ack_stdout_size" == "$expected_stdout_size" && "$ack_stdout_sha256" == "$expected_stdout_sha256" ]]' \
+        '[[ "$ack_stderr_size" == "$expected_stderr_size" && "$ack_stderr_sha256" == "$expected_stderr_sha256" ]]' \
+        'if [[ -e "$marker_file" ]]; then' \
+        '    [[ -f "$marker_file" && ! -L "$marker_file" ]]' \
+        "    marker_metadata=\$(stat -c '%u|%a|%s' -- \"\$marker_file\")" \
+        '    [[ "$marker_metadata" == "$expected_marker_uid|600|0" ]]' \
+        '    rm -f -- "$marker_file"' \
+        'fi' \
+        '[[ ! -e "$marker_file" ]]' \
+        'printf "%s\n" "$ack_status"'
+    if ! encoded="$(printf '%s' "$proof_script" | base64 | tr -d '\r\n')" \
+        || [[ -z "$encoded" || ! "$encoded" =~ ^[A-Za-z0-9+/=]+$ ]]; then
+        return 16
+    fi
+    proof=""
+    for attempt in {1..10}; do
+        if proof="$(MSYS_NO_PATHCONV=1 wsl "${wsl_args[@]}" bash -c \
+            "printf '%s' '$encoded' | base64 --decode | bash" 2>/dev/null | tr -d '\r')" \
+            && [[ "$proof" =~ ^([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$ ]]; then
+            break
+        fi
+        proof=""
+        sleep 0.2
+    done
+    if [[ -z "$proof" ]]; then
+        return 16
+    fi
+    # Keep the acknowledgement until its proof has crossed the WSL transport.
+    # If that transport is lost after marker removal, the next retry can still
+    # re-read the same immutable record instead of guessing completion.
+    for attempt in {1..10}; do
+        if MSYS_NO_PATHCONV=1 wsl "${wsl_args[@]}" bash -c \
+            "rm -f -- $completion_q; test ! -e $completion_q" >/dev/null 2>&1; then
+            printf '%s\n' "$proof"
+            return 0
+        fi
+        sleep 0.2
+    done
+    return 16
+}
+
 remove_active_supervision_artifacts() {
     local marker_q
     if [[ -n "$DEPLOY_ACTIVE_MARKER_FILE" ]]; then
@@ -403,6 +734,8 @@ remove_active_supervision_artifacts() {
         rm -f -- \
             "$DEPLOY_ACTIVE_GATE_DIR/authorized" \
             "$DEPLOY_ACTIVE_GATE_DIR/cancel" \
+            "$DEPLOY_ACTIVE_GATE_DIR/command.stderr" \
+            "$DEPLOY_ACTIVE_GATE_DIR/command.stdout" \
             "$DEPLOY_ACTIVE_GATE_DIR/prepared" \
             "$DEPLOY_ACTIVE_GATE_DIR/launch" 2>/dev/null || true
         rmdir -- "$DEPLOY_ACTIVE_GATE_DIR" 2>/dev/null || true
@@ -425,9 +758,8 @@ supervised_wrapper_cleanup() {
         && "${SUPERVISED_WRAPPER_COMMAND_LAUNCHED:-false}" != true ]]; then
         # Cancellation before final launch is the only case where the wrapper
         # itself can prove that no mutation ever owned the marker.
-        printf -v marker_q '%q' "$SUPERVISED_WRAPPER_MARKER_FILE"
-        if ! MSYS_NO_PATHCONV=1 wsl -d "$DISTRO" bash -c \
-            "rm -f -- $marker_q; test ! -e $marker_q" >/dev/null 2>&1; then
+        if ! remove_proven_completed_active_marker \
+            "$SUPERVISED_WRAPPER_MARKER_FILE"; then
             cleanup_status=16
         fi
     elif [[ "${SUPERVISED_WRAPPER_MARKER_CREATED:-false}" == true ]]; then
@@ -440,6 +772,8 @@ supervised_wrapper_cleanup() {
     rm -f -- \
         "${SUPERVISED_WRAPPER_GATE_DIR:-}/authorized" \
         "${SUPERVISED_WRAPPER_GATE_DIR:-}/cancel" \
+        "${SUPERVISED_WRAPPER_GATE_DIR:-}/command.stderr" \
+        "${SUPERVISED_WRAPPER_GATE_DIR:-}/command.stdout" \
         "${SUPERVISED_WRAPPER_GATE_DIR:-}/prepared" \
         "${SUPERVISED_WRAPPER_GATE_DIR:-}/launch" 2>/dev/null || true
     rmdir -- "${SUPERVISED_WRAPPER_GATE_DIR:-}" 2>/dev/null || true
@@ -450,27 +784,111 @@ supervised_wrapper_cleanup() {
 }
 
 run_supervised_command_guard() {
-    local marker_file="$1" marker_q status
-    shift
+    local marker_file="$1" completion_mode="$2" completion_file="$3" user_mode="$4"
+    local io_mode="$5" gate_dir="$6" status completion_status
+    local stdout_size="-" stdout_sha256="-" stderr_size="-" stderr_sha256="-"
+    local stdout_file="$gate_dir/command.stdout" stderr_file="$gate_dir/command.stderr"
+    shift 6
     # This guard is a distinct process from the authorization wrapper.  If the
     # wrapper is SIGKILLed after launch, the guard remains attached to the real
     # synchronous command and alone clears the marker after that command
     # returns.  If the guard itself hard-crashes, the marker intentionally
     # remains for fail-closed manual recovery.
     set +e
-    "$@"
-    status=$?
-    printf -v marker_q '%q' "$marker_file"
-    if ! MSYS_NO_PATHCONV=1 wsl -d "$DISTRO" bash -c \
-        "rm -f -- $marker_q; test ! -e $marker_q" >/dev/null 2>&1; then
-        return 16
+    if [[ "$completion_mode" == wsl-ack ]]; then
+        case "$io_mode" in
+            capture)
+                umask 077
+                : >"$stdout_file"
+                : >"$stderr_file"
+                chmod 600 -- "$stdout_file" "$stderr_file"
+                "$@" >"$stdout_file" 2>"$stderr_file"
+                status=$?
+                ;;
+            quiet)
+                "$@" >/dev/null 2>&1
+                status=$?
+                ;;
+            stream)
+                "$@"
+                status=$?
+                ;;
+            *)
+                return 16
+                ;;
+        esac
+    else
+        "$@"
+        status=$?
     fi
-    return "$status"
+    case "$completion_mode" in
+        local)
+            if ! remove_proven_completed_active_marker "$marker_file"; then
+                return 16
+            fi
+            return "$status"
+            ;;
+        status-zero)
+            # An unclassified client that returns non-zero may have lost its
+            # transport after submitting a remote mutation.  Keep the marker
+            # poisoned unless completion is positively known.
+            if [[ "$status" -ne 0 ]]; then
+                return 16
+            fi
+            if ! remove_proven_completed_active_marker "$marker_file"; then
+                return 16
+            fi
+            return 0
+            ;;
+        wsl-ack)
+            if [[ "$status" -ne 0 ]]; then
+                if [[ "$io_mode" == capture ]]; then
+                    cat -- "$stderr_file" >&2 || true
+                fi
+                return 16
+            fi
+            if [[ "$io_mode" == capture ]]; then
+                if ! stdout_size="$(wc -c <"$stdout_file" | tr -d '[:space:]')" \
+                    || ! stderr_size="$(wc -c <"$stderr_file" | tr -d '[:space:]')" \
+                    || ! stdout_sha256="$(sha256sum -- "$stdout_file" | awk '{print $1}')" \
+                    || ! stderr_sha256="$(sha256sum -- "$stderr_file" | awk '{print $1}')" \
+                    || [[ ! "$stdout_size" =~ ^[0-9]+$ \
+                        || ! "$stderr_size" =~ ^[0-9]+$ \
+                        || ! "$stdout_sha256" =~ ^[0-9a-f]{64}$ \
+                        || ! "$stderr_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+                    return 16
+                fi
+            fi
+            if ! completion_status="$(finalize_proven_wsl_completion \
+                "$marker_file" "$completion_file" "$user_mode" "$io_mode" \
+                "$stdout_size" "$stdout_sha256" "$stderr_size" "$stderr_sha256" \
+                "$DEPLOY_WSL_DEFAULT_UID")"; then
+                if [[ "$io_mode" == capture ]]; then
+                    cat -- "$stderr_file" >&2 || true
+                fi
+                return 16
+            fi
+            if [[ "$io_mode" == capture ]]; then
+                if ! cat -- "$stdout_file"; then
+                    return 16
+                fi
+                if ! cat -- "$stderr_file" >&2; then
+                    return 16
+                fi
+            fi
+            return "$completion_status"
+            ;;
+        *)
+            return 16
+            ;;
+    esac
 }
 
 run_supervised_wrapper() {
-    local parent_pid="$1" gate_dir="$2" marker_file="$3" context="$4" marker_q status
-    shift 4
+    local parent_pid="$1" gate_dir="$2" marker_file="$3" context="$4"
+    local completion_mode="$5" completion_file="$6" user_mode="$7" io_mode="$8"
+    local marker_q status
+    shift 8
     SUPERVISED_WRAPPER_CHILD_PID=""
     SUPERVISED_WRAPPER_GATE_DIR="$gate_dir"
     SUPERVISED_WRAPPER_MARKER_FILE="$marker_file"
@@ -500,7 +918,7 @@ run_supervised_wrapper() {
 
     printf -v marker_q '%q' "$marker_file"
     if ! MSYS_NO_PATHCONV=1 wsl -d "$DISTRO" bash -c \
-        "umask 077; if [[ -e $marker_q ]]; then exit 19; fi; : >$marker_q; chmod 600 -- $marker_q" >/dev/null; then
+        "python3 -c 'import os, sys; fd=os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600); os.fchmod(fd, 0o600); os.close(fd)' $marker_q" >/dev/null; then
         return 16
     fi
     SUPERVISED_WRAPPER_MARKER_CREATED=true
@@ -515,7 +933,9 @@ run_supervised_wrapper() {
         return 16
     fi
 
-    run_supervised_command_guard "$marker_file" "$@" &
+    run_supervised_command_guard \
+        "$marker_file" "$completion_mode" "$completion_file" "$user_mode" \
+        "$io_mode" "$gate_dir" "$@" &
     SUPERVISED_WRAPPER_CHILD_PID=$!
     SUPERVISED_WRAPPER_COMMAND_LAUNCHED=true
     if [[ "${AATS_DEPLOY_TEST_MODE:-false}" == true \
@@ -543,9 +963,51 @@ run_supervised_wrapper() {
     return 0
 }
 
+run_lock_supervised_wsl() {
+    local context="$1" user_mode="$2" io_mode="$3" remote_command="$4"
+    run_lock_supervised_external \
+        "$context" --wsl-completion "$user_mode" "$io_mode" "$remote_command"
+}
+
 run_lock_supervised_external() {
     local context="$1" process_pid status gate_dir marker_file
+    local completion_mode="status-zero" completion_file="" user_mode="default"
+    local io_mode="stream" remote_command="" wrapped_command="" wrapped_encoded=""
+    local -a supervised_command=()
     shift
+    case "${1:-}" in
+        --local-completion)
+            completion_mode="local"
+            shift
+            supervised_command=("$@")
+            ;;
+        --wsl-completion)
+            completion_mode="wsl-ack"
+            user_mode="${2:-}"
+            io_mode="${3:-}"
+            remote_command="${4:-}"
+            if [[ "$#" -ne 4 || ( "$user_mode" != default && "$user_mode" != root ) \
+                || ( "$io_mode" != capture && "$io_mode" != quiet && "$io_mode" != stream ) \
+                || -z "$remote_command" ]]; then
+                log_error "无效的 WSL completion acknowledgement 参数: $context"
+                return 16
+            fi
+            ;;
+        *)
+            supervised_command=("$@")
+            ;;
+    esac
+    if [[ "$completion_mode" != wsl-ack && "${#supervised_command[@]}" -eq 0 ]]; then
+        log_error "受监督步骤缺少命令: $context"
+        return 16
+    fi
+    if [[ ! "$DEPLOY_WSL_DEFAULT_UID" =~ ^[0-9]+$ ]]; then
+        log_error "标准部署锁未绑定可信 WSL default UID: $context"
+        return 16
+    fi
+    if ! assert_no_owned_active_markers "$context 启动"; then
+        return 16
+    fi
     if [[ "$DEPLOY_SUPERVISION_POISONED" == true \
         || -n "$DEPLOY_ACTIVE_PROCESS_PID" \
         || -n "$DEPLOY_ACTIVE_MARKER_FILE" \
@@ -562,9 +1024,31 @@ run_lock_supervised_external() {
     }
     DEPLOY_ACTIVE_SEQUENCE=$((DEPLOY_ACTIVE_SEQUENCE + 1))
     marker_file="/tmp/aats-standard-deploy-active-$DEPLOY_LOCK_SCOPE-$DEPLOY_LOCK_TOKEN-$DEPLOY_ACTIVE_SEQUENCE"
+    if [[ "$completion_mode" == wsl-ack ]]; then
+        completion_file="${marker_file/aats-standard-deploy-active-/aats-standard-deploy-completion-}"
+        if ! wrapped_command="$(build_wsl_completion_wrapped_command \
+            "$remote_command" "$marker_file" "$completion_file" "$io_mode" \
+            "$DEPLOY_WSL_DEFAULT_UID")"; then
+            log_error "无法构造 WSL completion acknowledgement wrapper: $context"
+            return 16
+        fi
+        if ! wrapped_encoded="$(printf '%s' "$wrapped_command" | base64 | tr -d '\r\n')" \
+            || [[ -z "$wrapped_encoded" || ! "$wrapped_encoded" =~ ^[A-Za-z0-9+/=]+$ ]]; then
+            log_error "无法编码 WSL completion acknowledgement wrapper: $context"
+            return 16
+        fi
+        supervised_command=(wsl -d "$DISTRO")
+        if [[ "$user_mode" == root ]]; then
+            supervised_command+=(-u root)
+        fi
+        supervised_command+=(bash -c \
+            "printf '%s' '$wrapped_encoded' | base64 --decode | bash")
+    fi
     DEPLOY_ACTIVE_GATE_DIR="$gate_dir"
     DEPLOY_ACTIVE_MARKER_FILE="$marker_file"
-    run_supervised_wrapper "$$" "$gate_dir" "$marker_file" "$context" "$@" &
+    run_supervised_wrapper "$$" "$gate_dir" "$marker_file" "$context" \
+        "$completion_mode" "$completion_file" "$user_mode" "$io_mode" \
+        "${supervised_command[@]}" &
     process_pid=$!
     if [[ "${AATS_DEPLOY_TEST_MODE:-false}" == true \
         && "${BASH_SOURCE[0]}" != "$0" \
@@ -602,7 +1086,7 @@ run_lock_supervised_external() {
             || ! kill -0 "$DEPLOY_LOCK_KEEPER_PID" 2>/dev/null \
             || [[ -z "$DEPLOY_LOCK_HEARTBEAT_PID" ]] \
             || ! kill -0 "$DEPLOY_LOCK_HEARTBEAT_PID" 2>/dev/null; then
-            log_error "WSL2 标准部署锁在活动步骤中丢失；终止受监督进程树: $context"
+            log_error "WSL2 标准部署锁在活动步骤中丢失；等待受监督步骤完成证明: $context"
             terminate_active_supervised_process
             return 16
         fi
@@ -629,8 +1113,10 @@ run_locked_step() {
     local step_name="$1"
     shift
     assert_deploy_lock_held "$step_name 前"
+    assert_no_owned_active_markers "$step_name 前"
     assert_local_docker_daemon_binding "$step_name 前"
     "$@"
+    assert_no_owned_active_markers "$step_name 后"
     assert_local_docker_daemon_binding "$step_name 后"
     assert_deploy_lock_held "$step_name 后"
 }
@@ -1128,7 +1614,8 @@ step_commit() {
                 git status --short
                 exit 1
             fi
-            run_lock_supervised_external "Git commit" git commit -m "$COMMIT_MSG"
+            run_lock_supervised_external \
+                "Git commit" --local-completion git commit -m "$COMMIT_MSG"
             log_ok "已提交: $(git log --oneline -1)"
         elif repo_has_unstaged_or_untracked_changes; then
             log_error "--commit 不再自动执行 git add -A，避免把无关改动发布到 live"
@@ -1174,8 +1661,37 @@ step_sync() {
         return
     fi
 
+    local source_branch source_head source_mount target_path sync_command
     log_info "Step 2/8: 同步代码到 WSL2..."
-    run_lock_supervised_external "Windows 到 WSL2 同步" "$SCRIPT_DIR/sync_to_wsl2.sh" pull
+    source_branch="$(git -C "$PROJECT_ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+    source_head="$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
+    if [[ ! "$source_head" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        log_error "Windows 源仓库 branch/HEAD 无法形成安全同步输入"
+        return 1
+    fi
+    if [[ -n "$source_branch" ]] \
+        && ! git -C "$PROJECT_ROOT" check-ref-format --branch "$source_branch" >/dev/null 2>&1; then
+        log_error "Windows 源仓库 branch/HEAD 无法形成安全同步输入"
+        return 1
+    fi
+    if ! source_mount="$(windows_path_to_wsl_mount "$PROJECT_ROOT")"; then
+        log_error "无法把 Windows 源路径转换为 WSL mount 路径"
+        return 1
+    fi
+    if ! target_path="$(wsl_run "cd $WSL_PROJECT && pwd -P" | tr -d '\r')" \
+        || [[ "$target_path" != /* || "$target_path" == *$'\n'* ]]; then
+        log_error "无法解析可信 WSL2 checkout 绝对路径"
+        return 1
+    fi
+    if ! sync_command="$(build_wsl_checkout_sync_command \
+        "$source_mount" "$target_path" "$source_branch" "$source_head")"; then
+        log_error "无法构造单事务 WSL2 Git 同步命令"
+        return 1
+    fi
+    # The complete Git transaction executes behind one WSL-side completion
+    # acknowledgement.  Semantic Git refusals therefore clean their marker;
+    # only an ambiguous client/transport completion remains fail-closed.
+    wsl_run "$sync_command"
     log_ok "同步完成"
 }
 
@@ -1650,7 +2166,9 @@ step_build() {
     local env_prefix
     env_prefix="$(compose_env_prefix)"
     assert_wsl_checkout_clean "镜像构建前"
-    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && ${env_prefix:+env $env_prefix }docker compose $COMPOSE_CMD_ARGS build $NO_CACHE"
+    wsl_run \
+        "cd $WSL_PROJECT/$DEPLOY_DIR && ${env_prefix:+env $env_prefix }docker compose $COMPOSE_CMD_ARGS build $NO_CACHE" \
+        stream
     assert_wsl_checkout_clean "镜像构建后"
     log_ok "镜像构建完成"
 }

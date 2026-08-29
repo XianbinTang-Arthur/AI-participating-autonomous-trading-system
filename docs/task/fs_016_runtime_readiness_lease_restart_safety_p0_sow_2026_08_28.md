@@ -189,17 +189,29 @@ v1 -> v2 的 full-down，也不授权 rolling upgrade。
 `AATS_DEPLOY_TEST_MODE=true` 的隔离测试中才可覆盖，标准部署尝试覆盖会非零退出，不能通过多个
 路径拆分全局互斥。单一 WSL holder 持有同一个 fd；Windows heartbeat 每 3 秒刷新独立 lease，
 holder 连续 12 秒未见刷新才释放 fd，且不删除 lock inode。新 holder 即使已取得 flock，也会扫描
-其他 `/tmp/aats-standard-deploy-lease-*`；任一 predecessor lease 仍不超过 12 秒时，新 holder 持续
-刷新自己的 lease 并隔离等待，直至前任 lease 被清除或过期才报告 `ACQUIRED`。这避免旧 holder
-异常退出与子进程清理之间的短窗被新部署抢占。
+其他 `/tmp/aats-standard-deploy-lease-*` 和同一锁作用域的 durable active marker；任一 predecessor
+lease 仍不超过 12 秒，或任一 active marker 仍存在时，新 holder 持续刷新自己的 lease 并隔离等待，
+直至两类前任证据均清除才报告 `ACQUIRED`。active marker 不使用 12 秒 TTL；它是无法证明远端 mutation
+已经结束时的持久阻断证据，不能靠时间自动失效。
 
 锁贯穿预检、提交/同步、generation、构建、停启、迁移、健康检查、最终证据与报告。每个外部步骤
-spawn 前先验证 holder PID、heartbeat PID 和 flock，拒绝嵌套 supervised child；spawn 后立即将 child
-PID/context 写入全局 active 登记，活动期间持续监督 holder/heartbeat。失锁时先终止并 wait Windows/
-WSL 进程树，再返回失败。`TERM`、`HUP`、`INT` 与普通 `EXIT` 共用同一释放顺序：先终止并 wait
-active child，随后停止并 wait heartbeat、移除本次 lease、关闭 holder 通道，最后 wait/终止 flock
-holder；不能让锁先释放而旧子进程仍继续 mutation。当前 Windows Git Bash -> WSL 锁协议已有聚焦
-smoke 证据，但这不是标准部署 PASS。
+spawn 前先验证 holder PID、heartbeat PID、flock 和当前作用域不存在未闭合 marker，拒绝嵌套
+supervised child；spawn 后立即将 child PID/context 写入全局 active 登记。最终 launch 前的 cancel
+handshake 可以证明命令从未获得 mutation 能力；launch 后，失锁、`TERM`、`HUP`、`INT` 或普通
+`EXIT` 都不能通过杀死 Windows/`wsl.exe` 客户端推断 Docker daemon/WSL 端 mutation 已停止，而是
+保持 lease/flock 并等待同步 guard 取得实际完成证明。父进程或 guard 硬丢失时，active marker 留存，
+keeper 与后继 holder 都被阻断，直至按精确证据恢复；锁不会在旧 mutation 仍可能运行时释放。
+
+完成证明分为三类：已知本地同步进程返回后可清理自身 marker；未分类 transport 仅在返回零时可清理，
+非零视为歧义；WSL/root 命令由 WSL-side wrapper 在真实远端命令返回后原子写入七字段 completion ACK，
+绑定 marker、远端语义退出码、I/O 模式、stdout/stderr 字节数及 SHA-256。默认 `capture` 同时在本地以
+`0600` 暂存两路输出，只有 ACK 与本地字节数/摘要完全一致时才回放并返回远端语义状态；`stream` 仅用于
+需实时输出的构建，`quiet` 用于明确静默步骤。ACK 在 proof 跨越 WSL transport 前保留，允许“marker 已
+删除但响应丢失”的幂等重读；初次 client 非零、ACK 缺失/畸形、摘要不一致、回放或清理失败均返回
+16 并保留阻断证据。释放阶段在 NATS 快照清理后再次扫描 marker 并复核 holder；若原状态待成功则改为
+16，已有非零状态保持不变。标准代码同步已合并为单个 ACK 支持的 WSL Git 事务，dirty checkout、
+分支不匹配或同步后 HEAD 不一致等远端语义状态可准确传播并清理自身 marker，transport 歧义仍保留。
+当前 Windows Git Bash -> WSL 协议只有聚焦 smoke 证据，不等于标准部署 PASS。
 
 停止阶段对所有已知 profile 的七个应用容器执行 15 秒有界 stop；逐个只接受 `exited/dead` 或明确
 not-found，其他状态与 inspect 失败全部停止发布。quiescence 基线记录容器 ID、状态、`StartedAt`、
@@ -223,8 +235,9 @@ commit 后，只用严格 allowlist 解析 profile 一次，将全部八键补�
 在 `/run/aats-deploy/` 的受管目录内原子写入 `root:root`、`0444` 的本次锁 token 专属文件。preflight
 只读该快照，所有模拟 profile 的必需应用容器均把它作为最后一个 `env_file`，并携带同一 target
 manifest SHA-256 label。健康边界与最终 writer 都要求每个容器 label 精确匹配 preflight manifest；
-app-up 前后及证据生成前再次验证快照的类型、owner、mode、严格八键内容与摘要。正常退出只删除该
-精确路径；快照不含凭证。NATS 容器共享身份投影还同时校验 Compose project/service、唯一 RW 标准
+app-up 前后及证据生成前再次验证快照的类型、owner、mode、严格八键内容与摘要。正常退出仅尝试删除
+本次精确路径；清理失败会告警，并可能留下不含凭证的 stale file。NATS 容器共享身份投影还同时校验
+Compose project/service、唯一 RW 标准
 本地 volume、固定 `Config.Image` digest ref，并将容器实际 image ID 与该 pin 当前解析出的 image ID
 绑定，不能以同名、同 label 的其他镜像冒充。
 
@@ -282,7 +295,7 @@ truth 丢失/被错误恢复与独立 watchdog 或 OS termination 同时失效�
 10. Gateway barrier/lease failure 不设置伪 ready，cleanup 不删除新 owner；
 11. 关键故障立即冻结续租且 fatal 不可解除；正常 stop 先冻结续租、进入 10 秒 SHUTDOWN deadline、停止业务并 drain NATS、disarm 后再 owner-aware delete；非安全停机不删除 owner，由 TTL fencing；
 12. NATS 连续断连 30 秒和永久 close 进入 critical failure；critical durable `NotFound`/配置漂移立即 terminal，management/push/heartbeat 持续失败和 backlog 无进展有界 terminal；Redis `noeviction` 与写失败上浮；
-13. 原 FS-016 generation、deploy injection、210 秒 health budget、monolith 与 optional 路径回归，并明确拒绝 protocol v1/mixed-version peer；标准 deploy 使用不可由生产覆盖的固定全局 WSL `flock`，任一 fresh predecessor lease 触发 takeover quarantine；每个外部步骤 spawn 前 fencing、spawn 后唯一 active child 全局登记，丢锁或 `TERM/HUP/INT/EXIT` 时先终止并 wait child tree 再释放 heartbeat/lease/flock；七容器 quiescence 以 ID/status/StartedAt/FinishedAt/RestartCount 和精确 Docker events 区间验证；full-down 前与 app-up 前各执行一次只读全量分页 preflight；失败保留 NATS；最后一次 schema v2 PASS 与最终证据的 lock id/generation/deployed commit/quiescence/path/hash 一致。
+13. 原 FS-016 generation、deploy injection、210 秒 health budget、monolith 与 optional 路径回归，并明确拒绝 protocol v1/mixed-version peer；标准 deploy 使用不可由生产覆盖的固定全局 WSL `flock`，任一 fresh predecessor lease 或同作用域 durable active marker 触发 takeover quarantine；每个外部步骤 spawn 前 fencing、spawn 后唯一 active child 全局登记，launch 前取消不执行 mutation，launch 后丢锁或 `TERM/HUP/INT/EXIT` 保持 lease/flock 并等待 guard 的真实完成证明；本地/未分类/WSL ACK 三类完成语义、七字段输出完整性、远端语义状态传播、proof 幂等重读、release 状态 16 与 poison marker 均须回归。七容器 quiescence 以 ID/status/StartedAt/FinishedAt/RestartCount 和精确 Docker events 区间验证；full-down 前与 app-up 前各执行一次只读全量分页 preflight；失败保留 NATS；最后一次 schema v2 PASS 与最终证据的 lock id/generation/deployed commit/quiescence/path/hash 一致。
 14. NATS 八键 target snapshot 必须规范、确定、无非白名单值、root-owned 只读且绑定 lock token；preflight、Compose 末位 `env_file`、所有必需容器 manifest label、健康边界和最终 writer 必须同摘要。NATS post-recreate/final 身份必须同时匹配固定 `Config.Image` pin 与该 pin 的实际 image ID。主动稳定观察必须拒绝 healthy 但 `FailingStreak>0` 或最新 `ExitCode!=0`；最终逻辑窗不得超过 60 秒，防止五条 Moby health log 淘汰边界后失败。
 
 ### 5.2 模拟运行验收
@@ -292,9 +305,11 @@ truth 丢失/被错误恢复与独立 watchdog 或 OS termination 同时失效�
 - Windows、WSL checkout、容器 evidence commit 与 readiness generation 对齐；
 - 四主进程、RDP daemon、Postgres、Redis、NATS 和 collectors 的组件健康；
 - 标准入口使用 210 秒应用健康预算；任何 mutation 前取得固定 `/tmp/aats-standard-deploy.lock` 的
-  长寿命 WSL `flock` 并持有至最终报告，拒绝生产 lock-path override，等待 fresh predecessor lease；
-  每个外部步骤 spawn 前围栏、spawn 后登记 active child，信号/退出/失锁先终止并 wait child tree 后
-  才释放 heartbeat/lease/flock；
+  长寿命 WSL `flock` 并持有至最终报告，拒绝生产 lock-path override，同时等待 fresh predecessor
+  lease 与同作用域所有 durable active marker；每个外部步骤 spawn 前围栏、spawn 后登记 active child，
+  launch 前取消不执行 mutation，launch 后信号/退出/失锁保持 lease/flock 并等待实际 completion proof；
+  WSL `capture` 的七字段 ACK、输出摘要验证后回放、远端语义状态、proof 幂等重读及所有歧义失败关闭均
+  取得运行证据；标准代码同步作为单个 ACK 支持的 Git 事务完成，语义拒绝不毒化全局锁；
   stop 七个 app 时只接受 `exited/dead` 或明确 not-found；以 ID/status/StartedAt/FinishedAt/RestartCount
   和精确 Docker events 区间验证 quiescence；基础设施-only up 后、full-down 前取得第一次 loopback
   全量分页只读 preflight PASS，full-down 后建立新基线，infra/schema 完成后、app up 前取得第二次；
@@ -350,10 +365,14 @@ supervision、30 秒断连监督、Redis `noeviction`、210 秒部署健康预�
 PROVISIONING 写/续租后的 50 秒滑动 hard fence、claim→READY 180 秒绝对上界（170 秒冻结 + 10 秒
 fatal grace）和正常 cleanup 10 秒上界也已进入候选代码。non-strict、in-memory 与 monolith 不注入
 gate、不强制 `max_ack_pending=1`。标准入口另已加入固定生产路径的长寿命 WSL `flock`、仅测试可用
-的 lock-path override、fresh predecessor lease takeover quarantine、外部步骤 spawn fencing/active
-child 全局登记、signal/exit child-first cleanup、七容器 lifecycle quiescence 证据、full-down 前和
+的 lock-path override、fresh predecessor lease 与 durable marker 双重 takeover quarantine、外部步骤
+spawn fencing/active child 全局登记、本地/未分类/WSL ACK 三类 completion 语义、七字段输出完整性、
+幂等 proof、release 失败关闭、单事务代码同步、七容器 lifecycle quiescence 证据、full-down 前和
 app-up 前两次只读 preflight，以及绑定 lock id/generation/deployed commit/quiescence/path/hash 的最终
-证据校验。应用健康边界后，应用和 NATS 均进入 40 秒、每 2 秒一次的主动稳定观察；NATS
+证据校验。只有 guard 已取得对应完成证明，或 wrapper 仍处在 final launch 前取消窗口时，才可对自身
+active marker 执行 10 次、每次间隔 200ms 的跨 WSL 删除与 absence 证明；父 trap 只能验证 marker 已
+消失，不能擦除硬崩溃留下的歧义 poison marker。应用健康边界后，应用和 NATS 均进入
+40 秒、每 2 秒一次的主动稳定观察；NATS
 `Health.Log` 与稳定 identity fingerprint 分离，但 writer 会在三次采样中绑定同一 container ID，
 拒绝边界后任一非零检查并要求至少一次边界后成功，因而“失败一次后恢复”不能被写成成功证据。
 Windows Git Bash -> WSL 锁协议只有聚焦 smoke 证据，不等于真实标准部署通过。**
@@ -366,9 +385,10 @@ TCP 仍连接时删除 critical durable 会 ABORT gate 并触发 terminal；首�
 证据不覆盖真实标准部署中的两次只读 drain/quiescence preflight，也不覆盖真实服务容器退出、网络/
 push/heartbeat/backlog stall、告警或恢复时序。
 
-最后一次 NATS 健康窗修复后，当前候选的 `213 passed` FS-016 聚焦回归、根级独立
-`173 passed` 聚焦复跑、五项隔离 smoke，以及全量
-`6430 passed / 31 skipped / 259 subtests passed` 已于 2026-08-28 通过；Ruff 与真实 Git Bash 语法
+最后一次 NATS 健康窗及 WSL completion ACK、输出完整性、幂等 proof、marker cleanup、durable
+marker scan 与单事务代码同步修复后，当前候选的 `213 passed` FS-016
+聚焦回归、根级独立 `173 passed` 聚焦复跑、六项隔离 smoke，以及全量
+`6433 passed / 31 skipped / 259 subtests passed` 已于 2026-08-28 通过；Ruff 与真实 Git Bash 语法
 检查通过。隔离 smoke 不等同于真实 Docker/WSL 发布，SQLite deprecation warnings 也不属于本切片
 安全通过条件。独立代码复审未留下可由当前代码继续修复的 P0/P1；Docker event delivery loss、
 daemon clock 未校准、HTTP ready 早于订阅确认及 exec/跨容器 volume blind spot 仍作为不完整信任边界
