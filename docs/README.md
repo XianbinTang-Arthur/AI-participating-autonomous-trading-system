@@ -208,7 +208,7 @@
   “outstanding 超过目标”或“收缩窗口且 outstanding 非零”条件约束，自动重启也可能触发；标准
   full-down 是额外发布门禁，不是运行时信号。
   当前候选在最后一次 NATS 健康窗修复后已通过 `213` 项 FS-016 聚焦回归、`173` 项根级独立聚焦
-  复跑、四项隔离 smoke 和 `6429 passed / 31 skipped / 259 subtests passed` 全量单测；真
+  复跑、五项隔离 smoke 和 `6430 passed / 31 skipped / 259 subtests passed` 全量单测；真
   Redis/NATS/Docker 故障注入、标准
   部署、逐角色重启、双故障与下游 fencing 均 `OPEN`，真实资金继续 `NO-GO`。详见现行
   [`task/fs_016_runtime_readiness_lease_restart_safety_p0_sow_2026_08_28.md`](task/fs_016_runtime_readiness_lease_restart_safety_p0_sow_2026_08_28.md)

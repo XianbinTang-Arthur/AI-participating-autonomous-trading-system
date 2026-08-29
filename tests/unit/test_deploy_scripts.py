@@ -988,6 +988,23 @@ def test_standard_deploy_freezes_and_revalidates_nats_target_snapshot() -> None:
     assert "NATS_TARGET_ENV_SNAPSHOT_PATH" in source
 
 
+def test_nats_target_root_scripts_use_exact_base64_transport() -> None:
+    source = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+    helper = source.split("wsl_root_run_script() {", 1)[1].split("\n}", 1)[0]
+    prepare = source.split("prepare_nats_target_env_snapshot() {", 1)[1].split(
+        "\n}", 1
+    )[0]
+    cleanup = source.split("cleanup_nats_target_env_snapshot() {", 1)[1].split(
+        "\n}", 1
+    )[0]
+
+    assert "base64 --decode | bash" in helper
+    assert 'wsl_root_run_script "$root_script"' in prepare
+    assert 'wsl_root_run_script "$root_script"' in cleanup
+    assert 'wsl_root_run "set -euo pipefail' not in prepare
+    assert 'wsl_root_run "set -euo pipefail' not in cleanup
+
+
 @pytest.mark.parametrize(
     ("profile", "overlay_name"),
     (

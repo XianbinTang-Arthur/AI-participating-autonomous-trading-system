@@ -140,7 +140,7 @@
   是额外发布门禁，不是运行时信号。真实 NATS
   consumer-delete 集成已通过，锁竞争/释放/重取有窄 smoke；最后一次 NATS 健康窗修复后，当前候选
   通过 `213` 项 FS-016 聚焦、`173` 项根级独立聚焦复跑和
-  `6429 passed / 31 skipped / 259 subtests passed` 全量单测，但真 Redis/NATS/Docker、标准
+  `6430 passed / 31 skipped / 259 subtests passed` 全量单测，但真 Redis/NATS/Docker、标准
   部署、网络/push/heartbeat/backlog stall、真实逐角色重启、双故障和下游 fencing 均为 `OPEN`；
   不能据本地候选宣称模拟栈已恢复或 live 已放行。
 - [`fs_019_operator_login_async_isolation_sow_2026_08_24.md`](fs_019_operator_login_async_isolation_sow_2026_08_24.md)：Operator 登录异步隔离、有界 worker、每进程限流与 dummy KDF；

@@ -175,6 +175,24 @@ wsl_root_run() {
     fi
 }
 
+wsl_root_run_script() {
+    local script="${1:-}"
+    local encoded
+    if [[ -z "$script" ]]; then
+        log_error "拒绝执行空的 WSL root 脚本"
+        return 1
+    fi
+    if ! encoded="$(printf '%s' "$script" | base64 | tr -d '\r\n')" \
+        || [[ ! "$encoded" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
+        log_error "无法安全编码 WSL root 脚本"
+        return 1
+    fi
+    # Multiline scripts containing nested quotes and shell variables do not
+    # survive the Git-Bash -> wsl.exe -> bash -c boundary reliably.  Transport
+    # the exact bytes as base64, then decode into a fresh WSL bash process.
+    wsl_root_run "printf '%s' '$encoded' | base64 --decode | bash"
+}
+
 release_deploy_lock() {
     local original_status=$?
     # EXIT/HUP/INT/TERM may arrive while a Windows, WSL, Git, sync, or Docker
@@ -803,9 +821,13 @@ assert_nats_target_env_snapshot() {
 }
 
 prepare_nats_target_env_snapshot() {
-    local rendered manifest_sha256 encoded_snapshot extra snapshot_path
+    local rendered manifest_sha256 encoded_snapshot extra snapshot_path root_script
     if [[ ! "$DEPLOY_LOCK_TOKEN" =~ ^[A-Za-z0-9._:-]{1,128}$ ]]; then
         log_error "部署锁 token 无法安全派生 NATS 目标参数快照路径"
+        return 1
+    fi
+    if [[ "$NATS_TARGET_SNAPSHOT_RUNTIME_DIR" != "/run/aats-deploy" ]]; then
+        log_error "NATS 目标参数快照运行目录偏离受管路径"
         return 1
     fi
     if ! rendered="$(wsl_run "cd $WSL_PROJECT && ~/aats-venv/bin/python scripts/nats_target_env_snapshot.py render --source '$ENV_PROFILE_PATH'" | tr -d '\r')" \
@@ -821,19 +843,21 @@ prepare_nats_target_env_snapshot() {
         return 1
     fi
     snapshot_path="$NATS_TARGET_SNAPSHOT_RUNTIME_DIR/nats-target-$DEPLOY_LOCK_TOKEN.env"
-    if ! wsl_root_run "set -euo pipefail
-runtime_dir='$NATS_TARGET_SNAPSHOT_RUNTIME_DIR'
-target='$snapshot_path'
-test ! -L \"\$runtime_dir\"
-install -d -o root -g root -m 0755 \"\$runtime_dir\"
-test \"\$(stat -Lc '%u:%g:%a:%F' \"\$runtime_dir\")\" = '0:0:755:directory'
-tmp=\$(mktemp \"\$runtime_dir/.nats-target.tmp.XXXXXX\")
-trap 'rm -f -- \"\$tmp\"' EXIT
-printf '%s' '$encoded_snapshot' | base64 --decode >\"\$tmp\"
-chown root:root \"\$tmp\"
-chmod 0444 \"\$tmp\"
-mv -fT -- \"\$tmp\" \"\$target\"
-trap - EXIT"; then
+    printf -v root_script '%s\n' \
+        'set -euo pipefail' \
+        "runtime_dir='$NATS_TARGET_SNAPSHOT_RUNTIME_DIR'" \
+        "target='$snapshot_path'" \
+        'test ! -L "$runtime_dir"' \
+        'install -d -o root -g root -m 0755 "$runtime_dir"' \
+        'test "$(stat -Lc '\''%u:%g:%a:%F'\'' "$runtime_dir")" = '\''0:0:755:directory'\''' \
+        'tmp=$(mktemp "$runtime_dir/.nats-target.tmp.XXXXXX")' \
+        "trap 'rm -f -- \"\$tmp\"' EXIT" \
+        "printf '%s' '$encoded_snapshot' | base64 --decode >\"\$tmp\"" \
+        'chown root:root "$tmp"' \
+        'chmod 0444 "$tmp"' \
+        'mv -fT -- "$tmp" "$target"' \
+        'trap - EXIT'
+    if ! wsl_root_run_script "$root_script"; then
         log_error "无法创建 root-owned NATS 目标参数只读快照"
         return 1
     fi
@@ -845,19 +869,22 @@ trap - EXIT"; then
 
 cleanup_nats_target_env_snapshot() {
     local target="$NATS_TARGET_ENV_SNAPSHOT_PATH"
+    local root_script
     if [[ -z "$target" ]]; then
         return 0
     fi
     if [[ ! "$target" =~ ^/run/aats-deploy/nats-target-[A-Za-z0-9._:-]+\.env$ ]]; then
         return 1
     fi
-    if ! wsl_root_run "set -euo pipefail
-target='$target'
-if test -e \"\$target\"; then
-    test ! -L \"\$target\"
-    test \"\$(stat -Lc '%u:%g:%a:%F' \"\$target\")\" = '0:0:444:regular file'
-    rm -f -- \"\$target\"
-fi"; then
+    printf -v root_script '%s\n' \
+        'set -euo pipefail' \
+        "target='$target'" \
+        'if test -e "$target"; then' \
+        '    test ! -L "$target"' \
+        '    test "$(stat -Lc '\''%u:%g:%a:%F'\'' "$target")" = '\''0:0:444:regular file'\''' \
+        '    rm -f -- "$target"' \
+        'fi'
+    if ! wsl_root_run_script "$root_script"; then
         return 1
     fi
     NATS_TARGET_ENV_SNAPSHOT_PATH=""
