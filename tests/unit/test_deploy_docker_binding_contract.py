@@ -17,6 +17,10 @@ def test_standard_deploy_binds_local_daemon_after_sync_before_build() -> None:
 
     assert sync < binding < build
     assert "scripts/docker_event_monitor.py daemon-binding" in text
+    assert "daemon-binding-envelope" in text
+    assert "tr -d '\\000\\r'" in text
+    assert "sha256sum" in text
+    assert "base64 --decode" in text
 
 
 def test_every_standard_wsl_child_is_pinned_to_local_socket() -> None:

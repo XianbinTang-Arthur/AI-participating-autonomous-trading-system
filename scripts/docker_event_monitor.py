@@ -16,6 +16,8 @@ application-start and final-evidence phases of the standard deployment.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import http.client
 import json
 import os
@@ -145,6 +147,16 @@ def validate_local_docker_daemon_binding(
     if cli_id != direct_id:
         raise DockerEventMonitorError("docker_cli_direct_daemon_id_mismatch")
     return direct_id
+
+
+def daemon_binding_transport_envelope(daemon_id: object) -> str:
+    """Return an integrity-bound ASCII envelope for the wsl.exe boundary."""
+
+    validated = _validated_daemon_id(daemon_id)
+    raw = validated.encode("ascii", errors="strict")
+    digest = hashlib.sha256(raw).hexdigest()
+    encoded = base64.b64encode(raw).decode("ascii")
+    return f"sha256:{digest}\t{encoded}"
 
 
 @dataclass(slots=True)
@@ -1171,6 +1183,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("daemon-binding")
+    subparsers.add_parser("daemon-binding-envelope")
     daemon = subparsers.add_parser("daemon")
     daemon.add_argument("--control-dir", type=Path, required=True)
     daemon.add_argument("--token", required=True)
@@ -1193,6 +1206,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     if args.command == "daemon-binding":
         print(validate_local_docker_daemon_binding())
+        return 0
+    if args.command == "daemon-binding-envelope":
+        print(
+            daemon_binding_transport_envelope(
+                validate_local_docker_daemon_binding()
+            )
+        )
         return 0
     metadata = {
         "deployment_lock_id": args.deployment_lock_id,

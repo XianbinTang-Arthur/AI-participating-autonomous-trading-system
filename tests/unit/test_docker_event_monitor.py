@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import json
 import os
 import time
@@ -13,6 +15,15 @@ START_NS = 1_725_000_000_123_456_789
 ALLOWLIST = ("aats-gateway", "aats-nats")
 DAEMON_ID = "AATS:LOCAL:DAEMON:01"
 OTHER_DAEMON_ID = "AATS:LOCAL:DAEMON:02"
+
+
+def test_daemon_binding_transport_envelope_is_ascii_and_integrity_bound() -> None:
+    envelope = monitor.daemon_binding_transport_envelope(DAEMON_ID)
+    digest, encoded = envelope.split("\t")
+    raw = base64.b64decode(encoded, validate=True)
+
+    assert raw == DAEMON_ID.encode("ascii")
+    assert digest == f"sha256:{hashlib.sha256(raw).hexdigest()}"
 
 
 def _packet(

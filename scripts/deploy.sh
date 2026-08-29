@@ -1027,9 +1027,33 @@ print_required_app_container_states() {
 }
 
 capture_local_docker_daemon_binding() {
-    wsl_run "cd $WSL_PROJECT && ~/aats-venv/bin/python scripts/docker_event_monitor.py daemon-binding" \
-        | tr -d '\r' \
-        | tail -1
+    local envelope expected_sha256 encoded extra daemon_id actual_sha256
+    # wsl.exe can sporadically inject NUL bytes into redirected stdout after a
+    # noisy child (observed after BuildKit).  Strip only transport NUL/CR before
+    # shell capture, then verify the WSL-produced SHA-256 over a base64 payload.
+    # This tolerates encoding noise without accepting arbitrary byte loss.
+    if ! envelope="$(
+        wsl_run "set -o pipefail; cd $WSL_PROJECT && ~/aats-venv/bin/python scripts/docker_event_monitor.py daemon-binding-envelope" \
+            | tr -d '\000\r'
+    )" \
+        || [[ -z "$envelope" || "$envelope" == *$'\n'* ]]; then
+        return 1
+    fi
+    IFS=$'\t' read -r expected_sha256 encoded extra <<<"$envelope"
+    if [[ ! "$expected_sha256" =~ ^sha256:[0-9a-f]{64}$ \
+        || ! "$encoded" =~ ^[A-Za-z0-9+/]+={0,2}$ \
+        || -n "$extra" ]]; then
+        return 1
+    fi
+    if ! daemon_id="$(printf '%s' "$encoded" | base64 --decode)" \
+        || [[ ! "$daemon_id" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$ ]]; then
+        return 1
+    fi
+    if ! actual_sha256="$(printf '%s' "$daemon_id" | sha256sum | cut -d' ' -f1)" \
+        || [[ "sha256:$actual_sha256" != "$expected_sha256" ]]; then
+        return 1
+    fi
+    printf '%s\n' "$daemon_id"
 }
 
 establish_local_docker_daemon_binding() {
