@@ -106,7 +106,7 @@
 - [`rdp_strict_instrument_scope_p0_sow_2026_08_27.md`](rdp_strict_instrument_scope_p0_sow_2026_08_27.md)：
   记录 BTC/ETH spot/swap 显式支持集合及统一失败关闭规则；未知币对、伪 `-SWAP` 与 FUTURES
   不再因字符串形状进入 lineage、Gold、replay、capital eligibility、治理 API 或历史导入。
-- [`rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md`](rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md)：历史数据恢复、持续采集、归档、双准入与完整模拟 RDP 的实施台账。旧 v1 30 日 campaign 已在 2026-08-27 写入 `SUCCEEDED`，但不满足当前 v2 持久 fencing、不可变 Silver/source-aware Gold 与逐行终态 verifier 契约；账户只读事实、跨日连续性、签名 UI、精确归因、OOS/holdout 和资本资格仍未完成，90 日保持 NO-GO。
+- [`rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md`](rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md)：历史数据恢复、持续采集、归档、双准入与完整模拟 RDP 的实施台账。旧 v1 30 日 campaign 的 128 个 checkpoint、65 个 ELIGIBLE bundle、30 日 Silver 与 source-aware Gold 已于 2026-08-29 只读核实落库，但不满足当前 v2 持久 fencing、不可变 Silver 与逐行终态 verifier 契约；持续采集当前受未归属 NATS durable 的人工 owner/release 门阻断，账户只读事实、跨日连续性、精确归因、OOS/holdout 和资本资格仍未完成，90 日保持 NO-GO。
 
 现行操作入口是 [`../operations/rdp_historical_data_recovery_runbook.md`](../operations/rdp_historical_data_recovery_runbook.md)，当前收益/上线门结论是 [`../testing/profit_readiness_acceptance.md`](../testing/profit_readiness_acceptance.md)。任务书不替代下一次运行前的新覆盖审计和健康检查。
 

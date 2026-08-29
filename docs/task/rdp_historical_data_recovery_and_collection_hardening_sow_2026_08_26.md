@@ -1,9 +1,9 @@
 # RDP 历史数据恢复与持续采集加固任务书
 
-> 文档状态：实施任务书 / 工程与 1 日现场闭环完成；旧 v1 30 日 campaign 已运行终态，但不满足当前 v2 准入；90 日及外部事实仍停在安全门禁
+> 文档状态：实施任务书 / 旧 v1 30 日数据工件已只读闭环；当前 v2 重验与持续采集恢复仍受安全门禁；90 日及外部事实保持 NO-GO/UNKNOWN
 > 编写日期：2026-08-26
 > 起始代码基线：`51448768bb3ff08fa44066d286f7383800d8d744`
-> 最后核对：2026-08-27（2026-08-26 实施证据仍绑定实现 `314adc6e8f17` / derivatives generation `314adc6e8f17-20260826T193656Z-763-10457`；另补 30 日 v1 campaign 终态只读证据）
+> 最后核对：2026-08-29（30 日旧 v1 数据证据、持续采集现场与保活任务绑定本地实现 `1d95cf4e38dc`；同提交的标准 derivatives 部署在只读 NATS preflight 安全阻断，未恢复应用）
 > 工作区边界：起始工作区包含一组尚未提交的 RDP live attribution lineage 修复；必须先独立复审、验证并收口，禁止由本任务覆盖或重复实现
 > 核对范围：当前代码、迁移、RDP workflow、采集器、保留脚本、现行 RDP 文档与 OKX 官方公开历史数据能力
 > 运行时边界：本文是任务清单，不证明当前数据库覆盖、采集器新鲜度、容器健康、交易所账户状态或收益能力；实施期间禁止启动 live profile、提交真实订单、应用参数建议或输出凭证
@@ -78,6 +78,38 @@
 fencing、attempt 隔离/stale recovery CAS、不可变 candle/funding Silver、source-aware Gold 与
 逐行只读终态 verifier 完成前，完整 campaign 入口固定失败关闭。因此 RDP-DATA-052/053、精确
 归因、OOS/holdout 和资本资格仍未通过，90 日仍为 NO-GO。
+
+### 2.4 2026-08-29 30 日数据工件与持续采集现场复核
+
+本次只读复核把“旧 v1 状态机写出 `SUCCEEDED`”进一步核到实际数据库工件，但不把旧状态
+升级为当前 v2 验收：
+
+- campaign 窗口仍为 `[2026-07-22 08:00+08, 2026-08-21 08:00+08)`；`128/128`
+  checkpoint 为 `succeeded`，引用 `65/65` 个唯一 bundle，全部为 `ELIGIBLE`；
+- campaign-scoped 历史 BBO 1 Hz 为 `2,591,974` 行、books5 2 Hz 为 `5,183,974` 行；
+  26 个缺口均有分类，不能把它们改写成零缺口；
+- trade-flow Silver 15m 与 L2 Silver 15m 各为 `2,880` 行，完整覆盖 30 日的 15 分钟桶；
+- checkpoint 绑定的 source-aware Gold artifact 为 15m `2,880` 行、1H `720` 行，时间边界分别
+  到 `2026-08-21 07:45+08` 与 `07:00+08`；这些是旧 v1 已落库工件，不代表当前 v2 已完成
+  persistent fencing、不可变 Silver 与逐行终态 verifier；
+- 复核时 `aats_research` 数据库约 `197 GB`；WSL 文件系统 `1007 GB` 中已用 `393 GB`、
+  可用 `564 GB`。这只证明当前 30 日落库后的容量现场，不能改变 90 日 NO-GO，也不能替代
+  下一次执行前的 capacity dry-run。
+
+持续采集与历史 campaign 是两条独立生命周期。2026-08-29 现场中，trades、BBO、books5、
+OI/funding 与 liquidation 的最后 `received_at` 均停在北京时间约 `11:31:44–11:31:46`，最近
+10 分钟新增均为 0；七个应用/采集容器保持自 `03:31Z` 起的协调停止，PostgreSQL、Redis、NATS
+仍健康。Windows 任务 `AATS-WSL2-Prewarm-derivatives` 已原位升级为登录触发加每 5 分钟无限期
+巡检，`MultipleInstances=IgnoreNew`，repair 冷却 30 分钟；它会唤醒 WSL 并监测部分故障，但
+在七个应用全部停止时按设计返回非零，不能把“保活任务活动”表述为“采集已恢复”。
+
+提交 `1d95cf4e38dc` 的标准 derivatives 部署真实执行到第一次 schema v3 只读 NATS preflight：
+3 个 stream、78 个 consumer 中，77 个声明 durable 全部存在、0 个缺失；唯一阻断项是未归属的
+`aats-codex_manual_resume-system_operator_command_responses`，artifact 为
+`artifacts/deployments/nats_durable_cutover_preflight_20260829T222814479755Z_9a0a2ed68396.json`，
+且 `mutations_performed=[]`。该 consumer 只能经真人 owner/release review 处置；本任务不授权
+自动 ACK/delete/update/recreate/reset/purge。处置前持续采集保持停止，停止窗口内不可回填的
+本地采样与 liquidation 必须保留真实 `UNKNOWN`/gap。
 
 ### 2.2 2026-08-26 静态与隔离验证证据
 

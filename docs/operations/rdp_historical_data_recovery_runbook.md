@@ -1,8 +1,8 @@
 # RDP 历史数据恢复与持续采集运行手册
 
 > 文档状态：现行操作说明
-> 最后核对：2026-08-27（当前静态起始 HEAD `main@9c4112c6d769735f171971c8fa4f2cae5a03a824`，含尚未部署的控制面候选；上一已核验 derivatives generation `314adc6e8f17-20260826T193656Z-763-10457` 仅作历史运行证据）
-> 核对范围：当前代码、迁移、CLI、单元契约、上一受控 derivatives 模拟部署及本轮只读运行快照；数据库覆盖、磁盘容量、网络和 collector 连续性会漂移，执行时必须重新验证
+> 最后核对：2026-08-29（当前静态 HEAD `main@1d95cf4e38dc`；同提交标准 derivatives 部署在首次只读 NATS preflight 安全阻断，应用未恢复）
+> 核对范围：当前代码、迁移、CLI、单元契约、30 日旧 v1 数据工件、Windows 周期保活任务及本轮 derivatives 现场；数据库覆盖、磁盘容量、网络和 collector 连续性会漂移，执行时必须重新验证
 > 安全边界：只允许 RDP research/governance 数据库与 `derivatives` 模拟栈；禁止 live profile、真实订单和参数 apply
 
 本手册是历史数据恢复、raw archive、持续采集、retention 和历史 bundle 重建的当前操作入口。任务背景保留在 [`../task/rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md`](../task/rdp_historical_data_recovery_and_collection_hardening_sow_2026_08_26.md)，但执行时以本页和当前代码为准。
@@ -328,6 +328,41 @@ verifier 后，才可重新开放状态机和成功终态。
 > `[2026-07-22 08:00+08, 2026-08-21 08:00+08)`，结束时间 `2026-08-27 19:50:04+08`，
 > 且已无对应 runner 进程。该记录允许保留审计，但不满足本节当前 v2/fencing/不可变 Silver/
 > 终态 verifier 契约，不能用于跳过重验、解除 NO-GO 或恢复旧 runner。
+
+### 10.2 30 日旧 v1 数据工件的只读验收边界
+
+2026-08-29 的 campaign-scoped 复核结果如下；查询必须通过 checkpoint 中的 bundle/artifact id
+限定范围，不能只按 symbol/time window 汇总，否则其他 campaign 的重叠工件会被重复计算：
+
+| 对象 | 结果 |
+| --- | --- |
+| campaign/checkpoint | `SUCCEEDED`；`128/128` succeeded |
+| bundle | `65/65 ELIGIBLE` |
+| 历史 BBO / books5 | `2,591,974` / `5,183,974` 行；26 个缺口均已分类 |
+| Silver 15m | trade-flow `2,880`；L2 `2,880` |
+| source-aware Gold | 15m `2,880`；1H `720` |
+| 容量现场 | `aats_research` 约 `197 GB`；WSL 可用约 `564 GB` |
+
+这些结果允许回答“旧 v1 30 日数据是否实际落库”，答案是 campaign 引用的历史数据、bundle、
+Silver 和 Gold 工件均已落库并通过旧资格门；但答案不是“当前 v2 campaign 已验证通过”。当前入口
+仍因 persistent fencing、不可变 Silver 与逐行 verifier 合同失败关闭，禁止用旧成功记录短路。
+
+### 10.3 持续采集保活与协调停机处置
+
+持续采集是否正常必须同时检查容器和 PostgreSQL 最新 `received_at`；Windows 计划任务为 `Ready`
+只证明巡检器存在。现行 Windows 保活入口见
+[`wsl2_startup_prewarm.md`](wsl2_startup_prewarm.md)：默认登录触发加每 5 分钟巡检、30 分钟 repair
+冷却、`IgnoreNew`。部分容器故障只能调用标准 derivatives 部署修复；七个应用全部 `exited/dead`
+视为协调停止，必须保留并进入 operator review。
+
+2026-08-29 现场的最后入库时间为北京时间约 `11:31:44–11:31:46`，最近 10 分钟五类流均为
+0；七个应用保持协调停止，基础设施健康。提交 `1d95cf4e38dc` 的标准部署扫描 3 个 stream、
+78 个 consumer，77 个声明 durable 无缺失，仅
+`aats-codex_manual_resume-system_operator_command_responses` 未归属而 `BLOCKED`。证据：
+`artifacts/deployments/nats_durable_cutover_preflight_20260829T222814479755Z_9a0a2ed68396.json`。
+在真人 owner/release review 前，禁止 ACK、删除、更新、重建、重置、purge 或忽略该 consumer，
+也禁止手工启动应用绕过 preflight。停机期间本地 BBO/books5、OI/mark tick、liquidation 等不可
+回填事实保持 gap/UNKNOWN。
 
 90 日必须先做容量 dry-run；当前校准下应返回 `capacity_projection_exceeds_safe_free_bytes`，不得增加 `--apply --confirm`：
 
