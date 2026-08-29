@@ -146,7 +146,7 @@
   consumer-delete 集成已通过，锁竞争/释放/重取、WSL completion ACK、输出完整性、幂等 proof 重试与
   marker cleanup 有窄 smoke；最后一次 NATS 健康窗与部署 completion protocol 修复后，当前候选通过
   `213` 项 FS-016 聚焦、`173` 项根级独立聚焦
-  复跑、六项隔离 smoke 和 `6433 passed / 31 skipped / 259 subtests passed` 全量单测，但真
+  复跑、六项隔离 smoke 和 `6434 passed / 31 skipped / 259 subtests passed` 全量单测，但真
   Redis/NATS/Docker、标准
   部署、网络/push/heartbeat/backlog stall、真实逐角色重启、双故障和下游 fencing 均为 `OPEN`；
   不能据本地候选宣称模拟栈已恢复或 live 已放行。

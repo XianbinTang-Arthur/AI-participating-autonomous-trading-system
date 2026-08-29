@@ -219,7 +219,7 @@
   当前候选在最后一次 NATS 健康窗及 WSL completion ACK、输出完整性、幂等 proof、marker cleanup、
   durable marker scan 与单事务代码同步修复后已通过 `213` 项
   FS-016 聚焦回归、`173` 项根级独立聚焦复跑、六项隔离 smoke 和
-  `6433 passed / 31 skipped / 259 subtests passed` 全量单测；真
+  `6434 passed / 31 skipped / 259 subtests passed` 全量单测；真
   Redis/NATS/Docker 故障注入、标准
   部署、逐角色重启、双故障与下游 fencing 均 `OPEN`，真实资金继续 `NO-GO`。详见现行
   [`task/fs_016_runtime_readiness_lease_restart_safety_p0_sow_2026_08_28.md`](task/fs_016_runtime_readiness_lease_restart_safety_p0_sow_2026_08_28.md)

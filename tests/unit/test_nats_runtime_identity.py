@@ -327,6 +327,18 @@ def test_volume_fingerprint_canonicalizes_label_order() -> None:
     ).fingerprint
 
 
+def test_volume_identity_normalizes_docker_missing_label_empty_string() -> None:
+    lines = _volume_output().splitlines()
+    lines[7] = json.dumps("")
+
+    parsed = identity.parse_nats_volume_identity("\n".join(lines))
+
+    assert "com.aats.bootstrap_lock" not in parsed.labels
+    assert parsed.fingerprint == identity.parse_nats_volume_identity(
+        _volume_output()
+    ).fingerprint
+
+
 @pytest.mark.parametrize(
     "labels",
     (

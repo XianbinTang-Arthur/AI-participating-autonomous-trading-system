@@ -512,6 +512,13 @@ def parse_nats_volume_identity(output: str) -> NatsVolumeIdentity:
         bootstrap_lock_value = json.loads(lines[7])
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"{error}:bootstrap_lock") from exc
+    # Docker's Go template renders a missing value selected with
+    # ``index .Labels`` as the JSON string ``""`` (not JSON ``null``).  Both
+    # forms mean that this pre-existing Compose volume has no fresh-bootstrap
+    # claim.  A non-empty claim remains strictly validated and is matched to
+    # the current deployment token by the fresh-install path.
+    if bootstrap_lock_value == "":
+        bootstrap_lock_value = None
     if bootstrap_lock_value is not None and (
         not isinstance(bootstrap_lock_value, str)
         or _SAFE_LABEL_VALUE_RE.fullmatch(bootstrap_lock_value) is None

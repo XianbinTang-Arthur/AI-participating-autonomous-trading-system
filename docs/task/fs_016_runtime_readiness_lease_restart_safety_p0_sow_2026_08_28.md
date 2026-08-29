@@ -388,7 +388,7 @@ push/heartbeat/backlog stall、告警或恢复时序。
 最后一次 NATS 健康窗及 WSL completion ACK、输出完整性、幂等 proof、marker cleanup、durable
 marker scan 与单事务代码同步修复后，当前候选的 `213 passed` FS-016
 聚焦回归、根级独立 `173 passed` 聚焦复跑、六项隔离 smoke，以及全量
-`6433 passed / 31 skipped / 259 subtests passed` 已于 2026-08-28 通过；Ruff 与真实 Git Bash 语法
+`6434 passed / 31 skipped / 259 subtests passed` 已于 2026-08-28 通过；Ruff 与真实 Git Bash 语法
 检查通过。隔离 smoke 不等同于真实 Docker/WSL 发布，SQLite deprecation warnings 也不属于本切片
 安全通过条件。独立代码复审未留下可由当前代码继续修复的 P0/P1；Docker event delivery loss、
 daemon clock 未校准、HTTP ready 早于订阅确认及 exec/跨容器 volume blind spot 仍作为不完整信任边界
