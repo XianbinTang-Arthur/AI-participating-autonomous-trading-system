@@ -15,6 +15,13 @@
 - 新任务材料继续写入本目录，不得写入 `docs/` 根层兼容区；
 - 同一任务有子目录时，以其 `README.md` 作为该任务入口。
 
+## 2026-08-29 持续采集保活
+
+- [`continuous_collection_keepalive_sow_2026_08_29.md`](continuous_collection_keepalive_sow_2026_08_29.md)：
+  把一次性登录预热升级为登录触发加无限期周期健康检查；部分故障只通过标准 deploy repair，加入
+  冷却和任务防重叠。全部应用协调停止时保持 fail-closed，当前未归属 NATS durable 仍需真人
+  owner/release review，不能把任务注册解释为现场采集已恢复。
+
 ## AATS Research OS 独立建设计划
 
 - [`aats_research_os_source_access_and_profit_priority_correction_2026_08_29.md`](aats_research_os_source_access_and_profit_priority_correction_2026_08_29.md)：

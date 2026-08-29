@@ -1,7 +1,7 @@
 # AATS Operations 文档索引
 
 > 文档状态：现行索引
-> 最后核对：2026-08-27（起始 HEAD `9c4112c6`，含当前 RDP 控制面收口候选；以本文档所在 HEAD 为准）
+> 最后核对：2026-08-29（起始 HEAD `d34b01c38f31` + 持续采集周期保活工作区；以本文档所在 HEAD 为准）
 > 核对范围：目录状态、当前静态入口与安全边界；不证明现场服务或数据状态
 
 本目录同时保存当前操作手册、专题参考和历史运行记录。文件名包含 `runbook`、`checklist` 或 `release`，不代表它仍可用于当前实盘。执行任何状态变更前，先按本页状态选择入口，并按 [`../README.md`](../README.md) 的真实性与时效性规则复核当前 `HEAD`。
@@ -25,7 +25,7 @@
 | [`rdp_staging_rehearsal_checklist.md`](rdp_staging_rehearsal_checklist.md) | staging 演练 | 不等于实盘放行或 runtime 验证 |
 | [`rdp_ui_quickstart.md`](rdp_ui_quickstart.md) | RDP UI 使用入口 | local HTTP 与 live TLS 必须区分 |
 | [`wsl2_sync_workflow.md`](wsl2_sync_workflow.md) | Windows/WSL2 Git 同步 | 只同步 committed state；部署仍走 `scripts/deploy.sh` |
-| [`wsl2_startup_prewarm.md`](wsl2_startup_prewarm.md) | 登录后 WSL2 预热/repair | repair 复用标准部署包装器，不形成第二套部署方式 |
+| [`wsl2_startup_prewarm.md`](wsl2_startup_prewarm.md) | 登录后及周期性 WSL2/采集栈健康检查 | repair 复用标准部署包装器；协调停止不自动撤销，不形成第二套部署方式 |
 | [`profit_readiness_runbook.md`](profit_readiness_runbook.md) | 收益证据、v2 研究、L2、holdout、参数代次、故障矩阵与 readiness | 格式 v1 只能证明模拟就绪，不能放行 live |
 | [`rdp_historical_data_recovery_runbook.md`](rdp_historical_data_recovery_runbook.md) | 历史覆盖审计、官方导入、raw/archive、retention、连续性与历史 bundle 重建 | 只允许 research/governance 与 derivatives 模拟栈；不授权 live、真实订单或参数 apply |
 

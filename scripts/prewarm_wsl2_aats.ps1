@@ -6,6 +6,8 @@ param(
     [int]$DockerTimeoutSeconds = 120,
     [int]$HealthTimeoutSeconds = 120,
     [int]$DeployTimeoutSeconds = 120,
+    [ValidateRange(0, 86400)]
+    [int]$RepairCooldownSeconds = 0,
     [switch]$SkipRepairDeploy,
     [switch]$SkipKeepAlive,
     [switch]$DryRun
@@ -25,6 +27,86 @@ if ($Profile -in @('spot-live', 'derivatives-live', 'derivatives-live-monolith')
 
 function Get-RepoRoot {
     return (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+}
+
+function Get-StateRoot {
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        return Join-Path $env:LOCALAPPDATA 'AATS\startup-prewarm'
+    }
+
+    return Join-Path $env:TEMP 'AATS-startup-prewarm'
+}
+
+function Get-RepairStatePath {
+    $safeProfile = ($Profile -replace '[^A-Za-z0-9_.-]', '_').ToLowerInvariant()
+    $safeDistro = ($Distro -replace '[^A-Za-z0-9_.-]', '_').ToLowerInvariant()
+    return Join-Path (Get-StateRoot) ("repair-{0}-{1}.json" -f $safeProfile, $safeDistro)
+}
+
+function Read-RepairState {
+    $path = Get-RepairStatePath
+    if (-not (Test-Path $path)) {
+        return $null
+    }
+
+    try {
+        return Get-Content $path -Raw -Encoding utf8 | ConvertFrom-Json
+    }
+    catch {
+        return $null
+    }
+}
+
+function Write-RepairState {
+    param(
+        [string]$Status,
+        [DateTimeOffset]$AttemptedAt,
+        [int]$ExitCode = -1
+    )
+
+    $stateRoot = Get-StateRoot
+    if (-not (Test-Path $stateRoot)) {
+        New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
+    }
+
+    $path = Get-RepairStatePath
+    $tempPath = "{0}.{1}.tmp" -f $path, $PID
+    $payload = @{
+        profile = $Profile
+        distro = $Distro
+        status = $Status
+        exit_code = $ExitCode
+        last_attempt_at = $AttemptedAt.ToUniversalTime().ToString('o')
+        updated_at = [DateTimeOffset]::UtcNow.ToString('o')
+    }
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($tempPath, ($payload | ConvertTo-Json -Depth 4), $utf8NoBom)
+    Move-Item -LiteralPath $tempPath -Destination $path -Force
+}
+
+function Get-RepairCooldownRemainingSeconds {
+    if ($RepairCooldownSeconds -le 0) {
+        return 0
+    }
+
+    $state = Read-RepairState
+    if ($null -eq $state -or $null -eq $state.PSObject.Properties['last_attempt_at']) {
+        return 0
+    }
+
+    try {
+        $lastAttempt = [DateTimeOffset]::Parse([string]$state.last_attempt_at).ToUniversalTime()
+    }
+    catch {
+        return 0
+    }
+
+    $elapsed = ([DateTimeOffset]::UtcNow - $lastAttempt).TotalSeconds
+    $remaining = [Math]::Ceiling($RepairCooldownSeconds - $elapsed)
+    if ($remaining -le 0) {
+        return 0
+    }
+    return [int]$remaining
 }
 
 function Get-DeployWrapperPath {
@@ -158,6 +240,18 @@ function Test-RequiredContainersHealthy {
     return $true
 }
 
+function Test-AllRequiredContainersStopped {
+    param([string[]]$RequiredContainers)
+
+    foreach ($container in $RequiredContainers) {
+        $state = Get-ContainerState -ContainerName $container
+        if ([string]::IsNullOrWhiteSpace($state) -or $state -notmatch '^(exited|dead)\s') {
+            return $false
+        }
+    }
+    return $true
+}
+
 function Show-ContainerStates {
     param([string[]]$RequiredContainers)
 
@@ -254,7 +348,8 @@ if ($DryRun) {
     if (-not $SkipKeepAlive) {
         Write-PrewarmInfo "dry-run: would start or reuse a hidden WSL keepalive process before health checks"
     }
-    Write-PrewarmInfo "dry-run: would wake WSL, wait for docker, verify container health, and use run-deploy.ps1 -SkipSync -SkipCommit if repair is needed"
+    Write-PrewarmInfo "dry-run: would wake WSL, wait for docker, verify container health, preserve a coordinated all-app stop, and use run-deploy.ps1 -SkipSync -SkipCommit if repair is needed"
+    Write-PrewarmInfo "dry-run: repair_cooldown_seconds=$RepairCooldownSeconds"
     return
 }
 
@@ -274,6 +369,11 @@ if (-not (Wait-Until -Condition { Test-DockerReady } -TimeoutSeconds $DockerTime
 
 Write-PrewarmInfo "docker is ready"
 
+if (Test-AllRequiredContainersStopped -RequiredContainers $requiredContainers) {
+    Show-ContainerStates -RequiredContainers $requiredContainers
+    throw "coordinated_application_stop_requires_operator_review: all required application containers are stopped; automatic repair is suppressed"
+}
+
 $healthReady = Wait-Until -Condition {
     (Test-RequiredContainersHealthy -RequiredContainers $requiredContainers) -and (Test-GatewayHealth -Port $apiPort -Scheme $healthScheme)
 } -TimeoutSeconds $HealthTimeoutSeconds -Description 'AATS stack'
@@ -289,13 +389,29 @@ if ($SkipRepairDeploy) {
     throw "AATS stack is not healthy and repair deploy is disabled"
 }
 
-Invoke-RepairDeploy -ResolvedProfile $Profile
+$cooldownRemaining = Get-RepairCooldownRemainingSeconds
+if ($cooldownRemaining -gt 0) {
+    throw "repair_deploy_cooldown_active: retry after ${cooldownRemaining}s"
+}
+
+$repairAttemptedAt = [DateTimeOffset]::UtcNow
+Write-RepairState -Status 'running' -AttemptedAt $repairAttemptedAt
+try {
+    Invoke-RepairDeploy -ResolvedProfile $Profile
+}
+catch {
+    Write-RepairState -Status 'failed' -AttemptedAt $repairAttemptedAt -ExitCode 1
+    throw
+}
+Write-RepairState -Status 'deploy_succeeded_pending_health' -AttemptedAt $repairAttemptedAt -ExitCode 0
 
 if (-not (Wait-Until -Condition {
     (Test-RequiredContainersHealthy -RequiredContainers $requiredContainers) -and (Test-GatewayHealth -Port $apiPort -Scheme $healthScheme)
 } -TimeoutSeconds $HealthTimeoutSeconds -Description 'AATS stack after repair')) {
     Show-ContainerStates -RequiredContainers $requiredContainers
+    Write-RepairState -Status 'repair_completed_stack_unhealthy' -AttemptedAt $repairAttemptedAt -ExitCode 1
     throw "AATS stack did not recover after repair deploy"
 }
 
+Write-RepairState -Status 'healthy' -AttemptedAt $repairAttemptedAt -ExitCode 0
 Write-PrewarmInfo "AATS stack recovered successfully"

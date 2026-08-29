@@ -32,6 +32,16 @@ def test_prewarm_script_repairs_only_via_standard_wrapper() -> None:
     assert "triggering repair deploy via standard wrapper" in text
 
 
+def test_prewarm_script_suppresses_coordinated_stop_and_rate_limits_repair() -> None:
+    text = (REPO_ROOT / "scripts" / "prewarm_wsl2_aats.ps1").read_text(encoding="utf-8")
+
+    assert "Test-AllRequiredContainersStopped" in text
+    assert "coordinated_application_stop_requires_operator_review" in text
+    assert "RepairCooldownSeconds" in text
+    assert "repair_deploy_cooldown_active" in text
+    assert "Write-RepairState -Status 'running'" in text
+
+
 def test_run_deploy_wrapper_supports_assume_yes() -> None:
     text = (REPO_ROOT / ".codex" / "skills" / "wsl2-deploy" / "scripts" / "run-deploy.ps1").read_text(
         encoding="utf-8"
@@ -80,6 +90,18 @@ def test_register_script_creates_logon_task_and_supports_remove() -> None:
     assert "Register-ScheduledTask" in text
     assert "Unregister-ScheduledTask" in text
     assert "AATS-WSL2-Prewarm-" in text
+
+
+def test_register_script_adds_indefinite_periodic_monitor_without_overlap() -> None:
+    text = (REPO_ROOT / "scripts" / "register_wsl2_aats_startup_task.ps1").read_text(encoding="utf-8")
+
+    assert "MonitorIntervalMinutes = 5" in text
+    assert "RepairCooldownMinutes = 30" in text
+    assert "New-ScheduledTaskTrigger -Once" in text
+    assert "-RepetitionInterval" in text
+    assert "-RepetitionDuration" not in text
+    assert "MultipleInstances IgnoreNew" in text
+    assert "-RepairCooldownSeconds" in text
 
 
 def test_register_script_uses_hidden_powershell_action_for_prewarm() -> None:
