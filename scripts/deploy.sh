@@ -2223,8 +2223,8 @@ step_infra_up() {
     # child tree under the deployment lock supervisor.
     wsl_run "set -euo pipefail
 cd $WSL_PROJECT
-PG_USER=\$(grep '^POSTGRES_USER=' '$WSL2_ENV_FILE' | cut -d= -f2-)
-PG_PW=\$(grep '^POSTGRES_PASSWORD=' '$WSL2_ENV_FILE' | cut -d= -f2-)
+PG_USER=\$(grep '^POSTGRES_USER=' \"$WSL2_ENV_FILE\" | cut -d= -f2-)
+PG_PW=\$(grep '^POSTGRES_PASSWORD=' \"$WSL2_ENV_FILE\" | cut -d= -f2-)
 docker exec -i aats-postgres psql \\
     -v ON_ERROR_STOP=1 \\
     -v pg_user=\"\$PG_USER\" \\

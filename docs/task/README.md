@@ -19,8 +19,14 @@
 
 - [`continuous_collection_keepalive_sow_2026_08_29.md`](continuous_collection_keepalive_sow_2026_08_29.md)：
   把一次性登录预热升级为登录触发加无限期周期健康检查；部分故障只通过标准 deploy repair，加入
-  冷却和任务防重叠。全部应用协调停止时保持 fail-closed，当前未归属 NATS durable 仍需真人
-  owner/release review，不能把任务注册解释为现场采集已恢复。
+  冷却和任务防重叠。全部应用协调停止时保持 fail-closed；原唯一未归属 NATS durable 已在真人明确
+  授权且确认无 pending/ack pending 后精确删除，但不能把任务注册或 durable 删除解释为现场采集已恢复。
+
+## 2026-08-29 标准部署 WSL 环境路径修复
+
+- [`wsl_env_path_expansion_hotfix_sow_2026_08_29.md`](wsl_env_path_expansion_hotfix_sow_2026_08_29.md)：
+  修复标准部署在基础设施启动后读取 `.env.wsl2` 时错误保留字面量 `$HOME` 的问题；只调整
+  Windows 到 WSL 命令传输的引号，不改变 profile、凭证来源、数据库语义或 live 门禁。
 
 ## AATS Research OS 独立建设计划
 

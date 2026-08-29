@@ -3182,7 +3182,10 @@ def test_deploy_postgres_password_sync_is_lock_supervised() -> None:
     assert infra.count('    wsl_run "') == 2
     assert 'wsl -d "$DISTRO"' not in infra
     assert "docker exec -i aats-postgres psql" in infra
-    assert "PG_PW=\\$(grep '^POSTGRES_PASSWORD='" in infra
+    assert "PG_USER=\\$(grep '^POSTGRES_USER=' \\\"$WSL2_ENV_FILE\\\"" in infra
+    assert "PG_PW=\\$(grep '^POSTGRES_PASSWORD=' \\\"$WSL2_ENV_FILE\\\"" in infra
+    assert "grep '^POSTGRES_USER=' '$WSL2_ENV_FILE'" not in infra
+    assert "grep '^POSTGRES_PASSWORD=' '$WSL2_ENV_FILE'" not in infra
     assert 'pg_password=\\"\\$PG_PW\\"' in infra
 
 
