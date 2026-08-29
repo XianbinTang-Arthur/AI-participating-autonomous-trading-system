@@ -1002,6 +1002,8 @@ def test_standard_deploy_freezes_and_revalidates_nats_target_snapshot() -> None:
     assert "0:0:444:regular file" in source
     assert "NATS_TARGET_MANIFEST_SHA256" in source
     assert "NATS_TARGET_ENV_SNAPSHOT_PATH" in source
+    assert 'render --source \\"$ENV_PROFILE_PATH\\"' in source
+    assert "render --source '$ENV_PROFILE_PATH'" not in source
 
 
 def test_nats_target_root_scripts_use_exact_base64_transport() -> None:

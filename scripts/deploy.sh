@@ -1316,7 +1316,7 @@ prepare_nats_target_env_snapshot() {
         log_error "NATS 目标参数快照运行目录偏离受管路径"
         return 1
     fi
-    if ! rendered="$(wsl_run "cd $WSL_PROJECT && ~/aats-venv/bin/python scripts/nats_target_env_snapshot.py render --source '$ENV_PROFILE_PATH'" | tr -d '\r')" \
+    if ! rendered="$(wsl_run "cd $WSL_PROJECT && ~/aats-venv/bin/python scripts/nats_target_env_snapshot.py render --source \"$ENV_PROFILE_PATH\"" | tr -d '\r')" \
         || [[ "$rendered" == *$'\n'* ]]; then
         log_error "无法从 profile 生成 NATS 目标参数白名单快照"
         return 1
