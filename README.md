@@ -9,7 +9,7 @@ AATS 是一个以 AI 为核心受益主体的 AI 辅助自动化交易系统。�
 
 本文档是项目级入口，描述当前模块边界、运行方式和主要文档索引。具体交易链路见 [ARCHITECTURE.md](ARCHITECTURE.md)，部署流程见 [DEPLOYMENT.md](DEPLOYMENT.md)，逐文件代码核对后的完整现状见 [项目代码审查与系统说明](docs/code_review/README.md)。
 
-> 当前静态事实复核：2026-08-27，起始 HEAD `c0f59047ed71bd2989a3ab279d323401c04b0477`，当前工作区包含 RDP contract-aware replay P0-D 的本地候选。发生冲突时，以当前工作区代码、数据库迁移和部署脚本为准；`docs/task/`、`docs/design/`、`docs/review/` 中带日期或阶段编号的材料只代表当时状态。账户、容器、订单、仓位、schema、实际网络绑定与风险门等运行时事实仍须现场验证。
+> 当前静态事实复核：2026-08-28，起始 HEAD `82e600842a7ef360ab63c103c6dea1eae2267898`，当前工作区包含 FS-016 readiness lease 重启安全候选，以本文档所在最终 HEAD 为准。发生冲突时，以当前工作区代码、数据库迁移和部署脚本为准；`docs/task/`、`docs/design/`、`docs/review/` 中带日期或阶段编号的材料只代表当时状态。账户、容器、订单、仓位、schema、实际网络绑定与风险门等运行时事实仍须现场验证。
 
 ## 1. 项目边界
 
@@ -155,7 +155,13 @@ Phase 3H 新增统一浏览器安全头与 Host 失败关闭：当前只允许�
 
 Phase 3I 已把 Operator 登录中的同步 repository、390,000 轮 PBKDF2、账户状态与审计写入完整移出 event loop，并以每 Gateway 进程默认 4 个 worker、1 秒排队超时和 60 秒 global/client/identity `60/20/10` 限流失败关闭。不存在、禁用或损坏 hash 走固定 dummy KDF，登录输入有明确上限。该 limiter 不跨进程，目标 proxy/Redis 限流、真实数据库和生产等价负载尚未验证；当前裁定仅为 `CODE REMEDIATED / DISTRIBUTED RATE-LIMIT & LOAD VERIFICATION OPEN`。
 
-Phase 3J 已将四主进程 NATS/hybrid 启动 barrier 改为失败关闭：Redis announce/poll 失败、peer 超时、缺少热状态或缺少部署代次时，不启动 background publisher。标准模拟部署为每次流程生成同一非秘密 generation，Redis ready key/payload 和不可覆盖证据包都绑定该值，旧代次不能满足新启动。这是代码/隔离单测结论；NATS/Redis/Compose 目标环境启动、重启与断连矩阵仍未执行，当前裁定为 `CODE REMEDIATED / TARGET NATS STARTUP-RESTART VERIFICATION OPEN`。
+Phase 3J 已将四主进程 NATS/hybrid 启动 barrier 改为失败关闭；2026-08-28 FS-016 follow-up 的现行候选为 Redis-only protocol v2。每个 strict role 在任何 NATS I/O 前用全局 `aats:runtime:owner:<role>` key 独占 claim `PROVISIONING`，立即开始续租并启动独立 subprocess watchdog，再完成 55 秒 takeover quarantine；完成 runtime/consumer 装配后才 CAS 为 `READY`。父子进程统一使用计入宿主休眠的 POSIX `CLOCK_BOOTTIME` / Windows `GetTickCount64`，并以 POSIX pidfd / Windows process creation FILETIME 固定父进程身份。generation 只存在 payload 和 peer barrier，不再进入 key；因此旧/新 generation 无法分占同一 role。peer 只接受 protocol v2、精确 generation/role/instance 且 phase 为 `READY` 的 owner。
+
+`NatsDeliveryGate` 在 `PROVISIONING` 期间阻断 callback 的 parse/persist/handler/ack/nak，并将 build 期 publish 限定在 4,096 条且 64 MiB 双上限缓冲内；仅 strict 四主进程 NATS/hybrid 路径注入该 gate 并把 push consumer 的 `max_ack_pending` 固定为 `1`，non-strict、in-memory 与 monolith 路径不注入 gate、也不强制该窗口。已有 critical ALL durable 不会为调整可变参数而删除 cursor。所有 peer `READY` 后先 flush，再开放 callback 并启动 background。lease 为 TTL 60 秒/每 10 秒续租/30 秒安全停机 margin/10 秒 hard-exit grace；每次成功写入或刷新 `PROVISIONING` lease 后，本地 hard fence 最多还能向后滑动 50 秒，但 claim 到 `READY` promotion 另有不可续租延长的 180 秒绝对上界：第 170 秒冻结续租并进入 10 秒 fatal grace。确定 ownership 丢失零宽限。关键故障立即冻结续租并保留 fatal fence；正常 cleanup 也受 10 秒硬截止约束，安全停止业务/NATS 后才 disarm 与 owner-aware delete。Compose Redis 使用 `noeviction`，NATS 连续断连 30 秒进入 critical failure，标准部署默认应用健康预算为 210 秒。
+
+v1 -> v2 首发与回滚禁止 rolling/mixed version。标准入口在任何 mutation 前取得长寿命 WSL `flock`；生产路径固定为 `/tmp/aats-standard-deploy.lock`，只有 `AATS_DEPLOY_TEST_MODE=true` 的隔离测试可用 `AATS_DEPLOY_LOCK_FILE` 覆盖。Windows 每 3 秒刷新 lease，holder 12 秒失联释放；新 holder 取得 flock 后仍会等待任何不超过 12 秒的 fresh predecessor lease 清除或过期，再允许 mutation。每个外部步骤 spawn 前复核锁，spawn 后全局登记 active child；丢锁或收到 `TERM/HUP/INT/EXIT` 时，必须先终止并 wait 子进程树，再停止 heartbeat、移除 lease 并释放 flock。它停止所有已知 profile 的七个应用容器，只接受 `exited/dead` 或明确 not-found，并用容器 ID、状态、`StartedAt`、`FinishedAt`、`RestartCount` 及精确时间窗内的 Docker lifecycle events 证明 quiescence。基础设施-only up 后、full-down 前执行第一次 loopback NATS 全量分页只读 preflight；full-down 后建立新基线，正常 infra/schema 后、app up 前执行第二次。阻断、查询失败或 quiescence 变化会保留 NATS 在线。NATS 八键目标由 root-owned 白名单快照贯穿 preflight、Compose 与最终证据，所有必需容器绑定同一 manifest label；应用健康边界后主动观察 40 秒，最终证据逻辑窗限定 35–60 秒。v2 PASS 绑定 lock id、generation、deployed commit 与 quiescence，最终部署证据校验这些字段并记录相对路径与 SHA-256。标准 stop 本身仍不等于 drain 证据。当前候选全量单测已通过；针对新部署互斥的运行证据目前只有 Windows Git Bash -> WSL 聚焦 smoke，不是标准部署 PASS。真 Redis/NATS/Docker 故障注入、标准部署、逐角色重启、双故障和下游 fencing 仍 `OPEN`，真实资金继续 `NO-GO`。
+
+LAST/NEW snapshot/transient durable 在运行时同时满足 strict delivery-gated、policy 非 ALL，并且（outstanding 超过目标，或窗口正在收缩且 outstanding 非零）时，会在新 bind 前按声明语义重建：LAST 仅保留当时最新快照，NEW 仅接收重建后的新事件；旧 pending/cursor 会被舍弃。自动重启也可能进入该分支，运行时代码不接收“已 full-down”信号；标准 full-down 只是首次 v1 -> v2 切换的额外发布门禁。该分支绝不用于 critical ALL durable。
 
 Phase 3K 为七条固定周期资金关键循环增加成功进度 deadline：账户刷新、执行同步、对账、execution outbox、execution command flow、Phase 1 shadow 与 trial guard 若永久 await 或连续无成功周期，会被分类为 `stalled` 并触发 daemon 非零退出或 FastAPI health `503`。该结论只来自代码和纯内存测试；事件驱动任务、整个 event loop 阻塞、真实依赖/容器 restart/告警与独立复核仍未完成，所以 FS-006 仍是 P1 HARD BLOCKER，状态为 `PARTIALLY REMEDIATED / EVENT-DRIVEN AND TARGET RUNTIME VERIFICATION OPEN`。
 

@@ -73,6 +73,13 @@ x-aats-common-env: &aats-common-env
   AATS_LOG_LEVEL: INFO
   TZ: Asia/Shanghai
 
+# 仅含非秘密 provenance。部署证据通过 Docker 字段级投影读取这些 labels，
+# 不读取包含交易所和数据库凭证的 Config.Env。profile label 由受管 override 追加。
+x-aats-common-labels: &aats-common-labels
+  com.aats.runtime-readiness-generation: "${AATS_RUNTIME_READINESS_GENERATION:?runtime readiness generation required}"
+  com.aats.deployed-git-commit: "${AATS_DEPLOYED_GIT_COMMIT:?deployed Git commit required}"
+  com.aats.nats-target-manifest-sha256: "${AATS_NATS_TARGET_MANIFEST_SHA256:?NATS target manifest sha256 required}"
+
 # 4 个服务共享的资源限制
 x-aats-common-resources: &aats-common-resources
   deploy:
@@ -97,6 +104,7 @@ services:
     <<: *aats-build
     container_name: aats-gateway
     restart: unless-stopped
+    labels: *aats-common-labels
     environment:
       <<: *aats-common-env
       AATS_PROCESS_ROLE: gateway
@@ -160,6 +168,7 @@ services:
     <<: [*aats-build, *aats-common-resources]
     container_name: aats-market
     restart: unless-stopped
+    labels: *aats-common-labels
     environment:
       <<: *aats-common-env
       AATS_PROCESS_ROLE: market
@@ -184,6 +193,7 @@ services:
     <<: [*aats-build, *aats-common-resources]
     container_name: aats-decision
     restart: unless-stopped
+    labels: *aats-common-labels
     environment:
       <<: *aats-common-env
       AATS_PROCESS_ROLE: decision
@@ -206,6 +216,7 @@ services:
     <<: *aats-build
     container_name: aats-execution
     restart: unless-stopped
+    labels: *aats-common-labels
     environment:
       <<: *aats-common-env
       AATS_PROCESS_ROLE: execution
@@ -234,6 +245,7 @@ services:
     <<: [*aats-build, *aats-common-resources]
     container_name: aats-rdp-daemon
     restart: unless-stopped
+    labels: *aats-common-labels
     environment:
       <<: *aats-common-env
       AATS_PROCESS_ROLE: rdp-daemon

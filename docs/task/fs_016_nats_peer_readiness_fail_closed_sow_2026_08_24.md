@@ -1,11 +1,29 @@
 # FS-016 NATS Peer Readiness 失败关闭与部署代次隔离 SOW
 
-> 文档状态：现行实施约束  
+> 文档状态：历史实施约束；正文只保留 2026-08-24 当时设计，不是现行协议
 > 日期：2026-08-24  
 > Git 起始基线：`00b6df0f8a8d2665d6cae3e88996843767cd1f56`  
 > 工作区：Phase 3A–3I 未提交叠加变更  
+> 最后核对：2026-08-28（仅核对历史状态与现行替代入口；正文不重写）
 > 目标裁定：`CODE REMEDIATED / TARGET NATS STARTUP-RESTART VERIFICATION OPEN`  
 > 生产决定：**REAL-MONEY PRODUCTION: NO-GO**
+
+> **已被替代，禁止作为现行操作依据**：运行现场证明本文的 300 秒一次性 key
+> 与同 generation 单角色重启目标冲突。现行 protocol v2、全局 role owner key、
+> `PROVISIONING -> READY` 两阶段所有权、claim 即续租、55 秒 takeover quarantine、独立
+> subprocess watchdog、strict NATS gated `max_ack_pending=1`（non-strict/in-memory/monolith 不注入
+> gate）、每次成功 PROVISIONING 写/续租后的 50 秒滑动 hard fence、claim→READY 180 秒绝对上界、
+> 30 秒持续断连监督、Redis `noeviction`、固定生产路径的全流程长寿命 WSL `flock`（仅测试可覆盖）、
+> fresh predecessor lease takeover quarantine、外部步骤 spawn fencing/active-child 登记与信号退出时
+> child-first cleanup、full-down 前与 app-up 前两次
+> 基础设施-only loopback 只读 cutover preflight、绑定 lock/generation/commit/quiescence 的最终证据
+> path/hash、210 秒部署健康预算、首发/回滚与验收边界全部以
+> [`fs_016_runtime_readiness_lease_restart_safety_p0_sow_2026_08_28.md`](fs_016_runtime_readiness_lease_restart_safety_p0_sow_2026_08_28.md)
+> 为准。LAST/NEW 运行时重建由 strict gate、非 ALL policy，以及“outstanding 超过目标”或
+> “收缩窗口且 outstanding 非零”条件决定，标准
+> full-down 只是额外发布门禁。真实标准部署、真 Redis/NATS/Docker 完整故障注入、双故障和下游
+> fencing 仍 `OPEN`，真实资金继续
+> `NO-GO`。以下正文不回写，用于追溯当时问题与决策。
 
 ## 1. 背景与问题定义
 

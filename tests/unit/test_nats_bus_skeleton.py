@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from collections import defaultdict
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -36,6 +37,7 @@ from aats.bus.nats_bus import (
     HybridBusRouting,
     HybridEventBus,
     NatsBusConfig,
+    NatsDeliveryGate,
     NatsEventBus,
     StreamSpec,
     UnroutedTopicError,
@@ -360,6 +362,80 @@ def test_nats_bus_construction_does_not_require_nats_py() -> None:
     assert bus._connected is False
     assert bus._client is None
     assert bus._js is None
+
+
+def test_nats_connect_failure_closes_partial_client_without_masking_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary_error = RuntimeError("primary connect failure")
+
+    class _FakeNatsClient:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def connect(self, **_kwargs: Any) -> None:
+            raise primary_error
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            raise RuntimeError("secondary cleanup failure")
+
+    async def run() -> None:
+        from nats.aio import client as nats_client_module
+
+        monkeypatch.setattr(nats_client_module, "Client", lambda: client)
+        bus = NatsEventBus(config=NatsBusConfig(), consumer_role="decision")
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await bus.connect()
+
+        assert exc_info.value is primary_error
+        assert client.close_calls == 1
+        assert bus._client is None
+        assert bus._js is None
+        assert bus._connected is False
+
+    client = _FakeNatsClient()
+    asyncio.run(run())
+
+
+def test_nats_jetstream_initialization_failure_closes_connected_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary_error = RuntimeError("primary jetstream failure")
+
+    class _FakeNatsClient:
+        def __init__(self) -> None:
+            self.connect_calls = 0
+            self.close_calls = 0
+
+        async def connect(self, **_kwargs: Any) -> None:
+            self.connect_calls += 1
+
+        def jetstream(self) -> Any:
+            raise primary_error
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    async def run() -> None:
+        from nats.aio import client as nats_client_module
+
+        monkeypatch.setattr(nats_client_module, "Client", lambda: client)
+        bus = NatsEventBus(config=NatsBusConfig(), consumer_role="execution")
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await bus.connect()
+
+        assert exc_info.value is primary_error
+        assert client.connect_calls == 1
+        assert client.close_calls == 1
+        assert bus._client is None
+        assert bus._js is None
+        assert bus._connected is False
+
+    client = _FakeNatsClient()
+    asyncio.run(run())
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1649,11 +1725,29 @@ class _FakeMsgNoTerm:
         self.nak_called += 1
 
 
+class _ProgressMsg(_FakeMsgWithTerm):
+    def __init__(self, data: bytes, *, fail_progress: bool = False) -> None:
+        super().__init__(data)
+        self.progress_called = 0
+        self.fail_progress = fail_progress
+
+    async def in_progress(self) -> None:
+        self.progress_called += 1
+        if self.fail_progress:
+            raise RuntimeError("simulated progress failure")
+
+
 class _CbCapturingJS:
     """mock JetStreamContext：subscribe() 把 cb 捕获下来给测试调用。"""
 
     def __init__(self) -> None:
         self.captured_cb: Any = None
+        self.captured_config: Any = None
+
+    async def consumer_info(self, _stream: str, _durable: str) -> Any:
+        from nats.js.errors import NotFoundError
+
+        raise NotFoundError
 
     async def subscribe(
         self,
@@ -1662,9 +1756,12 @@ class _CbCapturingJS:
         durable: str,  # noqa: ARG002
         cb: Any,
         manual_ack: bool,  # noqa: ARG002
-        config: Any,  # noqa: ARG002
+        config: Any,
+        flow_control: bool = False,  # noqa: ARG002
+        idle_heartbeat: float | None = None,  # noqa: ARG002
     ) -> Any:
         self.captured_cb = cb
+        self.captured_config = config
         return object()
 
 
@@ -1680,6 +1777,1517 @@ async def _capture_on_msg(bus: NatsEventBus) -> Any:
     await bus.subscribe("market_snapshots", _noop_handler)
     assert js.captured_cb is not None
     return js.captured_cb
+
+
+def test_delivery_gate_limits_broker_prefetch_to_one_message() -> None:
+    """门禁关闭期间只有队首 callback 能发 +WPI，broker 不得再预取。"""
+
+    async def _run(*, gated: bool) -> int:
+        gate = NatsDeliveryGate() if gated else None
+        bus = NatsEventBus(
+            config=NatsBusConfig(max_ack_pending=73),
+            consumer_role="decision",
+            delivery_gate=gate,
+        )
+        js = _CbCapturingJS()
+        bus._js = js  # type: ignore[assignment]
+
+        async def _noop_handler(_msg: dict[str, Any]) -> None:
+            return None
+
+        await bus.subscribe("market_snapshots", _noop_handler)
+        return int(js.captured_config.max_ack_pending)
+
+    assert asyncio.run(_run(gated=True)) == 1
+    assert asyncio.run(_run(gated=False)) == 73
+
+
+def test_existing_gated_durable_is_updated_in_place_before_binding() -> None:
+    """v1 durable 的 256 预取必须原位改成 1，且绝不能删除 cursor。"""
+
+    from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+
+    topic = _topics.ORDER_INTENTS
+    config = NatsBusConfig(max_ack_pending=256)
+    durable = config.durable_name_for("execution", topic)
+    stream = config.stream_spec_for_topic(topic)
+    assert stream is not None
+
+    class _ExistingDurableJS:
+        def __init__(self) -> None:
+            self.operations: list[str] = []
+            self.current = ConsumerConfig(
+                durable_name=durable,
+                deliver_policy=DeliverPolicy.ALL,
+                ack_policy=AckPolicy.EXPLICIT,
+                ack_wait=30.0,
+                max_deliver=5,
+                max_ack_pending=256,
+                filter_subject=config.subject_for(topic),
+                deliver_subject="_INBOX.existing",
+                flow_control=True,
+                idle_heartbeat=5.0,
+            )
+            self.bound_config: Any = None
+
+        async def consumer_info(self, stream_name: str, name: str) -> Any:
+            assert stream_name == stream.name
+            assert name == durable
+            self.operations.append("consumer_info")
+            return SimpleNamespace(config=self.current)
+
+        async def add_consumer(self, stream_name: str, *, config: Any) -> Any:
+            assert stream_name == stream.name
+            self.operations.append("add_consumer")
+            self.current = config
+            return SimpleNamespace(config=config)
+
+        async def delete_consumer(self, _stream: str, _name: str) -> None:
+            raise AssertionError("critical durable cursor must never be deleted")
+
+        async def subscribe(self, **kwargs: Any) -> object:
+            self.operations.append("subscribe")
+            self.bound_config = kwargs["config"]
+            return object()
+
+    async def _run() -> _ExistingDurableJS:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=config,
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        js = _ExistingDurableJS()
+        bus._js = js  # type: ignore[assignment]
+
+        async def _noop_handler(_msg: dict[str, Any]) -> None:
+            return None
+
+        await bus.subscribe(topic, _noop_handler)
+        return js
+
+    js = asyncio.run(_run())
+    assert js.operations == [
+        "consumer_info",
+        "add_consumer",
+        "consumer_info",
+        "subscribe",
+    ]
+    assert js.current.max_ack_pending == 1
+    assert js.current.deliver_subject == "_INBOX.existing"
+    assert js.current.filter_subject == config.subject_for(topic)
+
+
+def test_gated_critical_durable_with_unacked_messages_refuses_window_shrink() -> None:
+    """首次 v1→v2 降窗不能在仍有 in-flight ACK 时改变 critical cursor。"""
+
+    from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+
+    topic = _topics.ORDER_INTENTS
+    config = NatsBusConfig(max_ack_pending=256)
+    durable = config.durable_name_for("execution", topic)
+    stream = config.stream_spec_for_topic(topic)
+    assert stream is not None
+
+    class _OutstandingCriticalDurableJS:
+        def __init__(self) -> None:
+            self.operations: list[str] = []
+            self.current = ConsumerConfig(
+                durable_name=durable,
+                deliver_policy=DeliverPolicy.ALL,
+                ack_policy=AckPolicy.EXPLICIT,
+                ack_wait=30.0,
+                max_deliver=5,
+                max_ack_pending=256,
+                filter_subject=config.subject_for(topic),
+                deliver_subject="_INBOX.existing",
+                flow_control=True,
+                idle_heartbeat=5.0,
+            )
+
+        async def consumer_info(self, stream_name: str, name: str) -> Any:
+            assert stream_name == stream.name
+            assert name == durable
+            self.operations.append("consumer_info")
+            return SimpleNamespace(
+                config=self.current,
+                num_ack_pending=3,
+            )
+
+        async def add_consumer(self, _stream: str, *, config: Any) -> Any:
+            self.operations.append("add_consumer")
+            raise AssertionError(
+                "ack window must not shrink while critical messages are unacked"
+            )
+
+        async def delete_consumer(self, _stream: str, _name: str) -> None:
+            self.operations.append("delete_consumer")
+            raise AssertionError("critical durable cursor must never be deleted")
+
+        async def subscribe(self, **_kwargs: Any) -> object:
+            self.operations.append("subscribe")
+            raise AssertionError("failed migration must not bind the durable")
+
+    async def _run() -> _OutstandingCriticalDurableJS:
+        bus = NatsEventBus(
+            config=config,
+            consumer_role="execution",
+            delivery_gate=NatsDeliveryGate(),
+        )
+        js = _OutstandingCriticalDurableJS()
+        bus._js = js  # type: ignore[assignment]
+
+        async def _noop_handler(_msg: dict[str, Any]) -> None:
+            return None
+
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                "^nats_critical_consumer_ack_window_migration_requires_drain:"
+                f"{durable}$"
+            ),
+        ):
+            await bus.subscribe(topic, _noop_handler)
+        return js
+
+    js = asyncio.run(_run())
+    assert js.operations == ["consumer_info"]
+    assert js.current.max_ack_pending == 256
+
+
+def test_gated_critical_durable_rejects_legacy_outstanding_after_window_shrunk() -> None:
+    """已降到单 ACK 窗口也不能承接遗留的多个 in-flight delivery。"""
+
+    from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+
+    topic = _topics.ORDER_INTENTS
+    config = NatsBusConfig(max_ack_pending=256)
+    durable = config.durable_name_for("execution", topic)
+    stream = config.stream_spec_for_topic(topic)
+    assert stream is not None
+
+    class _AlreadyShrunkOutstandingDurableJS:
+        def __init__(self) -> None:
+            self.operations: list[str] = []
+            self.current = ConsumerConfig(
+                durable_name=durable,
+                deliver_policy=DeliverPolicy.ALL,
+                ack_policy=AckPolicy.EXPLICIT,
+                ack_wait=30.0,
+                max_deliver=5,
+                max_ack_pending=1,
+                filter_subject=config.subject_for(topic),
+                deliver_subject="_INBOX.existing",
+                flow_control=True,
+                idle_heartbeat=5.0,
+            )
+
+        async def consumer_info(self, stream_name: str, name: str) -> Any:
+            assert stream_name == stream.name
+            assert name == durable
+            self.operations.append("consumer_info")
+            return SimpleNamespace(
+                config=self.current,
+                num_ack_pending=3,
+            )
+
+        async def add_consumer(self, _stream: str, *, config: Any) -> Any:
+            self.operations.append("add_consumer")
+            raise AssertionError("already-shrunk unsafe state must not be updated")
+
+        async def delete_consumer(self, _stream: str, _name: str) -> None:
+            self.operations.append("delete_consumer")
+            raise AssertionError("critical durable cursor must never be deleted")
+
+        async def subscribe(self, **_kwargs: Any) -> object:
+            self.operations.append("subscribe")
+            raise AssertionError("unsafe outstanding deliveries must not be bound")
+
+    async def _run() -> _AlreadyShrunkOutstandingDurableJS:
+        bus = NatsEventBus(
+            config=config,
+            consumer_role="execution",
+            delivery_gate=NatsDeliveryGate(),
+        )
+        js = _AlreadyShrunkOutstandingDurableJS()
+        bus._js = js  # type: ignore[assignment]
+
+        async def _noop_handler(_msg: dict[str, Any]) -> None:
+            return None
+
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                "^nats_critical_consumer_ack_window_migration_requires_drain:"
+                f"{durable}$"
+            ),
+        ):
+            await bus.subscribe(topic, _noop_handler)
+        return js
+
+    js = asyncio.run(_run())
+    assert js.operations == ["consumer_info"]
+    assert js.current.max_ack_pending == 1
+
+
+@pytest.mark.parametrize(
+    ("topic", "role", "expected_policy"),
+    (
+        (_topics.MARKET_SNAPSHOTS, "decision", "last"),
+        (_topics.OPERATOR_COMMAND_REQUESTS, "execution", "new"),
+    ),
+)
+def test_gated_non_event_durable_rebuilds_legacy_outstanding_before_binding(
+    topic: str,
+    role: str,
+    expected_policy: str,
+) -> None:
+    """LAST/NEW cursor 可丢弃；旧宽窗口 delivery 必须在 gate 绑定前清空。"""
+
+    from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+
+    config = NatsBusConfig(max_ack_pending=256)
+    durable = config.durable_name_for(role, topic)
+    stream = config.stream_spec_for_topic(topic)
+    assert stream is not None
+    deliver_policy = {
+        "last": DeliverPolicy.LAST,
+        "new": DeliverPolicy.NEW,
+    }[expected_policy]
+
+    class _OutstandingSnapshotDurableJS:
+        def __init__(self) -> None:
+            self.operations: list[str] = []
+            self.deleted = False
+            self.current = ConsumerConfig(
+                durable_name=durable,
+                deliver_policy=deliver_policy,
+                ack_policy=AckPolicy.EXPLICIT,
+                ack_wait=30.0,
+                max_deliver=5,
+                max_ack_pending=256,
+                filter_subject=config.subject_for(topic),
+                deliver_subject="_INBOX.existing",
+                flow_control=True,
+                idle_heartbeat=5.0,
+            )
+            self.bound_config: Any = None
+
+        async def consumer_info(self, _stream: str, _name: str) -> Any:
+            self.operations.append("consumer_info")
+            return SimpleNamespace(config=self.current, num_ack_pending=3)
+
+        async def add_consumer(self, _stream: str, *, config: Any) -> Any:
+            self.operations.append("add_consumer")
+            raise AssertionError("disposable snapshot durable must be rebuilt")
+
+        async def delete_consumer(self, stream_name: str, name: str) -> None:
+            assert stream_name == stream.name
+            assert name == durable
+            self.operations.append("delete_consumer")
+            self.deleted = True
+
+        async def subscribe(self, **kwargs: Any) -> object:
+            assert self.deleted is True
+            self.operations.append("subscribe")
+            self.bound_config = kwargs["config"]
+            return object()
+
+    async def _run() -> _OutstandingSnapshotDurableJS:
+        bus = NatsEventBus(
+            config=config,
+            consumer_role=role,
+            delivery_gate=NatsDeliveryGate(),
+        )
+        js = _OutstandingSnapshotDurableJS()
+        bus._js = js  # type: ignore[assignment]
+
+        async def _noop_handler(_msg: dict[str, Any]) -> None:
+            return None
+
+        await bus.subscribe(topic, _noop_handler)
+        return js
+
+    js = asyncio.run(_run())
+    assert js.operations == ["consumer_info", "delete_consumer", "subscribe"]
+    assert js.bound_config.max_ack_pending == 1
+    assert js.bound_config.deliver_policy == deliver_policy
+
+
+def test_critical_durable_immutable_drift_fails_without_cursor_reset() -> None:
+    from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+
+    topic = _topics.ORDER_INTENTS
+    config = NatsBusConfig()
+    durable = config.durable_name_for("execution", topic)
+    stream = config.stream_spec_for_topic(topic)
+    assert stream is not None
+
+    class _DriftedDurableJS:
+        def __init__(self) -> None:
+            self.delete_called = False
+
+        async def consumer_info(self, _stream: str, _name: str) -> Any:
+            return SimpleNamespace(
+                config=ConsumerConfig(
+                    durable_name=durable,
+                    deliver_policy=DeliverPolicy.LAST,
+                    ack_policy=AckPolicy.EXPLICIT,
+                    ack_wait=30.0,
+                    max_deliver=5,
+                    max_ack_pending=256,
+                    filter_subject=config.subject_for(topic),
+                    deliver_subject="_INBOX.existing",
+                    flow_control=True,
+                    idle_heartbeat=5.0,
+                )
+            )
+
+        async def delete_consumer(self, _stream: str, _name: str) -> None:
+            self.delete_called = True
+
+    async def _run() -> _DriftedDurableJS:
+        bus = NatsEventBus(
+            config=config,
+            consumer_role="execution",
+            delivery_gate=NatsDeliveryGate(),
+        )
+        js = _DriftedDurableJS()
+        bus._js = js  # type: ignore[assignment]
+
+        async def _noop_handler(_msg: dict[str, Any]) -> None:
+            return None
+
+        with pytest.raises(
+            RuntimeError,
+            match="nats_critical_consumer_config_drift",
+        ):
+            await bus.subscribe(topic, _noop_handler)
+        return js
+
+    js = asyncio.run(_run())
+    assert js.delete_called is False
+
+
+def test_nats_disconnect_timeout_aborts_gate_and_fails_supervisor() -> None:
+    async def _run() -> NatsDeliveryGate:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(reconnect_failure_timeout_seconds=0.01),
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        bus._connected = True
+        supervisor = asyncio.create_task(
+            bus.wait_for_terminal_connection_failure()
+        )
+        await bus._on_disconnected()
+        with pytest.raises(RuntimeError, match="nats_connection_terminal_failure"):
+            await asyncio.wait_for(supervisor, timeout=0.2)
+        return gate
+
+    gate = asyncio.run(_run())
+    assert gate.aborted is True
+
+
+def test_non_transient_nats_client_error_is_terminal() -> None:
+    async def _run() -> NatsDeliveryGate:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(),
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        supervisor = asyncio.create_task(
+            bus.wait_for_terminal_connection_failure()
+        )
+        await bus._on_error(RuntimeError("simulated permissions violation"))
+        with pytest.raises(RuntimeError, match="nats_connection_terminal_failure"):
+            await asyncio.wait_for(supervisor, timeout=0.2)
+        return gate
+
+    gate = asyncio.run(_run())
+    assert gate.aborted is True
+
+
+def test_transient_nats_client_error_does_not_fail_supervisor() -> None:
+    async def _run() -> tuple[bool, bool]:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(),
+            consumer_role="market",
+            delivery_gate=gate,
+        )
+        supervisor = asyncio.create_task(
+            bus.wait_for_terminal_connection_failure()
+        )
+        await bus._on_error(OSError("simulated temporary transport error"))
+        await asyncio.sleep(0)
+        still_waiting = not supervisor.done()
+        supervisor.cancel()
+        await asyncio.gather(supervisor, return_exceptions=True)
+        return still_waiting, gate.aborted
+
+    still_waiting, aborted = asyncio.run(_run())
+    assert still_waiting is True
+    assert aborted is False
+
+
+def test_nats_reconnect_before_deadline_remains_healthy() -> None:
+    async def _run() -> tuple[bool, bool]:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(reconnect_failure_timeout_seconds=0.03),
+            consumer_role="decision",
+            delivery_gate=gate,
+        )
+        bus._connected = True
+        supervisor = asyncio.create_task(
+            bus.wait_for_terminal_connection_failure()
+        )
+        await bus._on_disconnected()
+        await asyncio.sleep(0.005)
+        await bus._on_reconnected()
+        await asyncio.sleep(0.04)
+        still_waiting = not supervisor.done()
+        supervisor.cancel()
+        await asyncio.gather(supervisor, return_exceptions=True)
+        return still_waiting, gate.aborted
+
+    still_waiting, aborted = asyncio.run(_run())
+    assert still_waiting is True
+    assert aborted is False
+
+
+class _ConsumerSupervisionSubscription:
+    async def drain(self) -> None:
+        return None
+
+
+class _ConsumerSupervisionJS:
+    """先创建 durable，随后模拟管理面删除或持续不可达。"""
+
+    def __init__(self, *, failure: str) -> None:
+        self.failure = failure
+        self.bound = False
+        self.consumer_info_calls = 0
+        self.failure_calls = 0
+        self.first_failure = asyncio.Event()
+
+    async def consumer_info(self, _stream: str, _durable: str) -> Any:
+        from nats.js.errors import NotFoundError
+
+        self.consumer_info_calls += 1
+        if not self.bound:
+            # subscribe() 的首次探测：durable 尚不存在，走正常创建路径。
+            raise NotFoundError
+        self.failure_calls += 1
+        self.first_failure.set()
+        if self.failure == "deleted":
+            raise NotFoundError
+        if self.failure == "unavailable":
+            raise OSError("simulated JetStream management outage")
+        raise AssertionError(f"unsupported failure mode: {self.failure}")
+
+    async def subscribe(self, **_kwargs: Any) -> _ConsumerSupervisionSubscription:
+        self.bound = True
+        return _ConsumerSupervisionSubscription()
+
+
+class _ConcurrentUnavailableConsumerSupervisionJS:
+    """Bind many durables, then keep every management query pending."""
+
+    def __init__(self, *, expected_queries: int) -> None:
+        self.expected_queries = expected_queries
+        self.bound_durables: set[str] = set()
+        self.in_flight_queries = 0
+        self.max_in_flight_queries = 0
+        self.all_queries_started = asyncio.Event()
+
+    async def consumer_info(self, _stream: str, durable: str) -> Any:
+        from nats.js.errors import NotFoundError
+
+        if durable not in self.bound_durables:
+            raise NotFoundError
+        self.in_flight_queries += 1
+        self.max_in_flight_queries = max(
+            self.max_in_flight_queries,
+            self.in_flight_queries,
+        )
+        if self.in_flight_queries >= self.expected_queries:
+            self.all_queries_started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            self.in_flight_queries -= 1
+
+    async def subscribe(self, **kwargs: Any) -> _ConsumerSupervisionSubscription:
+        self.bound_durables.add(str(kwargs["durable"]))
+        return _ConsumerSupervisionSubscription()
+
+
+class _AlternatingUnhealthyConsumerSupervisionJS:
+    """Alternate management outages with an explicitly unbound push consumer."""
+
+    def __init__(self) -> None:
+        self.bound = False
+        self.config: Any = None
+        self.failure_calls = 0
+
+    async def consumer_info(self, _stream: str, _durable: str) -> Any:
+        from nats.js.errors import NotFoundError
+
+        if not self.bound:
+            raise NotFoundError
+        self.failure_calls += 1
+        if self.failure_calls % 2:
+            raise OSError("simulated alternating management outage")
+        return SimpleNamespace(
+            config=self.config,
+            push_bound=False,
+            delivered=None,
+            ack_floor=None,
+            num_pending=0,
+            num_ack_pending=0,
+        )
+
+    async def subscribe(self, **kwargs: Any) -> _ConsumerSupervisionSubscription:
+        self.config = kwargs["config"].evolve(
+            filter_subject=kwargs["subject"],
+        )
+        self.bound = True
+        return _ConsumerSupervisionSubscription()
+
+
+class _NoAckProgressConsumerSupervisionJS:
+    """Vary broker counters while the business ACK floor remains fixed."""
+
+    def __init__(self, *, mode: str) -> None:
+        self.mode = mode
+        self.bound = False
+        self.config: Any = None
+        self.query_calls = 0
+
+    async def consumer_info(self, _stream: str, _durable: str) -> Any:
+        from nats.js.errors import NotFoundError
+
+        if not self.bound:
+            raise NotFoundError
+        self.query_calls += 1
+        delivered_consumer_seq = (
+            self.query_calls if self.mode == "redelivery_growth" else 1
+        )
+        num_pending = self.query_calls if self.mode == "pending_growth" else 0
+        return SimpleNamespace(
+            config=self.config,
+            push_bound=True,
+            delivered=SimpleNamespace(
+                stream_seq=1,
+                consumer_seq=delivered_consumer_seq,
+            ),
+            ack_floor=SimpleNamespace(stream_seq=0, consumer_seq=0),
+            num_pending=num_pending,
+            num_ack_pending=1,
+        )
+
+    async def subscribe(self, **kwargs: Any) -> _ConsumerSupervisionSubscription:
+        self.config = kwargs["config"].evolve(
+            filter_subject=kwargs["subject"],
+        )
+        self.bound = True
+        return _ConsumerSupervisionSubscription()
+
+
+def test_pre_promotion_proof_rejects_disconnected_bus_and_aborts_gate() -> None:
+    """Build 末尾已断线时不得等到稳态 supervisor 才撤销启动门禁。"""
+
+    async def _run() -> NatsDeliveryGate:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(),
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        bus._js = object()  # type: ignore[assignment]
+        bus._connected = False
+
+        with pytest.raises(RuntimeError, match="nats_not_ready_for_promotion"):
+            await bus.verify_ready_for_promotion()
+        return gate
+
+    gate = asyncio.run(_run())
+    assert gate.aborted is True
+    assert gate.activated is False
+
+
+def test_pre_promotion_proof_rejects_deleted_critical_durable_immediately() -> None:
+    """关键 durable 在 build 尾部被删时，首次同步 proof 必须立即失败。"""
+
+    async def _run() -> tuple[NatsDeliveryGate, _ConsumerSupervisionJS]:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(),
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        js = _ConsumerSupervisionJS(failure="deleted")
+        bus._js = js  # type: ignore[assignment]
+        bus._connected = True
+
+        async def _noop_handler(_message: dict[str, Any]) -> None:
+            return None
+
+        try:
+            await bus.subscribe(_topics.ORDER_INTENTS, _noop_handler)
+            with pytest.raises(
+                RuntimeError,
+                match="nats_not_ready_for_promotion",
+            ):
+                await bus.verify_ready_for_promotion()
+            return gate, js
+        finally:
+            await bus.close()
+
+    gate, js = asyncio.run(_run())
+    assert gate.aborted is True
+    assert gate.activated is False
+    assert js.failure_calls == 1
+
+
+def test_pre_promotion_proof_rechecks_connection_after_consumer_queries() -> None:
+    """最后一次管理面查询期间断线时，不得用查询前的连接状态晋级。"""
+
+    class _DisconnectingHealthyJS:
+        def __init__(self, bus: NatsEventBus) -> None:
+            self.bus = bus
+            self.bound = False
+            self.config: Any = None
+
+        async def consumer_info(self, _stream: str, _durable: str) -> Any:
+            from nats.js.errors import NotFoundError
+
+            if not self.bound:
+                raise NotFoundError
+            self.bus._connected = False
+            return SimpleNamespace(
+                config=self.config,
+                push_bound=True,
+                delivered=None,
+                ack_floor=None,
+                num_pending=0,
+                num_ack_pending=0,
+            )
+
+        async def subscribe(
+            self, **kwargs: Any
+        ) -> _ConsumerSupervisionSubscription:
+            self.config = kwargs["config"].evolve(
+                filter_subject=kwargs["subject"],
+            )
+            self.bound = True
+            return _ConsumerSupervisionSubscription()
+
+    async def _run() -> NatsDeliveryGate:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(),
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        bus._connected = True
+        bus._js = _DisconnectingHealthyJS(bus)  # type: ignore[assignment]
+
+        async def _noop_handler(_message: dict[str, Any]) -> None:
+            return None
+
+        await bus.subscribe(_topics.ORDER_INTENTS, _noop_handler)
+        with pytest.raises(RuntimeError, match="nats_not_ready_for_promotion"):
+            await bus.verify_ready_for_promotion()
+        return gate
+
+    gate = asyncio.run(_run())
+    assert gate.aborted is True
+    assert gate.activated is False
+
+
+def test_deleted_critical_durable_aborts_gate_and_fails_supervisor() -> None:
+    """Core TCP 仍活着时删除 ALL durable 也必须撤销 READY。"""
+
+    async def _run() -> tuple[NatsDeliveryGate, _ConsumerSupervisionJS]:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(
+                consumer_supervision_interval_seconds=0.005,
+                consumer_supervision_failure_timeout_seconds=0.04,
+            ),
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        js = _ConsumerSupervisionJS(failure="deleted")
+        bus._js = js  # type: ignore[assignment]
+
+        async def _noop_handler(_message: dict[str, Any]) -> None:
+            return None
+
+        try:
+            await bus.subscribe(_topics.ORDER_INTENTS, _noop_handler)
+            with pytest.raises(
+                RuntimeError,
+                match="nats_connection_terminal_failure",
+            ):
+                await asyncio.wait_for(
+                    bus.wait_for_terminal_connection_failure(),
+                    timeout=0.25,
+                )
+            return gate, js
+        finally:
+            await bus.close()
+
+    gate, js = asyncio.run(_run())
+    assert gate.aborted is True
+    assert js.consumer_info_calls >= 2
+    assert js.failure_calls >= 1
+
+
+def test_consumer_info_continuous_failure_is_bounded_before_terminal() -> None:
+    """瞬态管理面错误可重试，但不能让 critical durable 永久伪健康。"""
+
+    async def _run() -> tuple[NatsDeliveryGate, _ConsumerSupervisionJS]:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(
+                consumer_supervision_interval_seconds=0.005,
+                consumer_supervision_failure_timeout_seconds=0.04,
+            ),
+            consumer_role="decision",
+            delivery_gate=gate,
+        )
+        js = _ConsumerSupervisionJS(failure="unavailable")
+        bus._js = js  # type: ignore[assignment]
+
+        async def _noop_handler(_message: dict[str, Any]) -> None:
+            return None
+
+        try:
+            await bus.subscribe(_topics.ORDER_INTENTS, _noop_handler)
+            supervisor = asyncio.create_task(
+                bus.wait_for_terminal_connection_failure()
+            )
+            await asyncio.wait_for(js.first_failure.wait(), timeout=0.1)
+            # 单次暂态查询失败不得立即杀进程；只有连续失败超过配置窗口才 terminal。
+            await asyncio.sleep(0)
+            assert supervisor.done() is False
+            assert gate.aborted is False
+            with pytest.raises(
+                RuntimeError,
+                match="nats_connection_terminal_failure",
+            ):
+                await asyncio.wait_for(supervisor, timeout=0.25)
+            return gate, js
+        finally:
+            await bus.close()
+
+    gate, js = asyncio.run(_run())
+    assert gate.aborted is True
+    assert js.failure_calls >= 2
+
+
+def test_many_unavailable_consumers_share_one_bounded_supervision_window() -> None:
+    """管理面整体挂起时，terminal deadline 不能随 durable 数量线性放大。"""
+
+    topics = tuple(sorted(DEFAULT_CRITICAL_TOPICS)[:20])
+
+    async def _run() -> tuple[NatsDeliveryGate, int, float]:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(
+                consumer_supervision_interval_seconds=0.02,
+                consumer_supervision_failure_timeout_seconds=0.04,
+            ),
+            consumer_role="decision",
+            delivery_gate=gate,
+        )
+        js = _ConcurrentUnavailableConsumerSupervisionJS(
+            expected_queries=len(topics),
+        )
+        bus._js = js  # type: ignore[assignment]
+
+        async def _noop_handler(_message: dict[str, Any]) -> None:
+            return None
+
+        for topic in topics:
+            await bus.subscribe(topic, _noop_handler)
+        started_at = asyncio.get_running_loop().time()
+        supervisor = asyncio.create_task(
+            bus.wait_for_terminal_connection_failure()
+        )
+        try:
+            # A sequential implementation needs 20 * interval just to complete
+            # one failed pass. All queries must instead enter the same window.
+            await asyncio.wait_for(js.all_queries_started.wait(), timeout=0.15)
+            with pytest.raises(
+                RuntimeError,
+                match="nats_connection_terminal_failure",
+            ):
+                await asyncio.wait_for(supervisor, timeout=0.25)
+            elapsed = asyncio.get_running_loop().time() - started_at
+            return gate, js.max_in_flight_queries, elapsed
+        finally:
+            supervisor.cancel()
+            await asyncio.gather(supervisor, return_exceptions=True)
+            await bus.close()
+
+    gate, max_in_flight, elapsed = asyncio.run(_run())
+    assert max_in_flight == len(topics)
+    assert elapsed < 0.25
+    assert gate.aborted is True
+
+
+def test_alternating_consumer_fault_kinds_share_one_continuous_failure_window() -> None:
+    """故障类型变化不能重置持续不健康计时并让 READY 永久伪健康。"""
+
+    async def _run() -> tuple[NatsDeliveryGate, int]:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(
+                consumer_supervision_interval_seconds=0.005,
+                consumer_supervision_failure_timeout_seconds=0.04,
+            ),
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        js = _AlternatingUnhealthyConsumerSupervisionJS()
+        bus._js = js  # type: ignore[assignment]
+
+        async def _noop_handler(_message: dict[str, Any]) -> None:
+            return None
+
+        try:
+            await bus.subscribe(_topics.ORDER_INTENTS, _noop_handler)
+            with pytest.raises(
+                RuntimeError,
+                match="nats_connection_terminal_failure",
+            ):
+                await asyncio.wait_for(
+                    bus.wait_for_terminal_connection_failure(),
+                    timeout=0.2,
+                )
+            return gate, js.failure_calls
+        finally:
+            await bus.close()
+
+    gate, failure_calls = asyncio.run(_run())
+    assert failure_calls >= 2
+    assert gate.aborted is True
+
+
+@pytest.mark.parametrize(
+    "progress_mode",
+    ("pending_growth", "redelivery_growth"),
+)
+def test_broker_activity_without_ack_progress_is_bounded(
+    progress_mode: str,
+) -> None:
+    """新增积压或 broker 重投都不能冒充 handler 已完成业务处理。"""
+
+    async def _run() -> tuple[NatsDeliveryGate, int]:
+        gate = NatsDeliveryGate()
+        assert gate.activate() is True
+        bus = NatsEventBus(
+            config=NatsBusConfig(
+                ack_wait_seconds=0.005,
+                consumer_supervision_interval_seconds=0.005,
+                consumer_supervision_failure_timeout_seconds=0.04,
+            ),
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        js = _NoAckProgressConsumerSupervisionJS(mode=progress_mode)
+        bus._js = js  # type: ignore[assignment]
+
+        async def _noop_handler(_message: dict[str, Any]) -> None:
+            return None
+
+        try:
+            await bus.subscribe(_topics.ORDER_INTENTS, _noop_handler)
+            with pytest.raises(
+                RuntimeError,
+                match="nats_connection_terminal_failure",
+            ):
+                await asyncio.wait_for(
+                    bus.wait_for_terminal_connection_failure(),
+                    timeout=0.2,
+                )
+            return gate, js.query_calls
+        finally:
+            await bus.close()
+
+    gate, query_calls = asyncio.run(_run())
+    assert query_calls >= 2
+    assert gate.aborted is True
+
+
+def test_nats_unexpected_close_is_terminal_but_normal_close_is_not() -> None:
+    class _Client:
+        async def drain(self) -> None:
+            return None
+
+    async def _run() -> tuple[bool, bool]:
+        unexpected_gate = NatsDeliveryGate()
+        unexpected_bus = NatsEventBus(
+            config=NatsBusConfig(),
+            consumer_role="market",
+            delivery_gate=unexpected_gate,
+        )
+        unexpected_supervisor = asyncio.create_task(
+            unexpected_bus.wait_for_terminal_connection_failure()
+        )
+        await unexpected_bus._on_closed()
+        with pytest.raises(RuntimeError, match="nats_connection_terminal_failure"):
+            await asyncio.wait_for(unexpected_supervisor, timeout=0.2)
+
+        normal_gate = NatsDeliveryGate()
+        normal_bus = NatsEventBus(
+            config=NatsBusConfig(reconnect_failure_timeout_seconds=0.01),
+            consumer_role="gateway",
+            delivery_gate=normal_gate,
+        )
+        normal_bus._client = _Client()  # type: ignore[assignment]
+        normal_bus._connected = True
+        normal_supervisor = asyncio.create_task(
+            normal_bus.wait_for_terminal_connection_failure()
+        )
+        await normal_bus._on_disconnected()
+        await normal_bus.close()
+        await asyncio.sleep(0.02)
+        normal_failed = normal_supervisor.done()
+        normal_supervisor.cancel()
+        await asyncio.gather(normal_supervisor, return_exceptions=True)
+        return unexpected_gate.aborted, normal_failed
+
+    unexpected_aborted, normal_failed = asyncio.run(_run())
+    assert unexpected_aborted is True
+    assert normal_failed is False
+
+
+def test_delivery_gate_blocks_all_message_side_effects_until_activation() -> None:
+    """PROVISIONING consumer 可注册，但 READY 前不能 parse/term/ack。"""
+
+    async def _run() -> _FakeMsgWithTerm:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(),
+            consumer_role="decision",
+            delivery_gate=gate,
+        )
+        on_msg = await _capture_on_msg(bus)
+        msg = _FakeMsgWithTerm(b"{not valid json")
+        callback = asyncio.create_task(on_msg(msg))
+        await asyncio.sleep(0)
+        assert callback.done() is False
+        assert msg.term_called == 0
+        assert msg.ack_called == 0
+        assert msg.nak_called == 0
+        assert gate.activate() is True
+        await asyncio.wait_for(callback, timeout=0.2)
+        return msg
+
+    msg = asyncio.run(_run())
+    assert msg.term_called == 1
+    assert msg.ack_called == 0
+    assert msg.nak_called == 0
+
+
+def test_closed_delivery_gate_renews_jetstream_ack_wait_until_activation() -> None:
+    """PROVISIONING 等待不能消耗 max_deliver；周期 +WPI 后仅执行一次。"""
+
+    async def _run() -> _ProgressMsg:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(ack_wait_seconds=0.03),
+            consumer_role="decision",
+            delivery_gate=gate,
+        )
+        on_msg = await _capture_on_msg(bus)
+        msg = _ProgressMsg(b"{not valid json")
+        callback = asyncio.create_task(on_msg(msg))
+        deadline = asyncio.get_running_loop().time() + 0.2
+        while msg.progress_called < 2:
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("delivery progress was not renewed")
+            await asyncio.sleep(0.002)
+        assert msg.term_called == 0
+        assert gate.activate() is True
+        await asyncio.wait_for(callback, timeout=0.2)
+        return msg
+
+    msg = asyncio.run(_run())
+    assert msg.progress_called >= 2
+    assert msg.term_called == 1
+    assert msg.ack_called == 0
+    assert msg.nak_called == 0
+
+
+def test_delivery_progress_failure_aborts_gate_without_ack_or_nak() -> None:
+    """无法延长 ack timer 时启动门禁必须 ABORT，不得静默耗尽重投。"""
+
+    async def _run() -> tuple[NatsDeliveryGate, _ProgressMsg]:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(ack_wait_seconds=0.003),
+            consumer_role="decision",
+            delivery_gate=gate,
+        )
+        on_msg = await _capture_on_msg(bus)
+        msg = _ProgressMsg(b"{not valid json", fail_progress=True)
+        with pytest.raises(RuntimeError, match="nats_delivery_progress_failed"):
+            await asyncio.wait_for(on_msg(msg), timeout=0.2)
+        return gate, msg
+
+    gate, msg = asyncio.run(_run())
+    assert gate.aborted is True
+    assert gate.activated is False
+    assert msg.progress_called == 1
+    assert msg.term_called == 0
+    assert msg.ack_called == 0
+    assert msg.nak_called == 0
+
+
+def test_close_aborts_blocked_delivery_before_unsubscribe_and_drain() -> None:
+    """构建失败/关停必须唤醒 gate waiter，且消息保持未确认、无副作用。"""
+
+    class _Subscription:
+        def __init__(self) -> None:
+            self.drained = False
+
+        async def drain(self) -> None:
+            self.drained = True
+
+    class _Client:
+        def __init__(self) -> None:
+            self.drained = False
+
+        async def drain(self) -> None:
+            self.drained = True
+
+    async def _run() -> tuple[_FakeMsgWithTerm, _Subscription, _Client]:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(),
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        on_msg = await _capture_on_msg(bus)
+        msg = _FakeMsgWithTerm(b"{not valid json")
+        callback = asyncio.create_task(on_msg(msg))
+        await asyncio.sleep(0)
+        subscription = _Subscription()
+        client = _Client()
+        bus._subscriptions = [subscription]
+        bus._client = client  # type: ignore[assignment]
+        await asyncio.wait_for(bus.close(), timeout=0.2)
+        await asyncio.wait_for(callback, timeout=0.2)
+        return msg, subscription, client
+
+    msg, subscription, client = asyncio.run(_run())
+    assert msg.term_called == 0
+    assert msg.ack_called == 0
+    assert msg.nak_called == 0
+    assert subscription.drained is True
+    assert client.drained is True
+
+
+def test_close_waits_for_in_flight_subscription_drain_before_returning() -> None:
+    """Owner release 的 bus.close 前置必须等待旧 callback 真正退出。"""
+
+    class _Subscription:
+        def __init__(self) -> None:
+            self.drain_started = asyncio.Event()
+            self.handler_finished = asyncio.Event()
+
+        async def drain(self) -> None:
+            self.drain_started.set()
+            await self.handler_finished.wait()
+
+    class _Client:
+        async def drain(self) -> None:
+            return None
+
+    async def _run() -> None:
+        bus = NatsEventBus(config=NatsBusConfig(), consumer_role="execution")
+        subscription = _Subscription()
+        bus._subscriptions = [subscription]
+        bus._client = _Client()  # type: ignore[assignment]
+
+        closing = asyncio.create_task(bus.close())
+        await asyncio.wait_for(subscription.drain_started.wait(), timeout=0.2)
+        await asyncio.sleep(0)
+        assert not closing.done()
+        subscription.handler_finished.set()
+        await asyncio.wait_for(closing, timeout=0.2)
+
+    asyncio.run(_run())
+
+
+def test_subscription_drain_failure_keeps_bus_open_and_fails_close() -> None:
+    class _Subscription:
+        async def drain(self) -> None:
+            raise RuntimeError("private callback detail")
+
+    class _Client:
+        def __init__(self) -> None:
+            self.drained = False
+
+        async def drain(self) -> None:
+            self.drained = True
+
+    async def _run() -> tuple[NatsEventBus, _Client]:
+        bus = NatsEventBus(config=NatsBusConfig(), consumer_role="execution")
+        client = _Client()
+        bus._subscriptions = [_Subscription()]
+        bus._client = client  # type: ignore[assignment]
+        with pytest.raises(RuntimeError, match="nats_delivery_drain_failed"):
+            await bus.close()
+        return bus, client
+
+    bus, client = asyncio.run(_run())
+    assert client.drained is True
+    assert bus._subscriptions
+    assert bus._client is client
+
+
+def test_pre_activation_publish_flushes_before_callback_gate_opens() -> None:
+    """build 期 publish 不进 INTEREST stream；peer READY 后 flush 才开回调。"""
+
+    from unittest.mock import AsyncMock
+
+    async def _run() -> tuple[NatsDeliveryGate, AsyncMock, EventEnvelope]:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(),
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        fake_js = AsyncMock()
+        bus._js = fake_js  # type: ignore[assignment]
+        envelope = _make_envelope(_topics.PORTFOLIO_SNAPSHOTS)
+        await bus.publish_envelope(envelope, persist=False)
+        fake_js.publish.assert_not_awaited()
+        assert gate.activated is False
+        await bus.activate_delivery()
+        return gate, fake_js.publish, envelope
+
+    gate, publish, envelope = asyncio.run(_run())
+    assert gate.activated is True
+    publish.assert_awaited_once()
+    kwargs = publish.await_args.kwargs
+    assert kwargs["subject"] == f"aats.{envelope.topic}"
+    assert kwargs["headers"] == {"Nats-Msg-Id": envelope.event_id}
+
+
+def test_pre_activation_flush_failure_keeps_gate_closed() -> None:
+    """JetStream ack 失败必须让 startup 失败，不可开放 consumer callback。"""
+
+    from unittest.mock import AsyncMock
+
+    async def _run() -> NatsDeliveryGate:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(),
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        fake_js = AsyncMock()
+        fake_js.publish.side_effect = RuntimeError("simulated broker failure")
+        bus._js = fake_js  # type: ignore[assignment]
+        await bus.publish_envelope(
+            _make_envelope(_topics.PORTFOLIO_SNAPSHOTS),
+            persist=False,
+        )
+        with pytest.raises(RuntimeError, match="simulated broker failure"):
+            await bus.activate_delivery()
+        return gate
+
+    gate = asyncio.run(_run())
+    assert gate.activated is False
+    assert gate.aborted is False
+
+
+def test_pre_activation_publication_buffer_has_strict_byte_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """条数之外必须限制真实 payload bytes，避免大消息把启动进程撑爆。"""
+
+    monkeypatch.setattr(
+        "aats.bus.nats_bus._MAX_PRE_ACTIVATION_PUBLICATION_BYTES",
+        9,
+    )
+
+    async def _run() -> tuple[int, int]:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(),
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        bus._js = object()  # type: ignore[assignment]
+        await bus._publish_or_defer_until_activation(
+            subject="aats.one",
+            body=b"12345",
+            event_id="one",
+        )
+        with pytest.raises(
+            RuntimeError,
+            match="nats_pre_activation_publication_bytes_exceeded",
+        ):
+            await bus._publish_or_defer_until_activation(
+                subject="aats.two",
+                body=b"67890",
+                event_id="two",
+            )
+        return (
+            len(bus._pre_activation_publications),
+            bus._pre_activation_publication_bytes,
+        )
+
+    count, byte_count = asyncio.run(_run())
+    assert count == 1
+    assert byte_count == 5
+
+
+def test_abort_after_activation_transition_prevents_new_network_publish() -> None:
+    """等待 activation 锁的 publisher 解锁后必须再次观察 ABORT。"""
+
+    from unittest.mock import AsyncMock
+
+    class _TransitionRaceGate:
+        def __init__(self) -> None:
+            self.abort_reads = 0
+
+        @property
+        def aborted(self) -> bool:
+            self.abort_reads += 1
+            # fast-path、入锁重检均未 abort；解锁后的最终重检观察到 ABORT。
+            return self.abort_reads >= 3
+
+        @property
+        def activated(self) -> bool:
+            # fast-path 先见 CLOSED，入锁后模拟 activation 已完成。
+            return self.abort_reads >= 2
+
+    async def _run() -> AsyncMock:
+        gate = _TransitionRaceGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(),
+            consumer_role="execution",
+            delivery_gate=gate,  # type: ignore[arg-type]
+        )
+        fake_js = AsyncMock()
+        bus._js = fake_js  # type: ignore[assignment]
+        with pytest.raises(RuntimeError, match="nats_delivery_gate_aborted"):
+            await bus._publish_or_defer_until_activation(
+                subject="aats.test",
+                body=b"payload",
+                event_id="event",
+            )
+        return fake_js.publish
+
+    publish = asyncio.run(_run())
+    publish.assert_not_awaited()
+
+
+def test_pre_activation_byte_accounting_survives_failed_flush(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """失败项仍留队列时 byte counter 必须保持一致，成功 flush 后归零。"""
+
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(
+        "aats.bus.nats_bus._MAX_PRE_ACTIVATION_PUBLICATION_BYTES",
+        16,
+    )
+
+    async def _run() -> tuple[int, int, int, int]:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(),
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        fake_js = AsyncMock()
+        fake_js.publish.side_effect = RuntimeError("first flush failed")
+        bus._js = fake_js  # type: ignore[assignment]
+        await bus._publish_or_defer_until_activation(
+            subject="aats.one",
+            body=b"12345",
+            event_id="one",
+        )
+        with pytest.raises(RuntimeError, match="first flush failed"):
+            await bus.activate_delivery()
+        failed_count = len(bus._pre_activation_publications)
+        failed_bytes = bus._pre_activation_publication_bytes
+        fake_js.publish.side_effect = None
+        await bus.activate_delivery()
+        return (
+            failed_count,
+            failed_bytes,
+            len(bus._pre_activation_publications),
+            bus._pre_activation_publication_bytes,
+        )
+
+    failed_count, failed_bytes, final_count, final_bytes = asyncio.run(_run())
+    assert (failed_count, failed_bytes) == (1, 5)
+    assert (final_count, final_bytes) == (0, 0)
+
+
+def test_abort_during_flush_never_publishes_second_queued_message() -> None:
+    """首条在途 publish 无法撤销，但 ABORT 后不得继续冲刷其余队列。"""
+
+    class _BlockingJetStream:
+        def __init__(self) -> None:
+            self.first_started = asyncio.Event()
+            self.release_first = asyncio.Event()
+            self.calls: list[str] = []
+
+        async def publish(
+            self,
+            *,
+            subject: str,
+            payload: bytes,  # noqa: ARG002
+            headers: dict[str, str],  # noqa: ARG002
+        ) -> None:
+            self.calls.append(subject)
+            if len(self.calls) == 1:
+                self.first_started.set()
+                await self.release_first.wait()
+
+    async def _run() -> tuple[NatsDeliveryGate, list[str]]:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(),
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        fake_js = _BlockingJetStream()
+        bus._js = fake_js  # type: ignore[assignment]
+        await bus.publish_envelope(
+            _make_envelope(_topics.PORTFOLIO_SNAPSHOTS, key="one"),
+            persist=False,
+        )
+        await bus.publish_envelope(
+            _make_envelope(_topics.PORTFOLIO_SNAPSHOTS, key="two"),
+            persist=False,
+        )
+        activation = asyncio.create_task(bus.activate_delivery())
+        await asyncio.wait_for(fake_js.first_started.wait(), timeout=0.2)
+        gate.abort()
+        fake_js.release_first.set()
+        with pytest.raises(RuntimeError, match="nats_delivery_gate_aborted"):
+            await activation
+        return gate, fake_js.calls
+
+    gate, calls = asyncio.run(_run())
+    assert gate.aborted is True
+    assert gate.activated is False
+    assert calls == [f"aats.{_topics.PORTFOLIO_SNAPSHOTS}"]
+
+
+def test_steady_state_publishes_are_not_serialized_by_activation_lock() -> None:
+    """READY 后 publish 保持并发；单条 broker stall 不得全局 head-of-line。"""
+
+    class _ConcurrentJetStream:
+        def __init__(self) -> None:
+            self.first_started = asyncio.Event()
+            self.second_started = asyncio.Event()
+            self.release_first = asyncio.Event()
+            self.calls = 0
+
+        async def publish(self, **_kwargs: Any) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                self.first_started.set()
+                await self.release_first.wait()
+            else:
+                self.second_started.set()
+
+    async def _run() -> None:
+        gate = NatsDeliveryGate()
+        assert gate.activate() is True
+        bus = NatsEventBus(
+            config=NatsBusConfig(),
+            consumer_role="market",
+            delivery_gate=gate,
+        )
+        fake_js = _ConcurrentJetStream()
+        bus._js = fake_js  # type: ignore[assignment]
+        first = asyncio.create_task(
+            bus.publish_envelope(
+                _make_envelope(_topics.MARKET_SNAPSHOTS, key="one"),
+                persist=False,
+            )
+        )
+        await asyncio.wait_for(fake_js.first_started.wait(), timeout=0.2)
+        second = asyncio.create_task(
+            bus.publish_envelope(
+                _make_envelope(_topics.MARKET_SNAPSHOTS, key="two"),
+                persist=False,
+            )
+        )
+        await asyncio.wait_for(fake_js.second_started.wait(), timeout=0.2)
+        await second
+        fake_js.release_first.set()
+        await first
+
+    asyncio.run(_run())
+
+
+def test_close_does_not_wait_on_hung_steady_publish_activation_lock() -> None:
+    """close 先 ABORT 并进入 drain；不得被一个稳态 publish 的本地锁卡住。"""
+
+    class _HungJetStream:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def publish(self, **_kwargs: Any) -> None:
+            self.started.set()
+            await self.release.wait()
+
+    class _Client:
+        def __init__(self) -> None:
+            self.drained = False
+
+        async def drain(self) -> None:
+            self.drained = True
+
+    async def _run() -> tuple[bool, bool]:
+        gate = NatsDeliveryGate()
+        assert gate.activate() is True
+        bus = NatsEventBus(
+            config=NatsBusConfig(),
+            consumer_role="market",
+            delivery_gate=gate,
+        )
+        fake_js = _HungJetStream()
+        client = _Client()
+        bus._js = fake_js  # type: ignore[assignment]
+        bus._client = client  # type: ignore[assignment]
+        publishing = asyncio.create_task(
+            bus.publish_envelope(
+                _make_envelope(_topics.MARKET_SNAPSHOTS),
+                persist=False,
+            )
+        )
+        await asyncio.wait_for(fake_js.started.wait(), timeout=0.2)
+        await asyncio.wait_for(bus.close(), timeout=0.2)
+        fake_js.release.set()
+        await publishing
+        return gate.aborted, client.drained
+
+    aborted, drained = asyncio.run(_run())
+    assert aborted is True
+    assert drained is True
 
 
 def test_on_msg_parse_error_terms_when_term_supported() -> None:

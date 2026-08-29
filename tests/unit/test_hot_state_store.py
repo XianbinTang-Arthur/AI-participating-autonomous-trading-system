@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+import types
 from typing import Any
 
 import pytest
@@ -121,6 +123,72 @@ def test_inmemory_health_check() -> None:
     asyncio.run(run())
 
 
+def test_inmemory_owner_aware_atomic_operations() -> None:
+    async def run() -> None:
+        store = InMemoryHotStateStore()
+        owner_a = {"instance_id": "a"}
+        owner_b = {"instance_id": "b"}
+        ready_a = {"instance_id": "a", "phase": "READY"}
+
+        assert await store.set_if_absent(
+            "lease", owner_a, ttl_seconds=30
+        ) is True
+        assert await store.set_if_absent(
+            "lease", owner_b, ttl_seconds=30
+        ) is False
+        assert await store.compare_refresh(
+            "lease", owner_b, ttl_seconds=30
+        ) is False
+        assert await store.compare_replace(
+            "lease", owner_b, ready_a, ttl_seconds=30
+        ) is False
+        assert await store.compare_replace(
+            "lease", owner_a, ready_a, ttl_seconds=30
+        ) is True
+        assert await store.compare_refresh(
+            "lease", owner_a, ttl_seconds=30
+        ) is False
+        assert await store.compare_refresh(
+            "lease", ready_a, ttl_seconds=30
+        ) is True
+        assert await store.compare_delete("lease", owner_b) is False
+        assert await store.compare_delete("lease", owner_a) is False
+        assert await store.get("lease") == ready_a
+        assert await store.compare_delete("lease", ready_a) is True
+        assert await store.get("lease") is None
+        assert await store.compare_replace(
+            "lease", ready_a, owner_a, ttl_seconds=30
+        ) is False
+
+    asyncio.run(run())
+
+
+def test_inmemory_atomic_operations_reject_expired_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        store = InMemoryHotStateStore()
+        fake_now = 1000.0
+        monkeypatch.setattr(
+            "aats.storage.hot_state_store.time.monotonic", lambda: fake_now
+        )
+        owner = {"instance_id": "a"}
+        assert await store.set_if_absent("lease", owner, ttl_seconds=1) is True
+        monkeypatch.setattr(
+            "aats.storage.hot_state_store.time.monotonic", lambda: fake_now + 2
+        )
+        assert await store.compare_refresh(
+            "lease", owner, ttl_seconds=1
+        ) is False
+        assert await store.compare_replace(
+            "lease", owner, {"instance_id": "b"}, ttl_seconds=1
+        ) is False
+        assert await store.compare_delete("lease", owner) is False
+        assert await store.set_if_absent("lease", owner, ttl_seconds=1) is True
+
+    asyncio.run(run())
+
+
 # ─────────────────────────────────────────────────────────────────────
 # InMemoryHotStateStore TTL
 # ─────────────────────────────────────────────────────────────────────
@@ -183,6 +251,79 @@ def test_redis_construction_does_not_require_redis_py() -> None:
     assert store._client is None
 
 
+def test_redis_connect_ping_failure_closes_local_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeRedisClient:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def ping(self) -> bool:
+            raise RuntimeError("primary ping failure")
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+
+    class _FakeRedis:
+        @staticmethod
+        def from_url(*_args: Any, **_kwargs: Any) -> _FakeRedisClient:
+            return client
+
+    async def run() -> None:
+        redis_module = types.ModuleType("redis")
+        redis_asyncio_module = types.ModuleType("redis.asyncio")
+        redis_asyncio_module.Redis = _FakeRedis  # type: ignore[attr-defined]
+        redis_module.asyncio = redis_asyncio_module  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "redis", redis_module)
+        monkeypatch.setitem(sys.modules, "redis.asyncio", redis_asyncio_module)
+        store = RedisHotStateStore(config=RedisHotStateConfig())
+
+        with pytest.raises(RuntimeError, match="primary ping failure"):
+            await store.connect()
+
+        assert client.close_calls == 1
+        assert store._client is None
+
+    client = _FakeRedisClient()
+    asyncio.run(run())
+
+
+def test_redis_connect_cleanup_failure_does_not_mask_ping_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary_error = RuntimeError("primary ping failure")
+
+    class _FakeRedisClient:
+        async def ping(self) -> bool:
+            raise primary_error
+
+        async def aclose(self) -> None:
+            raise RuntimeError("secondary cleanup failure")
+
+    class _FakeRedis:
+        @staticmethod
+        def from_url(*_args: Any, **_kwargs: Any) -> _FakeRedisClient:
+            return client
+
+    async def run() -> None:
+        redis_module = types.ModuleType("redis")
+        redis_asyncio_module = types.ModuleType("redis.asyncio")
+        redis_asyncio_module.Redis = _FakeRedis  # type: ignore[attr-defined]
+        redis_module.asyncio = redis_asyncio_module  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "redis", redis_module)
+        monkeypatch.setitem(sys.modules, "redis.asyncio", redis_asyncio_module)
+        store = RedisHotStateStore(config=RedisHotStateConfig())
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await store.connect()
+
+        assert exc_info.value is primary_error
+        assert store._client is None
+
+    client = _FakeRedisClient()
+    asyncio.run(run())
+
+
 def test_redis_get_before_connect_raises() -> None:
     async def run() -> None:
         store = RedisHotStateStore(config=RedisHotStateConfig())
@@ -204,6 +345,90 @@ def test_redis_delete_before_connect_raises() -> None:
         store = RedisHotStateStore(config=RedisHotStateConfig())
         with pytest.raises(RuntimeError, match="connect"):
             await store.delete("k")
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ("set_if_absent", "compare_refresh", "compare_replace", "compare_delete"),
+)
+def test_redis_owner_operation_before_connect_raises(operation: str) -> None:
+    async def run() -> None:
+        store = RedisHotStateStore(config=RedisHotStateConfig())
+        with pytest.raises(RuntimeError, match="connect"):
+            if operation == "set_if_absent":
+                await store.set_if_absent("k", "v", ttl_seconds=30)
+            elif operation == "compare_refresh":
+                await store.compare_refresh("k", "v", ttl_seconds=30)
+            elif operation == "compare_replace":
+                await store.compare_replace("k", "v", "next", ttl_seconds=30)
+            else:
+                await store.compare_delete("k", "v")
+
+    asyncio.run(run())
+
+
+def test_redis_owner_operations_use_nx_and_atomic_lua() -> None:
+    class _FakeRedisClient:
+        def __init__(self) -> None:
+            self.set_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+            self.eval_calls: list[tuple[Any, ...]] = []
+
+        async def set(self, *args: Any, **kwargs: Any) -> bool:
+            self.set_calls.append((args, kwargs))
+            return True
+
+        async def eval(self, *args: Any) -> int:
+            self.eval_calls.append(args)
+            return 1
+
+    async def run() -> None:
+        client = _FakeRedisClient()
+        store = RedisHotStateStore(
+            config=RedisHotStateConfig(global_prefix="test:")
+        )
+        store._client = client  # type: ignore[assignment]
+        owner = {"instance_id": "a"}
+
+        assert await store.set_if_absent(
+            "lease", owner, ttl_seconds=30
+        ) is True
+        set_args, set_kwargs = client.set_calls[0]
+        assert set_args[0] == "test:lease"
+        assert set_kwargs == {"px": 30_000, "nx": True}
+
+        assert await store.compare_refresh(
+            "lease", owner, ttl_seconds=30
+        ) is True
+        replacement = {"instance_id": "a", "phase": "READY"}
+        assert await store.compare_replace(
+            "lease", owner, replacement, ttl_seconds=45
+        ) is True
+        assert await store.compare_delete("lease", owner) is True
+        assert len(client.eval_calls) == 3
+        assert client.eval_calls[0][2] == "test:lease"
+        assert client.eval_calls[0][-1] == 30_000
+        assert client.eval_calls[1][2] == "test:lease"
+        assert client.eval_calls[1][-1] == 45_000
+        assert client.eval_calls[2][2] == "test:lease"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("ttl", (0.0, -1.0, float("inf"), float("nan")))
+def test_owner_operations_reject_invalid_ttl(ttl: float) -> None:
+    async def run() -> None:
+        store = InMemoryHotStateStore()
+        with pytest.raises(ValueError, match="finite and positive"):
+            await store.set_if_absent("lease", "owner", ttl_seconds=ttl)
+        await store.set("lease", "owner")
+        with pytest.raises(ValueError, match="finite and positive"):
+            await store.compare_refresh("lease", "owner", ttl_seconds=ttl)
+        with pytest.raises(ValueError, match="finite and positive"):
+            await store.compare_replace(
+                "lease", "owner", "next", ttl_seconds=ttl
+            )
+
     asyncio.run(run())
 
 

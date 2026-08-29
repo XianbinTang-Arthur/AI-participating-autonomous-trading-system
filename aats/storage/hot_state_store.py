@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -87,12 +88,47 @@ class HotStateStore(Protocol):
         """写入 key。ttl_seconds 为 None 表示不过期。"""
         ...
 
+    async def set_if_absent(
+        self,
+        key: str,
+        value: Any,
+        *,
+        ttl_seconds: float | None = None,
+    ) -> bool:
+        """仅在 key 不存在时写入；返回是否取得所有权。"""
+        ...
+
     async def delete(self, key: str) -> None:
         """删除 key。不存在视为成功。"""
         ...
 
     async def expire(self, key: str, ttl_seconds: float) -> bool:
         """对已存在的 key 设置 TTL。返回 True 表示设置成功。"""
+        ...
+
+    async def compare_refresh(
+        self,
+        key: str,
+        expected_value: Any,
+        *,
+        ttl_seconds: float,
+    ) -> bool:
+        """仅当当前值精确匹配时原子刷新 TTL。"""
+        ...
+
+    async def compare_replace(
+        self,
+        key: str,
+        expected_value: Any,
+        new_value: Any,
+        *,
+        ttl_seconds: float,
+    ) -> bool:
+        """仅当当前值精确匹配时原子替换值并重置 TTL。"""
+        ...
+
+    async def compare_delete(self, key: str, expected_value: Any) -> bool:
+        """仅当当前值精确匹配时原子删除。"""
         ...
 
     async def exists(self, key: str) -> bool: ...
@@ -119,6 +155,13 @@ class HotStateStore(Protocol):
 class _InMemoryEntry:
     value: Any
     expires_at: float | None  # monotonic seconds
+
+
+def _validated_positive_ttl(ttl_seconds: float) -> float:
+    ttl = float(ttl_seconds)
+    if not math.isfinite(ttl) or ttl <= 0.0:
+        raise ValueError("ttl_seconds must be finite and positive")
+    return ttl
 
 
 class InMemoryHotStateStore(HotStateStore):
@@ -155,16 +198,104 @@ class InMemoryHotStateStore(HotStateStore):
         async with self._lock:
             self._data[key] = _InMemoryEntry(value=value, expires_at=expires_at)
 
+    async def set_if_absent(
+        self,
+        key: str,
+        value: Any,
+        *,
+        ttl_seconds: float | None = None,
+    ) -> bool:
+        now = time.monotonic()
+        ttl = (
+            _validated_positive_ttl(ttl_seconds)
+            if ttl_seconds is not None
+            else None
+        )
+        expires_at = now + ttl if ttl is not None else None
+        async with self._lock:
+            existing = self._data.get(key)
+            if existing is not None and self._is_expired(existing, now):
+                self._data.pop(key, None)
+                existing = None
+            if existing is not None:
+                return False
+            self._data[key] = _InMemoryEntry(value=value, expires_at=expires_at)
+            return True
+
     async def delete(self, key: str) -> None:
         async with self._lock:
             self._data.pop(key, None)
 
     async def expire(self, key: str, ttl_seconds: float) -> bool:
+        ttl = _validated_positive_ttl(ttl_seconds)
         async with self._lock:
             entry = self._data.get(key)
             if entry is None:
                 return False
-            entry.expires_at = time.monotonic() + ttl_seconds
+            if self._is_expired(entry, time.monotonic()):
+                self._data.pop(key, None)
+                return False
+            entry.expires_at = time.monotonic() + ttl
+            return True
+
+    async def compare_refresh(
+        self,
+        key: str,
+        expected_value: Any,
+        *,
+        ttl_seconds: float,
+    ) -> bool:
+        ttl = _validated_positive_ttl(ttl_seconds)
+        now = time.monotonic()
+        async with self._lock:
+            entry = self._data.get(key)
+            if entry is None:
+                return False
+            if self._is_expired(entry, now):
+                self._data.pop(key, None)
+                return False
+            if entry.value != expected_value:
+                return False
+            entry.expires_at = now + ttl
+            return True
+
+    async def compare_replace(
+        self,
+        key: str,
+        expected_value: Any,
+        new_value: Any,
+        *,
+        ttl_seconds: float,
+    ) -> bool:
+        ttl = _validated_positive_ttl(ttl_seconds)
+        now = time.monotonic()
+        async with self._lock:
+            entry = self._data.get(key)
+            if entry is None:
+                return False
+            if self._is_expired(entry, now):
+                self._data.pop(key, None)
+                return False
+            if entry.value != expected_value:
+                return False
+            self._data[key] = _InMemoryEntry(
+                value=new_value,
+                expires_at=now + ttl,
+            )
+            return True
+
+    async def compare_delete(self, key: str, expected_value: Any) -> bool:
+        now = time.monotonic()
+        async with self._lock:
+            entry = self._data.get(key)
+            if entry is None:
+                return False
+            if self._is_expired(entry, now):
+                self._data.pop(key, None)
+                return False
+            if entry.value != expected_value:
+                return False
+            self._data.pop(key, None)
             return True
 
     async def exists(self, key: str) -> bool:
@@ -271,7 +402,17 @@ class RedisHotStateStore(HotStateStore):
             decode_responses=False,
             **ssl_kwargs,
         )
-        await client.ping()
+        try:
+            await client.ping()
+        except BaseException:
+            # The client owns a connection pool as soon as it is constructed.
+            # Keep it local until the health probe succeeds, and make a failed
+            # probe release that pool without replacing the original failure.
+            try:
+                await client.aclose()
+            except BaseException:
+                pass
+            raise
         self._client = client
 
     def _ensure_client(self) -> "AsyncRedis":
@@ -311,14 +452,106 @@ class RedisHotStateStore(HotStateStore):
             ms = max(int(round(ttl_seconds * 1000)), 1)
             await client.set(full_key, encoded, px=ms)
 
+    async def set_if_absent(
+        self,
+        key: str,
+        value: Any,
+        *,
+        ttl_seconds: float | None = None,
+    ) -> bool:
+        client = self._ensure_client()
+        encoded = self._encode(value)
+        full_key = self._config.apply_prefix(key)
+        if ttl_seconds is None:
+            result = await client.set(full_key, encoded, nx=True)
+        else:
+            ttl = _validated_positive_ttl(ttl_seconds)
+            ms = max(int(round(ttl * 1000)), 1)
+            result = await client.set(full_key, encoded, px=ms, nx=True)
+        return bool(result)
+
     async def delete(self, key: str) -> None:
         client = self._ensure_client()
         await client.delete(self._config.apply_prefix(key))
 
     async def expire(self, key: str, ttl_seconds: float) -> bool:
         client = self._ensure_client()
-        ms = max(int(round(ttl_seconds * 1000)), 1)
+        ttl = _validated_positive_ttl(ttl_seconds)
+        ms = max(int(round(ttl * 1000)), 1)
         result = await client.pexpire(self._config.apply_prefix(key), ms)
+        return bool(result)
+
+    async def compare_refresh(
+        self,
+        key: str,
+        expected_value: Any,
+        *,
+        ttl_seconds: float,
+    ) -> bool:
+        client = self._ensure_client()
+        full_key = self._config.apply_prefix(key)
+        expected = self._encode(expected_value)
+        ttl = _validated_positive_ttl(ttl_seconds)
+        ms = max(int(round(ttl * 1000)), 1)
+        result = await client.eval(
+            """
+            if redis.call('GET', KEYS[1]) == ARGV[1] then
+                return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+            end
+            return 0
+            """,
+            1,
+            full_key,
+            expected,
+            ms,
+        )
+        return bool(result)
+
+    async def compare_replace(
+        self,
+        key: str,
+        expected_value: Any,
+        new_value: Any,
+        *,
+        ttl_seconds: float,
+    ) -> bool:
+        client = self._ensure_client()
+        full_key = self._config.apply_prefix(key)
+        expected = self._encode(expected_value)
+        replacement = self._encode(new_value)
+        ttl = _validated_positive_ttl(ttl_seconds)
+        ms = max(int(round(ttl * 1000)), 1)
+        result = await client.eval(
+            """
+            if redis.call('GET', KEYS[1]) == ARGV[1] then
+                redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
+                return 1
+            end
+            return 0
+            """,
+            1,
+            full_key,
+            expected,
+            replacement,
+            ms,
+        )
+        return bool(result)
+
+    async def compare_delete(self, key: str, expected_value: Any) -> bool:
+        client = self._ensure_client()
+        full_key = self._config.apply_prefix(key)
+        expected = self._encode(expected_value)
+        result = await client.eval(
+            """
+            if redis.call('GET', KEYS[1]) == ARGV[1] then
+                return redis.call('DEL', KEYS[1])
+            end
+            return 0
+            """,
+            1,
+            full_key,
+            expected,
+        )
         return bool(result)
 
     async def exists(self, key: str) -> bool:

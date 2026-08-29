@@ -23,14 +23,14 @@
    - 这是 4 进程拓扑里 "gateway publish → decision subscribe" 模式的微缩验证
 
 ⚠️ **运行条件**：
-- 需要 docker（Windows 上请确保 Docker Desktop 正在运行）
+- 需要规定 WSL2 运行环境（``~/aats-venv``）可访问 Docker daemon
 - 需要安装可选依赖：``pip install -e .[nats-integration]``
 - 需要设置环境变量 ``AATS_RUN_NATS_INTEGRATION=1`` 才会真正运行
 - 默认情况下整个文件被 ``unittest.skipUnless`` 跳过，不会拖慢 CI / 单测
 
 ⚠️ **scope 注意**：本文件验证的是 NATS JetStream 路径在 EventBus 层的正确性。
-完整的 4 进程 docker-compose smoke test（gateway/market/decision/execution 容器
-互相通信）依赖 Stage 5 的 entry script + 4 个新 docker service，那部分尚未做。
+FS-016 针对现有四主服务的 full-down/restart/disconnect 故障注入矩阵仍为 OPEN；
+本文件不能替代该部署态证据。
 本文件用 multiprocessing 子进程作为 "可移植的 4 进程"代理来验证跨进程语义。
 """
 from __future__ import annotations
@@ -191,6 +191,527 @@ class TestNatsEventBusRoundTrip(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(msg["payload"]["payload"]["decision_id"], "rt-1")
         finally:
             await bus.close()
+
+    async def test_existing_critical_durable_updates_in_place_without_cursor_reset(
+        self,
+    ) -> None:
+        """v1 max_ack_pending=256 → gated v2=1 必须保留 durable cursor。"""
+
+        from aats.bus.nats_bus import (
+            NatsBusConfig,
+            NatsDeliveryGate,
+            NatsEventBus,
+            StreamSpec,
+        )
+        from aats.schemas.common import EventEnvelope
+
+        topic = _topics.ORDER_INTENTS
+        stream_name = "AATS_RT_DURABLE_UPGRADE"
+        stream = StreamSpec(
+            name=stream_name,
+            topics=frozenset({topic}),
+            max_age_seconds=300.0,
+            max_bytes=16 * 1024 * 1024,
+            max_msgs=10_000,
+            max_msg_size=1024 * 1024,
+        )
+        legacy_config = NatsBusConfig(
+            servers=(self.nats_url,),
+            streams=(stream,),
+            ack_wait_seconds=0.3,
+            max_ack_pending=256,
+            flow_control=False,
+        )
+        upgraded_config = NatsBusConfig(
+            servers=(self.nats_url,),
+            streams=(stream,),
+            ack_wait_seconds=0.3,
+            max_ack_pending=256,
+            flow_control=True,
+        )
+        durable = legacy_config.durable_name_for("execution", topic)
+        legacy = NatsEventBus(
+            config=legacy_config,
+            consumer_role="execution",
+        )
+        raw_client = await nats.connect(self.nats_url)
+        raw_js = raw_client.jetstream()
+        legacy_received = asyncio.Event()
+
+        async def _legacy_handler(_message: dict[str, Any]) -> None:
+            legacy_received.set()
+
+        try:
+            await legacy.start()
+            await legacy.subscribe(topic, _legacy_handler)
+            first = EventEnvelope(
+                event_type="order_intent",
+                source_component="durable_upgrade_test",
+                topic=topic,
+                key="first",
+                payload={"sequence": 1},
+            )
+            await legacy.publish_envelope(first, persist=False)
+            await asyncio.wait_for(legacy_received.wait(), timeout=3.0)
+            for _ in range(50):
+                before = await raw_js.consumer_info(stream_name, durable)
+                if before.num_ack_pending == 0:
+                    break
+                await asyncio.sleep(0.02)
+            self.assertEqual(before.config.max_ack_pending, 256)
+            before_ack_stream = before.ack_floor.stream_seq
+            before_ack_consumer = before.ack_floor.consumer_seq
+            before_delivered_stream = before.delivered.stream_seq
+            before_delivered_consumer = before.delivered.consumer_seq
+            before_created = before.created
+            before_name = before.name
+            await legacy.close()
+
+            pending = EventEnvelope(
+                event_type="order_intent",
+                source_component="durable_upgrade_test",
+                topic=topic,
+                key="pending",
+                payload={"sequence": 2},
+            )
+            await raw_js.publish(
+                legacy_config.subject_for(topic),
+                pending.model_dump_json().encode("utf-8"),
+                headers={"Nats-Msg-Id": pending.event_id},
+            )
+
+            gate = NatsDeliveryGate()
+            upgraded = NatsEventBus(
+                config=upgraded_config,
+                consumer_role="execution",
+                delivery_gate=gate,
+            )
+            upgraded_received = asyncio.Event()
+            upgraded_keys: list[str] = []
+
+            async def _upgraded_handler(message: dict[str, Any]) -> None:
+                upgraded_keys.append(str(message["key"]))
+                upgraded_received.set()
+
+            try:
+                await upgraded.start()
+                await upgraded.subscribe(topic, _upgraded_handler)
+                for _ in range(50):
+                    after_bind = await raw_js.consumer_info(stream_name, durable)
+                    if after_bind.num_ack_pending == 1:
+                        break
+                    await asyncio.sleep(0.02)
+
+                self.assertEqual(after_bind.config.max_ack_pending, 1)
+                self.assertEqual(after_bind.name, before_name)
+                self.assertEqual(after_bind.created, before_created)
+                self.assertGreaterEqual(
+                    after_bind.ack_floor.stream_seq,
+                    before_ack_stream,
+                )
+                self.assertGreaterEqual(
+                    after_bind.ack_floor.consumer_seq,
+                    before_ack_consumer,
+                )
+                self.assertGreaterEqual(
+                    after_bind.delivered.stream_seq,
+                    before_delivered_stream,
+                )
+                self.assertGreaterEqual(
+                    after_bind.delivered.consumer_seq,
+                    before_delivered_consumer,
+                )
+                self.assertEqual(after_bind.num_ack_pending, 1)
+                self.assertFalse(upgraded_received.is_set())
+
+                await upgraded.activate_delivery()
+                await asyncio.wait_for(upgraded_received.wait(), timeout=3.0)
+                for _ in range(50):
+                    final_info = await raw_js.consumer_info(stream_name, durable)
+                    if final_info.num_ack_pending == 0:
+                        break
+                    await asyncio.sleep(0.02)
+                self.assertEqual(final_info.num_ack_pending, 0)
+                self.assertGreaterEqual(
+                    final_info.ack_floor.stream_seq,
+                    after_bind.delivered.stream_seq,
+                )
+                self.assertEqual(upgraded_keys, ["pending"])
+            finally:
+                await upgraded.close()
+        finally:
+            if legacy._client is not None:
+                await legacy.close()
+            await raw_client.drain()
+
+    async def test_deleted_critical_durable_is_terminal_while_core_stays_connected(
+        self,
+    ) -> None:
+        """JetStream consumer 删除不能被健康的 core TCP 连接掩盖。"""
+
+        from aats.bus.nats_bus import (
+            NatsBusConfig,
+            NatsDeliveryGate,
+            NatsEventBus,
+            StreamSpec,
+        )
+
+        topic = _topics.ORDER_INTENTS
+        stream_name = "AATS_RT_CONSUMER_SUPERVISION"
+        config = NatsBusConfig(
+            servers=(self.nats_url,),
+            streams=(
+                StreamSpec(
+                    name=stream_name,
+                    topics=frozenset({topic}),
+                    max_age_seconds=300.0,
+                    max_bytes=16 * 1024 * 1024,
+                    max_msgs=10_000,
+                    max_msg_size=1024 * 1024,
+                ),
+            ),
+            consumer_supervision_interval_seconds=0.05,
+            consumer_supervision_failure_timeout_seconds=0.3,
+        )
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=config,
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        raw_client = await nats.connect(self.nats_url)
+        raw_js = raw_client.jetstream()
+        durable = config.durable_name_for("execution", topic)
+
+        async def _noop_handler(_message: dict[str, Any]) -> None:
+            return None
+
+        try:
+            await bus.start()
+            await bus.subscribe(topic, _noop_handler)
+            before = await raw_js.consumer_info(stream_name, durable)
+            self.assertEqual(before.name, durable)
+            await bus._supervise_critical_consumers_once()
+            self.assertFalse(gate.aborted)
+
+            await raw_js.delete_consumer(stream_name, durable)
+            self.assertTrue(raw_client.is_connected)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "nats_connection_terminal_failure",
+            ):
+                await asyncio.wait_for(
+                    bus.wait_for_terminal_connection_failure(),
+                    timeout=2.0,
+                )
+            self.assertTrue(raw_client.is_connected)
+            self.assertTrue(gate.aborted)
+        finally:
+            await bus.close()
+            await raw_client.drain()
+
+    async def test_critical_durable_with_outstanding_acks_refuses_window_upgrade(
+        self,
+    ) -> None:
+        """v1 durable 有未 ACK 消息时，v2 必须保留窗口与 cursor 并失败关闭。"""
+
+        from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+
+        from aats.bus.nats_bus import (
+            NatsBusConfig,
+            NatsDeliveryGate,
+            NatsEventBus,
+            StreamSpec,
+        )
+        from aats.schemas.common import EventEnvelope
+
+        topic = _topics.ORDER_INTENTS
+        stream_name = "AATS_RT_DURABLE_PENDING_UPGRADE"
+        stream = StreamSpec(
+            name=stream_name,
+            topics=frozenset({topic}),
+            max_age_seconds=300.0,
+            max_bytes=16 * 1024 * 1024,
+            max_msgs=10_000,
+            max_msg_size=1024 * 1024,
+        )
+        legacy_config = NatsBusConfig(
+            servers=(self.nats_url,),
+            streams=(stream,),
+            ack_wait_seconds=30.0,
+            max_ack_pending=256,
+            flow_control=False,
+        )
+        durable = legacy_config.durable_name_for("execution", topic)
+        subject = legacy_config.subject_for(topic)
+        provisioner = NatsEventBus(
+            config=legacy_config,
+            consumer_role="execution",
+        )
+        upgraded = NatsEventBus(
+            config=NatsBusConfig(
+                servers=(self.nats_url,),
+                streams=(stream,),
+                ack_wait_seconds=30.0,
+                max_ack_pending=256,
+                flow_control=True,
+            ),
+            consumer_role="execution",
+            delivery_gate=NatsDeliveryGate(),
+        )
+        raw_client = await nats.connect(self.nats_url)
+        raw_js = raw_client.jetstream()
+        raw_subscription: Any = None
+        received: list[Any] = []
+        three_delivered = asyncio.Event()
+
+        async def _leave_unacked(message: Any) -> None:
+            received.append(message)
+            if len(received) >= 3:
+                three_delivered.set()
+
+        try:
+            await provisioner.start()
+            deliver_subject = raw_client.new_inbox()
+            raw_subscription = await raw_client.subscribe(
+                deliver_subject,
+                cb=_leave_unacked,
+            )
+            await raw_js.add_consumer(
+                stream_name,
+                config=ConsumerConfig(
+                    durable_name=durable,
+                    deliver_subject=deliver_subject,
+                    deliver_policy=DeliverPolicy.ALL,
+                    ack_policy=AckPolicy.EXPLICIT,
+                    ack_wait=30.0,
+                    max_ack_pending=256,
+                    max_deliver=5,
+                    filter_subject=subject,
+                ),
+            )
+
+            for sequence in range(1, 4):
+                envelope = EventEnvelope(
+                    event_type="order_intent",
+                    source_component="durable_pending_upgrade_test",
+                    topic=topic,
+                    key=f"pending-{sequence}",
+                    payload={"sequence": sequence},
+                )
+                await raw_js.publish(
+                    subject,
+                    envelope.model_dump_json().encode("utf-8"),
+                    headers={"Nats-Msg-Id": envelope.event_id},
+                )
+
+            await asyncio.wait_for(three_delivered.wait(), timeout=3.0)
+            for _ in range(100):
+                before = await raw_js.consumer_info(stream_name, durable)
+                if before.num_ack_pending >= 3:
+                    break
+                await asyncio.sleep(0.02)
+            self.assertGreaterEqual(before.num_ack_pending, 3)
+            self.assertEqual(before.config.max_ack_pending, 256)
+            before_identity = (before.name, before.created)
+            before_ack_floor = (
+                before.ack_floor.stream_seq,
+                before.ack_floor.consumer_seq,
+            )
+            before_delivered = (
+                before.delivered.stream_seq,
+                before.delivered.consumer_seq,
+            )
+
+            await upgraded.start()
+
+            async def _noop_handler(_message: dict[str, Any]) -> None:
+                return None
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                (
+                    "^nats_critical_consumer_ack_window_migration_requires_drain:"
+                    f"{durable}$"
+                ),
+            ):
+                await upgraded.subscribe(topic, _noop_handler)
+
+            after = await raw_js.consumer_info(stream_name, durable)
+            self.assertEqual((after.name, after.created), before_identity)
+            self.assertEqual(after.config.max_ack_pending, 256)
+            self.assertEqual(after.num_ack_pending, before.num_ack_pending)
+            self.assertEqual(
+                (
+                    after.ack_floor.stream_seq,
+                    after.ack_floor.consumer_seq,
+                ),
+                before_ack_floor,
+            )
+            self.assertEqual(
+                (
+                    after.delivered.stream_seq,
+                    after.delivered.consumer_seq,
+                ),
+                before_delivered,
+            )
+        finally:
+            if upgraded._client is not None:
+                await upgraded.close()
+            if raw_subscription is not None:
+                await raw_subscription.unsubscribe()
+            await raw_client.drain()
+            await provisioner.close()
+
+
+    async def test_non_event_durables_rebuild_outstanding_window_by_policy(
+        self,
+    ) -> None:
+        """LAST 保留最新、NEW 仅收未来；二者均不得继承旧宽窗 delivery。"""
+
+        from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+
+        from aats.bus.nats_bus import (
+            NatsBusConfig,
+            NatsDeliveryGate,
+            NatsEventBus,
+            StreamSpec,
+        )
+        from aats.schemas.common import EventEnvelope
+
+        cases = (
+            (
+                _topics.MARKET_SNAPSHOTS,
+                "decision",
+                DeliverPolicy.LAST,
+                "AATS_RT_LAST_PENDING_REBUILD",
+            ),
+            (
+                _topics.OPERATOR_COMMAND_REQUESTS,
+                "execution",
+                DeliverPolicy.NEW,
+                "AATS_RT_NEW_PENDING_REBUILD",
+            ),
+        )
+        for topic, role, policy, stream_name in cases:
+            with self.subTest(policy=str(policy)):
+                stream = StreamSpec(
+                    name=stream_name,
+                    topics=frozenset({topic}),
+                    max_age_seconds=300.0,
+                    max_bytes=16 * 1024 * 1024,
+                    max_msgs=10_000,
+                    max_msg_size=1024 * 1024,
+                )
+                config = NatsBusConfig(
+                    servers=(self.nats_url,),
+                    streams=(stream,),
+                    ack_wait_seconds=30.0,
+                    max_ack_pending=256,
+                    flow_control=True,
+                )
+                durable = config.durable_name_for(role, topic)
+                subject = config.subject_for(topic)
+                provisioner = NatsEventBus(
+                    config=config,
+                    consumer_role=role,
+                )
+                gate = NatsDeliveryGate()
+                upgraded = NatsEventBus(
+                    config=config,
+                    consumer_role=role,
+                    delivery_gate=gate,
+                )
+                raw_client = await nats.connect(self.nats_url)
+                raw_js = raw_client.jetstream()
+                raw_subscription: Any = None
+                received_raw: list[Any] = []
+                three_delivered = asyncio.Event()
+
+                async def _leave_unacked(message: Any) -> None:
+                    received_raw.append(message)
+                    if len(received_raw) >= 3:
+                        three_delivered.set()
+
+                try:
+                    await provisioner.start()
+                    deliver_subject = raw_client.new_inbox()
+                    raw_subscription = await raw_client.subscribe(
+                        deliver_subject,
+                        cb=_leave_unacked,
+                    )
+                    await raw_js.add_consumer(
+                        stream_name,
+                        config=ConsumerConfig(
+                            durable_name=durable,
+                            deliver_subject=deliver_subject,
+                            deliver_policy=policy,
+                            ack_policy=AckPolicy.EXPLICIT,
+                            ack_wait=30.0,
+                            max_ack_pending=256,
+                            max_deliver=5,
+                            filter_subject=subject,
+                        ),
+                    )
+                    for sequence in range(1, 4):
+                        envelope = EventEnvelope(
+                            event_type="non_event_cutover_probe",
+                            source_component="non_event_pending_rebuild_test",
+                            topic=topic,
+                            key=f"pending-{sequence}",
+                            payload={"sequence": sequence},
+                        )
+                        await raw_js.publish(
+                            subject,
+                            envelope.model_dump_json().encode("utf-8"),
+                            headers={"Nats-Msg-Id": envelope.event_id},
+                        )
+                    await asyncio.wait_for(three_delivered.wait(), timeout=3.0)
+                    before = await raw_js.consumer_info(stream_name, durable)
+                    self.assertGreaterEqual(before.num_ack_pending, 3)
+                    before_created = before.created
+
+                    await upgraded.start()
+                    received_upgraded: list[str] = []
+                    delivered = asyncio.Event()
+
+                    async def _upgraded_handler(message: dict[str, Any]) -> None:
+                        received_upgraded.append(str(message["key"]))
+                        delivered.set()
+
+                    await upgraded.subscribe(topic, _upgraded_handler)
+                    after = await raw_js.consumer_info(stream_name, durable)
+                    self.assertEqual(after.name, durable)
+                    self.assertNotEqual(after.created, before_created)
+                    self.assertEqual(after.config.max_ack_pending, 1)
+                    self.assertLessEqual(after.num_ack_pending, 1)
+                    self.assertFalse(delivered.is_set())
+
+                    await upgraded.activate_delivery()
+                    if policy == DeliverPolicy.LAST:
+                        await asyncio.wait_for(delivered.wait(), timeout=3.0)
+                        self.assertEqual(received_upgraded, ["pending-3"])
+                    else:
+                        await asyncio.sleep(0.2)
+                        self.assertEqual(received_upgraded, [])
+                        future = EventEnvelope(
+                            event_type="non_event_cutover_probe",
+                            source_component="non_event_pending_rebuild_test",
+                            topic=topic,
+                            key="future",
+                            payload={"sequence": 4},
+                        )
+                        await upgraded.publish_envelope(future, persist=False)
+                        await asyncio.wait_for(delivered.wait(), timeout=3.0)
+                        self.assertEqual(received_upgraded, ["future"])
+                finally:
+                    if upgraded._client is not None:
+                        await upgraded.close()
+                    if raw_subscription is not None:
+                        await raw_subscription.unsubscribe()
+                    await raw_client.drain()
+                    if provisioner._client is not None:
+                        await provisioner.close()
 
 
 @unittest.skipUnless(

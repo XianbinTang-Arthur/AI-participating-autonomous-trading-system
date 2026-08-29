@@ -118,6 +118,31 @@
 - [`fs_011_legacy_run_local_fail_closed_sow_2026_08_25.md`](fs_011_legacy_run_local_fail_closed_sow_2026_08_25.md)：失效本地 paper-loop 入口的无配置副作用迁移失败关闭；
 - [`fs_015_replay_short_bias_parity_sow_2026_08_25.md`](fs_015_replay_short_bias_parity_sow_2026_08_25.md)：independent replay 与生产 short-bias gate 一致性；
 - [`fs_016_nats_peer_readiness_fail_closed_sow_2026_08_24.md`](fs_016_nats_peer_readiness_fail_closed_sow_2026_08_24.md)：NATS/hybrid peer readiness 失败关闭与部署代次隔离；
+- [`fs_016_runtime_readiness_lease_restart_safety_p0_sow_2026_08_28.md`](fs_016_runtime_readiness_lease_restart_safety_p0_sow_2026_08_28.md)：
+  记录模拟栈运行超过 300 秒后单角色无法重新加入的现场 P0，以 Redis-only protocol v2、
+  全局 `aats:runtime:owner:<role>`、`PROVISIONING -> READY` CAS、claim 即续租、独立 subprocess
+  watchdog、55 秒 takeover quarantine、`NatsDeliveryGate`、strict gated `max_ack_pending=1`、首次
+  cutover drain gate、critical durable runtime supervision、Redis `noeviction`、4,096 条/64 MiB build
+  publish 缓冲、60/10/30/10 秒 lease 时间界、每次成功 PROVISIONING 写/续租后的 50 秒滑动 hard
+  fence 与 claim→READY 180 秒绝对上界修订原 FS-016；non-strict/in-memory/monolith 不注入 gate、
+  不强制窗口。v1 -> v2 首发/回滚必须走标准 full-down。入口在任何 mutation 前取得固定
+  `/tmp/aats-standard-deploy.lock` 的长寿命 WSL `flock`；只有 `AATS_DEPLOY_TEST_MODE=true` 的隔离
+  测试可用 `AATS_DEPLOY_LOCK_FILE` 覆盖。Windows 3 秒 heartbeat / WSL 12 秒失联释放协议持有到
+  最终 evidence/report；新 holder 必须隔离等待 fresh predecessor lease 清除或过期。外部步骤 spawn
+  前复核锁、spawn 后登记 active child，丢锁或 `TERM/HUP/INT/EXIT` 均先终止并 wait 子进程树，再
+  停止 heartbeat、移除 lease、释放 flock。stop 七个
+  应用后，以 ID/status/StartedAt/FinishedAt/RestartCount 和精确 Docker events 区间证明 quiescence。
+  基础设施-only up 后、full-down 前执行第一次 loopback 全量分页只读 preflight；full-down 后重建
+  基线，并在 infra/schema 后、app-up 前执行第二次。阻断或 quiescence 变化时保留 NATS，最终部署
+  证据校验最后一次 v2 PASS 的 lock id/generation/deployed commit/quiescence 及路径/hash；标准 stop
+  仍不能替代 drain 证明。LAST/NEW 的运行时重建受 strict delivery gate、非 ALL policy，以及
+  “outstanding 超过目标”或“收缩窗口且 outstanding 非零”条件约束，自动重启也可能触发；full-down
+  是额外发布门禁，不是运行时信号。真实 NATS
+  consumer-delete 集成已通过，锁竞争/释放/重取有窄 smoke；最后一次 NATS 健康窗修复后，当前候选
+  通过 `213` 项 FS-016 聚焦、`173` 项根级独立聚焦复跑和
+  `6429 passed / 31 skipped / 259 subtests passed` 全量单测，但真 Redis/NATS/Docker、标准
+  部署、网络/push/heartbeat/backlog stall、真实逐角色重启、双故障和下游 fencing 均为 `OPEN`；
+  不能据本地候选宣称模拟栈已恢复或 live 已放行。
 - [`fs_019_operator_login_async_isolation_sow_2026_08_24.md`](fs_019_operator_login_async_isolation_sow_2026_08_24.md)：Operator 登录异步隔离、有界 worker、每进程限流与 dummy KDF；
 - [`fs_020_browser_security_headers_sow_2026_08_24.md`](fs_020_browser_security_headers_sow_2026_08_24.md)：Gateway Host 失败关闭与浏览器安全响应头；
 - [`fs_017_fs_018_dashboard_accessibility_sow_2026_08_25.md`](fs_017_fs_018_dashboard_accessibility_sow_2026_08_25.md)：Dashboard 原生 modal/focus contract 与 reduced-motion 收敛；

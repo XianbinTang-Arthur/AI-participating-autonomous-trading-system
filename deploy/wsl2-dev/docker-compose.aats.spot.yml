@@ -28,34 +28,47 @@ name: aats-dev
 x-aats-spot-env: &aats-spot-env
   AATS_PROFILE: spot
 
+x-aats-spot-labels: &aats-spot-labels
+  com.aats.profile: spot
+
 services:
   aats-gateway:
     env_file:
       - ../../.env.spot
+      - "${AATS_NATS_TARGET_ENV_SNAPSHOT_PATH:?NATS target snapshot required}"
     environment:
       <<: *aats-spot-env
+    labels: *aats-spot-labels
 
   aats-market:
     env_file:
       - ../../.env.spot
+      - "${AATS_NATS_TARGET_ENV_SNAPSHOT_PATH:?NATS target snapshot required}"
     environment:
       <<: *aats-spot-env
+    labels: *aats-spot-labels
 
   aats-decision:
     env_file:
       - ../../.env.spot
+      - "${AATS_NATS_TARGET_ENV_SNAPSHOT_PATH:?NATS target snapshot required}"
     environment:
       <<: *aats-spot-env
+    labels: *aats-spot-labels
 
   aats-execution:
     env_file:
       - ../../.env.spot
+      - "${AATS_NATS_TARGET_ENV_SNAPSHOT_PATH:?NATS target snapshot required}"
     environment:
       <<: *aats-spot-env
+    labels: *aats-spot-labels
 
   aats-rdp-daemon:
     env_file:
       - ../../.env.spot
+      - "${AATS_NATS_TARGET_ENV_SNAPSHOT_PATH:?NATS target snapshot required}"
     environment:
       <<: *aats-spot-env
       AATS_PROCESS_ROLE: rdp-daemon
+    labels: *aats-spot-labels

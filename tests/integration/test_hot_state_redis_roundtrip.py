@@ -14,8 +14,11 @@
 3. **错误路径**：connect 之前就 set 应当抛 RuntimeError
    - 提前用错路径让 build_runtime fail-fast 校验更可靠
 
+4. **跨 store owner fencing**：真实 Redis 的独占 claim、CAS refresh/delete 与 TTL
+   - 非 owner 不能续租或删除；owner 刷新会延长 TTL；过期后另一实例可重新取得
+
 ⚠️ **运行条件**：
-- 需要 docker（Windows 上请确保 Docker Desktop 正在运行）
+- 按仓库规定在 WSL2 Docker 与 ``~/aats-venv`` 中运行
 - 需要安装可选依赖：``pip install -e .[redis-integration]``
 - 需要设置环境变量 ``AATS_RUN_REDIS_INTEGRATION=1`` 才会真正运行
 - 默认情况下整个文件被 ``unittest.skipUnless`` 跳过，不会拖慢 CI / 单测
@@ -23,7 +26,8 @@
 ⚠️ **scope 注意**：本文件验证的是 RedisHotStateStore 在最底层的正确性。
 build_runtime 真正切到 Redis backend 的端到端验证是 Slice 6.1 #4.6 的
 "4 进程 docker compose 真跑"，由 runbook 章节记录。本文件用 testcontainers
-起的 ad-hoc Redis 是"可移植的最小信任根"。
+起的 ad-hoc Redis 是"可移植的最小信任根"；即使本文件通过，也不证明 NATS、生命周期、
+Compose 或单角色重启矩阵已经通过。
 """
 from __future__ import annotations
 
@@ -279,6 +283,191 @@ class TestRedisHotStateStoreRoundTrip(unittest.IsolatedAsyncioTestCase):
         finally:
             await gateway_store.close()
             await execution_store.close()
+
+    async def test_owner_fencing_and_ttl_refresh_are_atomic_across_stores(self) -> None:
+        """真实 Redis 必须拒绝非 owner refresh/delete，并允许 TTL 后重新取得。"""
+
+        from redis.asyncio import Redis as AsyncRedis  # type: ignore[import-not-found]
+
+        from aats.storage.hot_state_store import (
+            RedisHotStateConfig,
+            RedisHotStateStore,
+        )
+
+        owner_a_store = RedisHotStateStore(
+            config=RedisHotStateConfig(url=self.redis_url, global_prefix="lease-test:"),
+        )
+        owner_b_store = RedisHotStateStore(
+            config=RedisHotStateConfig(url=self.redis_url, global_prefix="lease-test:"),
+        )
+        raw_client = AsyncRedis.from_url(self.redis_url)
+        key = "runtime:ready:generation:execution"
+        full_key = f"lease-test:{key}"
+        owner_a = {"instance_id": "a" * 32}
+        owner_b = {"instance_id": "b" * 32}
+        try:
+            await owner_a_store.connect()
+            await owner_b_store.connect()
+
+            self.assertTrue(
+                await owner_a_store.set_if_absent(
+                    key,
+                    owner_a,
+                    ttl_seconds=0.25,
+                )
+            )
+            self.assertFalse(
+                await owner_b_store.set_if_absent(
+                    key,
+                    owner_b,
+                    ttl_seconds=0.25,
+                )
+            )
+            self.assertFalse(
+                await owner_b_store.compare_refresh(
+                    key,
+                    owner_b,
+                    ttl_seconds=0.5,
+                )
+            )
+            self.assertFalse(await owner_b_store.compare_delete(key, owner_b))
+
+            original_ttl_ms = await raw_client.pttl(full_key)
+            self.assertGreater(original_ttl_ms, 0)
+            await asyncio.sleep(0.12)
+            self.assertTrue(
+                await owner_a_store.compare_refresh(
+                    key,
+                    owner_a,
+                    ttl_seconds=0.5,
+                )
+            )
+            refreshed_ttl_ms = await raw_client.pttl(full_key)
+            self.assertGreater(refreshed_ttl_ms, original_ttl_ms)
+
+            self.assertTrue(await owner_a_store.compare_delete(key, owner_a))
+            self.assertTrue(
+                await owner_b_store.set_if_absent(
+                    key,
+                    owner_b,
+                    ttl_seconds=0.1,
+                )
+            )
+            await asyncio.sleep(0.2)
+            self.assertIsNone(await owner_a_store.get(key))
+            self.assertTrue(
+                await owner_a_store.set_if_absent(
+                    key,
+                    owner_a,
+                    ttl_seconds=0.25,
+                )
+            )
+        finally:
+            await raw_client.aclose()
+            await owner_a_store.close()
+            await owner_b_store.close()
+
+    async def test_compare_replace_is_owner_aware_and_replaces_ttl_atomically(
+        self,
+    ) -> None:
+        """PROVISIONING→READY 必须是跨实例安全的 value+TTL 单次 CAS。"""
+
+        from redis.asyncio import Redis as AsyncRedis  # type: ignore[import-not-found]
+
+        from aats.storage.hot_state_store import (
+            RedisHotStateConfig,
+            RedisHotStateStore,
+        )
+
+        owner_store = RedisHotStateStore(
+            config=RedisHotStateConfig(
+                url=self.redis_url,
+                global_prefix="replace-test:",
+            ),
+        )
+        contender_store = RedisHotStateStore(
+            config=RedisHotStateConfig(
+                url=self.redis_url,
+                global_prefix="replace-test:",
+            ),
+        )
+        raw_client = AsyncRedis.from_url(self.redis_url)
+        key = "runtime:ready:generation:execution"
+        full_key = f"replace-test:{key}"
+        provisioning = {"instance_id": "a" * 32, "phase": "PROVISIONING"}
+        ready = {"instance_id": "a" * 32, "phase": "READY"}
+        contender = {"instance_id": "b" * 32, "phase": "PROVISIONING"}
+        try:
+            await owner_store.connect()
+            await contender_store.connect()
+            self.assertTrue(
+                await owner_store.set_if_absent(
+                    key,
+                    provisioning,
+                    ttl_seconds=2.0,
+                )
+            )
+            ttl_before_mismatch = await raw_client.pttl(full_key)
+
+            self.assertFalse(
+                await contender_store.compare_replace(
+                    key,
+                    contender,
+                    ready,
+                    ttl_seconds=5.0,
+                )
+            )
+            self.assertEqual(await owner_store.get(key), provisioning)
+            ttl_after_mismatch = await raw_client.pttl(full_key)
+            self.assertGreater(ttl_after_mismatch, 0)
+            self.assertLessEqual(ttl_after_mismatch, ttl_before_mismatch)
+
+            self.assertTrue(
+                await owner_store.compare_replace(
+                    key,
+                    provisioning,
+                    ready,
+                    ttl_seconds=3.0,
+                )
+            )
+            self.assertEqual(await contender_store.get(key), ready)
+            self.assertGreater(await raw_client.pttl(full_key), 2000)
+
+            # 旧 PROVISIONING payload 与其他实例都不能再续租/删除 READY。
+            self.assertFalse(
+                await owner_store.compare_refresh(
+                    key,
+                    provisioning,
+                    ttl_seconds=9.0,
+                )
+            )
+            self.assertFalse(
+                await owner_store.compare_delete(key, provisioning)
+            )
+            self.assertFalse(
+                await contender_store.compare_replace(
+                    key,
+                    contender,
+                    provisioning,
+                    ttl_seconds=9.0,
+                )
+            )
+            self.assertEqual(await owner_store.get(key), ready)
+
+            self.assertTrue(await owner_store.compare_delete(key, ready))
+            self.assertFalse(
+                await owner_store.compare_replace(
+                    key,
+                    ready,
+                    provisioning,
+                    ttl_seconds=1.0,
+                )
+            )
+            self.assertIsNone(await owner_store.get(key))
+        finally:
+            await raw_client.aclose()
+            await owner_store.close()
+            await contender_store.close()
 
     async def test_set_before_connect_raises(self) -> None:
         """没 connect 就 set 必须抛 RuntimeError——避免 build_runtime

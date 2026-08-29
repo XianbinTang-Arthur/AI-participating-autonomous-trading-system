@@ -1,16 +1,15 @@
 """B1 契约测试：跨进程 readiness barrier。
 
-docs/task/nats_retention_global_architecture_sow.md §B1 引入：
-build_runtime 完成后（subscribe 全部就位）与 start_background_tasks 之前
-（publisher 启动）加一层 Redis-backed readiness gate。
+现行 protocol v2 在任何 NATS I/O 前取得 global-role PROVISIONING owner，
+build 完整返回后 CAS READY，再等待同 generation peer READY。
 
 覆盖语义：
-- _announce_runtime_ready 写 Redis key aats:runtime:ready:{role}
-- optional/in-memory 调用超时可兼容返回；四主进程 NATS/hybrid 严格调用失败关闭
-- Phase 3J 由独立 FS-016 测试覆盖 generation、Redis failure 与 strict timeout
+- _announce_runtime_ready 取得 global-role、instance-fenced lease
+- optional/in-memory 兼容调用可 no-op；四主进程 NATS/hybrid 严格调用失败关闭
+- 独立 FS-016 测试覆盖 generation、原子 claim/refresh/delete、Redis failure 与 strict timeout
 - 无 peer（monolith）路径立即返回
-- hot_state_store=None 场景（测试 InMemory）直接 no-op
-- Redis 异常时 fallback（不硬失败，允许 LIMITS 向前兼容）
+- hot_state_store=None 仅在非严格兼容调用中 no-op
+- strict Redis 异常绝不 fallback；publisher 不得在 barrier 或 lease 失败后启动
 """
 from __future__ import annotations
 
@@ -20,6 +19,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock
 
 from aats.bootstrap.process_lifecycle import (
+    _RUNTIME_READY_LEASE_PROTOCOL,
     _PEER_READINESS_MAP,
     _announce_runtime_ready,
     _ready_key,
@@ -41,6 +41,34 @@ class _RecordingHotStateStore:
         self._store[key] = value
         self.set_calls.append((key, value, ttl_seconds))
 
+    async def set_if_absent(
+        self,
+        key: str,
+        value: object,
+        *,
+        ttl_seconds: float | None = None,
+    ) -> bool:
+        if key in self._store:
+            return False
+        self._store[key] = value
+        self.set_calls.append((key, value, ttl_seconds))
+        return True
+
+    async def compare_refresh(
+        self,
+        key: str,
+        expected_value: object,
+        *,
+        ttl_seconds: float,
+    ) -> bool:
+        return self._store.get(key) == expected_value
+
+    async def compare_delete(self, key: str, expected_value: object) -> bool:
+        if self._store.get(key) != expected_value:
+            return False
+        self._store.pop(key, None)
+        return True
+
     async def delete(self, key: str) -> None:
         self._store.pop(key, None)
 
@@ -61,7 +89,9 @@ class TestAnnounceRuntimeReady(unittest.IsolatedAsyncioTestCase):
         self.assertIn(key, store._store)
         val = store._store[key]
         self.assertEqual(val["process_role"], "decision")
-        self.assertIn("ready_ts", val)
+        self.assertIn("announced_ts", val)
+        self.assertEqual(val["lease_protocol"], _RUNTIME_READY_LEASE_PROTOCOL)
+        self.assertEqual(len(val["instance_id"]), 32)
         self.assertIn("pid", val)
         # TTL 必须设上（防僵尸 key）
         (_, _, ttl) = store.set_calls[0]
@@ -80,7 +110,7 @@ class TestAnnounceRuntimeReady(unittest.IsolatedAsyncioTestCase):
     async def test_redis_set_exception_does_not_raise(self) -> None:
         """Optional/in-memory 兼容调用的 Redis set 失败仍可 warning 返回。"""
         store = MagicMock()
-        store.set = AsyncMock(side_effect=RuntimeError("redis down"))
+        store.set_if_absent = AsyncMock(side_effect=RuntimeError("redis down"))
         logger = logging.getLogger("test.announce.fail")
         # 应该吞掉异常
         await _announce_runtime_ready(
@@ -116,7 +146,15 @@ class TestWaitForPeerRolesReady(unittest.IsolatedAsyncioTestCase):
         for peer in ("market", "execution", "gateway"):
             await store.set(
                 _ready_key(peer),
-                {"process_role": peer, "ready_ts": "now", "pid": 1},
+                {
+                    "lease_protocol": _RUNTIME_READY_LEASE_PROTOCOL,
+                    "process_role": peer,
+                    "phase": "READY",
+                    "generation": None,
+                    "instance_id": "a" * 32,
+                    "announced_ts": "now",
+                    "pid": 1,
+                },
             )
         logger = logging.getLogger("test.wait.all_ready")
         # decision 等 market/execution/gateway
@@ -152,7 +190,15 @@ class TestWaitForPeerRolesReady(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.1)
             await store.set(
                 _ready_key("market"),
-                {"process_role": "market", "ready_ts": "now", "pid": 42},
+                {
+                    "lease_protocol": _RUNTIME_READY_LEASE_PROTOCOL,
+                    "process_role": "market",
+                    "phase": "READY",
+                    "generation": None,
+                    "instance_id": "a" * 32,
+                    "announced_ts": "now",
+                    "pid": 42,
+                },
             )
 
         writer_task = asyncio.create_task(writer())
@@ -182,6 +228,35 @@ class TestWaitForPeerRolesReady(unittest.IsolatedAsyncioTestCase):
             timeout_seconds=0.5,
             poll_interval=0.02,
         )
+
+    async def test_hung_get_many_obeys_strict_overall_timeout(self) -> None:
+        """单次 Redis read 永久挂起也不能越过 peer barrier 总 deadline。"""
+
+        store = MagicMock()
+
+        async def _hang(_keys: list[str]) -> dict[str, object]:
+            await asyncio.Event().wait()
+            return {}
+
+        store.get_many = AsyncMock(side_effect=_hang)
+        logger = logging.getLogger("test.wait.redis_hung")
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"runtime_ready_gate_timeout:decision:market",
+        ):
+            await asyncio.wait_for(
+                _wait_for_peer_roles_ready(
+                    role="decision",
+                    hot_state_store=store,
+                    logger=logger,
+                    peers=("market",),
+                    generation="test-generation",
+                    timeout_seconds=0.05,
+                    poll_interval=0.01,
+                    required=True,
+                ),
+                timeout=0.25,
+            )
 
 
 class TestPeerReadinessMap(unittest.TestCase):

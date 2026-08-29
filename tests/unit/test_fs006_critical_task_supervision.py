@@ -90,6 +90,9 @@ def _run_supervised_process(outcome: str, *, external_stop: bool = False):
     async def _fake_heartbeat(_role, *, stop_event, logger, **_kwargs):
         del logger
         nonlocal heartbeat_ticks
+        started_event = _kwargs.get("started_event")
+        if started_event is not None:
+            started_event.set()
         while not stop_event.is_set():
             heartbeat_ticks += 1
             try:

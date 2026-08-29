@@ -16,6 +16,9 @@
    理由：bus.publish_envelope 路径会双写到 event_store；如果 DB 已经 dispose
    再 drain bus，所有 in-flight publish 会失败。
 
+5. **readiness 安全释放点**：可选 callback 必须在业务 task/NATS bus 停止后、
+   HotStateStore 关闭前执行；callback 失败不能截断后续资源清理。
+
 ⚠️ 这一组测试 **不构造完整 ApplicationRuntime**（成本太高），而是直接
 mock 出最小可调用的对象，定向验证 stop_background_tasks 内部逻辑。
 """
@@ -27,6 +30,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from aats.bootstrap.config import ApplicationRuntime
 from aats.bus.memory_bus import InMemoryEventBus
+from aats.bus.nats_bus import HybridEventBus
 
 
 def _make_minimal_runtime(*, bus: Any) -> ApplicationRuntime:
@@ -44,6 +48,13 @@ def _make_minimal_runtime(*, bus: Any) -> ApplicationRuntime:
     market_gateway = MagicMock()
     market_gateway.stop = AsyncMock()
     runtime.market_gateway = market_gateway
+    kill_switch = MagicMock()
+    kill_switch.stop_trading_permission_lease = AsyncMock()
+    kill_switch.stop = AsyncMock()
+    runtime.kill_switch = kill_switch
+    portfolio_snapshot_cache = MagicMock()
+    portfolio_snapshot_cache.stop = AsyncMock()
+    runtime.portfolio_snapshot_cache = portfolio_snapshot_cache
     # account_service.stop_private_ws() / .client.aclose() 必须是 awaitable
     account_service = MagicMock()
     account_service.stop_private_ws = AsyncMock()
@@ -54,6 +65,9 @@ def _make_minimal_runtime(*, bus: Any) -> ApplicationRuntime:
     database_runtime = MagicMock()
     database_runtime.dispose = MagicMock()
     runtime.database_runtime = database_runtime
+    hot_state_store = MagicMock()
+    hot_state_store.close = AsyncMock()
+    runtime.hot_state_store = hot_state_store
     runtime.logger = MagicMock()
     return runtime
 
@@ -91,6 +105,46 @@ class TestStopBackgroundTasksBusClose(unittest.IsolatedAsyncioTestCase):
         # database.dispose 仍然被调用
         runtime.database_runtime.dispose.assert_called_once()
 
+    async def test_bus_close_failure_does_not_release_readiness_ownership(
+        self,
+    ) -> None:
+        bus = MagicMock()
+        bus.close = AsyncMock(side_effect=RuntimeError("simulated drain failure"))
+        runtime = _make_minimal_runtime(bus=bus)
+        release = AsyncMock()
+
+        await runtime.stop_background_tasks(
+            before_hot_state_close=release,
+        )
+
+        release.assert_not_awaited()
+        runtime.database_runtime.dispose.assert_called_once()
+
+    async def test_hybrid_critical_close_failure_does_not_release_readiness(
+        self,
+    ) -> None:
+        critical = MagicMock()
+        critical.close = AsyncMock(
+            side_effect=RuntimeError("sensitive nats endpoint"),
+        )
+        observer = MagicMock()
+        observer.close = AsyncMock()
+        runtime = _make_minimal_runtime(
+            bus=HybridEventBus(
+                critical_bus=critical,
+                observer_bus=observer,
+            )
+        )
+        release = AsyncMock()
+
+        await runtime.stop_background_tasks(
+            before_hot_state_close=release,
+        )
+
+        observer.close.assert_awaited_once()
+        release.assert_not_awaited()
+        runtime.database_runtime.dispose.assert_called_once()
+
     async def test_bus_close_runs_before_database_dispose(self) -> None:
         """顺序约束：bus.close 必须在 database_runtime.dispose 之前发生。
         理由：bus.publish_envelope 双写 event_store 依赖 DB 仍可用。"""
@@ -118,6 +172,58 @@ class TestStopBackgroundTasksBusClose(unittest.IsolatedAsyncioTestCase):
         runtime.database_runtime = None
         await runtime.stop_background_tasks()
         bus.close.assert_awaited_once()
+
+    async def test_readiness_release_hook_runs_after_bus_before_hot_state_close(
+        self,
+    ) -> None:
+        events: list[str] = []
+        bus = MagicMock()
+
+        async def _record_bus_close() -> None:
+            events.append("bus_close")
+
+        async def _record_hot_state_close() -> None:
+            events.append("hot_state_close")
+
+        async def _record_release() -> None:
+            events.append("readiness_release")
+
+        bus.close = _record_bus_close
+        runtime = _make_minimal_runtime(bus=bus)
+        runtime.hot_state_store = MagicMock()
+        runtime.hot_state_store.close = _record_hot_state_close
+
+        await runtime.stop_background_tasks(
+            before_hot_state_close=_record_release,
+        )
+
+        self.assertEqual(
+            events,
+            ["bus_close", "readiness_release", "hot_state_close"],
+        )
+
+    async def test_readiness_release_hook_failure_keeps_cleanup_best_effort(
+        self,
+    ) -> None:
+        events: list[str] = []
+        bus = MagicMock()
+        bus.close = AsyncMock()
+        runtime = _make_minimal_runtime(bus=bus)
+        runtime.hot_state_store = MagicMock()
+
+        async def _record_hot_state_close() -> None:
+            events.append("hot_state_close")
+
+        async def _fail_release() -> None:
+            raise RuntimeError("do not leak this backend detail")
+
+        runtime.hot_state_store.close = _record_hot_state_close
+        await runtime.stop_background_tasks(
+            before_hot_state_close=_fail_release,
+        )
+
+        self.assertEqual(events, ["hot_state_close"])
+        runtime.database_runtime.dispose.assert_called_once()
 
     async def test_bus_close_failure_logged_at_warning(self) -> None:
         """bus.close 失败必须记录 warning 级别日志，便于运维排查。"""

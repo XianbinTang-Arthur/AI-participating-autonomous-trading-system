@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Coroutine, Literal
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine, Literal
 
 import yaml
 
@@ -36,6 +36,7 @@ from aats.bus.nats_bus import (
     HybridBusRouting,
     HybridEventBus,
     NatsBusConfig,
+    NatsDeliveryGate,
     NatsEventBus,
     build_nats_streams_from_env,
 )
@@ -1148,13 +1149,22 @@ class ApplicationRuntime:
             timeframes=list(timeframes),
         )
 
-    async def stop_background_tasks(self) -> None:
+    async def stop_background_tasks(
+        self,
+        *,
+        before_hot_state_close: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        # 只有所有可能继续 publish/execute 的受保护组件都确认停止，才允许
+        # lifecycle 主动删除 readiness ownership。任何 best-effort stop 失败都
+        # 保留 lease 到 TTL；不能因为外围资源继续清理就开放同 role 新实例。
+        protected_stop_succeeded = True
         # 关停首先停止控制面续租并撤销短时许可；长期 kill-switch state 不变。
         # 即使后续账户 WS 或其他服务退出耗时，execution 也不能继续依赖旧 lease
         # 接受新的增险提交。kill_switch.stop() 稍后会幂等地再次确认清理。
         try:
             await self.kill_switch.stop_trading_permission_lease()
         except Exception as exc:
+            protected_stop_succeeded = False
             log_event(
                 self.logger,
                 "kill_switch_permission_lease_shutdown_failed",
@@ -1174,6 +1184,7 @@ class ApplicationRuntime:
             try:
                 await _poller.stop()
             except Exception as exc:
+                protected_stop_succeeded = False
                 log_event(
                     self.logger,
                     "long_short_poller_stop_failed",
@@ -1214,6 +1225,7 @@ class ApplicationRuntime:
             if _audit_service is not None and hasattr(_audit_service, "stop_batch_writer"):
                 await _audit_service.stop_batch_writer()
         except Exception as exc:
+            protected_stop_succeeded = False
             log_event(
                 self.logger,
                 "audit_batch_writer_shutdown_failed",
@@ -1231,6 +1243,7 @@ class ApplicationRuntime:
             if abort_hook_service is not None:
                 await abort_hook_service.stop()
         except Exception as exc:
+            protected_stop_succeeded = False
             log_event(
                 self.logger,
                 "abort_hook_service_shutdown_close_failed",
@@ -1249,6 +1262,7 @@ class ApplicationRuntime:
             if decision_trigger is not None:
                 await decision_trigger.stop()
         except Exception as exc:
+            protected_stop_succeeded = False
             log_event(
                 self.logger,
                 "decision_trigger_shutdown_close_failed",
@@ -1266,6 +1280,7 @@ class ApplicationRuntime:
         try:
             await self.kill_switch.stop()
         except Exception as exc:
+            protected_stop_succeeded = False
             log_event(
                 self.logger,
                 "kill_switch_shutdown_close_failed",
@@ -1278,6 +1293,7 @@ class ApplicationRuntime:
         try:
             await self.portfolio_snapshot_cache.stop()
         except Exception as exc:
+            protected_stop_succeeded = False
             log_event(
                 self.logger,
                 "portfolio_snapshot_cache_shutdown_close_failed",
@@ -1297,6 +1313,7 @@ class ApplicationRuntime:
             if obligation_hot_state_cache is not None:
                 await obligation_hot_state_cache.stop()
         except Exception as exc:
+            protected_stop_succeeded = False
             log_event(
                 self.logger,
                 "obligation_hot_state_cache_shutdown_close_failed",
@@ -1313,6 +1330,7 @@ class ApplicationRuntime:
             if _account_snapshot_cache is not None:
                 await _account_snapshot_cache.stop()
         except Exception as exc:
+            protected_stop_succeeded = False
             log_event(
                 self.logger,
                 "account_snapshot_cache_shutdown_close_failed",
@@ -1330,6 +1348,7 @@ class ApplicationRuntime:
             if operator_command_client is not None:
                 await operator_command_client.stop()
         except Exception as exc:
+            protected_stop_succeeded = False
             log_event(
                 self.logger,
                 "operator_command_client_shutdown_close_failed",
@@ -1342,6 +1361,7 @@ class ApplicationRuntime:
             if operator_command_worker is not None:
                 await operator_command_worker.stop()
         except Exception as exc:
+            protected_stop_succeeded = False
             log_event(
                 self.logger,
                 "operator_command_worker_shutdown_close_failed",
@@ -1359,6 +1379,7 @@ class ApplicationRuntime:
             try:
                 await bus_close()
             except Exception as exc:
+                protected_stop_succeeded = False
                 log_event(
                     self.logger,
                     "event_bus_shutdown_close_failed",
@@ -1366,6 +1387,26 @@ class ApplicationRuntime:
                     error_type=type(exc).__name__,
                     error=str(exc),
                 )
+        # Readiness lease 保护的是仍可能 publish/execute 的本进程实例。必须在
+        # 所有业务 task、worker 与 NATS bus 都已停止后，且在 Redis client
+        # 关闭前，才允许 lifecycle owner-aware 释放 lease。callback 失败只保留
+        # TTL fencing，不得为了“清理干净”提前开放同 role 新实例。
+        if before_hot_state_close is not None and protected_stop_succeeded:
+            try:
+                await before_hot_state_close()
+            except Exception as exc:  # noqa: BLE001
+                log_event(
+                    self.logger,
+                    "before_hot_state_close_failed",
+                    level="warning",
+                    error_type=type(exc).__name__,
+                )
+        elif before_hot_state_close is not None:
+            log_event(
+                self.logger,
+                "before_hot_state_close_skipped_protected_stop_failed",
+                level="warning",
+            )
         # Stage 6 Slice 6.1：关闭 HotStateStore（Redis 客户端 aclose / 内存
         # dict.clear）。在 database_runtime.dispose 之前，与 bus.close 同样
         # 走 best-effort 路径——hot_state 是缓存，关闭失败不能阻塞整体停机。
@@ -4275,6 +4316,7 @@ def _construct_event_bus(
     event_store: Any,
     process_role: str | None,
     stream_snapshot_cache: StreamSnapshotCache | None = None,
+    delivery_gate: NatsDeliveryGate | None = None,
 ) -> EventBus:
     """Stage 4 工厂：按 settings.event_bus_backend 选择 EventBus 实现。
 
@@ -4320,8 +4362,9 @@ def _construct_event_bus(
     #   storage 80% 阈值.
     # 缓解:
     #   (a) FEATURE_SNAPSHOTS 已在 SNAPSHOT_DELIVERY_TOPICS → DeliverPolicy.LAST
-    #       (只消费最新, 不回放历史积压). 但**现有 durable consumer 不会自动
-    #       更新**, 需运维侧删除 consumer 让新 deploy 按新 policy 重建.
+    #       (只消费最新, 不回放历史积压). NatsEventBus.subscribe 会显式读取
+    #       现有 durable config：可变反压字段原位更新；LAST/NEW 的不可变漂移
+    #       才允许重建，critical ALL cursor 绝不删除.
     #   (b) per-topic max_ack_pending 降到 32: 让 NATS 不再一次推 256 条到
     #       decision buffer, 避免 ack_pending 常年打满的死循环.
     #   (c) per-topic ack_wait 90s: 给 decision run_cycle 17s 留 5x buffer,
@@ -4352,6 +4395,7 @@ def _construct_event_bus(
             persistence_mode=persistence_mode,
             consumer_role=consumer_role,
             stream_snapshot_cache=stream_snapshot_cache,
+            delivery_gate=delivery_gate,
         )
 
     if backend == "hybrid":
@@ -4362,6 +4406,7 @@ def _construct_event_bus(
             persistence_mode=persistence_mode,
             consumer_role=consumer_role,
             stream_snapshot_cache=stream_snapshot_cache,
+            delivery_gate=delivery_gate,
         )
         observer_bus = InMemoryEventBus(
             event_store=None,  # 双写已由 critical_bus 接管，observer 不重复落盘
@@ -4391,6 +4436,30 @@ async def _start_event_bus(bus: EventBus) -> None:
     await start_method()
 
 
+def _register_event_bus_connection_supervision(
+    *,
+    runtime: ApplicationRuntime,
+    bus: EventBus,
+) -> asyncio.Task[Any] | None:
+    """把 NATS terminal-failure waiter 登记为 runtime critical task。"""
+
+    critical_bus = (
+        bus.critical_bus if isinstance(bus, HybridEventBus) else bus
+    )
+    connection_failure_waiter = getattr(
+        critical_bus,
+        "wait_for_terminal_connection_failure",
+        None,
+    )
+    if not callable(connection_failure_waiter):
+        return None
+    return runtime.create_background_task(
+        connection_failure_waiter(),
+        name="aats_nats_connection_supervision",
+        critical=True,
+    )
+
+
 def _build_shared_runtime_slice(
     *,
     runtime_settings: AATSSettings,
@@ -4398,6 +4467,7 @@ def _build_shared_runtime_slice(
     storage: StorageBackends,
     slices: _RuntimeSlices,
     effective_process_role: str | None,
+    delivery_gate: NatsDeliveryGate | None = None,
 ) -> None:
     """构造全部进程都需要的基础设施。
 
@@ -4432,6 +4502,7 @@ def _build_shared_runtime_slice(
         event_store=storage.event_store,
         process_role=effective_process_role,
         stream_snapshot_cache=slices.stream_snapshot_cache,
+        delivery_gate=delivery_gate,
     )
     _backfill_fill_outcomes_from_event_store(
         event_store=storage.event_store,
@@ -5525,6 +5596,10 @@ async def build_runtime(
     *,
     bootstrap_portfolio_snapshot: bool = True,
     process_role: str | None = None,
+    before_event_bus_start: (
+        Callable[[HotStateStore, AATSSettings], Awaitable[None]] | None
+    ) = None,
+    nats_delivery_gate: NatsDeliveryGate | None = None,
 ) -> ApplicationRuntime:
     base_settings = settings or load_settings()
     base_runtime_layering = resolve_runtime_layering(base_settings)
@@ -5552,6 +5627,7 @@ async def build_runtime(
             error=str(_telemetry_exc),
         )
     storage = build_storage_backends(base_settings, process_role=effective_process_role)
+    hot_state_store: HotStateStore | None = None
     try:
         # ── Settings Provenance 追踪 ─────────────────────────────
         from aats.bootstrap.settings_provenance import SettingsProvenanceTracker
@@ -5646,7 +5722,14 @@ async def build_runtime(
             backend=runtime_settings.hot_state_backend,
             global_prefix=runtime_settings.hot_state_global_prefix,
         )
+        if before_event_bus_start is not None:
+            # FS-016 two-phase ownership: strict split runtimes claim their
+            # PROVISIONING role lease here, before NATS is connected or any
+            # durable callback can be registered/delivered.
+            await before_event_bus_start(hot_state_store, runtime_settings)
     except Exception:
+        if hot_state_store is not None:
+            await hot_state_store.close()
         if storage.database_runtime is not None:
             storage.database_runtime.dispose()
         raise
@@ -5661,6 +5744,7 @@ async def build_runtime(
         storage=storage,
         slices=slices,
         effective_process_role=effective_process_role,
+        delivery_gate=nats_delivery_gate,
     )
     # Stage 4: bus 生命周期启动必须在任何 subscriber 注册（_build_*_slice
     # 内部 subscribe / _wire_event_subscriptions）之前完成；否则 NatsEventBus
@@ -6619,5 +6703,11 @@ async def build_runtime(
             "trial": _trial_guard_cache,
             "recovery": _recovery_cache,
         }
+
+    # NATS 无限重连期间不能继续维持 READY/healthy。连接层在明确窗口内仍未
+    # 恢复时会触发 sticky terminal failure；把 watcher 纳入既有 FS-006
+    # critical registry，让 daemon/Gateway 统一撤销健康、冻结 lease，并由
+    # 独立 watchdog 在 cleanup 卡死时强退。Memory bus 没有该 watcher。
+    _register_event_bus_connection_supervision(runtime=runtime, bus=bus)
 
     return runtime

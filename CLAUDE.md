@@ -2,7 +2,7 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](docs/project_positioning.md)。
 
-> 文档状态：现行约束。最后核对：2026-08-27（起始 HEAD `c0f59047ed71bd2989a3ab279d323401c04b0477`，包含本轮 RDP contract-aware replay P0-D 本地候选，以本文档所在 HEAD 为准）。运行架构、部署、安全纪律或文档治理变化时必须同步复核。
+> 文档状态：现行约束。最后核对：2026-08-28（起始 HEAD `82e600842a7ef360ab63c103c6dea1eae2267898`；包含当前 FS-016 readiness lease 重启安全候选，以本文档所在最终 HEAD 为准）。运行架构、部署、安全纪律或文档治理变化时必须同步复核。
 
 > 本文件是仓库级操作手册。所有在本仓库工作的编码代理必须遵守此文档约束。
 
@@ -86,7 +86,13 @@ bash scripts/deploy.sh --profile derivatives --no-cache --skip-commit
 # 当前真实资金 NO-GO：所有 live profile 在同步/构建/停服/迁移前非零退出，--yes 不能绕过
 ```
 
-标准模拟 deploy 会在 sync 后自动生成非秘密 runtime readiness generation，注入四主进程并记入模拟证据包。不要把该值写进 `.env.*` 或手工复用到新部署；直接 Compose 缺代次时失败是预期安全语义。代码已收紧 peer barrier，但真 Redis/NATS/Compose 启动重启矩阵仍未验证。
+标准模拟 deploy 会在 sync 后自动生成非秘密 runtime readiness generation，注入四主进程并记入模拟证据包。不要把该值写进 `.env.*` 或手工复用到新部署；直接 Compose 缺代次时失败是预期安全语义。严格 NATS/hybrid 四主进程的现行候选使用 Redis-only protocol v2 和全局 `aats:runtime:owner:<role>` key；generation 只存在 payload 和 peer barrier。每个 role 在任何 NATS I/O 前 claim `PROVISIONING`，立即开始续租并启动独立 subprocess watchdog，然后完成 55 秒 takeover quarantine；build 完成后 CAS 为 `READY`。父子进程统一使用 POSIX `CLOCK_BOOTTIME` / Windows `GetTickCount64`，并以 POSIX pidfd / Windows process creation FILETIME 固定父进程身份。所有 peer `READY` 后先 flush build 期 publish 缓冲（最多 4,096 条且 64 MiB），再开放 callback 与 background。`NatsDeliveryGate` 在未 ready 或 `ABORT` 时不 parse/persist/handler/ack/nak；仅 strict 四主进程 NATS/hybrid 注入 gate 并把 push consumer 的 `max_ack_pending` 固定为 `1`。non-strict、in-memory 与 monolith 不注入该 gate，也不强制窗口为 `1`。已有 critical ALL durable 只允许原位更新可变字段，不删除 cursor。
+
+owner TTL 为 60 秒，每 10 秒续租，安全停机 margin 30 秒，hard-exit grace 10 秒。每次成功写/续租 `PROVISIONING` lease 后，本地 hard fence 最多滑动到该次写入后 50 秒；这不是 claim 后 50 秒总上界。claim 到 `READY` promotion 另有不可被续租延长的 180 秒绝对上界，第 170 秒冻结续租并进入最后 10 秒 fatal grace；确定失租零宽限。任一关键故障先冻结续租并进入不可 disarm 的 fatal deadline；正常停机同样先冻结续租，以 10 秒硬截止完成业务/NATS cleanup，随后才 disarm watchdog、owner-aware delete。Redis 使用 `noeviction`，写满必须显式失败；NATS 连续断连 30 秒会进入 critical failure。默认应用健康预算为 210 秒。不得手工写 owner key，也不得以手工 Compose/容器重启冒充受控矩阵。
+
+标准部署在任何 mutation 前取得并持续持有长寿命 WSL `flock`。生产锁路径固定为 `/tmp/aats-standard-deploy.lock`；只有 `AATS_DEPLOY_TEST_MODE=true` 的隔离测试才允许通过 `AATS_DEPLOY_LOCK_FILE` 改路径，生产覆盖直接失败。Windows 端每 3 秒更新 lease，WSL holder 在 12 秒失联后释放锁；新 holder 取得 flock 后若发现其他仍新鲜的 predecessor lease，会由 holder 持续刷新自己的 lease 并隔离等待，直至前任 lease 清除或过期才报告取得锁。每个外部步骤 spawn 前复核 holder/heartbeat/flock，spawn 后立即全局登记 active child PID/context；活动中丢锁会终止并 wait 进程树。`TERM/HUP/INT/EXIT` 必须先终止并 wait active child，再按 heartbeat、lease、holder fd/flock 的顺序释放，禁止先放锁后遗留 mutation。cutover 会停止所有已知 profile 的七个应用容器，只接受 `exited/dead` 或明确 not-found，记录并前后比较容器 ID、状态、`StartedAt`、`FinishedAt`、`RestartCount`，同时查询 preflight 精确时间窗内的 Docker lifecycle events。第一次只读 preflight 位于基础设施-only up 后、full-down 前；full-down 后重建 quiescence 基线，正常 infra/schema 完成后、app up 前再执行第二次。任何 outstanding/config drift/查询失败或 quiescence 变化都必须保留 NATS 在线并阻断。v2 PASS 证据绑定 lock id、generation、部署提交与 quiescence，最终部署证据校验字段一致并记录路径和 SHA-256。protocol v1 -> v2 首次发布和回滚禁止 rolling/mixed version；标准 stop 本身不是 drain 证明，BLOCKED outstanding 只能在人工批准变更窗用匹配旧消费者自然 drain 后重跑，禁止自动 ACK/delete/update/recreate/reset/purge。LAST/NEW 的运行时重建只由 strict delivery gate、非 ALL policy，以及“outstanding 超过目标”或“收缩窗口且 outstanding 非零”决定，自动重启也可能触发；标准 full-down 是额外发布门禁，不是注入代码的运行时信号。当前只完成 Windows Git Bash -> WSL 锁协议的聚焦 smoke；真实标准部署和完整故障矩阵仍 `OPEN`。
+
+该 lease/watchdog 仍不是下游执行端强制校验的单调 fencing token；Redis owner truth 与 watchdog/OS 终止同时失效的双故障尚未取得端到端排他证据。当前候选全量单测已通过；真 Redis/NATS/Docker 故障注入、标准部署、断连与受控逐角色重启矩阵仍 `OPEN`，真实资金继续 `NO-GO`；不得宣称新候选已完成运行验收。详见 `docs/task/fs_016_runtime_readiness_lease_restart_safety_p0_sow_2026_08_28.md`。
 
 ## 开发环境
 

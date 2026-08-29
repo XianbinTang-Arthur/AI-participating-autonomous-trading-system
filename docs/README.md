@@ -1,7 +1,7 @@
 # AATS 文档地图与适用边界
 
 > 文档状态：现行全仓文档入口
-> 最后核对：2026-08-28（起始 HEAD `c15ccd2d5057`；含当前 RDP 参数内容身份、typed JSON、Step 2/3 provenance 与控制面原子发布收口候选，以本文档所在 HEAD 为准）
+> 最后核对：2026-08-28（起始 HEAD `82e600842a7ef360ab63c103c6dea1eae2267898`；含当前 FS-016 readiness lease 重启安全候选，以本文档所在最终 HEAD 为准）
 > 核对范围：当前代码、迁移、配置、测试与文档入口的静态复核；不证明现场容器、数据库、交易所或资金状态
 
 本页解决一个长期问题：仓库同时保存当前规范、专题参考、历史设计、审查报告、任务书和一次性观察记录。文件仍在仓库中，不代表它描述当前行为。
@@ -173,10 +173,46 @@
   滑动窗口、dummy KDF 和输入上限失败关闭。多进程集中限流、trusted proxy、
   真实数据库和目标负载仍 OPEN，详见
   [`task/fs_019_operator_login_async_isolation_sow_2026_08_24.md`](task/fs_019_operator_login_async_isolation_sow_2026_08_24.md)。
-- 2026-08-24 Phase 3J 已将四主进程 NATS/hybrid peer readiness 收紧为
-  generation-scoped 失败关闭；旧 key、Redis 异常、peer timeout 或缺代次都
-  不能启动 publisher。标准模拟 deploy 生成/注入同一代次并记入证据包；
-  真 Redis/NATS/Compose 启动、重启和断连矩阵仍 OPEN，详见
+- 2026-08-28 FS-016 P0 现行本地候选将四主进程 NATS/hybrid readiness 升级为 Redis-only
+  protocol v2：全局 `aats:runtime:owner:<role>` key 不含 generation，generation 只在 payload 和 peer
+  barrier；任何 NATS I/O 前 claim `PROVISIONING`，立即续租并启动独立 subprocess watchdog，再执行
+  55 秒 takeover quarantine。父子进程统一使用 POSIX `CLOCK_BOOTTIME` / Windows
+  `GetTickCount64`，并以 POSIX pidfd / Windows process creation FILETIME 固定父进程身份；build
+  完成后 CAS 为 `READY`。`NatsDeliveryGate` 在此前禁止 callback 副作用，build 期 publish 受
+  4,096 条/64 MiB 双上限约束；仅 strict 四主进程 NATS/hybrid 注入 gate 并使用
+  `max_ack_pending=1`，non-strict、in-memory 与 monolith 不注入、不强制窗口。critical ALL durable
+  只原位更新可变字段而不删除 cursor。所有 peer `READY` 后先 flush，再开放 callback/background。
+  TTL/renew/safety margin/hard-exit grace 分别为 60/10/30/10 秒；每次成功 PROVISIONING 写/续租后的
+  本地 hard fence 最多滑动 50 秒，claim→READY 另有不可续租延长的 180 秒绝对上界（170 秒冻结续租
+  加 10 秒 fatal grace）。关键故障立即冻结续租并保持 fatal fence，正常 cleanup 也受 10 秒硬截止
+  保护。Compose Redis 使用 `noeviction`，NATS 连续断连 30 秒进入 critical failure，标准部署默认
+  应用健康预算为 210 秒。v1 -> v2 首发/回滚禁止 rolling 或 mixed version；标准入口在任何 mutation
+  前取得长寿命 WSL `flock`。生产锁路径固定为 `/tmp/aats-standard-deploy.lock`，仅
+  `AATS_DEPLOY_TEST_MODE=true` 的隔离测试可通过 `AATS_DEPLOY_LOCK_FILE` 覆盖；Windows 3 秒
+  heartbeat / WSL 12 秒失联释放协议持有到最终证据和报告。新 holder 取得 flock 后仍等待任何
+  fresh predecessor lease 清除或过期。每个外部步骤 spawn 前围栏、spawn 后登记 active child；
+  丢锁或 `TERM/HUP/INT/EXIT` 都先终止并 wait 子进程树，再停止 heartbeat、移除 lease 和释放 flock。
+  入口停净七个已知应用后记录容器 ID/status/StartedAt/FinishedAt/RestartCount，并在 preflight
+  前后查询精确时间窗内的 Docker lifecycle events；基础设施-only up 后、full-down 前执行第一次
+  loopback 全量分页只读 durable preflight，full-down 后重建基线，infra/schema 后、app up 前执行
+  第二次。v2 PASS 绑定 lock id、generation、deployed commit 与 quiescence，最终部署证据校验同值并
+  记录最后一次证据的路径/hash。阻断、查询失败或 quiescence 变化保留 NATS 在线；标准 stop 仍不是
+  drain 证明。NATS 八键容量目标在同步后冻结为 root-owned `0444` 白名单快照，preflight、Compose
+  末位 `env_file`、所有必需容器 manifest label 与最终证据绑定同一摘要；NATS 身份还校验固定
+  `Config.Image` pin 及其实际 image ID。应用通过健康边界后主动观察 40 秒，应用与 NATS 均每 2 秒
+  主动复核；NATS 的滚动 `Health.Log` 独立于稳定身份 fingerprint，但部署观察和最终 writer 会按同一
+  边界拒绝非零结果，并要求至少一次边界后的成功检查。最终逻辑窗限定为 35–60 秒；Docker event
+  证据仍明确只是 bounded observation。
+  该路径已完成代码、聚焦测试及 Windows Git Bash -> WSL 锁竞争/释放/重取窄 smoke，尚未完成真实
+  标准部署。LAST/NEW 运行时重建仅受 strict delivery gate、非 ALL policy，以及
+  “outstanding 超过目标”或“收缩窗口且 outstanding 非零”条件约束，自动重启也可能触发；标准
+  full-down 是额外发布门禁，不是运行时信号。
+  当前候选在最后一次 NATS 健康窗修复后已通过 `213` 项 FS-016 聚焦回归、`173` 项根级独立聚焦
+  复跑、四项隔离 smoke 和 `6429 passed / 31 skipped / 259 subtests passed` 全量单测；真
+  Redis/NATS/Docker 故障注入、标准
+  部署、逐角色重启、双故障与下游 fencing 均 `OPEN`，真实资金继续 `NO-GO`。详见现行
+  [`task/fs_016_runtime_readiness_lease_restart_safety_p0_sow_2026_08_28.md`](task/fs_016_runtime_readiness_lease_restart_safety_p0_sow_2026_08_28.md)
+  与历史边界
   [`task/fs_016_nats_peer_readiness_fail_closed_sow_2026_08_24.md`](task/fs_016_nats_peer_readiness_fail_closed_sow_2026_08_24.md)。
 - 2026-08-24 Phase 3L 已把 Kill Switch 长期恢复状态与在线增险许可拆分：
   Gateway/monolith 维护同 generation 的 15 秒 Redis permission，execution 只在最终

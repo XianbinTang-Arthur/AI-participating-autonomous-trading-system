@@ -27,12 +27,17 @@ mock 替换，只验证组装路径、参数传递、生命周期顺序。真正
 """
 from __future__ import annotations
 
+import asyncio
 import unittest
 from unittest.mock import AsyncMock
 
 import pytest
 
-from aats.bootstrap.config import _construct_event_bus, _start_event_bus
+from aats.bootstrap.config import (
+    _construct_event_bus,
+    _register_event_bus_connection_supervision,
+    _start_event_bus,
+)
 from aats.bootstrap.settings import AATSSettings
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.bus.nats_bus import (
@@ -98,6 +103,45 @@ class TestConstructEventBusInMemory:
             process_role=None,
         )
         assert bus._persistence_mode == "permissive"  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_nats_connection_waiter_is_registered_as_critical() -> None:
+    failure = asyncio.Event()
+
+    class _CriticalBus:
+        async def wait_for_terminal_connection_failure(self) -> None:
+            await failure.wait()
+            raise RuntimeError("nats_connection_terminal_failure")
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, bool]] = []
+
+        def create_background_task(
+            self,
+            coroutine,
+            *,
+            name: str,
+            critical: bool,
+        ) -> asyncio.Task[object]:
+            self.calls.append((name, critical))
+            return asyncio.create_task(coroutine, name=name)
+
+    runtime = _Runtime()
+    hybrid = HybridEventBus(
+        critical_bus=_CriticalBus(),  # type: ignore[arg-type]
+        observer_bus=InMemoryEventBus(),
+    )
+    task = _register_event_bus_connection_supervision(
+        runtime=runtime,  # type: ignore[arg-type]
+        bus=hybrid,
+    )
+    assert task is not None
+    assert runtime.calls == [("aats_nats_connection_supervision", True)]
+    failure.set()
+    with pytest.raises(RuntimeError, match="nats_connection_terminal_failure"):
+        await task
 
 
 class TestConstructEventBusHybrid:
@@ -368,8 +412,8 @@ class TestStartEventBusLifecycle(unittest.IsolatedAsyncioTestCase):
         critical_close.assert_awaited_once()
         observer_close.assert_awaited_once()
 
-    async def test_hybrid_close_swallows_individual_failure(self) -> None:
-        """单条总线关闭失败不应该阻止另一条关闭——避免一个故障让 shutdown 卡住。"""
+    async def test_hybrid_close_reports_failure_after_attempting_both(self) -> None:
+        """单条失败不阻止另一条清理，但最终必须向 lifecycle 报告失败。"""
         settings = _paper_settings(
             event_bus_backend="hybrid",
             nats_url="nats://127.0.0.1:4222",
@@ -385,6 +429,10 @@ class TestStartEventBusLifecycle(unittest.IsolatedAsyncioTestCase):
         )
         observer_close = AsyncMock()
         bus.observer_bus.close = observer_close  # type: ignore[method-assign,union-attr]
-        # 不应抛错
-        await bus.close()
+        with pytest.raises(
+            RuntimeError,
+            match="hybrid_bus_close_failed:critical",
+        ) as raised:
+            await bus.close()
         observer_close.assert_awaited_once()
+        assert raised.value.__cause__ is None

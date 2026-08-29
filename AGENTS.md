@@ -2,7 +2,7 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](docs/project_positioning.md)。
 
-> 文档状态：现行约束。最后核对：2026-08-25（起始 HEAD `00b6df0f8a8d2665d6cae3e88996843767cd1f56`，包含 Phase 3A–3W 整改提交候选）。代理权限、实施、验证或部署纪律变化时必须同步复核。
+> 文档状态：现行约束。最后核对：2026-08-28（起始 HEAD `82e600842a7ef360ab63c103c6dea1eae2267898`；包含当前 FS-016 readiness lease 重启安全候选，以本文档所在最终 HEAD 为准）。代理权限、实施、验证或部署纪律变化时必须同步复核。
 
 > **重要**：先阅读项目根目录的 `CLAUDE.md` 获取完整操作手册。
 
@@ -44,6 +44,7 @@ If any command fails, explain the failure clearly. Do not claim success without 
 ## Deployment
 - **唯一入口**: `bash scripts/deploy.sh --profile derivatives --skip-commit`（代码已提交的本地模拟栈）
 - **当前 live 门禁**: `spot-live`、`derivatives-live`、`derivatives-live-monolith` 均在任何副作用前失败；无 override
+- **FS-016 当前候选边界**: strict 四主进程使用 Redis protocol v2、55 秒 takeover quarantine 与独立 subprocess watchdog；标准部署候选另有固定 `/tmp/aats-standard-deploy.lock` 的全流程 WSL `flock`、fresh predecessor lease 接管隔离、外部子进程 spawn/退出围栏、七容器 quiescence 和 full-down 前/app-up 前两次只读 NATS preflight，最终证据绑定 lock/generation/commit/path/hash。生产不得覆盖锁路径；`AATS_DEPLOY_LOCK_FILE` 只允许与 `AATS_DEPLOY_TEST_MODE=true` 同时用于隔离测试。只有锁 smoke 与聚焦验证不等于真实标准部署；真 Redis/NATS/Docker 完整故障注入、双故障和下游 fencing 尚未完成，不能据此放开 live
 - **不要手动执行** `docker compose` 命令
 - **不要用 rsync** 同步代码到 WSL2
 - 详见 `CLAUDE.md` 的部署章节

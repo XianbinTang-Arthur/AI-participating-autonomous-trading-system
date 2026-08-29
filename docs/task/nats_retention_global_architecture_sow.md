@@ -2,12 +2,13 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
-> **文档状态**：待审批（2026-04-20 起草）
+> **文档状态**：历史设计快照（2026-04-20 起草；不是现行操作依据）
+> **最后核对**：2026-08-28（仅核对历史边界与现行替代入口；正文不重写）
 > **调查依据**：background agent `a5010db6f6e3c61fb` 完整报告（5 问 + 4 意外发现），基于源码追踪
 > **关联**：取代 [`aats_events_stream_retention_root_fix_sow.md`](aats_events_stream_retention_root_fix_sow.md)（那份是局部方案 C，本 SOW 是全局根治）
 > **用户要求**：路线 β — "从全局思考，让优化真正实现全局优化"，不做局部补丁
 
-> **2026-08-24 现行替代说明**：本文保留为 2026-04-20 历史设计证据，其固定 `aats:runtime:ready:{role}`、readiness fallback 和通过开关绕过 barrier 的内容不是当前行为。现行 FS-016 契约见 [`fs_016_nats_peer_readiness_fail_closed_sow_2026_08_24.md`](fs_016_nats_peer_readiness_fail_closed_sow_2026_08_24.md)：四主进程 NATS/hybrid 必须使用部署 generation 的 strict barrier，Redis 异常或超时不得继续 publisher。当前验证边界见 [`../../audit/full_system_2026_08_24/30-fs-016-nats-peer-readiness-remediation.md`](../../audit/full_system_2026_08_24/30-fs-016-nats-peer-readiness-remediation.md)。
+> **2026-08-28 现行替代说明**：本文保留为 2026-04-20 历史设计证据，其固定 `aats:runtime:ready:{role}`、readiness fallback 和通过开关绕过 barrier 的内容不是当前行为。Phase 3J generation 隔离与严格失败关闭见历史实施记录 [`fs_016_nats_peer_readiness_fail_closed_sow_2026_08_24.md`](fs_016_nats_peer_readiness_fail_closed_sow_2026_08_24.md)；现行 lease 协议与验收边界以 [`fs_016_runtime_readiness_lease_restart_safety_p0_sow_2026_08_28.md`](fs_016_runtime_readiness_lease_restart_safety_p0_sow_2026_08_28.md) 为准：strict 四主进程 NATS/hybrid 使用全局 role owner、claim 即续租、55 秒 quarantine、独立 subprocess watchdog 与 gated `max_ack_pending=1`，non-strict/in-memory/monolith 不注入 gate；每次成功 PROVISIONING 写/续租后的本地 hard fence 最多滑动 50 秒，claim→READY 另有 180 秒绝对上界。Redis 使用 `noeviction`，持续断连 30 秒进入 critical failure；标准入口在任何 mutation 前取得固定生产路径的长寿命 WSL `flock`，只有测试模式可覆盖，fresh predecessor lease 触发 takeover quarantine；外部步骤使用 spawn fencing/active-child 登记，丢锁或 signal/exit 时先终止并 wait child tree 再释放 heartbeat/lease/flock。入口以七容器 lifecycle 指纹与精确 Docker events 证明 quiescence，并在 full-down 前和 app-up 前各执行一次基础设施-only loopback 全量分页只读 cutover preflight；最终证据校验同 lock/generation/commit/quiescence 的 path/hash。LAST/NEW 运行时重建由 strict gate、非 ALL policy，以及“outstanding 超过目标”或“收缩窗口且 outstanding 非零”条件决定，full-down 只是额外发布门禁。真实标准部署、真 Redis/NATS/Docker 完整故障矩阵、双故障和下游 fencing 仍 `OPEN`，真实资金 `NO-GO`。2026-08-24 的审计快照见 [`../../audit/full_system_2026_08_24/30-fs-016-nats-peer-readiness-remediation.md`](../../audit/full_system_2026_08_24/30-fs-016-nats-peer-readiness-remediation.md)，不能代替当前运行验收。
 
 ---
 

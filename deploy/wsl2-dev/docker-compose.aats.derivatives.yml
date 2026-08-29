@@ -28,6 +28,9 @@ name: aats-dev
 x-aats-derivatives-env: &aats-derivatives-env
   AATS_PROFILE: derivatives
 
+x-aats-derivatives-labels: &aats-derivatives-labels
+  com.aats.profile: derivatives
+
 services:
   # derivatives 模拟栈也采集不需要交易凭证的 OKX 公共微观结构数据。
   # 采集器只写 aats_research，不订阅 execution command，也不加载 live env。
@@ -38,33 +41,43 @@ services:
   aats-gateway:
     env_file:
       - ../../.env.derivatives
+      - "${AATS_NATS_TARGET_ENV_SNAPSHOT_PATH:?NATS target snapshot required}"
     environment:
       <<: *aats-derivatives-env
+    labels: *aats-derivatives-labels
 
   aats-market:
     env_file:
       - ../../.env.derivatives
+      - "${AATS_NATS_TARGET_ENV_SNAPSHOT_PATH:?NATS target snapshot required}"
     environment:
       <<: *aats-derivatives-env
+    labels: *aats-derivatives-labels
 
   aats-decision:
     env_file:
       - ../../.env.derivatives
+      - "${AATS_NATS_TARGET_ENV_SNAPSHOT_PATH:?NATS target snapshot required}"
     environment:
       <<: *aats-derivatives-env
+    labels: *aats-derivatives-labels
 
   aats-execution:
     env_file:
       - ../../.env.derivatives
+      - "${AATS_NATS_TARGET_ENV_SNAPSHOT_PATH:?NATS target snapshot required}"
     environment:
       <<: *aats-derivatives-env
+    labels: *aats-derivatives-labels
 
   aats-rdp-daemon:
     env_file:
       - ../../.env.derivatives
+      - "${AATS_NATS_TARGET_ENV_SNAPSHOT_PATH:?NATS target snapshot required}"
     environment:
       <<: *aats-derivatives-env
       AATS_PROCESS_ROLE: rdp-daemon
+    labels: *aats-derivatives-labels
 
   aats-liquidations-daemon:
     build:
@@ -73,7 +86,17 @@ services:
     image: aats-base:dev
     container_name: aats-liquidations-daemon
     restart: unless-stopped
+    env_file:
+      - "${AATS_NATS_TARGET_ENV_SNAPSHOT_PATH:?NATS target snapshot required}"
+    labels:
+      <<: *aats-derivatives-labels
+      com.aats.runtime-readiness-generation: "${AATS_RUNTIME_READINESS_GENERATION:?runtime readiness generation required}"
+      com.aats.deployed-git-commit: "${AATS_DEPLOYED_GIT_COMMIT:?deployed Git commit required}"
+      com.aats.nats-target-manifest-sha256: "${AATS_NATS_TARGET_MANIFEST_SHA256:?NATS target manifest sha256 required}"
     environment:
+      <<: *aats-derivatives-env
+      AATS_RUNTIME_READINESS_GENERATION: "${AATS_RUNTIME_READINESS_GENERATION:?runtime readiness generation required}"
+      AATS_DEPLOYED_GIT_COMMIT: "${AATS_DEPLOYED_GIT_COMMIT:?deployed Git commit required}"
       AATS_ACTIVE_PARAMETER_DB_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/aats_research
       RDP_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/aats_research
       AATS_LOG_FORMAT: json
@@ -107,7 +130,17 @@ services:
     image: aats-base:dev
     container_name: aats-microstructure-collector
     restart: unless-stopped
+    env_file:
+      - "${AATS_NATS_TARGET_ENV_SNAPSHOT_PATH:?NATS target snapshot required}"
+    labels:
+      <<: *aats-derivatives-labels
+      com.aats.runtime-readiness-generation: "${AATS_RUNTIME_READINESS_GENERATION:?runtime readiness generation required}"
+      com.aats.deployed-git-commit: "${AATS_DEPLOYED_GIT_COMMIT:?deployed Git commit required}"
+      com.aats.nats-target-manifest-sha256: "${AATS_NATS_TARGET_MANIFEST_SHA256:?NATS target manifest sha256 required}"
     environment:
+      <<: *aats-derivatives-env
+      AATS_RUNTIME_READINESS_GENERATION: "${AATS_RUNTIME_READINESS_GENERATION:?runtime readiness generation required}"
+      AATS_DEPLOYED_GIT_COMMIT: "${AATS_DEPLOYED_GIT_COMMIT:?deployed Git commit required}"
       AATS_ACTIVE_PARAMETER_DB_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/aats_research
       RDP_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/aats_research
       AATS_LOG_FORMAT: json

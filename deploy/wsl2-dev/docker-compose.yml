@@ -113,7 +113,9 @@ services:
       - "--maxmemory"
       - "384mb"
       - "--maxmemory-policy"
-      - "allkeys-lru"
+      # Readiness ownership 与热缓存当前共用此 Redis。绝不能淘汰带 TTL 的 owner
+      # key：达到上限时让写入显式失败并触发上层 fail-closed，比静默双主安全。
+      - "noeviction"
       - "--requirepass"
       - "${REDIS_PASSWORD:-changeme}"
     # REDISCLI_AUTH 环境变量让 redis-cli 自动认证，避免 -a 参数把密码

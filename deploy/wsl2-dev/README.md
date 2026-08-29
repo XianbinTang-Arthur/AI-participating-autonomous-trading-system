@@ -12,7 +12,8 @@
 > 当前约定：`.env.wsl2` 的单一真相放在仓库根目录，例如 `~/aats/.env.wsl2`。
 > `scripts/deploy.sh` 仍兼容旧位置 `deploy/wsl2-dev/.env.wsl2`，但只建议作为迁移期兼容路径。
 >
-> 最后核对：2026-08-25（Git 基线 `00b6df0` + 当前未提交 Phase 3A–3V 工作区覆盖层）。本页说明基础设施构成；部署唯一入口仍是仓库根目录的 `scripts/deploy.sh`。静态文档不能证明当前容器、网络、数据库、账户、交易所或风控状态。
+> 文档状态：现行基础设施与部署入口说明
+> 最后核对：2026-08-28（起始 Git 基线 `82e600842a7e` + 当前 FS-016 readiness lease 重启安全候选，以本文档所在最终 HEAD 为准）。本页说明基础设施构成；部署唯一入口仍是仓库根目录的 `scripts/deploy.sh`。静态文档不能证明当前容器、网络、数据库、账户、交易所或风控状态。
 
 ## 拓扑
 
@@ -97,7 +98,17 @@ $EDITOR .env.wsl2     # 把 *_change_me 改成你自己的值
 bash scripts/deploy.sh --profile derivatives --skip-commit
 ```
 
-profile 必填；当前只允许 `spot`/`derivatives`，所有 live profile 在副作用前失败且无 override。部署顺序由该入口固定为：预检与同步 → 生成本次 runtime readiness generation → 构建新镜像 → 停止旧栈 → 校正 WSL2 `vm.overcommit_memory=1` → 启动并检查基础设施 → 执行一次性 root + RDP schema migration job → 启动应用 → 应用健康检查 → 写入模拟证据包。Redis 前置条件无法校正时部署失败关闭；Postgres 探针同时指定容器内的用户和基础数据库，不会向不存在的用户名同名库探测。四主进程只有在同 generation peer 就绪后启动 NATS/hybrid publisher；该代次同时写入 evidence。应用进程只做 schema exact validation，不得在 lifespan 或 daemon 启动路径隐式建表、补列或迁移。任一关键步骤失败必须中止；模拟证据明确不是 trading-ready，也不证明生产库已迁移或 NATS 目标故障矩阵已通过。
+profile 必填；当前只允许 `spot`/`derivatives`，所有 live profile 在副作用前失败且无 override。profile/live gate 后、任何 mutation 前，入口取得由单一长寿命 WSL `flock` holder 持有的全流程锁。生产路径固定为 `/tmp/aats-standard-deploy.lock`；`AATS_DEPLOY_LOCK_FILE` 仅在 `AATS_DEPLOY_TEST_MODE=true` 的隔离测试可覆盖，生产设置会失败关闭。Windows 每 3 秒刷新 lease，holder 连续 12 秒未见刷新才释放 fd，锁不通过删除 inode 释放；新 holder 取得 flock 后仍等待任何 fresh predecessor lease 清除或超过 12 秒，再报告 `ACQUIRED`。每个外部步骤 spawn 前复核 holder/heartbeat/flock，spawn 后全局登记 active child PID/context；活动中失锁会终止并 wait 进程树。`TERM/HUP/INT/EXIT` 也必须先完成该子进程清理，再停止 heartbeat、移除 lease 并释放/wait holder flock。部署顺序固定为：持锁预检与同步 → 生成本次 runtime readiness generation → 构建新镜像并校正 WSL2 `vm.overcommit_memory=1` → 以 15 秒 stop budget 停止七个已知应用并建立 quiescence 基线 → 受控启动基础设施-only → 第一次 loopback 全量分页只读 NATS durable cutover preflight → PASS 后以 5 秒 down budget full-down 并建立新基线 → 启动并检查基础设施 → 执行一次性 root + RDP schema migration job → app up 前第二次同等 preflight → 启动应用 → 在默认 210 秒预算内完成应用健康检查 → 将最后一次 preflight path/hash 写入模拟证据包 → 仍在持锁状态下输出报告。锁竞争/失锁、Redis 前置条件无法校正或任一阶段失败都失败关闭；Postgres 探针同时指定容器内用户和基础数据库，不会向不存在的用户名同名库探测。
+
+四主进程的 strict NATS/hybrid readiness 为 Redis-only protocol v2。每个 role 在任何 NATS I/O 前以全局 `aats:runtime:owner:<role>` key claim `PROVISIONING`，立即开始续租并启动独立 subprocess watchdog，然后完成 55 秒 takeover quarantine；generation 只位于 payload/peer barrier。父子进程统一使用 POSIX `CLOCK_BOOTTIME` / Windows `GetTickCount64`，并以 POSIX pidfd / Windows process creation FILETIME 固定父进程身份。build 完成后 owner-aware CAS 为 `READY`，所有同 generation peer `READY` 后先 flush 最多 4,096 条且 64 MiB 的 build 期 publish 缓冲，再开放 callback 和 background tasks。仅该 strict 分布式路径注入 delivery gate 并把 push consumer 的 `max_ack_pending` 固定为 `1`；non-strict、in-memory 和 monolith 不注入 gate、也不强制该窗口。已有 durable 的可变参数原位更新并验证，critical ALL cursor 不得删除。
+
+首次将旧/无限窗口降到 `1` 时，标准入口按所有受支持 profile 应用容器的并集 stop（避免 derivatives -> spot 遗留 collector），并只接受 `exited/dead` 或明确 not-found；paused/restarting/removing/unknown/inspect 失败均阻断。quiescence 证据覆盖七容器的 ID、状态、`StartedAt`、`FinishedAt`、`RestartCount`，preflight 前后还查询精确时间窗内的 Docker lifecycle events。入口以 base Compose 受控确保基础设施/NATS 在线而不启动 app，再由 `~/aats-venv` 固定从 loopback 分页读取全部 stream/consumer。preflight 只检查现存四主 role 的 stream-backed ALL durable（persist-only `system.audit_records` 不在 NATS），并核对 stream/filter/ack/deliver policy、created/cursor、窗口和 outstanding；缺失或畸形的计数/cursor 是查询失败，不会折算成零。标准 stop 只证明生产者已停，不证明 drain；旧/无限窗口仍有任何未 ACK、窗口已为 `1` 但 outstanding 大于 `1`、配置 drift、查询失败或 quiescence 变化都会阻断并保持 NATS 在线。它绝不自动 ACK/delete/update/recreate/reset/purge；outstanding 只能经人工批准后用匹配旧消费者自然 drain，immutable drift 必须 release review。第一次 PASS 后才 full-down；重建基线并完成正常 infra/schema 后，app up 前必须再次 PASS。v2 证据绑定 lock id、generation、deployed commit 与 quiescence，最终 deployment evidence 校验同值并记录最后一次证据的相对路径和 SHA-256。
+
+LAST/NEW durable 只在运行时同时满足 strict delivery gate、policy 非 ALL，并且（outstanding 超过目标，或窗口正在收缩且 outstanding 非零）时重建：LAST 仅取最新，NEW 仅收未来，自动重启也可能触发。标准 full-down 是首次切换的额外发布门禁，不是运行时代码输入；该分支不适用于 ALL cursor。
+
+TTL 为 60 秒，每 10 秒续租，safety margin 30 秒，hard-exit grace 10 秒。每次成功 `PROVISIONING` 写入/续租后，本地 hard fence 最多滑动到该次写入后 50 秒；另有 claim 到 `READY` 的 180 秒绝对 promotion 上界，续租不得延长，并在第 170 秒冻结续租、进入 10 秒 fatal grace。确定失租零宽限。关键故障立即冻结续租并进入不可解除的 fatal deadline；正常 cleanup 也先冻结续租并受 10 秒硬截止保护，业务/NATS 安全停止后才 disarm、owner-aware delete。Redis 配置为 `noeviction`，写满显式失败；NATS 连续断连 30 秒进入 runtime critical failure。critical durable 明确缺失或配置漂移立即 terminal；management、push binding、heartbeat 持续失败 30 秒 terminal；有 backlog 且进度在 `max(30 秒, 2 x ack_wait)` 内不变也 terminal。该代次同时写入 evidence。
+
+protocol v1 -> v2 首次发布和回滚禁止 rolling/mixed version，只能走标准 full-down/full-up；旧 gateway/market/decision/execution 未全部停止，或首次 ACK-window cutover 未取得完整只读 PASS 时，均不得 app up。NATS 八键目标在同步后冻结为 root-owned `0444` 白名单快照，并作为所有必需应用最后一个 `env_file`；preflight、容器 manifest label、健康边界和最终证据必须同摘要。应用健康后另执行 40 秒主动观察，最终证据逻辑窗只能为 35–60 秒。应用进程只做 schema exact validation，不得在 lifespan 或 daemon 启动路径隐式建表、补列或迁移。任一关键步骤失败必须中止；模拟证据明确不是 trading-ready。真实 NATS consumer-delete 集成已经证明 durable 消失会在 core TCP 仍连通时触发 terminal，当前候选全量单测、preflight 聚焦回归和隔离 smoke 已通过；但尚未执行真实标准部署/完整 Docker 矩阵，当前 lease 也仍不是下游执行端强制校验的单调 fencing token。真 Redis/NATS/Docker 故障注入、标准发布、网络/push/heartbeat/backlog stall、双故障、下游 fencing 与受控逐角色重启矩阵仍 `OPEN`，真实资金继续 `NO-GO`。
 
 部署报告完成后可做只读验证：
 

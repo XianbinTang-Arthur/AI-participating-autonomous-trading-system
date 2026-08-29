@@ -3,7 +3,7 @@
 > 文档状态：现行代码导航，包含明确标注的历史静态快照
 > 文档性质：当前实现说明、代码导航、运行与安全边界、维护手册
 > 原始全景审阅基线：Git `be9179ead5be6aba22fbe94e3baf72b9f46eedc3`（`main`，2026-05-19）
-> 当前覆盖层最后复核：2026-08-27（静态起始 HEAD `main@9c4112c6d769735f171971c8fa4f2cae5a03a824`；包含尚未部署的 RDP 控制面收口候选，以本文档所在最终 HEAD 为准）
+> 当前覆盖层最后复核：2026-08-28（静态起始 HEAD `main@82e600842a7ef360ab63c103c6dea1eae2267898`；包含当前尚未部署的 FS-016 readiness lease 重启安全候选，以本文档所在最终 HEAD 为准）
 > 核对范围：当前 RDP schema/API/参数控制面、derivatives 模拟拓扑及原始全景导航；原始审阅规模、附录 A/C 和带日期的运行记录保留为历史快照，不证明当前 runtime 或 live 状态
 > 适用对象：重新接手项目的维护者、代码审阅者、交易与风控负责人、Operator
 > 事实优先级：固定行为以当前可执行代码为准；有效运行值以现场 runtime/数据库为准；自动化测试用于交叉验证；历史设计文档仅作背景
@@ -223,18 +223,20 @@ worker 的统一生命周期为：
 
 ```mermaid
 flowchart TD
-    A[加载 settings] --> B[build_runtime]
-    B --> C[连接 event bus / hot state]
-    C --> D[通过跨进程 readiness barrier]
-    D --> E[执行 startup recovery 或 slice 初始化]
-    E --> F[启动 role 对应后台任务]
-    F --> G[注册关键长期 task 并写 heartbeat]
-    G --> H{停止信号、关键 task 结束或成功进度超时}
-    H -->|SIGTERM/SIGINT| I[正常停止，退出 0]
-    H -->|exception / cancel / 提前返回| K[停止 heartbeat，退出 1]
-    H -->|固定周期 task stalled| K
-    K --> I
-    I --> J[关闭 runtime / bus / DB]
+    A[加载最终 settings / 连接 Redis hot state] --> B[任何 NATS I/O 前 claim 全局 role PROVISIONING]
+    B --> C[启动独立 watchdog 子进程 / 开始 PROVISIONING 续租]
+    C --> D[55 秒 takeover quarantine]
+    D --> E[build_runtime 连接 NATS / 注册 consumer；delivery gate 关闭]
+    E --> F[原子 CAS 本 owner 为 READY]
+    F --> G[等待同 generation peer 均为 READY]
+    G --> H[先 flush build publish，再开 callback / background]
+    H --> I[注册关键长期 task 并写 heartbeat]
+    I --> J{停止信号、关键 task 结束或成功进度超时}
+    J -->|SIGTERM/SIGINT| K[冻结续租，10 秒有界安全停止]
+    J -->|exception / cancel / 提前返回| L[ABORT gate，停 heartbeat，冻结续租并失败关闭]
+    J -->|固定周期 task stalled| L
+    K --> M[关闭业务 / NATS，disarm watchdog，owner-aware delete，再关 Redis/DB]
+    L --> N[非安全路径不 delete；TTL / sticky fatal watchdog fencing]
 ```
 
 进程会安装信号处理和 heartbeat。2026-08-24 Phase 3D 工作区新增显式
@@ -261,15 +263,24 @@ gateway 启动顺序为：
 1. 加载 settings、初始化结构化日志；
 2. 识别 gateway 或 monolith role；
 3. 只读校验 RDP ORM table/column surface 与 Batch B ledger/checksum；任一差异立即失败；
-4. 调用 `build_runtime()`，managed Postgres 在此只读校验 root migration ledger 与财务精度；
-5. 发布本 role ready，并等待 peer roles；
-6. 启动 runtime background tasks 与 dashboard snapshot plane；
-7. 对外提供 UI/API；
-8. lifespan 退出时停止 snapshot plane、后台任务和 runtime。
+4. 调用 `build_runtime()`；managed Postgres 在此只读校验 root migration ledger 与财务精度，strict 路径在任何 NATS I/O 前 claim 全局 role `PROVISIONING` owner，立即启动续租与独立 subprocess watchdog，并完成 55 秒 takeover quarantine；
+5. strict 四主进程 NATS/hybrid 在关闭的 `NatsDeliveryGate` 后连接 NATS、注册 consumer 并完成 runtime；build 期 publish 只能进入 4,096 条/64 MiB 双上限缓冲，gated push consumer 使用 `max_ack_pending=1`；non-strict/in-memory/monolith 不注入 gate、也不强制该窗口；
+6. 将本 owner CAS 为 `READY`，并等待精确 generation 的 peer roles 均为 `READY`；
+7. 先 flush build 期 publish，再开放 callback，然后启动 runtime background tasks 与 dashboard snapshot plane；
+8. 对外提供 UI/API；
+9. lifespan 退出时 ABORT gate，停止 snapshot plane、后台任务和 NATS；只有安全关停才 owner-aware delete，再关 Redis/DB。
 
 RDP 校验位于任何 readiness 广播、peer wait 和后台 task 之前；原“迁移失败只 warning 后继续 ready”路径已在 Phase 3E 收紧。它仍只是未提交的代码/隔离验证结论，不是生产库已通过声明。
 
-Phase 3J 将第 5 步的 peer barrier 收紧为四主进程 NATS/hybrid 必经失败关闭路径。标准 deploy 在 sync 后生成非秘密 generation，Compose 必填注入；每个 role 只写/读 `aats:runtime:ready:<generation>:<role>` 并校验 payload role/generation。缺失 generation/hot-state、Redis set/get 失败或 60 秒 peer timeout 都在 `start_background_tasks()` 前抛固定错误。退出时 best-effort 删本 role/本代次 key。该 key 是 consumer provisioning 事实，不是持续业务健康 lease。
+Phase 3J 将 peer barrier 收紧为四主进程 NATS/hybrid 必经失败关闭路径；2026-08-28 P0 follow-up 的现行本地候选为 Redis-only protocol v2。标准 deploy 在 sync 后生成非秘密 generation 并由 Compose 必填注入，但 owner key 固定为全局 `aats:runtime:owner:<role>`，generation 只位于 payload 和 peer barrier。每个 role 在任何 NATS I/O 前 `SET NX PX` claim `PROVISIONING`，立即启动续租 task 和独立 subprocess watchdog，然后执行 55 秒 takeover quarantine；build 完成后以 compare-replace CAS 为 `READY`。父进程与 watchdog 统一使用计入宿主休眠的 POSIX `CLOCK_BOOTTIME` / Windows `GetTickCount64`；child 在 ready handshake 前以继承 pidfd（POSIX）或 process handle + creation FILETIME（Windows）固定父进程身份。peer 严格校验 protocol v2、phase=`READY`、role、generation、instance 与诊断字段；缺 generation/Redis、claim/replace/poll 异常、60 秒 peer timeout、ownership 丢失或 Redis 持续失败均失败关闭。
+
+`NatsDeliveryGate` 在 `PROVISIONING` 和失败 `ABORT` 状态下不允许 callback parse/persist/handler/ack/nak；build 期 publish 只能进入最多 4,096 条且 64 MiB 的双上限缓冲。仅 strict 四主进程 NATS/hybrid 注入 gate 并把 push consumer 收紧为 `max_ack_pending=1`，防止串行 callback 在门关闭时只有队首能发送 progress ACK、其余 broker 预取消息耗尽 `max_deliver`；non-strict、in-memory 与 monolith 不注入 gate、也不强制该窗口。已有 durable 的 ack 参数以原位 update + readback 校验收敛；携带关键 ALL cursor 的 durable 遇到不可变 drift 时失败关闭，不能删除重建。所有 peer `READY` 后必须先 flush，再开 callback，最后启动 background。
+
+TTL/renew/safety margin/hard-exit grace 分别为 60/10/30/10 秒；每次成功写/续租 `PROVISIONING` lease 后，本地 hard fence 最多滑动至该次写入后 50 秒，这不是 claim 后的总期限。claim→READY 另有不能由续租延长的 180 秒绝对 promotion deadline：第 170 秒冻结续租并进入 10 秒 fatal grace。compare-replace/refresh 确定失租零宽限硬退。关键业务/NATS 故障先冻结续租、ABORT gate 并进入不可 disarm 的 fatal deadline；正常 shutdown 也先冻结续租并将 cleanup 收紧为 10 秒，业务与 NATS 安全停止后才 disarm watchdog、owner-aware delete。Compose Redis 使用 `noeviction`，容量写失败显式上浮；NATS 连续断连 30 秒或永久关闭进入 critical failure。标准 deploy 在任何 mutation 前取得并持有长寿命 WSL `flock` 到最终 evidence/report；生产锁固定 `/tmp/aats-standard-deploy.lock`，只有 `AATS_DEPLOY_TEST_MODE=true` 的隔离测试可通过 `AATS_DEPLOY_LOCK_FILE` 覆盖。Windows 每 3 秒刷新 lease，WSL holder 12 秒未刷新才释放 fd；新 holder 取得 flock 后仍等待其他 fresh predecessor lease 清除或过期。每个外部步骤 spawn 前校验 holder/heartbeat/flock、spawn 后全局登记 active child，丢锁会终止并 wait 进程树；`TERM/HUP/INT/EXIT` 同样先清理并 wait child，再依次停止 heartbeat、移除 lease、释放并 wait flock holder。部署停净七个已知应用后记录容器 ID/status/StartedAt/FinishedAt/RestartCount；每次 preflight 前后比较指纹并查询精确时间窗内的 Docker lifecycle events。第一次只读 preflight 位于基础设施-only up 后、full-down 前；full-down 后重建基线，infra/schema 后、app up 前执行第二次。BLOCKED、查询失败或 quiescence 失效保留 NATS 在线；v2 PASS 绑定 lock id、generation、deployed commit 和 quiescence，最终 evidence 校验同值并记录路径与 SHA-256。默认应用 health budget 为 210 秒。v1 -> v2 首发/回滚禁止 rolling/mixed version，必须走标准 full-down。
+
+部署停止集合取所有支持 profile 的应用容器并集，不能因目标 profile 较小而遗留 collector。preflight 将缺失或畸形 outstanding/cursor 视为 QUERY_FAILED，而不是零。LAST/NEW durable 只在运行时同时满足 strict delivery-gated、policy 非 ALL，并且（outstanding 超过目标，或窗口正在收缩且 outstanding 非零）时，会在 bind 前按“LAST 仅最新、NEW 仅未来”重建并舍弃旧 pending/cursor；自动重启也可能触发。标准 full-down 是首次切换的额外发布门禁，不是运行时重建的代码内信号；critical ALL durable 永不删除。
+
+该 owner lease 不是下游 Postgres/NATS/交易所执行端强制校验的单调 fencing token；Redis owner truth 与 watchdog/OS 终止同时失效的双故障仍缺少端到端排他证明。当前候选全量单测已通过；真 Redis/NATS/Docker 故障注入、标准部署、受控逐角色重启、双故障和下游 fencing 均 `OPEN`，所以仍是本地候选，不等于完整业务健康或 trading-ready，真实资金继续 `NO-GO`。
 
 `/healthz` 不需要认证；lifespan runtime 的关键 task 已结束，或纳管的固定周期
 任务成功进度超时时返回 `503`，其余情况下只证明 gateway lifespan 和当前监督面
@@ -334,14 +345,15 @@ gateway 对 execution-only 人工动作使用 operator command request/response�
 6. 再次执行配置、安全与认证校验；
 7. 初始化策略 profile 与 Operator 初始状态；
 8. 构建 memory/Redis hot store；
-9. 构建 shared slice 并启动 event bus；
-10. 从持久化/热缓存恢复 kill switch、stream cache、portfolio、obligation、order、fill、account 等状态；
-11. 按 role 构建 market、decision、execution、portfolio、reconciliation slice；
-12. 聚合事件订阅，构建 audit writer；
-13. execution/monolith 执行启动恢复；
-14. 创建 `ApplicationRuntime`；
-15. gateway 安装跨进程命令 proxy；
-16. 由各入口在 readiness 后启动后台循环。
+9. strict NATS/hybrid 路径在任何 NATS I/O 前通过 hook claim 全局 role `PROVISIONING` owner，立即开始续租、启动独立 subprocess watchdog 并完成 55 秒 takeover quarantine；
+10. 构建 shared slice 并在关闭的 delivery gate 后启动 event bus；
+11. 从持久化/热缓存恢复 kill switch、stream cache、portfolio、obligation、order、fill、account 等状态；build 期 NATS publish 仅进入有界缓冲；
+12. 按 role 构建 market、decision、execution、portfolio、reconciliation slice；
+13. 聚合事件订阅，构建 audit writer；
+14. execution/monolith 执行启动恢复；
+15. 创建 `ApplicationRuntime`；
+16. gateway 安装跨进程命令 proxy；
+17. `build_runtime()` 返回后，由 strict 入口 CAS 本 owner 为 `READY`、启动续租、等待 peer `READY`，先 flush 再开 callback，最后启动后台循环。
 
 运行时不是“所有服务都有值”的大容器。非本 role 的服务刻意为空；新增调用若跨 slice，必须经事件或命令代理，而不是直接访问一个在该进程不存在的 service。
 
@@ -373,7 +385,7 @@ topic 分三类：
 
 NATS server file store 上限 8 GiB。三条 stream 声明上限合计 6.5 GiB，留出内部索引、consumer state 与运行余量。
 
-`AATS_EVENTS` 使用 INTEREST，因此“Redis 异常/超时后继续 publisher”的旧 LIMITS 兼容注释已不成立。Phase 3J 单测已证明 strict 路径对 announce/poll/timeout/旧代次失败关闭，但未连接真实 NATS/Redis，也未证明 Compose 并发启动、自动重启和 consumer provisioning 延迟下的消息计数。所以当前状态是 `CODE REMEDIATED / TARGET NATS STARTUP-RESTART VERIFICATION OPEN`，不是 CLOSED。
+`AATS_EVENTS` 使用 INTEREST，因此“Redis 异常/超时后继续 publisher”的旧 LIMITS 兼容注释已不成立。Phase 3J 与早期 lease follow-up 的聚焦/真 Redis 结果发生在 protocol v2 两阶段 owner、delivery gate、有界 publish 缓冲和独立 subprocess watchdog 重设计之前，只能作为 **pre-watchdog baseline**。当前 read-only cutover preflight v2 排除没有 JetStream consumer 的 persist-only topic，分页枚举全部 stream/consumer，校验目标 stream/filter/ack/deliver policy、cursor、窗口/outstanding；它还把七容器 before/after lifecycle 指纹和精确 Docker events 时间窗绑定到 lock id、generation 与 deployed commit。标准入口在 full-down 前和 app-up 前各执行一次，最终 evidence 校验最后一次 PASS 的同值字段、相对路径与 SHA-256。Windows Git Bash -> WSL 的长寿命锁竞争、释放和重取已有窄 smoke；真实 NATS 聚焦集成已证明 durable 消失会 terminal，也验证 LAST/NEW 重建后的声明丢弃语义。这些证据仍不证明真实 Redis/NATS/Docker 中的 compare-replace、55 秒 quarantine、父进程身份围栏、ABORT/flush 竞态、event-loop/GIL 阻塞硬退、首次旧消费者自然 drain、30 秒持续断连、自动重启或标准 full-down 发布正确。真实标准部署、完整故障矩阵、下游单调 fencing 和 Redis truth + watchdog/OS termination 双故障排他仍 `OPEN`。所以当前状态是 `LOCAL CANDIDATE / FINAL STARTUP-RESTART VERIFICATION OPEN / REAL-MONEY NO-GO`，不是 CLOSED。
 
 ### 7.4 投递策略
 
@@ -1314,7 +1326,7 @@ bash scripts/deploy.sh --profile derivatives --skip-commit
 | Grafana | 12.4.3 | 3000 | 512 MiB |
 | Promtail | 3.0.0 | 无 host port | 256 MiB |
 
-Postgres 设 max connections 200、shared buffers 768 MiB，并记录 500ms 以上 SQL；健康探针同时指定 `POSTGRES_USER` 与 `POSTGRES_DB`，避免把“用户名同名但不存在的库”误写成周期性 FATAL。Redis AOF everysec、maxmemory 384 MiB、allkeys-lru；标准部署会以 WSL root 幂等设置 `vm.overcommit_memory=1`，否则失败关闭，防止 fork/BGSAVE 因宿主 overcommit 配置失败。Redis 仍是热状态，不是不可替代的永久账本。
+Postgres 设 max connections 200、shared buffers 768 MiB，并记录 500ms 以上 SQL；健康探针同时指定 `POSTGRES_USER` 与 `POSTGRES_DB`，避免把“用户名同名但不存在的库”误写成周期性 FATAL。Redis AOF everysec、maxmemory 384 MiB、`noeviction`；容量不足必须显式写失败并由上层失败关闭，不能淘汰 readiness owner。标准部署会以 WSL root 幂等设置 `vm.overcommit_memory=1`，否则失败关闭，防止 fork/BGSAVE 因宿主 overcommit 配置失败。Redis 仍是热状态，不是不可替代的永久账本。
 
 ### 21.5 镜像
 

@@ -25,8 +25,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import warnings
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
@@ -55,6 +57,69 @@ if TYPE_CHECKING:  # pragma: no cover - 仅用于类型检查
 # consumer 在收到 MAJOR 不同的 envelope 时应当直接 term() 掉，避免旧版本进程
 # 去解一个结构已变化的消息时静默跑错逻辑。
 _SUPPORTED_ENVELOPE_SCHEMA_MAJOR: str = "1"
+_MAX_PRE_ACTIVATION_PUBLICATIONS = 4096
+_MAX_PRE_ACTIVATION_PUBLICATION_BYTES = 64 * 1024 * 1024
+
+
+class NatsDeliveryGate:
+    """Strict split-runtime callback gate with explicit READY/ABORT states.
+
+    Durable consumers may be provisioned while a process owns only a
+    PROVISIONING lease. ``activate()`` is called exactly after local promotion
+    and all peer READY checks; ``abort()`` wakes callbacks without parse,
+    persistence, handler invocation, ack or nak. ABORT is sticky and wins every
+    race with activation.
+    """
+
+    def __init__(self) -> None:
+        self._activation_event = asyncio.Event()
+        self._abort_event = asyncio.Event()
+
+    @property
+    def activated(self) -> bool:
+        return self._activation_event.is_set() and not self._abort_event.is_set()
+
+    @property
+    def aborted(self) -> bool:
+        return self._abort_event.is_set()
+
+    def activate(self) -> bool:
+        if self._abort_event.is_set():
+            return False
+        self._activation_event.set()
+        return True
+
+    def abort(self) -> None:
+        self._abort_event.set()
+
+    async def wait_aborted(self) -> None:
+        await self._abort_event.wait()
+
+    async def wait(self) -> bool:
+        if self._abort_event.is_set():
+            return False
+        if self._activation_event.is_set():
+            return True
+        activation_wait = asyncio.create_task(self._activation_event.wait())
+        abort_wait = asyncio.create_task(self._abort_event.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                (activation_wait, abort_wait),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            return (
+                activation_wait in done
+                and not self._abort_event.is_set()
+            )
+        finally:
+            for task in (activation_wait, abort_wait):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(
+                activation_wait,
+                abort_wait,
+                return_exceptions=True,
+            )
 
 
 # _on_error 分级用白名单：以下异常类型视为 nats-py 内置重连逻辑在处理的
@@ -760,6 +825,15 @@ class NatsBusConfig:
     connect_timeout_seconds: float = 5.0
     # 重连最大次数（-1 = 无限重连）
     max_reconnect_attempts: int = -1
+    # 无限重连不能等于无限伪健康。断连超过该窗口后，connection supervisor
+    # 结束为 critical failure，由 lifecycle 撤销健康并有界退出。
+    reconnect_failure_timeout_seconds: float = 30.0
+    # Core TCP connected 不代表 JetStream durable 仍存在或 push path 仍活跃。
+    # runtime critical supervisor 以该周期核验所有已绑定 critical consumer。
+    consumer_supervision_interval_seconds: float = 5.0
+    # consumer management 暂态查询失败或 push path inactive 的容忍窗口；
+    # durable 明确 NotFound / 安全配置漂移不等待该窗口，立即 fail-closed。
+    consumer_supervision_failure_timeout_seconds: float = 30.0
     # 消费者持久 name 前缀（每个进程角色独立）
     durable_name_prefix: str = "aats-"
 
@@ -771,6 +845,32 @@ class NatsBusConfig:
         - topic 互斥：不允许同一个 topic 被多条 stream 同时 claim（否则
           subject overlap，nats-py add_stream 会抛 "subjects overlap" 错误）
         """
+        if (
+            not math.isfinite(self.reconnect_failure_timeout_seconds)
+            or self.reconnect_failure_timeout_seconds <= 0.0
+        ):
+            raise ValueError(
+                "NatsBusConfig.reconnect_failure_timeout_seconds must be "
+                "finite and positive"
+            )
+        for field_name in (
+            "consumer_supervision_interval_seconds",
+            "consumer_supervision_failure_timeout_seconds",
+        ):
+            value = float(getattr(self, field_name))
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(
+                    f"NatsBusConfig.{field_name} must be finite and positive"
+                )
+        if (
+            self.consumer_supervision_failure_timeout_seconds
+            < self.consumer_supervision_interval_seconds
+        ):
+            raise ValueError(
+                "NatsBusConfig.consumer_supervision_failure_timeout_seconds "
+                "must be greater than or equal to "
+                "consumer_supervision_interval_seconds"
+            )
         if not self.streams:
             raise ValueError("NatsBusConfig.streams must be non-empty")
 
@@ -880,6 +980,26 @@ def build_consumer_config_spec(
     )
 
 
+@dataclass(slots=True)
+class _ConsumerSupervisionTarget:
+    """Expected state and bounded-failure bookkeeping for one critical durable."""
+
+    stream_name: str
+    durable: str
+    topic: str
+    subject: str
+    ack_policy: Any
+    deliver_policy: Any
+    ack_wait: float
+    max_ack_pending: int
+    max_deliver: int
+    subscription: Any
+    health_failure_since: float | None = None
+    health_failure_kind: str | None = None
+    progress_signature: tuple[int, ...] | None = None
+    progress_since: float | None = None
+
+
 # ─────────────────────────────────────────────────────────────────────
 # NatsEventBus 骨架
 # ─────────────────────────────────────────────────────────────────────
@@ -914,16 +1034,34 @@ class NatsEventBus(EventBus):
         persistence_mode: str = "strict",
         consumer_role: str = "monolith",
         stream_snapshot_cache: StreamSnapshotCache | None = None,
+        delivery_gate: NatsDeliveryGate | None = None,
     ) -> None:
         self._config = config
         self._event_store = event_store
         self._persistence_mode = persistence_mode
         self._consumer_role = consumer_role
         self._stream_cache = stream_snapshot_cache
+        # Strict split-runtime restart safety: durable consumers may be provisioned
+        # while this role lease is still PROVISIONING, but no callback may parse,
+        # persist, invoke handlers or ack until ownership is atomically READY.
+        self._delivery_gate = delivery_gate
+        self._delivery_publish_lock = asyncio.Lock()
+        self._pre_activation_publications: deque[
+            tuple[str, bytes, str]
+        ] = deque()
+        self._pre_activation_publication_bytes = 0
         self._client: NATSClient | None = None
         self._js: JetStreamContext | None = None
         self._subscriptions: list[Any] = []
         self._connected = False
+        self._closing = False
+        self._disconnect_generation = 0
+        self._disconnect_deadline_task: asyncio.Task[None] | None = None
+        self._terminal_connection_failure = asyncio.Event()
+        self._consumer_supervision_targets: dict[
+            str, _ConsumerSupervisionTarget
+        ] = {}
+        self._consumer_supervision_lock = asyncio.Lock()
         self.logger = get_logger("aats.event_bus.nats")
 
     # ── 生命周期 ────────────────────────────────────────────────
@@ -955,6 +1093,8 @@ class NatsEventBus(EventBus):
         """惰性连接 NATS server。"""
         if self._connected:
             return
+        self._closing = False
+        self._terminal_connection_failure.clear()
         try:
             import nats  # type: ignore[import-not-found]  # noqa: F401  # 可选依赖
         except ImportError as exc:
@@ -965,19 +1105,37 @@ class NatsEventBus(EventBus):
         from nats.aio.client import Client as NATSClient  # type: ignore[import-not-found]
 
         client = NATSClient()
-        await client.connect(
-            servers=list(self._config.servers),
-            name=self._config.name,
-            connect_timeout=self._config.connect_timeout_seconds,
-            max_reconnect_attempts=self._config.max_reconnect_attempts,
-            error_cb=self._on_error,
-            disconnected_cb=self._on_disconnected,
-            reconnected_cb=self._on_reconnected,
-            closed_cb=self._on_closed,
-        )
+        try:
+            await client.connect(
+                servers=list(self._config.servers),
+                name=self._config.name,
+                connect_timeout=self._config.connect_timeout_seconds,
+                max_reconnect_attempts=self._config.max_reconnect_attempts,
+                error_cb=self._on_error,
+                disconnected_cb=self._on_disconnected,
+                reconnected_cb=self._on_reconnected,
+                closed_cb=self._on_closed,
+            )
+            js = client.jetstream()
+        except BaseException:
+            # connect() may have opened sockets/background reconnect tasks before
+            # failing, while jetstream() can fail after a complete connection.
+            # Do not publish the client on either path; close it best-effort and
+            # preserve the exact startup exception for the caller.
+            try:
+                await client.close()
+            except BaseException:
+                pass
+            raise
         self._client = client
-        self._js = client.jetstream()
+        self._js = js
         self._connected = True
+        self._disconnect_generation += 1
+        disconnect_task = self._disconnect_deadline_task
+        self._disconnect_deadline_task = None
+        if disconnect_task is not None and not disconnect_task.done():
+            disconnect_task.cancel()
+            await asyncio.gather(disconnect_task, return_exceptions=True)
         log_event(
             self.logger,
             "nats_event_bus_connected",
@@ -1170,21 +1328,52 @@ class NatsEventBus(EventBus):
 
     async def close(self) -> None:
         """优雅关闭：取消订阅 + 断开连接。"""
+        # 必须先标 normal-closing，避免 client.drain() 触发 closed callback 时
+        # 把正常关停误报为 critical connection failure。
+        self._closing = True
+        self._disconnect_generation += 1
+        disconnect_task = self._disconnect_deadline_task
+        self._disconnect_deadline_task = None
+        if disconnect_task is not None and not disconnect_task.done():
+            disconnect_task.cancel()
+            await asyncio.gather(disconnect_task, return_exceptions=True)
+        # 先释放所有仍在 PROVISIONING activation gate 上等待的 callback，
+        # 但让它们无副作用返回；否则 unsubscribe/drain 会与 gate 永久死锁。
+        if self._delivery_gate is not None:
+            self._delivery_gate.abort()
+        drain_errors: list[BaseException] = []
         for sub in self._subscriptions:
             try:
-                await sub.unsubscribe()
+                # unsubscribe() 只取消 nats-py worker 并立即从 client 移除，
+                # 不等待 in-flight callback；那会允许 owner release 后旧 handler
+                # 继续产生副作用。drain() 会停止新投递并等 pending_queue.join()。
+                await sub.drain()
             except Exception as exc:
+                drain_errors.append(exc)
                 log_event(
                     self.logger,
-                    "nats_unsubscribe_failed",
+                    "nats_subscription_drain_failed",
                     level="warning",
                     error_type=type(exc).__name__,
                     error=str(exc),
                 )
-        self._subscriptions.clear()
         if self._client is not None:
-            await self._client.drain()
-            self._client = None
+            try:
+                await self._client.drain()
+            except Exception as exc:
+                drain_errors.append(exc)
+                log_event(
+                    self.logger,
+                    "nats_client_drain_failed",
+                    level="warning",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+        if drain_errors:
+            raise RuntimeError("nats_delivery_drain_failed") from drain_errors[0]
+        self._subscriptions.clear()
+        self._consumer_supervision_targets.clear()
+        self._client = None
         self._js = None
         self._connected = False
 
@@ -1200,6 +1389,8 @@ class NatsEventBus(EventBus):
     ) -> None:
         if self._js is None:
             raise RuntimeError("NatsEventBus.publish called before connect()")
+        if self._delivery_gate is not None and self._delivery_gate.aborted:
+            raise RuntimeError("nats_delivery_gate_aborted")
 
         subject = self._config.subject_for(envelope.topic)
         # Stage 8：publish 动作本身开一个 span；inject_trace_context 在本 span
@@ -1299,11 +1490,107 @@ class NatsEventBus(EventBus):
             #
             # JetStream publish 返回 ack，包含 stream/sequence；同步等待是为了
             # 在 strict 模式下 publish 失败立即向 caller 抛错。
+            await self._publish_or_defer_until_activation(
+                subject=subject,
+                body=body,
+                event_id=envelope.event_id,
+            )
+
+    async def _publish_or_defer_until_activation(
+        self,
+        *,
+        subject: str,
+        body: bytes,
+        event_id: str,
+    ) -> None:
+        """构建期先持久化并有界缓存，READY 后才进入 JetStream。"""
+
+        gate = self._delivery_gate
+        if gate is None:
+            if self._js is None:
+                raise RuntimeError("NatsEventBus.publish called before connect()")
             await self._js.publish(
                 subject=subject,
                 payload=body,
-                headers={"Nats-Msg-Id": envelope.event_id},
+                headers={"Nats-Msg-Id": event_id},
             )
+            return
+        if gate.aborted:
+            raise RuntimeError("nats_delivery_gate_aborted")
+        if gate.activated:
+            if self._js is None:
+                raise RuntimeError("NatsEventBus.publish called before connect()")
+            await self._js.publish(
+                subject=subject,
+                payload=body,
+                headers={"Nats-Msg-Id": event_id},
+            )
+            return
+
+        publish_after_transition = False
+        async with self._delivery_publish_lock:
+            if gate.aborted:
+                raise RuntimeError("nats_delivery_gate_aborted")
+            if not gate.activated:
+                body_size = len(body)
+                if (
+                    len(self._pre_activation_publications)
+                    >= _MAX_PRE_ACTIVATION_PUBLICATIONS
+                ):
+                    raise RuntimeError(
+                        "nats_pre_activation_publication_capacity_exceeded"
+                    )
+                if (
+                    body_size > _MAX_PRE_ACTIVATION_PUBLICATION_BYTES
+                    or self._pre_activation_publication_bytes + body_size
+                    > _MAX_PRE_ACTIVATION_PUBLICATION_BYTES
+                ):
+                    raise RuntimeError(
+                        "nats_pre_activation_publication_bytes_exceeded"
+                    )
+                self._pre_activation_publications.append(
+                    (subject, body, event_id)
+                )
+                self._pre_activation_publication_bytes += body_size
+                return
+            publish_after_transition = True
+        if publish_after_transition:
+            if gate.aborted:
+                raise RuntimeError("nats_delivery_gate_aborted")
+            if self._js is None:
+                raise RuntimeError("NatsEventBus.publish called before connect()")
+            await self._js.publish(
+                subject=subject,
+                payload=body,
+                headers={"Nats-Msg-Id": event_id},
+            )
+
+    async def activate_delivery(self) -> None:
+        """先冲刷 build 期发布，再原子开放本进程 callback delivery。"""
+
+        gate = self._delivery_gate
+        if gate is None:
+            return
+        async with self._delivery_publish_lock:
+            if gate.aborted:
+                raise RuntimeError("nats_delivery_gate_aborted")
+            if self._js is None:
+                raise RuntimeError("NatsEventBus.activate called before connect()")
+            while self._pre_activation_publications:
+                if gate.aborted:
+                    raise RuntimeError("nats_delivery_gate_aborted")
+                subject, body, event_id = self._pre_activation_publications[0]
+                await self._js.publish(
+                    subject=subject,
+                    payload=body,
+                    headers={"Nats-Msg-Id": event_id},
+                )
+                self._pre_activation_publications.popleft()
+                self._pre_activation_publication_bytes -= len(body)
+                if gate.aborted:
+                    raise RuntimeError("nats_delivery_gate_aborted")
+            if not gate.activate():
+                raise RuntimeError("nats_delivery_gate_aborted")
 
     async def subscribe(self, topic: str, handler: MessageHandler) -> None:
         """订阅 topic：注册一个 durable JetStream consumer。
@@ -1322,7 +1609,7 @@ class NatsEventBus(EventBus):
                 ConsumerConfig,
                 DeliverPolicy,
             )
-            from nats.js.errors import BadRequestError  # type: ignore[import-not-found]
+            from nats.js.errors import NotFoundError  # type: ignore[import-not-found]
         except ImportError as exc:
             raise RuntimeError("nats-py JetStream API unavailable") from exc
 
@@ -1333,6 +1620,14 @@ class NatsEventBus(EventBus):
         )
 
         async def _on_msg(msg: Any) -> None:
+            if not await self._wait_for_delivery_activation(
+                msg=msg,
+                progress_interval_seconds=min(
+                    10.0,
+                    max(0.001, spec.ack_wait_seconds / 3.0),
+                ),
+            ):
+                return
             # ── Phase 1: 反序列化（无 trace context，失败走早期 return）──
             try:
                 payload_dict = json.loads(msg.data.decode("utf-8"))
@@ -1574,11 +1869,20 @@ class NatsEventBus(EventBus):
                 f"expected one of: all, last, new"
             )
 
+        # nats-py 的 push subscription 以单一 worker 串行调用 callback。门禁
+        # 关闭时，只有队首消息进入 _wait_for_delivery_activation() 并发送
+        # +WPI；其余已由 server 投递、却排在客户端队列中的消息无法续租，
+        # 会在启动隔离期耗尽 max_deliver。带 startup delivery gate 的进程
+        # 因此必须把 broker 预取窗口永久收紧为 1。激活后 callback 本来也
+        # 是串行执行，这不会降低该 subscription 的实际并行度。
+        effective_max_ack_pending = (
+            1 if self._delivery_gate is not None else spec.max_ack_pending
+        )
         consumer_config = ConsumerConfig(
             durable_name=spec.durable_name,
             ack_policy=AckPolicy.EXPLICIT,
             ack_wait=spec.ack_wait_seconds,
-            max_ack_pending=spec.max_ack_pending,
+            max_ack_pending=effective_max_ack_pending,
             max_deliver=spec.max_deliver,
             deliver_policy=dp,
             flow_control=spec.flow_control if spec.flow_control else None,
@@ -1595,79 +1899,260 @@ class NatsEventBus(EventBus):
         # 不会触发迁移，不会丢失 ack 位置。
         stream_spec = self._config.stream_spec_for_topic(topic)
         stream_name = stream_spec.name if stream_spec else self._config.stream_name
-
         try:
-            sub = await self._js.subscribe(
-                subject=subject,
-                durable=durable,
-                cb=_on_msg,
-                manual_ack=True,
-                config=consumer_config,
+            existing_info = await self._js.consumer_info(stream_name, durable)
+        except NotFoundError:
+            existing_info = None
+
+        if existing_info is not None:
+            current = existing_info.config
+            current_filters = tuple(current.filter_subjects or ())
+            filter_matches = (
+                current.filter_subject == subject and not current_filters
+            ) or (
+                current.filter_subject in {None, ""}
+                and current_filters == (subject,)
             )
-        except Exception as sub_exc:
-            # 优先用 nats-py 结构化异常判断：err_code 10013 = consumer
-            # already exists with different configuration。
-            # fallback：字符串匹配兜底未来 nats-py 版本差异。
-            _is_config_mismatch = (
-                isinstance(sub_exc, BadRequestError)
-                and getattr(sub_exc, "err_code", 0) == 10013
-            )
-            if not _is_config_mismatch:
-                exc_str = str(sub_exc).lower()
-                _is_config_mismatch = "consumer" in exc_str and any(
-                    kw in exc_str
-                    for kw in ("configuration", "deliver", "mismatch")
-                )
-            if _is_config_mismatch:
+            immutable_drift: list[str] = []
+            if current.deliver_policy != consumer_config.deliver_policy:
+                immutable_drift.append("deliver_policy")
+            if current.ack_policy != consumer_config.ack_policy:
+                immutable_drift.append("ack_policy")
+            if not filter_matches:
+                immutable_drift.append("filter_subject")
+            if current.deliver_group not in {None, ""}:
+                immutable_drift.append("deliver_group")
+            if (
+                bool(current.flow_control) != bool(consumer_config.flow_control)
+                or float(current.idle_heartbeat or 0.0)
+                != float(consumer_config.idle_heartbeat or 0.0)
+            ):
+                # nats-py 历史创建路径会用 subscribe() 的默认参数覆盖 config，
+                # 所以旧 durable 常见 flow_control=False。该字段不能安全原位
+                # 修改，也不能为此删除 critical cursor；max_ack_pending=1 已
+                # 提供严格 broker 反压，保留旧传输配置并明确告警。
                 log_event(
                     self.logger,
-                    "nats_consumer_migration_needed",
+                    "nats_consumer_transport_config_preserved",
                     level="warning",
                     topic=topic,
                     durable=durable,
                     stream=stream_name,
-                    new_deliver_policy=spec.deliver_policy,
-                    error=str(sub_exc),
+                    existing_flow_control=bool(current.flow_control),
+                    configured_flow_control=bool(consumer_config.flow_control),
                 )
+
+            if immutable_drift:
+                log_event(
+                    self.logger,
+                    "nats_consumer_immutable_config_drift",
+                    level="critical",
+                    topic=topic,
+                    durable=durable,
+                    stream=stream_name,
+                    drift=immutable_drift,
+                )
+                # ALL durable carries the critical event cursor. Deleting it would
+                # reset delivery position and can replay/skip financial events, so
+                # immutable drift is always fail-closed. Snapshot/transient durable
+                # explicitly uses LAST/NEW semantics and may be safely rebuilt.
+                if spec.deliver_policy == "all":
+                    raise RuntimeError(
+                        f"nats_critical_consumer_config_drift:{durable}:"
+                        f"{','.join(immutable_drift)}"
+                    )
+                await self._js.delete_consumer(stream_name, durable)
+                existing_info = None
+                log_event(
+                    self.logger,
+                    "nats_non_event_consumer_rebuilt",
+                    topic=topic,
+                    durable=durable,
+                    stream=stream_name,
+                    drift=immutable_drift,
+                )
+
+        if existing_info is not None:
+            current = existing_info.config
+            current_ack_window = int(current.max_ack_pending or 0)
+            reducing_ack_window = (
+                effective_max_ack_pending > 0
+                and (
+                    current_ack_window <= 0
+                    or current_ack_window > effective_max_ack_pending
+                )
+            )
+            outstanding_acks = int(
+                getattr(existing_info, "num_ack_pending", 0) or 0
+            )
+            outstanding_exceeds_target = (
+                effective_max_ack_pending > 0
+                and outstanding_acks > effective_max_ack_pending
+            )
+            if (
+                self._delivery_gate is not None
+                and spec.deliver_policy == "all"
+                and (
+                    outstanding_exceeds_target
+                    or (reducing_ack_window and outstanding_acks != 0)
+                )
+            ):
+                # NATS only changes the configured ceiling when max_ack_pending is
+                # reduced; it does not recall messages already delivered under the
+                # old window. Binding the new single-worker gated subscriber would
+                # therefore strand all but the queue head without +WPI and could
+                # exhaust max_deliver before any handler is allowed to run. A first
+                # v1 -> v2 cutover must stop producers and drain the old consumer to
+                # zero before the cursor can be upgraded in place. The over-target
+                # check remains sticky on later starts because a prior config update
+                # may already say 1 while the broker still carries >1 old deliveries.
+                # Never delete or reset a critical ALL cursor to work around this.
+                log_event(
+                    self.logger,
+                    "nats_consumer_ack_window_migration_not_drained",
+                    level="critical",
+                    topic=topic,
+                    durable=durable,
+                    stream=stream_name,
+                    existing_max_ack_pending=current_ack_window,
+                    target_max_ack_pending=effective_max_ack_pending,
+                    num_ack_pending=outstanding_acks,
+                )
+                raise RuntimeError(
+                    "nats_critical_consumer_ack_window_migration_requires_drain:"
+                    f"{durable}"
+                )
+            if (
+                self._delivery_gate is not None
+                and spec.deliver_policy != "all"
+                and (
+                    outstanding_exceeds_target
+                    or (reducing_ack_window and outstanding_acks != 0)
+                )
+            ):
+                # LAST/NEW durables intentionally carry no financial event
+                # cursor. Existing deliveries issued under the old wider window
+                # cannot be recalled, so rebuild before binding rather than let
+                # queued messages exhaust max_deliver behind the startup gate.
+                # LAST recreates from the latest snapshot; NEW resumes from the
+                # new subscription point, which is exactly their declared
+                # semantics.
+                await self._js.delete_consumer(stream_name, durable)
+                existing_info = None
+                log_event(
+                    self.logger,
+                    "nats_non_event_consumer_rebuilt_for_ack_window",
+                    topic=topic,
+                    durable=durable,
+                    stream=stream_name,
+                    deliver_policy=spec.deliver_policy,
+                    existing_max_ack_pending=current_ack_window,
+                    target_max_ack_pending=effective_max_ack_pending,
+                    num_ack_pending=outstanding_acks,
+                )
+            if existing_info is None:
+                # The final subscribe call below recreates the disposable
+                # LAST/NEW durable with the complete target config.
+                mutable_drift = []
+            else:
+                mutable_targets = {
+                    "ack_wait": consumer_config.ack_wait,
+                    "max_ack_pending": consumer_config.max_ack_pending,
+                    "max_deliver": consumer_config.max_deliver,
+                }
+                mutable_drift = [
+                    field_name
+                    for field_name, expected in mutable_targets.items()
+                    if getattr(current, field_name) != expected
+                ]
+            if mutable_drift:
+                updated_config = current.evolve(**mutable_targets)
                 try:
-                    await self._js.delete_consumer(stream_name, durable)
-                except Exception as del_exc:
+                    await self._js.add_consumer(
+                        stream_name,
+                        config=updated_config,
+                    )
+                    verified_info = await self._js.consumer_info(
+                        stream_name,
+                        durable,
+                    )
+                except Exception as update_exc:
                     log_event(
                         self.logger,
-                        "nats_consumer_delete_failed",
-                        level="error",
+                        "nats_consumer_in_place_update_failed",
+                        level="critical",
                         topic=topic,
                         durable=durable,
                         stream=stream_name,
-                        error=str(del_exc),
+                        drift=mutable_drift,
+                        error_type=type(update_exc).__name__,
                     )
-                    raise del_exc from sub_exc
+                    raise RuntimeError(
+                        f"nats_consumer_in_place_update_failed:{durable}"
+                    ) from update_exc
+                uncorrected = [
+                    field_name
+                    for field_name, expected in mutable_targets.items()
+                    if getattr(verified_info.config, field_name) != expected
+                ]
+                if uncorrected:
+                    log_event(
+                        self.logger,
+                        "nats_consumer_in_place_update_unverified",
+                        level="critical",
+                        topic=topic,
+                        durable=durable,
+                        stream=stream_name,
+                        drift=uncorrected,
+                    )
+                    raise RuntimeError(
+                        f"nats_consumer_in_place_update_unverified:{durable}:"
+                        f"{','.join(uncorrected)}"
+                    )
                 log_event(
                     self.logger,
-                    "nats_consumer_deleted_for_migration",
+                    "nats_consumer_updated_in_place",
                     topic=topic,
                     durable=durable,
                     stream=stream_name,
+                    drift=mutable_drift,
                 )
-                sub = await self._js.subscribe(
-                    subject=subject,
-                    durable=durable,
-                    cb=_on_msg,
-                    manual_ack=True,
-                    config=consumer_config,
-                )
-                log_event(
-                    self.logger,
-                    "nats_consumer_migrated",
-                    topic=topic,
-                    durable=durable,
-                    stream=stream_name,
-                    new_deliver_policy=spec.deliver_policy,
-                )
-            else:
-                raise
+
+        # nats-py 2.14 silently replaces caller config with the existing durable
+        # config. The explicit reconcile/read-back above is therefore mandatory;
+        # subscribe itself is only the final bind/create operation.
+        sub = await self._js.subscribe(
+            subject=subject,
+            durable=durable,
+            cb=_on_msg,
+            manual_ack=True,
+            config=consumer_config,
+            flow_control=spec.flow_control,
+            idle_heartbeat=(
+                spec.idle_heartbeat_seconds
+                if spec.flow_control and spec.idle_heartbeat_seconds > 0
+                else None
+            ),
+        )
 
         self._subscriptions.append(sub)
+        if topic in DEFAULT_CRITICAL_TOPICS:
+            self._consumer_supervision_targets[durable] = (
+                _ConsumerSupervisionTarget(
+                    stream_name=stream_name,
+                    durable=durable,
+                    topic=topic,
+                    subject=subject,
+                    ack_policy=consumer_config.ack_policy,
+                    deliver_policy=consumer_config.deliver_policy,
+                    ack_wait=float(consumer_config.ack_wait or 0.0),
+                    max_ack_pending=int(
+                        consumer_config.max_ack_pending or 0
+                    ),
+                    max_deliver=int(consumer_config.max_deliver or 0),
+                    subscription=sub,
+                )
+            )
         log_event(
             self.logger,
             "nats_subscription_registered",
@@ -1675,12 +2160,351 @@ class NatsEventBus(EventBus):
             subject=subject,
             durable=durable,
             ack_wait_seconds=spec.ack_wait_seconds,
-            max_ack_pending=spec.max_ack_pending,
+            configured_max_ack_pending=spec.max_ack_pending,
+            effective_max_ack_pending=effective_max_ack_pending,
             max_deliver=spec.max_deliver,
             deliver_policy=spec.deliver_policy,
             flow_control=spec.flow_control,
             idle_heartbeat_seconds=spec.idle_heartbeat_seconds,
         )
+
+    async def _wait_for_delivery_activation(
+        self,
+        *,
+        msg: Any,
+        progress_interval_seconds: float,
+    ) -> bool:
+        if self._delivery_gate is None:
+            return True
+        while True:
+            try:
+                return await asyncio.wait_for(
+                    self._delivery_gate.wait(),
+                    timeout=progress_interval_seconds,
+                )
+            except asyncio.TimeoutError:
+                # Durable 已 provision 但 role 尚未 READY 时，JetStream 已把
+                # delivery attempt 计入 max_deliver。周期 +WPI 重置 ack timer，
+                # 避免消息在 handler 从未执行前因 startup barrier 耗尽重投。
+                if self._delivery_gate.aborted:
+                    return False
+                if self._delivery_gate.activated:
+                    return True
+                in_progress = getattr(msg, "in_progress", None)
+                if not callable(in_progress):
+                    self._delivery_gate.abort()
+                    raise RuntimeError(
+                        "nats_delivery_progress_unsupported"
+                    ) from None
+                try:
+                    await asyncio.wait_for(
+                        in_progress(),
+                        timeout=min(
+                            5.0,
+                            max(0.1, progress_interval_seconds / 2.0),
+                        ),
+                    )
+                except Exception as exc:
+                    self._delivery_gate.abort()
+                    log_event(
+                        self.logger,
+                        "nats_delivery_progress_failed",
+                        level="error",
+                        error_type=type(exc).__name__,
+                    )
+                    raise RuntimeError(
+                        "nats_delivery_progress_failed"
+                    ) from None
+
+    def _record_consumer_health_failure(
+        self,
+        *,
+        target: _ConsumerSupervisionTarget,
+        failure_kind: str,
+        now: float,
+    ) -> bool:
+        """Return True once a continuous consumer fault exceeds its bound."""
+
+        previous_kind = target.health_failure_kind
+        if previous_kind != failure_kind:
+            target.health_failure_kind = failure_kind
+            log_event(
+                self.logger,
+                "nats_consumer_supervision_degraded",
+                level="warning",
+                topic=target.topic,
+                durable=target.durable,
+                stream=target.stream_name,
+                failure_kind=failure_kind,
+                previous_failure_kind=previous_kind,
+            )
+        failure_since = target.health_failure_since
+        if failure_since is None:
+            target.health_failure_since = now
+            return False
+        if (
+            now - failure_since
+            < self._config.consumer_supervision_failure_timeout_seconds
+        ):
+            return False
+        log_event(
+            self.logger,
+            "nats_consumer_supervision_timeout",
+            level="critical",
+            topic=target.topic,
+            durable=target.durable,
+            stream=target.stream_name,
+            failure_kind=failure_kind,
+            timeout_seconds=(
+                self._config.consumer_supervision_failure_timeout_seconds
+            ),
+        )
+        self._mark_terminal_connection_failure("consumer_delivery_unhealthy")
+        return True
+
+    @staticmethod
+    def _consumer_progress_signature(info: Any) -> tuple[int, ...]:
+        ack_floor = getattr(info, "ack_floor", None)
+        return (
+            int(getattr(ack_floor, "stream_seq", 0) or 0),
+            int(getattr(ack_floor, "consumer_seq", 0) or 0),
+        )
+
+    async def _supervise_critical_consumers_once(
+        self,
+        *,
+        fail_fast: bool = False,
+    ) -> None:
+        """Verify durable existence, binding, config and bounded progress."""
+
+        if (
+            self._closing
+            or self._js is None
+            or self._terminal_connection_failure.is_set()
+        ):
+            return
+        try:
+            from nats.js.errors import NotFoundError  # type: ignore[import-not-found]
+        except ImportError as exc:  # pragma: no cover - connect() already guards
+            self._mark_terminal_connection_failure("consumer_api_unavailable")
+            raise RuntimeError("nats-py JetStream API unavailable") from exc
+
+        async with self._consumer_supervision_lock:
+            loop = asyncio.get_running_loop()
+            targets = tuple(self._consumer_supervision_targets.values())
+
+            async def _query_consumer(
+                target: _ConsumerSupervisionTarget,
+            ) -> tuple[_ConsumerSupervisionTarget, Any | Exception]:
+                try:
+                    info = await asyncio.wait_for(
+                        self._js.consumer_info(
+                            target.stream_name,
+                            target.durable,
+                        ),
+                        timeout=(
+                            self._config.consumer_supervision_interval_seconds
+                        ),
+                    )
+                except Exception as exc:
+                    return target, exc
+                return target, info
+
+            # A role can own dozens of critical durables. Query them concurrently
+            # so one management-plane hang cannot multiply the configured bound by
+            # the number of subscriptions while the role still advertises READY.
+            query_results = await asyncio.gather(
+                *(_query_consumer(target) for target in targets)
+            )
+            for target, query_result in query_results:
+                if self._closing or self._terminal_connection_failure.is_set():
+                    return
+                if isinstance(query_result, NotFoundError):
+                    log_event(
+                        self.logger,
+                        "nats_critical_consumer_missing",
+                        level="critical",
+                        topic=target.topic,
+                        durable=target.durable,
+                        stream=target.stream_name,
+                    )
+                    self._mark_terminal_connection_failure("consumer_missing")
+                    return
+                if isinstance(query_result, Exception):
+                    now = loop.time()
+                    if fail_fast:
+                        log_event(
+                            self.logger,
+                            "nats_consumer_pre_promotion_query_failed",
+                            level="critical",
+                            topic=target.topic,
+                            durable=target.durable,
+                            stream=target.stream_name,
+                            error_type=type(query_result).__name__,
+                        )
+                        self._mark_terminal_connection_failure(
+                            "consumer_pre_promotion_unhealthy"
+                        )
+                        return
+                    if self._record_consumer_health_failure(
+                        target=target,
+                        failure_kind="management_unavailable",
+                        now=now,
+                    ):
+                        return
+                    log_event(
+                        self.logger,
+                        "nats_consumer_supervision_query_failed",
+                        level="warning",
+                        topic=target.topic,
+                        durable=target.durable,
+                        stream=target.stream_name,
+                        error_type=type(query_result).__name__,
+                    )
+                    continue
+
+                now = loop.time()
+                info = query_result
+                current = info.config
+                current_filters = tuple(current.filter_subjects or ())
+                filter_matches = (
+                    current.filter_subject == target.subject
+                    and not current_filters
+                ) or (
+                    current.filter_subject in {None, ""}
+                    and current_filters == (target.subject,)
+                )
+                config_drift: list[str] = []
+                if current.ack_policy != target.ack_policy:
+                    config_drift.append("ack_policy")
+                if current.deliver_policy != target.deliver_policy:
+                    config_drift.append("deliver_policy")
+                if float(current.ack_wait or 0.0) != target.ack_wait:
+                    config_drift.append("ack_wait")
+                if int(current.max_ack_pending or 0) != target.max_ack_pending:
+                    config_drift.append("max_ack_pending")
+                if int(current.max_deliver or 0) != target.max_deliver:
+                    config_drift.append("max_deliver")
+                if not filter_matches:
+                    config_drift.append("filter_subject")
+                if config_drift:
+                    log_event(
+                        self.logger,
+                        "nats_critical_consumer_runtime_config_drift",
+                        level="critical",
+                        topic=target.topic,
+                        durable=target.durable,
+                        stream=target.stream_name,
+                        drift=config_drift,
+                    )
+                    self._mark_terminal_connection_failure(
+                        "consumer_config_drift"
+                    )
+                    return
+
+                push_bound = getattr(info, "push_bound", None)
+                inner_sub = getattr(target.subscription, "_sub", None)
+                jsi = getattr(inner_sub, "_jsi", None)
+                heartbeat_active = getattr(jsi, "_active", None)
+                if push_bound is False:
+                    if fail_fast:
+                        self._mark_terminal_connection_failure(
+                            "consumer_pre_promotion_unhealthy"
+                        )
+                        return
+                    if self._record_consumer_health_failure(
+                        target=target,
+                        failure_kind="push_unbound",
+                        now=now,
+                    ):
+                        return
+                    continue
+                if heartbeat_active is False:
+                    if fail_fast:
+                        self._mark_terminal_connection_failure(
+                            "consumer_pre_promotion_unhealthy"
+                        )
+                        return
+                    if self._record_consumer_health_failure(
+                        target=target,
+                        failure_kind="heartbeat_inactive",
+                        now=now,
+                    ):
+                        return
+                    continue
+                target.health_failure_since = None
+                target.health_failure_kind = None
+
+                gate_inactive = (
+                    self._delivery_gate is not None
+                    and not self._delivery_gate.activated
+                )
+                signature = self._consumer_progress_signature(info)
+                num_pending = int(getattr(info, "num_pending", 0) or 0)
+                num_ack_pending = int(
+                    getattr(info, "num_ack_pending", 0) or 0
+                )
+                backlog = num_pending > 0 or num_ack_pending > 0
+                if gate_inactive or not backlog:
+                    target.progress_signature = signature
+                    target.progress_since = None
+                    continue
+                if target.progress_signature != signature:
+                    target.progress_signature = signature
+                    target.progress_since = now
+                    continue
+                if target.progress_since is None:
+                    target.progress_since = now
+                    continue
+                progress_timeout = max(
+                    self._config.consumer_supervision_failure_timeout_seconds,
+                    target.ack_wait * 2.0,
+                )
+                if now - target.progress_since < progress_timeout:
+                    continue
+                log_event(
+                    self.logger,
+                    "nats_critical_consumer_progress_stalled",
+                    level="critical",
+                    topic=target.topic,
+                    durable=target.durable,
+                    stream=target.stream_name,
+                    progress_timeout_seconds=progress_timeout,
+                    num_pending=num_pending,
+                    num_ack_pending=num_ack_pending,
+                )
+                self._mark_terminal_connection_failure(
+                    "consumer_progress_stalled"
+                )
+                return
+
+    async def verify_ready_for_promotion(self) -> None:
+        """Synchronous pre-promotion proof for connection and critical durables."""
+
+        if (
+            self._closing
+            or not self._connected
+            or self._js is None
+            or self._terminal_connection_failure.is_set()
+        ):
+            self._mark_terminal_connection_failure(
+                "connection_not_ready_for_promotion"
+            )
+            raise RuntimeError("nats_not_ready_for_promotion")
+        await self._supervise_critical_consumers_once(fail_fast=True)
+        # A disconnect callback may run while the final management query is
+        # completing. Re-check every connection predicate after the proof so
+        # a non-terminal reconnect window cannot be promoted from stale state.
+        if (
+            self._closing
+            or not self._connected
+            or self._js is None
+            or self._terminal_connection_failure.is_set()
+        ):
+            self._mark_terminal_connection_failure(
+                "connection_not_ready_for_promotion"
+            )
+            raise RuntimeError("nats_not_ready_for_promotion")
 
     # ── NATS 回调 ────────────────────────────────────────────────
     async def _on_error(self, exc: Exception) -> None:
@@ -1698,15 +2522,90 @@ class NatsEventBus(EventBus):
             error=str(exc),
             transient=is_transient,
         )
+        if not is_transient:
+            # 权限撤销、协议错误等可能只进入 error_cb；nats-py 不保证随后
+            # disconnect/close。只记录日志会让 role 永久续租并伪装 healthy。
+            # terminal reason 固定且不携带 broker 文本，避免泄漏服务端细节。
+            self._mark_terminal_connection_failure("client_error")
 
     async def _on_disconnected(self) -> None:
         log_event(self.logger, "nats_client_disconnected", level="warning")
+        self._connected = False
+        if self._closing or self._terminal_connection_failure.is_set():
+            return
+        self._disconnect_generation += 1
+        generation = self._disconnect_generation
+        previous_task = self._disconnect_deadline_task
+        if previous_task is not None and not previous_task.done():
+            previous_task.cancel()
+        self._disconnect_deadline_task = asyncio.create_task(
+            self._fail_after_reconnect_deadline(generation),
+            name=f"aats_nats_reconnect_deadline_{self._consumer_role}",
+        )
 
     async def _on_reconnected(self) -> None:
+        self._connected = True
+        self._disconnect_generation += 1
+        disconnect_task = self._disconnect_deadline_task
+        self._disconnect_deadline_task = None
+        if disconnect_task is not None and not disconnect_task.done():
+            disconnect_task.cancel()
+            await asyncio.gather(disconnect_task, return_exceptions=True)
         log_event(self.logger, "nats_client_reconnected")
 
     async def _on_closed(self) -> None:
-        log_event(self.logger, "nats_client_closed")
+        self._connected = False
+        if self._closing:
+            log_event(self.logger, "nats_client_closed")
+            return
+        self._mark_terminal_connection_failure("closed")
+
+    async def _fail_after_reconnect_deadline(self, generation: int) -> None:
+        try:
+            await asyncio.sleep(
+                self._config.reconnect_failure_timeout_seconds
+            )
+        except asyncio.CancelledError:
+            return
+        if (
+            generation != self._disconnect_generation
+            or self._closing
+            or self._connected
+        ):
+            return
+        self._mark_terminal_connection_failure("reconnect_timeout")
+
+    def _mark_terminal_connection_failure(self, reason: str) -> None:
+        if self._closing or self._terminal_connection_failure.is_set():
+            return
+        if self._delivery_gate is not None:
+            self._delivery_gate.abort()
+        self._terminal_connection_failure.set()
+        log_event(
+            self.logger,
+            "nats_connection_terminal_failure",
+            level="critical",
+            consumer_role=self._consumer_role,
+            reason=reason,
+            reconnect_timeout_seconds=(
+                self._config.reconnect_failure_timeout_seconds
+            ),
+        )
+
+    async def wait_for_terminal_connection_failure(self) -> None:
+        """Supervise core connection and every bound critical durable."""
+
+        while not self._terminal_connection_failure.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._terminal_connection_failure.wait(),
+                    timeout=(
+                        self._config.consumer_supervision_interval_seconds
+                    ),
+                )
+            except asyncio.TimeoutError:
+                await self._supervise_critical_consumers_once()
+        raise RuntimeError("nats_connection_terminal_failure")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1809,7 +2708,13 @@ class HybridEventBus(EventBus):
             await observer_start()
 
     async def close(self) -> None:
-        """优雅关闭两条底层总线（best-effort，单条失败不影响另一条）。"""
+        """尝试关闭两条底层总线，并在全部尝试后汇总失败。
+
+        observer 仍必须在 critical 失败后获得清理机会；但失败不能被吞掉，
+        ApplicationRuntime 需要据此保留 readiness ownership 到 TTL，避免旧
+        NATS client/consumer 未确认停止时新实例立即取得同 role lease。
+        """
+        failed_buses: list[str] = []
         for bus_name, bus in (("critical", self._critical), ("observer", self._observer)):
             close_method = getattr(bus, "close", None)
             if close_method is None:
@@ -1817,14 +2722,31 @@ class HybridEventBus(EventBus):
             try:
                 await close_method()
             except Exception as exc:
+                failed_buses.append(bus_name)
                 log_event(
                     self.logger,
                     "hybrid_bus_close_failed",
                     level="warning",
                     bus=bus_name,
                     error_type=type(exc).__name__,
-                    error=str(exc),
                 )
+        if failed_buses:
+            failed = ",".join(failed_buses)
+            raise RuntimeError(f"hybrid_bus_close_failed:{failed}") from None
+
+    async def activate_delivery(self) -> None:
+        """冲刷 critical NATS 构建期发布并开放其 callback gate。"""
+
+        activate = getattr(self._critical, "activate_delivery", None)
+        if activate is not None:
+            await activate()
+
+    async def verify_ready_for_promotion(self) -> None:
+        """Delegate strict readiness proof to the critical NATS path."""
+
+        verify = getattr(self._critical, "verify_ready_for_promotion", None)
+        if callable(verify):
+            await verify()
 
     def _select(self, topic: str) -> EventBus:
         return self._critical if self._routing.route_for(topic) == "critical" else self._observer

@@ -40,7 +40,7 @@ def test_gateway_binding_evidence_accepts_only_loopback() -> None:
         }
     )
 
-    result = module._gateway_published_bindings(lambda _args, _cwd=None: bindings_json)
+    result = module._gateway_published_bindings_from_inspect(json.loads(bindings_json))
 
     assert {item["host_ip"] for item in result} == {"127.0.0.1", "::1"}
 
@@ -50,27 +50,36 @@ def test_gateway_binding_evidence_rejects_non_loopback(host_ip: str) -> None:
     module = _load_evidence_module()
     bindings_json = json.dumps({"8001/tcp": [{"HostIp": host_ip, "HostPort": "8001"}]})
 
-    with pytest.raises(RuntimeError, match="gateway_published_on_non_loopback"):
-        module._gateway_published_bindings(lambda _args, _cwd=None: bindings_json)
+    with pytest.raises(RuntimeError, match="gateway_binding_not_loopback"):
+        module._gateway_published_bindings_from_inspect(json.loads(bindings_json))
 
 
-@pytest.mark.parametrize("raw", ["not-json", "null", "{}", '{"8001/tcp": null}'])
-def test_gateway_binding_evidence_rejects_missing_or_malformed_bindings(raw: str) -> None:
+@pytest.mark.parametrize("raw", [None, "not-json", {}, {"8001/tcp": None}])
+def test_gateway_binding_evidence_rejects_missing_or_malformed_bindings(raw: object) -> None:
     module = _load_evidence_module()
 
     with pytest.raises(RuntimeError):
-        module._gateway_published_bindings(lambda _args, _cwd=None: raw)
+        module._gateway_published_bindings_from_inspect(raw)
 
 
-def test_deployment_evidence_requires_gateway_in_required_topology() -> None:
+def test_deployment_evidence_requires_exact_profile_topology() -> None:
     module = _load_evidence_module()
 
-    with pytest.raises(ValueError, match="required_gateway_missing"):
+    with pytest.raises(ValueError, match="required_container_set_mismatch"):
         module.build_evidence(
             repo_root=REPO_ROOT,
             profile="derivatives",
             overlay="docker-compose.aats.derivatives.yml",
             schema_job_status="passed",
             runtime_readiness_generation="aaaaaaaaaaaa-20260824T000000Z-123-456",
+            deployment_lock_id="test-deployment-lock",
+            deployed_commit="a" * 40,
             required_containers=("aats-execution",),
+            nats_stream_probe=lambda: (),
+            lifecycle_monitor_control_dir=Path("/tmp/unused-fs005-monitor"),
+            lifecycle_monitor_token="unused-fs005-monitor-token",
+            app_up_authorized_ns=1,
+            health_boundary_started_ns=1,
+            health_boundary_app_fingerprint="sha256:" + "1" * 64,
+            collector_heartbeat_epochs={},
         )
