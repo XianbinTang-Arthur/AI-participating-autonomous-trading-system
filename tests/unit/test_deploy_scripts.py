@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -146,6 +147,8 @@ def _matched_nats_stream_rows() -> cutover.QueryResult:
                 max_ack_pending=1,
                 num_ack_pending=0,
                 cursor=cutover.ConsumerCursor(0, 0, 0, 0),
+                ack_wait_seconds=durable.ack_wait_seconds,
+                max_deliver=durable.max_deliver,
             )
         )
     streams: list[cutover.CriticalStreamState] = []
@@ -1563,12 +1566,24 @@ def test_nats_cutover_evaluator_rejects_immutable_config_drift() -> None:
         assert row["blockers"] == [expected_blocker]
 
 
-def test_nats_cutover_expected_map_uses_only_critical_all_topics() -> None:
+def test_nats_cutover_expected_map_uses_exact_declared_runtime_topology() -> None:
     expected = cutover.build_expected_durable_index()
 
     assert "aats-execution-execution_order_intents" in expected
-    assert "aats-decision-market_snapshots" not in expected
+    assert expected["aats-decision-market_snapshots"].delivery_semantics == "snapshot"
+    assert expected["aats-decision-market_snapshots"].deliver_policy == "last"
+    assert expected["aats-decision-market_snapshots"].ack_wait_seconds == 90.0
+    assert expected["aats-decision-features_snapshots"].ack_wait_seconds == 90.0
+    assert expected["aats-execution-execution_order_intents"].ack_wait_seconds == 30.0
+    assert expected["aats-decision-system_ai_command_requests"].delivery_semantics == (
+        "transient"
+    )
+    assert expected["aats-decision-system_ai_command_requests"].deliver_policy == "new"
     assert all(item.topic != "system.audit_records" for item in expected.values())
+    assert len(expected) == 77
+    assert sum(item.delivery_semantics == "event" for item in expected.values()) == 49
+    assert sum(item.delivery_semantics == "snapshot" for item in expected.values()) == 24
+    assert sum(item.delivery_semantics == "transient" for item in expected.values()) == 4
     assert {item.role for item in expected.values()} == {
         "gateway",
         "market",
@@ -1589,13 +1604,26 @@ def test_nats_cutover_query_paginates_all_streams_and_consumers_read_only() -> N
                 filter_subjects=None,
                 deliver_group=None,
                 max_ack_pending=window,
+                deliver_subject="_INBOX.test",
+                replay_policy=SimpleNamespace(value="instant"),
+                headers_only=None,
+                pause_until=None,
+                backoff=None,
+                rate_limit_bps=None,
+                inactive_threshold=None,
+                mem_storage=None,
+                ack_wait=30.0,
+                max_deliver=5,
+                durable_name=name,
+                opt_start_seq=None,
+                opt_start_time=None,
             ),
             num_ack_pending=0,
             delivered=SimpleNamespace(stream_seq=4, consumer_seq=3),
             ack_floor=SimpleNamespace(stream_seq=3, consumer_seq=3),
         )
 
-    def _stream_info(name: str) -> SimpleNamespace:
+    def _stream_info(name: str, *, consumer_count: int) -> SimpleNamespace:
         return SimpleNamespace(
             config=SimpleNamespace(
                 name=name,
@@ -1616,7 +1644,7 @@ def test_nats_cutover_query_paginates_all_streams_and_consumers_read_only() -> N
                 bytes=300,
                 first_seq=1,
                 last_seq=3,
-                consumer_count=2,
+                consumer_count=consumer_count,
                 deleted=None,
                 num_deleted=None,
                 lost=None,
@@ -1634,8 +1662,8 @@ def test_nats_cutover_query_paginates_all_streams_and_consumers_read_only() -> N
         async def streams_info(self, *, offset: int) -> list[SimpleNamespace]:
             self.stream_offsets.append(offset)
             return {
-                0: [_stream_info("S1")],
-                1: [_stream_info("S2")],
+                    0: [_stream_info("S1", consumer_count=2)],
+                    1: [_stream_info("S2", consumer_count=1)],
                 2: [],
             }[offset]
 
@@ -1690,6 +1718,24 @@ def test_nats_cutover_query_paginates_all_streams_and_consumers_read_only() -> N
         "2026-08-28T00:00:00Z",
         "2026-08-28T00:00:00Z",
     ]
+
+
+def test_nats_consumer_projection_rejects_broker_enumeration_mismatch() -> None:
+    matched = _matched_nats_stream_rows()
+    drifted_streams = list(matched.streams)
+    drifted_streams[0] = replace(
+        drifted_streams[0],
+        consumer_count=drifted_streams[0].consumer_count + 1,
+    )
+    mismatched = replace(matched, streams=tuple(drifted_streams))
+
+    with pytest.raises(
+        RuntimeError,
+        match="nats_consumer_projection_stream_count_mismatch",
+    ):
+        cutover.validate_query_result_consumer_projection(mismatched)
+    with pytest.raises(RuntimeError, match="invalid_final_nats_query_result"):
+        deployment_evidence._read_final_nats_state(lambda: mismatched)
 
 
 def test_nats_cutover_stream_created_uses_raw_api_with_real_nats_type() -> None:
@@ -1961,6 +2007,19 @@ def test_nats_cutover_rejects_unknown_or_malformed_drain_counters() -> None:
                 filter_subjects=None,
                 deliver_group=None,
                 max_ack_pending=max_ack_pending,
+                deliver_subject="_INBOX.test",
+                replay_policy=SimpleNamespace(value="instant"),
+                headers_only=None,
+                pause_until=None,
+                backoff=None,
+                rate_limit_bps=None,
+                inactive_threshold=None,
+                mem_storage=None,
+                ack_wait=30.0,
+                max_deliver=5,
+                durable_name=name,
+                opt_start_seq=None,
+                opt_start_time=None,
             ),
             num_ack_pending=num_ack_pending,
             delivered=SimpleNamespace(
@@ -2137,7 +2196,7 @@ def test_nats_cutover_block_writes_evidence_and_returns_nonzero(
         "ack_window_migration_requires_drain"
     ]
     assert evidence["recovery"]["instruction_code"] == (
-        "nats_durable_cutover_requires_approved_legacy_drain_or_release_review"
+        "nats_durable_cutover_requires_approved_all_cursor_drain"
     )
 
 
@@ -2428,6 +2487,48 @@ def test_nats_cutover_post_recreate_accepts_new_stable_nats_identity(
     assert after["nats_bootstrap"] == NATS_BOOTSTRAP
     assert after["nats_query_fingerprint"] == NATS_POST_RECREATE_FINGERPRINT
     assert after["continuity"]["status"] == "PASSED"
+
+
+def test_nats_cutover_post_stage_revalidates_previous_snapshot_projection(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    evidence_dir = tmp_path / "deployments"
+    evidence_dir.mkdir()
+    before_path = evidence_dir / "before.json"
+    query, durables, streams = _qualified_preflight_snapshot()
+    payload = cutover.build_evidence(
+        generation="generation-1",
+        deployment_lock_id=DEPLOYMENT_LOCK_ID,
+        deployed_commit=DEPLOYED_COMMIT,
+        checked_at=datetime(2026, 8, 28, tzinfo=timezone.utc),
+        query_result=query,
+        rows=durables,
+        status="PASSED_WITH_TRUST_BOUNDARY",
+        app_quiescence=_passed_app_quiescence(),
+        nats_bootstrap=NATS_BOOTSTRAP,
+        nats_query_fingerprint=NATS_BASELINE_FINGERPRINT,
+        critical_streams=streams,
+        continuity={
+            **_baseline_continuity(),
+            "streams_checked": len(streams),
+            "durables_checked": len(durables),
+        },
+    )
+    payload["query"]["consumers_scanned"] += 1
+    before_path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(cutover, "_EVIDENCE_DIR", evidence_dir)
+
+    with pytest.raises(
+        RuntimeError,
+        match="nats_cutover_malformed_previous_preflight",
+    ):
+        cutover.load_previous_preflight(
+            before_path,
+            generation="generation-1",
+            deployment_lock_id=DEPLOYMENT_LOCK_ID,
+            deployed_commit=DEPLOYED_COMMIT,
+        )
 
 
 @pytest.mark.parametrize(

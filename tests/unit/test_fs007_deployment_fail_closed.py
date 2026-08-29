@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import importlib.util
 import json
 import stat
@@ -111,6 +113,8 @@ def _matched_nats_stream_rows() -> cutover.QueryResult:
                 max_ack_pending=1,
                 num_ack_pending=0,
                 cursor=cutover.ConsumerCursor(0, 0, 0, 0),
+                ack_wait_seconds=durable.ack_wait_seconds,
+                max_deliver=durable.max_deliver,
             )
         )
     streams: list[cutover.CriticalStreamState] = []
@@ -177,6 +181,25 @@ def _load_evidence_module() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_final_durable_projection_hash_binds_identity_and_configuration() -> None:
+    module = _load_evidence_module()
+    _, durables, _ = _qualified_preflight_snapshot()
+
+    projection, fingerprint = module._durable_qualification_projection(durables)
+    identity_changed = copy.deepcopy(projection)
+    identity_changed[0]["identity"]["durable"] += "-forged"
+    _, identity_fingerprint = module._durable_qualification_projection(
+        identity_changed
+    )
+    config_changed = copy.deepcopy(projection)
+    config_changed[0]["immutable_config"]["actual"]["ack_policy"] = "none"
+    _, config_fingerprint = module._durable_qualification_projection(config_changed)
+
+    assert fingerprint.startswith("sha256:")
+    assert identity_fingerprint != fingerprint
+    assert config_fingerprint != fingerprint
 
 
 def _passed_app_quiescence(
@@ -333,6 +356,155 @@ def _write_preflight_pair(tmp_path: Path, module: ModuleType) -> tuple[Path, Pat
         encoding="utf-8",
     )
     return before_path, after_path
+
+
+def _load_preflight_chain(
+    tmp_path: Path,
+    module: ModuleType,
+) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    before_path, after_path = _write_preflight_pair(tmp_path, module)
+    before_reference, before_payload = module._nats_cutover_preflight_reference(
+        repo_root=tmp_path,
+        path=before_path,
+        runtime_readiness_generation=READINESS_GENERATION,
+        deployment_lock_id=DEPLOYMENT_LOCK_ID,
+        deployed_commit=DEPLOYED_COMMIT,
+        expected_stage="pre_full_down",
+    )
+    _, after_payload = module._nats_cutover_preflight_reference(
+        repo_root=tmp_path,
+        path=after_path,
+        runtime_readiness_generation=READINESS_GENERATION,
+        deployment_lock_id=DEPLOYMENT_LOCK_ID,
+        deployed_commit=DEPLOYED_COMMIT,
+        expected_stage="post_infra_pre_app_up",
+    )
+    return before_reference, before_payload, after_payload
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "query_count",
+        "role",
+        "semantics",
+        "actual_config",
+        "expected_config",
+        "self_reported_status",
+    ),
+)
+def test_preflight_reference_recomputes_row_and_count_projection(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    module = _load_evidence_module()
+    before_path, _ = _write_preflight_pair(tmp_path, module)
+    payload = json.loads(before_path.read_text(encoding="utf-8"))
+    row = payload["durables"][0]
+    if mutation == "query_count":
+        payload["query"]["consumers_scanned"] += 1
+    elif mutation == "role":
+        row["identity"]["role"] = "market"
+    elif mutation == "semantics":
+        row["identity"]["delivery_semantics"] = "forged"
+    elif mutation == "actual_config":
+        row["immutable_config"]["actual"]["headers_only"] = True
+    elif mutation == "expected_config":
+        row["mutable_config"]["expected"]["max_deliver"] += 1
+    else:
+        row["status"] = "SAFE_ALREADY_ONE"
+        row["window"]["current_max_ack_pending"] = 256
+    before_path.write_text(
+        json.dumps(payload, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="nats_cutover_preflight_durable_projection_invalid",
+    ):
+        module._nats_cutover_preflight_reference(
+            repo_root=tmp_path,
+            path=before_path,
+            runtime_readiness_generation=READINESS_GENERATION,
+            deployment_lock_id=DEPLOYMENT_LOCK_ID,
+            deployed_commit=DEPLOYED_COMMIT,
+            expected_stage="pre_full_down",
+        )
+
+
+def test_preflight_chain_recomputes_continuity_and_rejects_forged_cursor_rollback(
+    tmp_path: Path,
+) -> None:
+    module = _load_evidence_module()
+    before_reference, before_payload, after_payload = _load_preflight_chain(
+        tmp_path,
+        module,
+    )
+    forged_before = copy.deepcopy(before_payload)
+    forged_before["durables"][0]["cursor"]["delivered_stream_seq"] = 1
+
+    with pytest.raises(
+        ValueError,
+        match="nats_cutover_continuity_recomputed_not_passed",
+    ):
+        module._validate_nats_cutover_preflight_chain(
+            before_reference=before_reference,
+            before_payload=forged_before,
+            after_payload=after_payload,
+        )
+
+
+def test_preflight_chain_recomputes_continuity_and_rejects_forged_stream_purge(
+    tmp_path: Path,
+) -> None:
+    module = _load_evidence_module()
+    before_reference, before_payload, after_payload = _load_preflight_chain(
+        tmp_path,
+        module,
+    )
+    forged_before = copy.deepcopy(before_payload)
+    forged_state = forged_before["critical_streams"][0]["state"]
+    forged_state.update(
+        {
+            "messages": 1,
+            "bytes": 16,
+            "first_seq": 1,
+            "last_seq": 1,
+        }
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="nats_cutover_continuity_recomputed_not_passed",
+    ):
+        module._validate_nats_cutover_preflight_chain(
+            before_reference=before_reference,
+            before_payload=forged_before,
+            after_payload=after_payload,
+        )
+
+
+def test_preflight_chain_rejects_forged_continuity_summary(
+    tmp_path: Path,
+) -> None:
+    module = _load_evidence_module()
+    before_reference, before_payload, after_payload = _load_preflight_chain(
+        tmp_path,
+        module,
+    )
+    forged_after = copy.deepcopy(after_payload)
+    forged_after["continuity"]["streams_checked"] += 1
+
+    with pytest.raises(
+        ValueError,
+        match="nats_cutover_continuity_artifact_mismatch:streams_checked",
+    ):
+        module._validate_nats_cutover_preflight_chain(
+            before_reference=before_reference,
+            before_payload=before_payload,
+            after_payload=forged_after,
+        )
 
 
 def _container_inspect_payload(
@@ -733,6 +905,28 @@ def test_evidence_packet_contains_only_simulation_identity_and_explicit_unknowns
         {"container_port": "8000/tcp", "host_ip": "127.0.0.1", "host_port": "8001"}
     ]
     assert payload["collector_freshness"] == []
+    durable_qualification = payload["nats_durable_qualification"]
+    assert durable_qualification["expected_count"] == len(
+        cutover.build_expected_durable_index()
+    )
+    assert durable_qualification["observed_count"] == len(
+        cutover.build_expected_durable_index()
+    )
+    assert durable_qualification["first_snapshot"] == durable_qualification[
+        "second_snapshot"
+    ]
+    for snapshot in (
+        durable_qualification["first_snapshot"],
+        durable_qualification["second_snapshot"],
+    ):
+        canonical = json.dumps(
+            snapshot["canonical_projection"],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        assert snapshot["canonical_projection_sha256"] == (
+            "sha256:" + hashlib.sha256(canonical).hexdigest()
+        )
     encoded = json.dumps(payload).lower()
     for forbidden in ("password", "api_key", "token", "database_url", "dsn"):
         assert forbidden not in encoded
@@ -875,6 +1069,16 @@ def test_final_evidence_requires_live_stream_target_to_be_fully_provisioned(
     )
     before_path, after_path = _write_preflight_pair(tmp_path, module)
 
+    def _stream_target_drift_probe() -> cutover.QueryResult:
+        query = _matched_nats_stream_rows()
+        return replace(
+            query,
+            streams=(
+                replace(query.streams[0], max_bytes=query.streams[0].max_bytes + 1),
+                *query.streams[1:],
+            ),
+        )
+
     with pytest.raises(RuntimeError, match="final_nats_stream_target_not_matched"):
         module.build_evidence(
             repo_root=tmp_path,
@@ -885,11 +1089,7 @@ def test_final_evidence_requires_live_stream_target_to_be_fully_provisioned(
             deployment_lock_id=DEPLOYMENT_LOCK_ID,
             deployed_commit=DEPLOYED_COMMIT,
             required_containers=names,
-            nats_stream_probe=lambda: replace(
-                _matched_nats_stream_rows(),
-                stream_count=0,
-                streams=(),
-            ),
+            nats_stream_probe=_stream_target_drift_probe,
             **_writer_monitor_kwargs(names),
             health_boundary_started_ns=HEALTH_BOUNDARY_NS,
             health_boundary_app_fingerprint=health_boundary_fingerprint,

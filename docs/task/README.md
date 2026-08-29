@@ -1,8 +1,7 @@
 # AATS Task 与 SOW 历史索引
 
-> 文档状态：任务与交付历史证据索引（截至 2026-08-28）
-> 最后核对：2026-08-28（Research OS G0 bootstrap、RDP 衍生品合同 P0-A、
-> P0-B LF-A、参数内容身份、typed JSON、正式制品读取与衍生品 Phase 2 资格闭环任务已登记；其余历史状态边界不变）
+> 文档状态：任务与交付历史证据索引（截至 2026-08-29）
+> 最后核对：2026-08-29（补录 FS-016 NATS exact ownership/schema v3 候选与最新失败关闭现场；其余历史状态边界不变）
 > 核对范围：任务文件存在性、索引与各任务自报状态；不把任务状态升级为运行时或生产事实
 
 本目录保存任务书、SOW、阶段设计、实施记录和交付报告。它是工程可追溯性材料，不是当前系统说明；“完成”“通过”“上线”等措辞只对文件记录的基线和验证范围成立。
@@ -138,15 +137,21 @@
   会清理自身 marker，而 transport 歧义保留 poison marker。stop 七个
   应用后，以 ID/status/StartedAt/FinishedAt/RestartCount 和精确 Docker events 区间证明 quiescence。
   基础设施-only up 后、full-down 前执行第一次 loopback 全量分页只读 preflight；full-down 后重建
-  基线，并在 infra/schema 后、app-up 前执行第二次。阻断或 quiescence 变化时保留 NATS，最终部署
-  证据校验最后一次 v2 PASS 的 lock id/generation/deployed commit/quiescence 及路径/hash；标准 stop
-  仍不能替代 drain 证明。LAST/NEW 的运行时重建受 strict delivery gate、非 ALL policy，以及
-  “outstanding 超过目标”或“收缩窗口且 outstanding 非零”条件约束，自动重启也可能触发；full-down
-  是额外发布门禁，不是运行时信号。真实 NATS
+  基线，并在 infra/schema 后、app-up 前执行第二次。schema v3 使用人工 authoritative ownership
+  manifest，并由动态 assembly 测试证明它精确匹配四个 `build_runtime()`：`77` 个 durable，角色
+  `31/8/27/11`，语义 `49/24/4`。preserved install 要求 exact set，fresh install preflight 要求为空且
+  app-up 后 final 才要求 exact `77`。阻断或 quiescence 变化时保留 NATS，最终部署证据校验最后一次
+  v3 PASS 的 lock id/generation/deployed commit/quiescence/path/hash，并封存两次 no-secret canonical
+  durable projection/hash；标准 stop 仍不能替代 drain 证明。共享迁移规则阻断 event `ack_wait`、任意
+  `max_deliver` 与不安全非事件 `ack_wait` drift；runtime 还监督 created/inbox/cursor/config 连续性。
+  LAST/NEW 的 ACK-window backlog 与 immutable-drift 重建是两个声明丢弃语义分支；full-down 是额外发布
+  门禁，不是运行时信号。真实 NATS
   consumer-delete 集成已通过，锁竞争/释放/重取、WSL completion ACK、输出完整性、幂等 proof 重试与
-  marker cleanup 有窄 smoke；最后一次 NATS 健康窗与部署 completion protocol 修复后，当前候选通过
-  `213` 项 FS-016 聚焦、`173` 项根级独立聚焦
-  复跑、六项隔离 smoke 和 `6434 passed / 31 skipped / 259 subtests passed` 全量单测，但真
+  marker cleanup 有窄 smoke；当前 exact-ownership 候选的聚焦与全量单测已通过，精确计数记录在
+  FS-016 当次交付正文，独立终审无 P0/P1。2026-08-29
+  标准入口仍运行已提交的旧 v2 checker：扫描 `78`、只认识 `49` 个 event，并把 `28` 个合法非事件
+  consumer 和 `1` 个未知 consumer 一并列为 `29` unexpected 后安全阻断；该 artifact 不能冒充 v3
+  资格证据。七个 app 保持停止，候选 v3 尚待提交和标准入口重跑。真
   Redis/NATS/Docker、标准
   部署、网络/push/heartbeat/backlog stall、真实逐角色重启、双故障和下游 fencing 均为 `OPEN`；
   不能据本地候选宣称模拟栈已恢复或 live 已放行。

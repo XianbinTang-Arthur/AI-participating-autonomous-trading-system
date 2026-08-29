@@ -1,7 +1,7 @@
 # FS-016 Runtime Readiness 可续租与单角色重启安全 P0 SOW
 
-> 文档状态：现行实施任务书；本地候选已完成全量单测，最终独立复审、WSL2 集成、标准部署和完整故障矩阵仍 `OPEN`
-> 最后核对：2026-08-28（起始基线 `main@82e600842a7ef360ab63c103c6dea1eae2267898`）
+> 文档状态：现行实施任务书；本地候选已完成独立复审，最终 WSL2 集成、标准部署和完整故障矩阵仍 `OPEN`
+> 最后核对：2026-08-29（核对基线 `main@f9bb249964364d457cd307f8ea427a65b7320888` + 当前 NATS exact-ownership 候选；以本文档所在最终 HEAD 为准）
 > 核对范围：当前代码、测试、标准部署脚本、WSL2 derivatives 模拟栈只读现场
 > 历史起点：[`fs_016_nats_peer_readiness_fail_closed_sow_2026_08_24.md`](fs_016_nats_peer_readiness_fail_closed_sow_2026_08_24.md)（其一次性 key 协议已被本文替代）
 > 生产决定：**REAL-MONEY PRODUCTION: NO-GO**
@@ -152,21 +152,36 @@ v1 -> v2 的 full-down，也不授权 rolling upgrade。
   `max_ack_pending=1`。nats-py callback 串行执行；门关闭时只有队首消息能发送 progress ACK，
   若继续预取 256 条会让客户端队列中其余消息在隔离期耗尽 `max_deliver`；因此不能只依赖队首 WPI。
   non-strict、in-memory 和 monolith 路径不注入 gate，也不强制 `max_ack_pending=1`。
-- 已有 durable 的 `ack_wait`、`max_ack_pending`、`max_deliver` 通过原位 consumer update 后再次
-  `consumer_info` 回读验证。对 `DeliverPolicy.ALL` 的关键事件 durable，filter/deliver policy 等
-  不可变 drift 一律失败关闭，禁止删除重建导致 cursor 重置。LAST/NEW snapshot/transient durable
+- 已有 durable 的可变项只能按声明边界迁移并再次 `consumer_info` 回读：`max_ack_pending` 收敛到
+  `1`；只有 snapshot/transient 的正数旧 `ack_wait` 可向声明目标增加；event 的 `ack_wait` drift 与
+  任意 `max_deliver` drift 均失败关闭。对 `DeliverPolicy.ALL` 的关键事件 durable，安全投影内的
+  consumer 行为配置 drift 一律失败关闭，禁止删除重建导致 cursor 重置。flow control/idle heartbeat
+  历史差异当前保留并告警，不在 qualification/supervisor 投影内，仍是运行验收边界。LAST/NEW
+  snapshot/transient durable
   只在运行时同时满足 strict delivery-gated、policy 非 ALL，并且（outstanding 超过目标，或窗口正在
   收缩且 outstanding 非零）时按既有语义
   重建：运行时会在 bind 前明确 delete/recreate，LAST 只从当前最新快照重新开始，NEW 只接收重建
   后的新事件，旧 pending/cursor 按其声明语义丢弃；自动重启也可能进入该分支。运行时代码不接收
   或校验“已 full-down”信号；标准 full-down 是首次 v1 -> v2 切换的额外发布门禁，不是此分支的
   代码内边界。该分支不适用于任何 ALL 金融事件 cursor。
-- 首次 v1 -> v2 ACK-window cutover 必须先停止相关生产者，再于 app up/bind 前对每个现存四主 role、
-  stream-backed critical ALL durable 取得只读证据并证明配置与 outstanding 安全；persist-only
-  `system.audit_records` 没有 JetStream stream/consumer，明确排除。标准 deploy 的应用 stop
+- runtime 在处理现存 durable 前冻结 broker `created`、实际 push `deliver_subject` 与 delivered/ack-floor
+  四维 cursor；update 回读、post-bind、READY 前和稳态 supervisor 都要求同一 created/inbox、durable
+  identity 与配置，并拒绝任一 cursor 回退。这关闭了 pre-check 到 update/bind 之间的同名重建竞态。
+  post-bind 校验失败只允许先 ABORT gate、再有界取消本地 subscription；不得 drain、ACK、删除或重建
+  broker durable，也不得把实际 inbox 写入日志/证据。
+- 首次 v1 -> v2 ACK-window cutover 必须先停止相关生产者，再于 app up/bind 前取得 exact ownership
+  只读证据。ownership manifest 是 `aats/bus/consumer_ownership.py` 中人工维护的 authoritative
+  declaration，动态 assembly 测试会实际装配四个 `build_runtime()` 并证明两者精确一致；共 `77` 个
+  stream-backed durable：gateway `31`、market `8`、decision `27`、execution `11`；event `49`、
+  snapshot `24`、transient `4`。persist-only `system.audit_records` 没有 JetStream consumer，明确排除。
+  标准 deploy 的应用 stop
   只证明生产者已停止，**不证明 JetStream 已 drain**。现行入口会在只接受 app `exited/dead` 或明确
   not-found 后，受控仅启动基础设施/NATS，以规定 `~/aats-venv` 从 loopback 分页枚举全部
-  stream/consumer，并核对 stream/filter/ack/deliver policy、created/cursor、窗口与 outstanding。
+  stream/consumer，并核对分页/总数、每个 stream 的 consumer 数、stream/durable/role/topic/semantics、
+  created、四维 cursor、safety-projection immutable/mutable config、窗口与 outstanding；实际 inbox
+  仅记录存在性。`existing_container_preserved` 下声明项缺失或实际 consumer 未归属都失败关闭；
+  `proven_fresh_install` 的 preflight 要求 consumer 集合为空，app-up 后最终证据才要求 exact `77`。
+  不能以总数相同替代集合与配置精确一致。
   旧 `max_ack_pending > 1` 时存在任意未 ACK，或配置虽已
   为 `1` 但 broker 仍携带 `num_ack_pending > 1` 的历史交付，均以固定码
   `nats_critical_consumer_ack_window_migration_requires_drain:<durable>` 失败关闭，不执行 update/bind，
@@ -174,8 +189,10 @@ v1 -> v2 的 full-down，也不授权 rolling upgrade。
   属稳态，不应被误判为首次迁移。
 - NATS 可保持底层无限重连，但断连连续 30 秒或 client 永久关闭会设置 sticky terminal failure；
   watcher 作为 runtime critical task 上浮到 daemon/Gateway，触发冻结续租、ABORT 与有界退出。
-- 已绑定 critical durable 由独立 consumer supervisor 默认每 5 秒只读核验。明确 `NotFound` 或
-  ack/deliver/filter/ack_wait/max_ack_pending/max_deliver 配置漂移立即 terminal；management 查询、
+- 已绑定 critical durable 由独立 consumer supervisor 默认每 5 秒只读核验。明确 `NotFound`、同名
+  重建、push inbox 变化、任一 cursor 回退，或安全投影内的 ack/deliver/filter/replay/headers/pause/backoff/
+  rate-limit/inactive-threshold/mem-storage/start-position/ack_wait/max_ack_pending/max_deliver 配置漂移
+  立即 terminal；management 查询、
   push binding 或 idle-heartbeat 持续失败达到 30 秒有界 terminal；gate 已激活且存在 backlog 时，
   delivered/ack-floor/pending 签名在 `max(30 秒, 2 x ack_wait)` 内无进展也 terminal。该监督不能由
   core TCP connected 或容器 healthy 替代。
@@ -226,9 +243,14 @@ lifecycle events；任一指纹变化、相关 event、paused/restarting/removin
 基础设施-only up 提供查询面，不能把不可达当 PASS。preflight 不得为制造零值而 ACK、删除/重建
 consumer、update、reset cursor 或 purge stream。outstanding-only 阻断只能在人工批准的变更窗保留
 旧状态、使用匹配旧版本消费者自然 drain 至零后重跑；immutable drift 必须人工 release review。
-PASS JSON schema v2 写入 `artifacts/deployments/`，绑定 deployment lock id、generation、deployed
-commit 与 quiescence。最终 deployment evidence 只接受最后一次同值、只读、完整查询且 quiescence
-有效的 PASS，并记录相对路径与 SHA-256。
+PASS JSON schema v3 写入 `artifacts/deployments/`，绑定 deployment lock id、generation、deployed
+commit、quiescence、ownership/query projection，以及适用于该 bootstrap mode 的声明与未归属/缺失
+集合。writer 重新执行共享
+投影验证并从原始 pre/post rows 独立重算 continuity，不信任 artifact 自报摘要。最终 deployment
+evidence 同时验证 pre/post 两次 schema v3 artifact 的同值、只读、完整查询、quiescence、chain、相对路径与 SHA-256；
+它还封存两次最终 no-secret canonical durable projection 及各自 SHA-256，覆盖 exact identity、created、
+四维 cursor、immutable/mutable config、窗口、outstanding、status/blockers，使审计者可独立重算
+post-to-final 与 final double-read 连续性。
 
 NATS 的八个非秘密容量目标不再由多个阶段重复读取可变 profile。标准入口在同步代码并取得 deployed
 commit 后，只用严格 allowlist 解析 profile 一次，将全部八键补齐、规范化并编码为确定性快照；root
@@ -250,7 +272,14 @@ Compose project/service、唯一 RW 标准
 `BOUNDED_OBSERVED / PASSED_WITH_TRUST_BOUNDARY`：Moby event broker 不是有序无损审计源，daemon/client
 时钟未证明对齐，exec、network attachment 与跨容器 volume 访问不可见，不能升格为完整审计。
 
-上述代码、聚焦测试与隔离 smoke 已落地；真实标准部署与完整 Docker 故障矩阵仍 `OPEN`。
+上述代码、聚焦测试与隔离 smoke 已落地。2026-08-29 03:43Z 的标准 derivatives 尝试使用已提交
+`f9bb2499` 的旧 schema v2 checker：停净七个 app 并保持基础设施在线后，第一次 `pre_full_down`
+扫描 `78` 个 consumer，只识别 `49` 个 event durable，把 `28` 个合法 snapshot/transient 与一个
+`aats-codex_manual_resume-system_operator_command_responses` 一并列为 `29` 个 unexpected 后安全阻断。
+该 artifact 证明旧 v2 ownership 模型过窄，不能证明新 v3 的 exact `77+1` 资格。当前候选随后对同一
+broker 做过非发布只读诊断，得到声明 `77` + 未归属 `1`，但仍须提交后用标准入口生成 v3 artifact。系统
+没有进入 full-down/app-up，七个 app 保持停止，未知 durable 未被修改。该项必须由真人 owner/release
+review 决定，不能自动删除；在此之前标准部署、完整 Docker 故障矩阵仍 `OPEN`。
 
 本协议仍不是下游 Postgres/NATS/交易所执行 sink 强制校验的单调 fencing token。若 Redis owner
 truth 丢失/被错误恢复与独立 watchdog 或 OS termination 同时失效，55 秒 quarantine 只能提供
@@ -290,13 +319,14 @@ truth 丢失/被错误恢复与独立 watchdog 或 OS termination 同时失效�
 5. Redis refresh exception、lease 到期、ownership 替换触发固定失败且不泄露异常正文；
 6. 旧实例 refresh/delete 与新实例 claim 竞争时，新实例值不被覆盖或删除；
 7. claim、PROVISIONING 续租、watchdog READY handshake 与 55 秒 quarantine 在任何 NATS I/O 前完成；父/child clock 一致且计入 suspend，pidfd/creation FILETIME 防 PID 重用；event-loop/GIL 阻塞不能越过每次成功 PROVISIONING 写/续租后的 50 秒滑动 hard fence，也不能越过 claim→READY 180 秒绝对上界（170 秒冻结续租 + 10 秒 fatal grace）；
-8. delivery gate 在未激活时不 parse/persist/handler/ack/nak，ABORT 竞态优先；4,096 条/64 MiB 双上限、flush-before-callback 和 flush 失败全部失败关闭；gated consumer 使用 `max_ack_pending=1`；已有 critical ALL durable 仅在 `num_ack_pending=0` 时从旧窗口原位降到 `1` 且 cursor 不删除；旧窗口仍有未 ACK 以及窗口已为 `1` 但 outstanding 大于 `1` 均固定失败关闭，且不调用 update/delete/subscribe；LAST/NEW 只在运行时同时满足 strict delivery-gated、policy 非 ALL，并且（outstanding 超过目标，或窗口正在收缩且 outstanding 非零）时于 bind 前重建，并分别验证“仅最新/仅未来”的真实语义；自动重启也可进入该分支，标准 full-down 是额外发布门禁而非运行时信号；
+8. delivery gate 在未激活时不 parse/persist/handler/ack/nak，ABORT 竞态优先；4,096 条/64 MiB 双上限、flush-before-callback 和 flush 失败全部失败关闭；gated consumer 使用 `max_ack_pending=1`；已有 critical ALL durable 仅在 `num_ack_pending=0` 时从旧窗口原位降到 `1` 且 cursor 不删除；旧窗口仍有未 ACK 以及窗口已为 `1` 但 outstanding 大于 `1` 均固定失败关闭，且不调用 update/delete/subscribe；仅 snapshot/transient 的正数 `ack_wait` 可向声明目标提高，event `ack_wait` 与任意 `max_deliver` drift 阻断；LAST/NEW 的 ACK-window backlog 重建仅在 strict delivery-gated、policy 非 ALL，并且（outstanding 超过目标，或窗口正在收缩且 outstanding 非零）时发生，safety-projection immutable drift 另有声明丢弃语义重建分支；两类都分别验证“仅最新/仅未来”的真实语义；自动重启也可进入运行时分支，标准 full-down 是额外发布门禁而非运行时信号；
 9. lease 在 peer wait/flush/background start 前失败时操作被取消；确定失租零宽限 hard exit，fatal watchdog 不可被 finally disarm；
 10. Gateway barrier/lease failure 不设置伪 ready，cleanup 不删除新 owner；
 11. 关键故障立即冻结续租且 fatal 不可解除；正常 stop 先冻结续租、进入 10 秒 SHUTDOWN deadline、停止业务并 drain NATS、disarm 后再 owner-aware delete；非安全停机不删除 owner，由 TTL fencing；
-12. NATS 连续断连 30 秒和永久 close 进入 critical failure；critical durable `NotFound`/配置漂移立即 terminal，management/push/heartbeat 持续失败和 backlog 无进展有界 terminal；Redis `noeviction` 与写失败上浮；
-13. 原 FS-016 generation、deploy injection、210 秒 health budget、monolith 与 optional 路径回归，并明确拒绝 protocol v1/mixed-version peer；标准 deploy 使用不可由生产覆盖的固定全局 WSL `flock`，任一 fresh predecessor lease 或同作用域 durable active marker 触发 takeover quarantine；每个外部步骤 spawn 前 fencing、spawn 后唯一 active child 全局登记，launch 前取消不执行 mutation，launch 后丢锁或 `TERM/HUP/INT/EXIT` 保持 lease/flock 并等待 guard 的真实完成证明；本地/未分类/WSL ACK 三类完成语义、七字段输出完整性、远端语义状态传播、proof 幂等重读、release 状态 16 与 poison marker 均须回归。七容器 quiescence 以 ID/status/StartedAt/FinishedAt/RestartCount 和精确 Docker events 区间验证；full-down 前与 app-up 前各执行一次只读全量分页 preflight；失败保留 NATS；最后一次 schema v2 PASS 与最终证据的 lock id/generation/deployed commit/quiescence/path/hash 一致。
+12. NATS 连续断连 30 秒和永久 close 进入 critical failure；critical durable `NotFound`、created/inbox/name/config drift 或四维 cursor 回退立即 terminal，management/push/heartbeat 持续失败和 backlog 无进展有界 terminal；update/bind 前冻结 identity，回读/post-bind/READY/steady state 关闭同名重建竞态；post-bind 失败无 drain/ACK/delete 副作用；Redis `noeviction` 与写失败上浮；
+13. 原 FS-016 generation、deploy injection、210 秒 health budget、monolith 与 optional 路径回归，并明确拒绝 protocol v1/mixed-version peer；标准 deploy 使用不可由生产覆盖的固定全局 WSL `flock`，任一 fresh predecessor lease 或同作用域 durable active marker 触发 takeover quarantine；每个外部步骤 spawn 前 fencing、spawn 后唯一 active child 全局登记，launch 前取消不执行 mutation，launch 后丢锁或 `TERM/HUP/INT/EXIT` 保持 lease/flock 并等待 guard 的真实完成证明；本地/未分类/WSL ACK 三类完成语义、七字段输出完整性、远端语义状态传播、proof 幂等重读、release 状态 16 与 poison marker 均须回归。七容器 quiescence 以 ID/status/StartedAt/FinishedAt/RestartCount 和精确 Docker events 区间验证；full-down 前与 app-up 前各执行一次只读全量分页 preflight；失败保留 NATS；两次 schema v3 artifact 都必须与最终证据的 lock id/generation/deployed commit/quiescence/path/hash 一致，并重算原始 pre/post continuity。
 14. NATS 八键 target snapshot 必须规范、确定、无非白名单值、root-owned 只读且绑定 lock token；preflight、Compose 末位 `env_file`、所有必需容器 manifest label、健康边界和最终 writer 必须同摘要。NATS post-recreate/final 身份必须同时匹配固定 `Config.Image` pin 与该 pin 的实际 image ID。主动稳定观察必须拒绝 healthy 但 `FailingStreak>0` 或最新 `ExitCode!=0`；最终逻辑窗不得超过 60 秒，防止五条 Moby health log 淘汰边界后失败。
+15. 人工 authoritative ownership manifest 必须经动态 assembly 测试证明精确匹配 gateway `31`、market `8`、decision `27`、execution `11`，共 `77` 个 durable 与 event/snapshot/transient `49/24/4`；preserved install 的 query 总数、逐 stream consumer count、声明集合与实际集合精确一致，missing/unowned/错 stream/config 均失败关闭；fresh install preflight 必须为空且 app-up 后 final 必须 exact `77`；最终证据两次 canonical durable projection 的 SHA-256 对任一同数量 identity 或 config 替换都必须变化，且不得包含实际 inbox、凭证或连接信息。
 
 ### 5.2 模拟运行验收
 
@@ -313,12 +343,13 @@ truth 丢失/被错误恢复与独立 watchdog 或 OS termination 同时失效�
   stop 七个 app 时只接受 `exited/dead` 或明确 not-found；以 ID/status/StartedAt/FinishedAt/RestartCount
   和精确 Docker events 区间验证 quiescence；基础设施-only up 后、full-down 前取得第一次 loopback
   全量分页只读 preflight PASS，full-down 后建立新基线，infra/schema 完成后、app up 前取得第二次；
-  最终证据验证最后一次 v2 PASS 的同 lock id/generation/deployed commit/quiescence 及 path/hash；
+  最终证据验证两次 v3 PASS 的同 lock id/generation/deployed commit/quiescence、chain 及 path/hash，
+  重新计算 pre/post continuity，并封存两次最终 canonical durable projection/hash；
 - 四个 strict role 都在任何 NATS I/O 前启动 PROVISIONING 续租与独立 watchdog，并实际完成 55 秒 quarantine；日志/受控探针证明父子 boot-time clock 和稳定父进程身份围栏生效；
 - 等待超过 lease TTL 后，按受控方式逐个重启四主角色并观察重新加入；
 - restart count 收敛，日志不再出现 readiness timeout 永久循环；
 - wrong generation、Redis claim/replace/poll/refresh、容量写失败和 NATS 连续断连超过 30 秒的故障注入保持失败关闭且无 publisher/伪健康；
-- 首次 cutover 在生产者停止后、app up 前保存逐 critical ALL durable 的只读 `consumer_info` 证据，全部 `num_ack_pending=0` 后才把窗口原位更新为 `1`；标准 stop 不冒充 drain，durable identity/created/cursor 连续；隔离期间不存在 broker 预取消息耗尽 `max_deliver`；
+- preserved install 的首次 cutover 在生产者停止后、app up 前保存 exact `77` durable ownership 与逐 consumer 的只读 `consumer_info` 证据；missing/unowned 均阻断。fresh install preflight 则必须为空，并在 app-up 后 final 证明 exact `77`。event 在旧窗口下必须 `num_ack_pending=0` 后才把窗口原位更新为 `1`，snapshot/transient 只执行声明语义允许的 reconcile/rebuild；标准 stop 不冒充 drain，durable identity/created/inbox/cursor 连续；隔离期间不存在 broker 预取消息耗尽 `max_deliver`；
 - 注入 consumer delete、配置漂移、management 查询故障、push unbound、heartbeat inactive 与 backlog stall；逐项证明立即或有界 terminal、gate ABORT、进程退出及告警送达，不能以 core TCP 或容器 healthy 掩盖；
 - 关键失败立即停止 renewal；正常停止在 10 秒内完成业务/NATS drain、watchdog disarm 与 owner-aware delete，超时则硬退出并保留 TTL fencing；
 - 首次 v1 -> v2 发布和任何回滚都采用标准 full-down，确认 gateway/market/decision/execution 旧进程全部停止后再 app up；不做 rolling 或 mixed-version 验收；
@@ -385,16 +416,17 @@ TCP 仍连接时删除 critical durable 会 ABORT gate 并触发 terminal；首�
 证据不覆盖真实标准部署中的两次只读 drain/quiescence preflight，也不覆盖真实服务容器退出、网络/
 push/heartbeat/backlog stall、告警或恢复时序。
 
-最后一次 NATS 健康窗及 WSL completion ACK、输出完整性、幂等 proof、marker cleanup、durable
-marker scan 与单事务代码同步修复后，当前候选的 `213 passed` FS-016
-聚焦回归、根级独立 `173 passed` 聚焦复跑、六项隔离 smoke，以及全量
-`6434 passed / 31 skipped / 259 subtests passed` 已于 2026-08-28 通过；Ruff 与真实 Git Bash 语法
-检查通过。隔离 smoke 不等同于真实 Docker/WSL 发布，SQLite deprecation warnings 也不属于本切片
-安全通过条件。独立代码复审未留下可由当前代码继续修复的 P0/P1；Docker event delivery loss、
+最后一次 NATS 健康窗、WSL completion ACK、输出完整性、幂等 proof、marker cleanup、durable marker
+scan、单事务代码同步、exact ownership、runtime TOCTOU 与最终 canonical durable evidence 修复后，
+当前候选的 NATS/部署门禁聚焦合集 `351 passed`，全量
+`6531 passed / 31 skipped / 259 subtests passed` 已于 2026-08-29 通过；Ruff 已对本切片全部变更 Python 文件复跑通过，
+此前真实 Git Bash 语法检查和六项隔离 smoke 通过。隔离 smoke 不等同于真实 Docker/WSL 发布，SQLite
+deprecation warnings 也不属于本切片安全通过条件。两路独立代码复审未留下 P0/P1；Docker event delivery loss、
 daemon clock 未校准、HTTP ready 早于订阅确认及 exec/跨容器 volume blind spot 仍作为不完整信任边界
 显式披露。真 Redis 集成、标准 full-down 模拟发布、完整真实 NATS/Docker
 启动-断连-consumer supervision-逐角色重启、双故障与下游 fencing 矩阵仍保持 `OPEN`，不得声称新候选已完成运行验收。此前 execution 重启循环和 Windows/容器基线
-不一致是 2026-08-28 已记录的历史现场证据，不证明当前时刻仍相同；在当前候选提交并经标准部署重新
-读取现场前，模拟栈状态为 `UNKNOWN`，不得宣称整体健康。仓库当前没有获准的单角色重启入口，因此
+不一致是 2026-08-28 已记录的历史现场证据，不证明当前时刻仍相同。2026-08-29 的标准尝试只证明
+基础设施在线与第一次 preflight 安全阻断；七个 app 当前有意保持停止，故整体模拟栈不是 healthy，
+也不得宣称部署通过。仓库当前没有获准的单角色重启入口，因此
 真实逐角色重启矩阵保持 **OPEN**，不能用手工 Compose 或容器重启冒充验收。真实资金继续
 **NO-GO**。

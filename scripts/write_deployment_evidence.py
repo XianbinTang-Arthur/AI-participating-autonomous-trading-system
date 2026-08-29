@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Sequence
@@ -61,7 +62,7 @@ _MIN_FINAL_EVIDENCE_WINDOW_SECONDS = 35.0
 # failure after the boundary is still present in at least one final inspect.
 _MAX_FINAL_EVIDENCE_WINDOW_SECONDS = 60.0
 _COMMAND_TIMEOUT_SECONDS = 30.0
-_NATS_CUTOVER_PREFLIGHT_SCHEMA = "aats.nats_durable_cutover_preflight.v2"
+_NATS_CUTOVER_PREFLIGHT_SCHEMA = "aats.nats_durable_cutover_preflight.v3"
 _MAX_NATS_CUTOVER_EVIDENCE_BYTES = 5 * 1024 * 1024
 _NATS_BOOTSTRAP_MODES = frozenset(
     {"existing_container_preserved", "proven_fresh_install"}
@@ -310,6 +311,79 @@ def _stream_target_projection(
     return projection, fingerprint
 
 
+def _durable_qualification_projection(
+    rows: Sequence[dict[str, object]],
+) -> tuple[list[dict[str, object]], str]:
+    """Build a canonical, no-secret durable snapshot for independent audit."""
+
+    required_keys = {
+        "identity",
+        "created",
+        "cursor",
+        "immutable_config",
+        "mutable_config",
+        "window",
+        "outstanding",
+        "status",
+        "blockers",
+    }
+    required_identity_keys = {
+        "stream",
+        "durable",
+        "role",
+        "topic",
+        "delivery_semantics",
+    }
+    projection: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != required_keys:
+            raise RuntimeError("invalid_final_nats_durable_snapshot")
+        identity = row.get("identity")
+        created = row.get("created")
+        if (
+            not isinstance(identity, dict)
+            or set(identity) != required_identity_keys
+            or not isinstance(created, str)
+            or not created
+            or row.get("status") != "SAFE_ALREADY_ONE"
+            or row.get("blockers") != []
+        ):
+            raise RuntimeError("invalid_final_nats_durable_snapshot")
+        stream = identity.get("stream")
+        durable = identity.get("durable")
+        if (
+            not isinstance(stream, str)
+            or not stream
+            or not isinstance(durable, str)
+            or not durable
+            or (stream, durable) in seen
+        ):
+            raise RuntimeError("invalid_final_nats_durable_snapshot")
+        if any(
+            not isinstance(row.get(key), dict)
+            for key in (
+                "cursor",
+                "immutable_config",
+                "mutable_config",
+                "window",
+                "outstanding",
+            )
+        ):
+            raise RuntimeError("invalid_final_nats_durable_snapshot")
+        seen.add((stream, durable))
+        projection.append(deepcopy(row))
+    projection.sort(
+        key=lambda row: (
+            str(row["identity"]["stream"]),  # type: ignore[index]
+            str(row["identity"]["durable"]),  # type: ignore[index]
+        )
+    )
+    canonical = json.dumps(projection, sort_keys=True, separators=(",", ":"))
+    fingerprint = f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+    return projection, fingerprint
+
+
 def _utc_text_from_ns(value: int) -> str:
     return datetime.fromtimestamp(value / 1_000_000_000, tz=timezone.utc).isoformat()
 
@@ -392,6 +466,10 @@ def _read_final_nats_state(
         or result.consumer_count != len(result.consumers)
     ):
         raise RuntimeError("invalid_final_nats_query_result")
+    try:
+        cutover.validate_query_result_consumer_projection(result)
+    except RuntimeError as exc:
+        raise RuntimeError("invalid_final_nats_query_result") from exc
     streams = cutover.build_critical_stream_rows(result.streams)
     expected = cutover.build_expected_durable_index()
     expected_pairs = {
@@ -862,6 +940,185 @@ def _collector_heartbeat_fact(
     }
 
 
+def _recompute_preflight_durable_row(
+    row: object,
+    *,
+    expected: object,
+    cutover: object,
+) -> dict[str, object]:
+    """Rebuild one v3 row from its raw fields and reject self-reported safety."""
+
+    error = "nats_cutover_preflight_durable_projection_invalid"
+    if not isinstance(row, dict) or set(row) != {
+        "identity",
+        "created",
+        "cursor",
+        "immutable_config",
+        "mutable_config",
+        "window",
+        "outstanding",
+        "status",
+        "blockers",
+    }:
+        raise ValueError(error)
+    identity = row.get("identity")
+    if not isinstance(identity, dict) or identity != {
+        "stream": expected.stream,
+        "durable": expected.durable,
+        "role": expected.role,
+        "topic": expected.topic,
+        "delivery_semantics": expected.delivery_semantics,
+    }:
+        raise ValueError(error)
+    try:
+        _parse_aware_timestamp(row.get("created"))
+    except ValueError as exc:
+        raise ValueError(error) from exc
+
+    immutable = row.get("immutable_config")
+    mutable = row.get("mutable_config")
+    if not isinstance(immutable, dict) or set(immutable) != {"actual", "expected"}:
+        raise ValueError(error)
+    if not isinstance(mutable, dict) or set(mutable) != {"actual", "expected"}:
+        raise ValueError(error)
+    actual = immutable.get("actual")
+    expected_config = immutable.get("expected")
+    canonical_expected = cutover._expected_consumer_config(expected)
+    if expected_config != canonical_expected or not isinstance(actual, dict):
+        raise ValueError(error)
+    if set(actual) != set(canonical_expected) | {"filter_subjects"}:
+        raise ValueError(error)
+    actual_mutable = mutable.get("actual")
+    if (
+        mutable.get("expected")
+        != cutover._expected_consumer_mutable_config(expected)
+        or not isinstance(actual_mutable, dict)
+        or set(actual_mutable) != {"ack_wait_seconds", "max_deliver"}
+    ):
+        raise ValueError(error)
+
+    cursor = row.get("cursor")
+    window = row.get("window")
+    outstanding = row.get("outstanding")
+    if (
+        not isinstance(cursor, dict)
+        or set(cursor)
+        != {
+            "delivered_stream_seq",
+            "delivered_consumer_seq",
+            "ack_floor_stream_seq",
+            "ack_floor_consumer_seq",
+        }
+        or not isinstance(window, dict)
+        or set(window)
+        != {"current_max_ack_pending", "target_max_ack_pending"}
+        or not isinstance(outstanding, dict)
+        or set(outstanding) != {"num_ack_pending"}
+    ):
+        raise ValueError(error)
+    for value in cursor.values():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(error)
+    current_window = window.get("current_max_ack_pending")
+    target_window = window.get("target_max_ack_pending")
+    num_ack_pending = outstanding.get("num_ack_pending")
+    if (
+        isinstance(current_window, bool)
+        or not isinstance(current_window, int)
+        or isinstance(target_window, bool)
+        or target_window != 1
+        or isinstance(num_ack_pending, bool)
+        or not isinstance(num_ack_pending, int)
+        or num_ack_pending < 0
+    ):
+        raise ValueError(error)
+
+    filter_subject = actual.get("filter_subject")
+    filter_subjects = actual.get("filter_subjects")
+    deliver_group = actual.get("deliver_group")
+    backoff = actual.get("backoff_seconds")
+    pause_until = actual.get("pause_until")
+    inactive_threshold = actual.get("inactive_threshold_seconds")
+    ack_wait = actual_mutable.get("ack_wait_seconds")
+    max_deliver = actual_mutable.get("max_deliver")
+    rate_limit = actual.get("rate_limit_bps")
+    opt_start_seq = actual.get("opt_start_seq")
+    opt_start_time = actual.get("opt_start_time")
+    if (
+        filter_subject is not None
+        and not isinstance(filter_subject, str)
+        or not isinstance(filter_subjects, list)
+        or not all(isinstance(value, str) for value in filter_subjects)
+        or deliver_group is not None
+        and not isinstance(deliver_group, str)
+        or not isinstance(backoff, list)
+        or not all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in backoff
+        )
+        or pause_until is not None
+        and not isinstance(pause_until, str)
+        or inactive_threshold is not None
+        and (
+            isinstance(inactive_threshold, bool)
+            or not isinstance(inactive_threshold, (int, float))
+        )
+        or isinstance(ack_wait, bool)
+        or not isinstance(ack_wait, (int, float))
+        or isinstance(max_deliver, bool)
+        or not isinstance(max_deliver, int)
+        or isinstance(rate_limit, bool)
+        or not isinstance(rate_limit, int)
+        or not isinstance(actual.get("deliver_subject_present"), bool)
+        or not isinstance(actual.get("replay_policy"), str)
+        or not isinstance(actual.get("headers_only"), bool)
+        or not isinstance(actual.get("mem_storage"), bool)
+        or not isinstance(actual.get("durable_name_matches"), bool)
+        or opt_start_seq is not None
+        and (
+            isinstance(opt_start_seq, bool)
+            or not isinstance(opt_start_seq, int)
+            or opt_start_seq < 0
+        )
+        or opt_start_time is not None
+        and not isinstance(opt_start_time, str)
+    ):
+        raise ValueError(error)
+
+    state = cutover.ConsumerState(
+        stream=actual.get("stream"),
+        durable=expected.durable,
+        created=row["created"],
+        deliver_policy=actual.get("deliver_policy"),
+        ack_policy=actual.get("ack_policy"),
+        filter_subject=filter_subject,
+        filter_subjects=tuple(filter_subjects),
+        deliver_group=deliver_group,
+        max_ack_pending=current_window,
+        num_ack_pending=num_ack_pending,
+        cursor=cutover.ConsumerCursor(**cursor),
+        deliver_subject_present=actual.get("deliver_subject_present"),
+        replay_policy=actual.get("replay_policy"),
+        headers_only=actual.get("headers_only"),
+        pause_until=pause_until,
+        backoff_seconds=tuple(float(value) for value in backoff),
+        rate_limit_bps=rate_limit,
+        inactive_threshold_seconds=(
+            None if inactive_threshold is None else float(inactive_threshold)
+        ),
+        mem_storage=actual.get("mem_storage"),
+        ack_wait_seconds=float(ack_wait),
+        max_deliver=max_deliver,
+        durable_name_matches=actual.get("durable_name_matches"),
+        opt_start_seq=opt_start_seq,
+        opt_start_time=opt_start_time,
+    )
+    recomputed = cutover.evaluate_consumer(state, expected)
+    if recomputed != row:
+        raise ValueError(error)
+    return recomputed
+
+
 def _nats_cutover_preflight_reference(
     *,
     repo_root: Path,
@@ -922,19 +1179,109 @@ def _nats_cutover_preflight_reference(
     query = payload.get("query")
     if not isinstance(query, dict) or query.get("complete") is not True:
         raise ValueError("nats_cutover_preflight_query_incomplete")
-    if not isinstance(payload.get("critical_streams"), list) or not isinstance(
-        payload.get("durables"), list
-    ):
+    durable_rows = payload.get("durables")
+    critical_streams = payload.get("critical_streams")
+    if not isinstance(critical_streams, list) or not isinstance(durable_rows, list):
         raise ValueError("nats_cutover_preflight_snapshot_incomplete")
     if payload.get("unexpected_durables") != []:
         raise ValueError("nats_cutover_preflight_unexpected_durables")
+    if payload.get("missing_declared_durables") != []:
+        raise ValueError("nats_cutover_preflight_missing_declared_durables")
+    from scripts import check_nats_durable_cutover as cutover
+
+    expected_durables = cutover.build_expected_durable_index()
+    expected_by_pair = {
+        (row.stream, row.durable): row for row in expected_durables.values()
+    }
+    expected_pairs = set(expected_by_pair)
+    observed_pairs: set[tuple[str, str]] = set()
+    event_count = 0
+    non_event_count = 0
+    for row in durable_rows:
+        if not isinstance(row, dict):
+            raise ValueError("nats_cutover_preflight_durable_projection_invalid")
+        identity = row.get("identity")
+        if not isinstance(identity, dict):
+            raise ValueError("nats_cutover_preflight_durable_projection_invalid")
+        stream = identity.get("stream")
+        durable = identity.get("durable")
+        semantics = identity.get("delivery_semantics")
+        if not isinstance(stream, str) or not isinstance(durable, str):
+            raise ValueError("nats_cutover_preflight_durable_projection_invalid")
+        pair = (stream, durable)
+        if pair in observed_pairs:
+            raise ValueError("nats_cutover_preflight_durable_projection_invalid")
+        observed_pairs.add(pair)
+        expected = expected_by_pair.get(pair)
+        if expected is None:
+            raise ValueError("nats_cutover_preflight_durable_projection_invalid")
+        _recompute_preflight_durable_row(
+            row,
+            expected=expected,
+            cutover=cutover,
+        )
+        if semantics == "event":
+            event_count += 1
+            allowed_statuses = {"SAFE_TO_SHRINK", "SAFE_ALREADY_ONE"}
+        elif semantics in {"snapshot", "transient"}:
+            non_event_count += 1
+            allowed_statuses = {
+                "SAFE_TO_SHRINK",
+                "SAFE_TO_RECONCILE_IN_PLACE",
+                "SAFE_REBUILDABLE_NON_EVENT",
+                "SAFE_ALREADY_ONE",
+            }
+        else:
+            raise ValueError("nats_cutover_preflight_durable_projection_invalid")
+        if row.get("status") not in allowed_statuses or row.get("blockers") != []:
+            raise ValueError("nats_cutover_preflight_durable_projection_invalid")
+    if nats_bootstrap["mode"] == "existing_container_preserved":
+        if observed_pairs != expected_pairs:
+            raise ValueError("nats_cutover_preflight_durable_projection_incomplete")
+    elif observed_pairs:
+        raise ValueError("nats_cutover_fresh_install_has_existing_durables")
+    expected_query = {
+        "complete": True,
+        "streams_scanned": len(critical_streams),
+        "consumers_scanned": len(durable_rows),
+        "declared_durables_found": len(durable_rows),
+        "critical_all_durables_found": event_count,
+        "known_non_event_durables_found": non_event_count,
+        "critical_streams_found": len(critical_streams),
+    }
+    if (
+        query != expected_query
+        or query.get("critical_all_durables_found") != event_count
+        or query.get("known_non_event_durables_found") != non_event_count
+        or payload.get("blocker_classes") != []
+    ):
+        raise ValueError("nats_cutover_preflight_durable_projection_invalid")
     target_stream_manifest = _required_target_stream_manifest(
         payload.get("target_stream_manifest")
     )
-    _required_stream_target_compliance(
+    reported_stream_compliance = _required_stream_target_compliance(
         payload.get("stream_target_compliance"),
         target_sha256=str(target_stream_manifest["sha256"]),
     )
+    try:
+        recomputed_stream_compliance, stream_blocked = (
+            cutover.evaluate_stream_target(
+                actual_streams=critical_streams,
+                target_manifest=target_stream_manifest,
+                bootstrap_mode=nats_bootstrap["mode"],
+            )
+        )
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("nats_cutover_stream_projection_invalid") from exc
+    if stream_blocked or reported_stream_compliance != recomputed_stream_compliance:
+        raise ValueError("nats_cutover_stream_projection_invalid")
+    try:
+        cutover.validate_preflight_snapshot_projection(
+            payload,
+            bootstrap_mode=nats_bootstrap["mode"],
+        )
+    except RuntimeError as exc:
+        raise ValueError("nats_cutover_preflight_snapshot_invalid") from exc
     quiescence = payload.get("app_quiescence")
     if (
         not isinstance(quiescence, dict)
@@ -1014,8 +1361,12 @@ def _nats_cutover_preflight_reference(
         "app_quiescence_status": "PASSED_WITH_TRUST_BOUNDARY",
         "streams_scanned": query.get("streams_scanned"),
         "consumers_scanned": query.get("consumers_scanned"),
+        "declared_durables_found": query.get("declared_durables_found"),
         "critical_all_durables_found": query.get(
             "critical_all_durables_found"
+        ),
+        "known_non_event_durables_found": query.get(
+            "known_non_event_durables_found"
         ),
         "critical_streams_found": query.get("critical_streams_found"),
         "artifact_relative_path": relative_to_artifacts.as_posix(),
@@ -1062,6 +1413,34 @@ def _validate_nats_cutover_preflight_chain(
         or continuity.get("baseline_sha256") != before_reference.get("sha256")
     ):
         raise ValueError("nats_cutover_continuity_hash_mismatch")
+    from scripts import check_nats_durable_cutover as cutover
+
+    try:
+        recomputed_continuity = cutover.evaluate_cutover_continuity(
+            previous_streams=before_payload.get("critical_streams"),
+            current_streams=after_payload.get("critical_streams"),
+            previous_durables=before_payload.get("durables"),
+            current_durables=after_payload.get("durables"),
+            baseline_sha256=str(before_reference.get("sha256")),
+        )
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("nats_cutover_continuity_recomputation_failed") from exc
+    if (
+        recomputed_continuity.get("status") != "PASSED"
+        or recomputed_continuity.get("complete") is not True
+        or recomputed_continuity.get("violations") != []
+    ):
+        raise ValueError("nats_cutover_continuity_recomputed_not_passed")
+    for key in (
+        "status",
+        "complete",
+        "baseline_sha256",
+        "streams_checked",
+        "durables_checked",
+        "violations",
+    ):
+        if continuity.get(key) != recomputed_continuity.get(key):
+            raise ValueError(f"nats_cutover_continuity_artifact_mismatch:{key}")
     if after_payload.get("nats_bootstrap") != before_reference.get(
         "nats_bootstrap"
     ):
@@ -1291,6 +1670,9 @@ def build_evidence(
     final_stream_projection, final_stream_projection_sha256 = (
         _stream_target_projection(final_stream_rows)
     )
+    final_durable_projection, final_durable_projection_sha256 = (
+        _durable_qualification_projection(final_durable_rows)
+    )
     container_facts_before, gateway_bindings_before = _container_snapshot(
         required_container_names,
         expected_image_id=base_image_id_before,
@@ -1366,6 +1748,9 @@ def build_evidence(
     final_stream_projection_after, final_stream_projection_sha256_after = (
         _stream_target_projection(final_stream_rows_after)
     )
+    final_durable_projection_after, final_durable_projection_sha256_after = (
+        _durable_qualification_projection(final_durable_rows_after)
+    )
     if base_image_id_after != base_image_id_before:
         raise RuntimeError("base_image_changed_during_evidence_capture")
     if (
@@ -1387,6 +1772,7 @@ def build_evidence(
         # matching and the exact expected-durable projection above constrain
         # every permitted new identity; all pre-existing identities must remain.
         allow_new_identities=True,
+        allow_declared_cutover_migrations=True,
     )
     if post_to_final_continuity.get("status") != "PASSED_WITH_TRUST_BOUNDARY":
         raise RuntimeError("nats_state_invalidated_since_post_preflight")
@@ -1572,6 +1958,16 @@ def build_evidence(
             "expected_count": len(cutover.build_expected_durable_index()),
             "observed_count": len(final_durable_rows_after),
             "stable_snapshots": 2,
+            "first_snapshot": {
+                "canonical_projection_sha256": final_durable_projection_sha256,
+                "canonical_projection": final_durable_projection,
+            },
+            "second_snapshot": {
+                "canonical_projection_sha256": (
+                    final_durable_projection_sha256_after
+                ),
+                "canonical_projection": final_durable_projection_after,
+            },
             "continuity": final_double_read_continuity,
         },
         "runtime_unknowns": [

@@ -44,6 +44,7 @@ from aats.bus.nats_bus import (
     _compute_stream_config_drift,
     build_consumer_config_spec,
     build_nats_streams_from_env,
+    consumer_mutable_config_migration_blockers,
     delivery_semantics_for,
 )
 from aats.events import topics as _topics
@@ -536,6 +537,54 @@ def test_consumer_config_spec_is_frozen() -> None:
     )
     with pytest.raises((AttributeError, dataclasses.FrozenInstanceError)):
         spec.ack_wait_seconds = 999.0  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    (
+        "semantics",
+        "current_ack_wait",
+        "target_ack_wait",
+        "current_max_deliver",
+        "target_max_deliver",
+        "expected",
+    ),
+    (
+        ("event", 30.0, 30.0, 5, 5, ()),
+        ("event", 29.0, 30.0, 5, 5, ("ack_wait_drift",)),
+        ("event", 31.0, 30.0, 5, 5, ("ack_wait_drift",)),
+        ("snapshot", 30.0, 90.0, 5, 5, ()),
+        ("transient", 30.0, 90.0, 5, 5, ()),
+        ("snapshot", 90.0, 30.0, 5, 5, ("ack_wait_drift",)),
+        ("snapshot", 0.0, 90.0, 5, 5, ("ack_wait_drift",)),
+        ("snapshot", -1.0, 90.0, 5, 5, ("ack_wait_drift",)),
+        ("snapshot", float("nan"), 90.0, 5, 5, ("ack_wait_drift",)),
+        ("snapshot", float("inf"), 90.0, 5, 5, ("ack_wait_drift",)),
+        ("snapshot", 30.0, 90.0, 6, 5, ("max_deliver_drift",)),
+        (
+            "event",
+            29.0,
+            30.0,
+            6,
+            5,
+            ("ack_wait_drift", "max_deliver_drift"),
+        ),
+    ),
+)
+def test_consumer_mutable_config_migration_policy_is_fail_closed(
+    semantics: str,
+    current_ack_wait: object,
+    target_ack_wait: object,
+    current_max_deliver: object,
+    target_max_deliver: object,
+    expected: tuple[str, ...],
+) -> None:
+    assert consumer_mutable_config_migration_blockers(
+        delivery_semantics=semantics,
+        current_ack_wait_seconds=current_ack_wait,
+        target_ack_wait_seconds=target_ack_wait,
+        current_max_deliver=current_max_deliver,
+        target_max_deliver=target_max_deliver,
+    ) == expected
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1737,6 +1786,72 @@ class _ProgressMsg(_FakeMsgWithTerm):
             raise RuntimeError("simulated progress failure")
 
 
+_TEST_CONSUMER_CREATED = "2026-08-29T00:00:00Z"
+
+
+def _fake_consumer_info(
+    config: Any,
+    *,
+    created: Any = _TEST_CONSUMER_CREATED,
+    cursor: tuple[int, int, int, int] = (0, 0, 0, 0),
+    push_bound: bool = True,
+    num_pending: int = 0,
+    num_ack_pending: int = 0,
+) -> Any:
+    return SimpleNamespace(
+        name=config.durable_name,
+        config=config,
+        created=created,
+        delivered=SimpleNamespace(
+            stream_seq=cursor[0],
+            consumer_seq=cursor[1],
+        ),
+        ack_floor=SimpleNamespace(
+            stream_seq=cursor[2],
+            consumer_seq=cursor[3],
+        ),
+        push_bound=push_bound,
+        num_pending=num_pending,
+        num_ack_pending=num_ack_pending,
+    )
+
+
+class _BoundConsumerSubscription:
+    def __init__(
+        self,
+        info: Any,
+        *,
+        binding_subject: str | None = None,
+    ) -> None:
+        self._info = info
+        self._subject = binding_subject or info.config.deliver_subject
+        self.drained = False
+        self.unsubscribed = False
+
+    @property
+    def subject(self) -> str:
+        return self._subject
+
+    async def consumer_info(self) -> Any:
+        return self._info
+
+    async def drain(self) -> None:
+        self.drained = True
+
+    async def unsubscribe(self) -> None:
+        self.unsubscribed = True
+
+
+class _HangingUnsubscribeBoundSubscription(_BoundConsumerSubscription):
+    def __init__(self, info: Any, *, binding_subject: str) -> None:
+        super().__init__(info, binding_subject=binding_subject)
+        self.unsubscribe_started = False
+
+    async def unsubscribe(self) -> None:
+        self.unsubscribe_started = True
+        await asyncio.Future()
+
+
 class _CbCapturingJS:
     """mock JetStreamContext：subscribe() 把 cb 捕获下来给测试调用。"""
 
@@ -1802,6 +1917,83 @@ def test_delivery_gate_limits_broker_prefetch_to_one_message() -> None:
     assert asyncio.run(_run(gated=False)) == 73
 
 
+def test_post_bind_mismatch_aborts_callback_and_bounds_local_unsubscribe(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Identity failure must not drain, ACK, delete, or wait indefinitely."""
+
+    from nats.js.errors import NotFoundError
+
+    topic = _topics.ORDER_INTENTS
+    config = NatsBusConfig(consumer_supervision_interval_seconds=0.01)
+
+    class _RoguePostBindJS:
+        def __init__(self) -> None:
+            self.subscription: _HangingUnsubscribeBoundSubscription | None = None
+            self.callback_task: asyncio.Task[None] | None = None
+            self.message = _ProgressMsg(b"not-parsed")
+            self.delete_called = False
+
+        async def consumer_info(self, _stream: str, _name: str) -> Any:
+            raise NotFoundError
+
+        async def delete_consumer(self, _stream: str, _name: str) -> None:
+            self.delete_called = True
+
+        async def subscribe(self, **kwargs: Any) -> Any:
+            broker_config = kwargs["config"].evolve(
+                filter_subject=kwargs["subject"],
+                deliver_subject="_INBOX.rogue",
+            )
+            broker_info = _fake_consumer_info(broker_config)
+            broker_info.name = None
+            self.subscription = _HangingUnsubscribeBoundSubscription(
+                broker_info,
+                binding_subject="_INBOX.local",
+            )
+            self.callback_task = asyncio.create_task(kwargs["cb"](self.message))
+            return self.subscription
+
+    async def _run() -> tuple[NatsDeliveryGate, _RoguePostBindJS]:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=config,
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        js = _RoguePostBindJS()
+        bus._js = js  # type: ignore[assignment]
+
+        async def _noop_handler(_message: dict[str, Any]) -> None:
+            raise AssertionError("aborted callback must not reach handler")
+
+        with pytest.raises(
+            RuntimeError,
+            match="nats_critical_consumer_post_bind_config_drift",
+        ) as exc_info:
+            await asyncio.wait_for(
+                bus.subscribe(topic, _noop_handler),
+                timeout=0.2,
+            )
+        assert "consumer_name" in str(exc_info.value)
+        assert "deliver_subject_binding" in str(exc_info.value)
+        assert js.callback_task is not None
+        await asyncio.wait_for(js.callback_task, timeout=0.1)
+        return gate, js
+
+    gate, js = asyncio.run(_run())
+    assert gate.aborted is True
+    assert js.subscription is not None
+    assert js.subscription.unsubscribe_started is True
+    assert js.subscription.drained is False
+    assert js.delete_called is False
+    assert js.message.ack_called == 0
+    assert js.message.nak_called == 0
+    assert js.message.term_called == 0
+    assert "_INBOX.local" not in caplog.text
+    assert "_INBOX.rogue" not in caplog.text
+
+
 def test_existing_gated_durable_is_updated_in_place_before_binding() -> None:
     """v1 durable 的 256 预取必须原位改成 1，且绝不能删除 cursor。"""
 
@@ -1827,6 +2019,10 @@ def test_existing_gated_durable_is_updated_in_place_before_binding() -> None:
                 deliver_subject="_INBOX.existing",
                 flow_control=True,
                 idle_heartbeat=5.0,
+                headers_only=False,
+                backoff=[],
+                rate_limit_bps=0,
+                mem_storage=False,
             )
             self.bound_config: Any = None
 
@@ -1834,13 +2030,13 @@ def test_existing_gated_durable_is_updated_in_place_before_binding() -> None:
             assert stream_name == stream.name
             assert name == durable
             self.operations.append("consumer_info")
-            return SimpleNamespace(config=self.current)
+            return _fake_consumer_info(self.current)
 
         async def add_consumer(self, stream_name: str, *, config: Any) -> Any:
             assert stream_name == stream.name
             self.operations.append("add_consumer")
             self.current = config
-            return SimpleNamespace(config=config)
+            return _fake_consumer_info(config)
 
         async def delete_consumer(self, _stream: str, _name: str) -> None:
             raise AssertionError("critical durable cursor must never be deleted")
@@ -1848,7 +2044,9 @@ def test_existing_gated_durable_is_updated_in_place_before_binding() -> None:
         async def subscribe(self, **kwargs: Any) -> object:
             self.operations.append("subscribe")
             self.bound_config = kwargs["config"]
-            return object()
+            return _BoundConsumerSubscription(
+                _fake_consumer_info(self.current)
+            )
 
     async def _run() -> _ExistingDurableJS:
         gate = NatsDeliveryGate()
@@ -1876,6 +2074,407 @@ def test_existing_gated_durable_is_updated_in_place_before_binding() -> None:
     assert js.current.max_ack_pending == 1
     assert js.current.deliver_subject == "_INBOX.existing"
     assert js.current.filter_subject == config.subject_for(topic)
+
+
+@pytest.mark.parametrize(
+    (
+        "topic",
+        "current_ack_wait",
+        "current_max_deliver",
+        "expected_blocker",
+    ),
+    (
+        (_topics.ORDER_INTENTS, 29.0, 5, "ack_wait_drift"),
+        (_topics.ORDER_INTENTS, 31.0, 5, "ack_wait_drift"),
+        (_topics.ORDER_INTENTS, 30.0, 6, "max_deliver_drift"),
+        (_topics.MARKET_SNAPSHOTS, 0.0, 5, "ack_wait_drift"),
+        (_topics.MARKET_SNAPSHOTS, -1.0, 5, "ack_wait_drift"),
+        (_topics.MARKET_SNAPSHOTS, 120.0, 5, "ack_wait_drift"),
+        (_topics.MARKET_SNAPSHOTS, 30.0, 6, "max_deliver_drift"),
+    ),
+)
+def test_existing_durable_rejects_unsafe_mutable_migration_without_side_effects(
+    topic: str,
+    current_ack_wait: float,
+    current_max_deliver: int,
+    expected_blocker: str,
+) -> None:
+    """Preflight and runtime reject the same drift before broker mutation."""
+
+    from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+
+    config = NatsBusConfig(
+        per_topic_ack_wait_seconds={_topics.MARKET_SNAPSHOTS: 90.0},
+    )
+    role = "execution" if topic == _topics.ORDER_INTENTS else "decision"
+    durable = config.durable_name_for(role, topic)
+    deliver_policy = (
+        DeliverPolicy.ALL
+        if topic == _topics.ORDER_INTENTS
+        else DeliverPolicy.LAST
+    )
+
+    class _UnsafeMutableDurableJS:
+        def __init__(self) -> None:
+            self.operations: list[str] = []
+            self.current = ConsumerConfig(
+                durable_name=durable,
+                deliver_policy=deliver_policy,
+                ack_policy=AckPolicy.EXPLICIT,
+                ack_wait=current_ack_wait,
+                max_deliver=current_max_deliver,
+                max_ack_pending=1,
+                filter_subject=config.subject_for(topic),
+                deliver_subject="_INBOX.existing",
+                flow_control=True,
+                idle_heartbeat=5.0,
+                headers_only=False,
+                backoff=[],
+                rate_limit_bps=0,
+                mem_storage=False,
+            )
+
+        async def consumer_info(self, _stream: str, _name: str) -> Any:
+            self.operations.append("consumer_info")
+            return _fake_consumer_info(self.current)
+
+        async def add_consumer(self, _stream: str, *, config: Any) -> Any:
+            self.operations.append("add_consumer")
+            raise AssertionError("unsafe mutable drift must not be updated")
+
+        async def delete_consumer(self, _stream: str, _name: str) -> None:
+            self.operations.append("delete_consumer")
+            raise AssertionError("unsafe mutable drift must not be rebuilt")
+
+        async def subscribe(self, **_kwargs: Any) -> object:
+            self.operations.append("subscribe")
+            raise AssertionError("unsafe mutable drift must not be bound")
+
+    async def _run() -> _UnsafeMutableDurableJS:
+        bus = NatsEventBus(
+            config=config,
+            consumer_role=role,
+            delivery_gate=NatsDeliveryGate(),
+        )
+        js = _UnsafeMutableDurableJS()
+        bus._js = js  # type: ignore[assignment]
+
+        async def _noop_handler(_message: dict[str, Any]) -> None:
+            return None
+
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                "^nats_critical_consumer_mutable_config_drift:"
+                f"{durable}:{expected_blocker}$"
+            ),
+        ):
+            await bus.subscribe(topic, _noop_handler)
+        return js
+
+    js = asyncio.run(_run())
+    assert js.operations == ["consumer_info"]
+
+
+def test_snapshot_ack_wait_may_increase_in_place_without_cursor_rebuild() -> None:
+    """A positive LAST ack_wait raise is the only mutable non-window migration."""
+
+    from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+
+    topic = _topics.MARKET_SNAPSHOTS
+    config = NatsBusConfig(
+        per_topic_ack_wait_seconds={topic: 90.0},
+    )
+    durable = config.durable_name_for("decision", topic)
+
+    class _SnapshotAckWaitJS:
+        def __init__(self) -> None:
+            self.operations: list[str] = []
+            self.current = ConsumerConfig(
+                durable_name=durable,
+                deliver_policy=DeliverPolicy.LAST,
+                ack_policy=AckPolicy.EXPLICIT,
+                ack_wait=30.0,
+                max_deliver=5,
+                max_ack_pending=1,
+                filter_subject=config.subject_for(topic),
+                deliver_subject="_INBOX.existing",
+                flow_control=True,
+                idle_heartbeat=5.0,
+                headers_only=False,
+                backoff=[],
+                rate_limit_bps=0,
+                mem_storage=False,
+            )
+
+        async def consumer_info(self, _stream: str, _name: str) -> Any:
+            self.operations.append("consumer_info")
+            return _fake_consumer_info(
+                self.current,
+                cursor=(10, 10, 8, 8),
+            )
+
+        async def add_consumer(self, _stream: str, *, config: Any) -> Any:
+            self.operations.append("add_consumer")
+            self.current = config
+            return _fake_consumer_info(
+                self.current,
+                cursor=(11, 11, 9, 9),
+            )
+
+        async def delete_consumer(self, _stream: str, _name: str) -> None:
+            self.operations.append("delete_consumer")
+            raise AssertionError("safe ack_wait raise must preserve the durable")
+
+        async def subscribe(self, **_kwargs: Any) -> object:
+            self.operations.append("subscribe")
+            return _BoundConsumerSubscription(
+                _fake_consumer_info(
+                    self.current,
+                    cursor=(11, 11, 9, 9),
+                )
+            )
+
+    async def _run() -> _SnapshotAckWaitJS:
+        bus = NatsEventBus(
+            config=config,
+            consumer_role="decision",
+            delivery_gate=NatsDeliveryGate(),
+        )
+        js = _SnapshotAckWaitJS()
+        bus._js = js  # type: ignore[assignment]
+
+        async def _noop_handler(_message: dict[str, Any]) -> None:
+            return None
+
+        await bus.subscribe(topic, _noop_handler)
+        return js
+
+    js = asyncio.run(_run())
+    assert js.operations == [
+        "consumer_info",
+        "add_consumer",
+        "consumer_info",
+        "subscribe",
+    ]
+    assert js.current.ack_wait == 90.0
+    assert js.current.max_deliver == 5
+
+
+def test_in_place_update_readback_rejects_new_behavior_drift() -> None:
+    """A broker response must not smuggle unsafe behavior into an update."""
+
+    from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+
+    topic = _topics.ORDER_INTENTS
+    config = NatsBusConfig(max_ack_pending=256)
+    durable = config.durable_name_for("execution", topic)
+
+    class _UnsafeUpdateReadbackJS:
+        def __init__(self) -> None:
+            self.operations: list[str] = []
+            self.current = ConsumerConfig(
+                durable_name=durable,
+                deliver_policy=DeliverPolicy.ALL,
+                ack_policy=AckPolicy.EXPLICIT,
+                ack_wait=30.0,
+                max_deliver=5,
+                max_ack_pending=256,
+                filter_subject=config.subject_for(topic),
+                deliver_subject="_INBOX.existing",
+            )
+
+        async def consumer_info(self, _stream: str, _name: str) -> Any:
+            self.operations.append("consumer_info")
+            return _fake_consumer_info(self.current)
+
+        async def add_consumer(self, _stream: str, *, config: Any) -> Any:
+            self.operations.append("add_consumer")
+            self.current = config.evolve(headers_only=True)
+            return _fake_consumer_info(self.current)
+
+        async def delete_consumer(self, _stream: str, _name: str) -> None:
+            self.operations.append("delete_consumer")
+            raise AssertionError("critical durable cursor must never be deleted")
+
+        async def subscribe(self, **_kwargs: Any) -> object:
+            self.operations.append("subscribe")
+            raise AssertionError("unverified update must not be bound")
+
+    async def _run() -> _UnsafeUpdateReadbackJS:
+        bus = NatsEventBus(
+            config=config,
+            consumer_role="execution",
+            delivery_gate=NatsDeliveryGate(),
+        )
+        js = _UnsafeUpdateReadbackJS()
+        bus._js = js  # type: ignore[assignment]
+
+        async def _noop_handler(_message: dict[str, Any]) -> None:
+            return None
+
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                "^nats_consumer_in_place_update_unverified:"
+                f"{durable}:headers_only$"
+            ),
+        ):
+            await bus.subscribe(topic, _noop_handler)
+        return js
+
+    js = asyncio.run(_run())
+    assert js.operations == ["consumer_info", "add_consumer", "consumer_info"]
+
+
+def test_in_place_update_readback_rejects_same_name_recreation() -> None:
+    """Consumer update may not replace a critical durable behind the caller."""
+
+    from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+
+    topic = _topics.ORDER_INTENTS
+    config = NatsBusConfig(max_ack_pending=256)
+    durable = config.durable_name_for("execution", topic)
+
+    class _RecreatedDuringUpdateJS:
+        def __init__(self) -> None:
+            self.operations: list[str] = []
+            self.current = ConsumerConfig(
+                durable_name=durable,
+                deliver_policy=DeliverPolicy.ALL,
+                ack_policy=AckPolicy.EXPLICIT,
+                ack_wait=30.0,
+                max_deliver=5,
+                max_ack_pending=256,
+                filter_subject=config.subject_for(topic),
+                deliver_subject="_INBOX.existing",
+            )
+            self.recreated = False
+
+        async def consumer_info(self, _stream: str, _name: str) -> Any:
+            self.operations.append("consumer_info")
+            return _fake_consumer_info(
+                self.current,
+                created=(
+                    "2026-08-29T00:01:00Z"
+                    if self.recreated
+                    else _TEST_CONSUMER_CREATED
+                ),
+                cursor=(0, 0, 0, 0) if self.recreated else (10, 10, 8, 8),
+            )
+
+        async def add_consumer(self, _stream: str, *, config: Any) -> Any:
+            self.operations.append("add_consumer")
+            self.current = config
+            self.recreated = True
+            return _fake_consumer_info(self.current)
+
+        async def delete_consumer(self, _stream: str, _name: str) -> None:
+            raise AssertionError("critical durable cursor must never be deleted")
+
+        async def subscribe(self, **_kwargs: Any) -> object:
+            raise AssertionError("recreated update must not be bound")
+
+    async def _run() -> _RecreatedDuringUpdateJS:
+        bus = NatsEventBus(
+            config=config,
+            consumer_role="execution",
+            delivery_gate=NatsDeliveryGate(),
+        )
+        js = _RecreatedDuringUpdateJS()
+        bus._js = js  # type: ignore[assignment]
+
+        async def _noop_handler(_message: dict[str, Any]) -> None:
+            return None
+
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                "^nats_consumer_in_place_update_unverified:"
+                f"{durable}:created,cursor_regressed$"
+            ),
+        ):
+            await bus.subscribe(topic, _noop_handler)
+        return js
+
+    js = asyncio.run(_run())
+    assert js.operations == ["consumer_info", "add_consumer", "consumer_info"]
+
+
+def test_post_bind_rejects_recreation_after_existing_identity_snapshot() -> None:
+    """A same-config recreation between lookup and bind must not reset baseline."""
+
+    from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+
+    topic = _topics.ORDER_INTENTS
+    config = NatsBusConfig(max_ack_pending=1)
+    durable = config.durable_name_for("execution", topic)
+
+    class _RecreatedDuringBindJS:
+        def __init__(self) -> None:
+            self.operations: list[str] = []
+            self.current = ConsumerConfig(
+                durable_name=durable,
+                deliver_policy=DeliverPolicy.ALL,
+                ack_policy=AckPolicy.EXPLICIT,
+                ack_wait=30.0,
+                max_deliver=5,
+                max_ack_pending=1,
+                filter_subject=config.subject_for(topic),
+                deliver_subject="_INBOX.existing",
+            )
+            self.subscription: _BoundConsumerSubscription | None = None
+
+        async def consumer_info(self, _stream: str, _name: str) -> Any:
+            self.operations.append("consumer_info")
+            return _fake_consumer_info(
+                self.current,
+                cursor=(10, 10, 8, 8),
+            )
+
+        async def delete_consumer(self, _stream: str, _name: str) -> None:
+            raise AssertionError("critical durable cursor must never be deleted")
+
+        async def subscribe(self, **_kwargs: Any) -> object:
+            self.operations.append("subscribe")
+            self.subscription = _BoundConsumerSubscription(
+                _fake_consumer_info(
+                    self.current,
+                    created="2026-08-29T00:01:00Z",
+                    cursor=(0, 0, 0, 0),
+                )
+            )
+            return self.subscription
+
+    async def _run() -> tuple[NatsDeliveryGate, _RecreatedDuringBindJS]:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=config,
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        js = _RecreatedDuringBindJS()
+        bus._js = js  # type: ignore[assignment]
+
+        async def _noop_handler(_message: dict[str, Any]) -> None:
+            return None
+
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                "^nats_critical_consumer_post_bind_identity_drift:"
+                f"{durable}:created,cursor_regressed$"
+            ),
+        ):
+            await bus.subscribe(topic, _noop_handler)
+        return gate, js
+
+    gate, js = asyncio.run(_run())
+    assert gate.aborted is True
+    assert js.operations == ["consumer_info", "subscribe"]
+    assert js.subscription is not None
+    assert js.subscription.unsubscribed is True
+    assert js.subscription.drained is False
 
 
 def test_gated_critical_durable_with_unacked_messages_refuses_window_shrink() -> None:
@@ -1909,8 +2508,8 @@ def test_gated_critical_durable_with_unacked_messages_refuses_window_shrink() ->
             assert stream_name == stream.name
             assert name == durable
             self.operations.append("consumer_info")
-            return SimpleNamespace(
-                config=self.current,
+            return _fake_consumer_info(
+                self.current,
                 num_ack_pending=3,
             )
 
@@ -1986,8 +2585,8 @@ def test_gated_critical_durable_rejects_legacy_outstanding_after_window_shrunk()
             assert stream_name == stream.name
             assert name == durable
             self.operations.append("consumer_info")
-            return SimpleNamespace(
-                config=self.current,
+            return _fake_consumer_info(
+                self.current,
                 num_ack_pending=3,
             )
 
@@ -2075,7 +2674,10 @@ def test_gated_non_event_durable_rebuilds_legacy_outstanding_before_binding(
 
         async def consumer_info(self, _stream: str, _name: str) -> Any:
             self.operations.append("consumer_info")
-            return SimpleNamespace(config=self.current, num_ack_pending=3)
+            return _fake_consumer_info(
+                self.current,
+                num_ack_pending=3,
+            )
 
         async def add_consumer(self, _stream: str, *, config: Any) -> Any:
             self.operations.append("add_consumer")
@@ -2090,8 +2692,17 @@ def test_gated_non_event_durable_rebuilds_legacy_outstanding_before_binding(
         async def subscribe(self, **kwargs: Any) -> object:
             assert self.deleted is True
             self.operations.append("subscribe")
-            self.bound_config = kwargs["config"]
-            return object()
+            self.current = kwargs["config"].evolve(
+                filter_subject=kwargs["subject"],
+                deliver_subject="_INBOX.rebuilt",
+            )
+            self.bound_config = self.current
+            return _BoundConsumerSubscription(
+                _fake_consumer_info(
+                    self.current,
+                    created="2026-08-29T00:01:00Z",
+                )
+            )
 
     async def _run() -> _OutstandingSnapshotDurableJS:
         bus = NatsEventBus(
@@ -2167,6 +2778,198 @@ def test_critical_durable_immutable_drift_fails_without_cursor_reset() -> None:
 
     js = asyncio.run(_run())
     assert js.delete_called is False
+
+
+_DANGEROUS_CONSUMER_BEHAVIOR_FIELDS = (
+    "deliver_subject",
+    "replay_policy",
+    "deliver_group",
+    "headers_only",
+    "pause_until",
+    "backoff",
+    "rate_limit_bps",
+    "inactive_threshold",
+    "mem_storage",
+    "opt_start_seq",
+    "opt_start_time",
+)
+_UNSAFE_EXISTING_CONSUMER_CONFIG_FIELDS = (
+    "durable_name",
+    *_DANGEROUS_CONSUMER_BEHAVIOR_FIELDS,
+)
+
+
+def _unsafe_consumer_config_override(field_name: str) -> dict[str, Any]:
+    from nats.js.api import ReplayPolicy
+
+    overrides: dict[str, Any] = {
+        "durable_name": None,
+        "deliver_subject": None,
+        "replay_policy": ReplayPolicy.ORIGINAL,
+        "deliver_group": "rogue-queue",
+        "headers_only": True,
+        "pause_until": "2099-01-01T00:00:00Z",
+        "backoff": [1.0],
+        "rate_limit_bps": 1,
+        "inactive_threshold": 1.0,
+        "mem_storage": True,
+        "opt_start_seq": 2,
+        "opt_start_time": "2099-01-01T00:00:00Z",
+    }
+    return {field_name: overrides[field_name]}
+
+
+@pytest.mark.parametrize(
+    "drift_name",
+    _UNSAFE_EXISTING_CONSUMER_CONFIG_FIELDS,
+)
+def test_critical_all_durable_rejects_unsafe_config_without_cursor_reset(
+    drift_name: str,
+) -> None:
+    """ALL cursor must not bind, update, or rebuild under behavior drift."""
+
+    from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+
+    topic = _topics.ORDER_INTENTS
+    config = NatsBusConfig()
+    durable = config.durable_name_for("execution", topic)
+    stream = config.stream_spec_for_topic(topic)
+    assert stream is not None
+
+    class _DangerousCriticalDurableJS:
+        def __init__(self) -> None:
+            canonical = ConsumerConfig(
+                durable_name=durable,
+                deliver_policy=DeliverPolicy.ALL,
+                ack_policy=AckPolicy.EXPLICIT,
+                ack_wait=30.0,
+                max_deliver=5,
+                max_ack_pending=256,
+                filter_subject=config.subject_for(topic),
+                deliver_subject="_INBOX.existing",
+                flow_control=True,
+                idle_heartbeat=5.0,
+            )
+            self.current = canonical.evolve(
+                **_unsafe_consumer_config_override(drift_name)
+            )
+            self.operations: list[str] = []
+
+        async def consumer_info(self, _stream: str, _name: str) -> Any:
+            self.operations.append("consumer_info")
+            info = _fake_consumer_info(self.current)
+            info.name = durable
+            return info
+
+        async def add_consumer(self, _stream: str, *, config: Any) -> Any:
+            self.operations.append("add_consumer")
+            raise AssertionError("unsafe ALL durable must not be updated")
+
+        async def delete_consumer(self, _stream: str, _name: str) -> None:
+            self.operations.append("delete_consumer")
+            raise AssertionError("critical durable cursor must never be deleted")
+
+        async def subscribe(self, **_kwargs: Any) -> object:
+            self.operations.append("subscribe")
+            raise AssertionError("unsafe ALL durable must not be bound")
+
+    async def _run() -> _DangerousCriticalDurableJS:
+        bus = NatsEventBus(
+            config=config,
+            consumer_role="execution",
+            delivery_gate=NatsDeliveryGate(),
+        )
+        js = _DangerousCriticalDurableJS()
+        bus._js = js  # type: ignore[assignment]
+
+        async def _noop_handler(_message: dict[str, Any]) -> None:
+            return None
+
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                "^nats_critical_consumer_config_drift:"
+                f"{durable}:{drift_name}$"
+            ),
+        ):
+            await bus.subscribe(topic, _noop_handler)
+        return js
+
+    js = asyncio.run(_run())
+    assert js.operations == ["consumer_info"]
+
+
+def test_non_event_durable_rebuilds_dangerous_behavior_before_binding() -> None:
+    """LAST/NEW semantics may discard their disposable cursor to recover."""
+
+    from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+
+    topic = _topics.MARKET_SNAPSHOTS
+    config = NatsBusConfig(
+        per_topic_ack_wait_seconds={topic: 90.0},
+    )
+    durable = config.durable_name_for("decision", topic)
+    stream = config.stream_spec_for_topic(topic)
+    assert stream is not None
+
+    class _DangerousSnapshotDurableJS:
+        def __init__(self) -> None:
+            self.operations: list[str] = []
+            self.deleted = False
+            self.current = ConsumerConfig(
+                durable_name=durable,
+                deliver_policy=DeliverPolicy.LAST,
+                ack_policy=AckPolicy.EXPLICIT,
+                ack_wait=90.0,
+                max_deliver=5,
+                max_ack_pending=1,
+                filter_subject=config.subject_for(topic),
+                deliver_subject="_INBOX.existing",
+                headers_only=True,
+            )
+            self.bound_config: Any = None
+
+        async def consumer_info(self, _stream: str, _name: str) -> Any:
+            self.operations.append("consumer_info")
+            return _fake_consumer_info(
+                self.current,
+                num_ack_pending=0,
+            )
+
+        async def delete_consumer(self, _stream: str, _name: str) -> None:
+            self.operations.append("delete_consumer")
+            self.deleted = True
+
+        async def subscribe(self, **kwargs: Any) -> object:
+            assert self.deleted is True
+            self.operations.append("subscribe")
+            self.current = kwargs["config"].evolve(
+                filter_subject=kwargs["subject"],
+                deliver_subject="_INBOX.rebuilt",
+            )
+            self.bound_config = self.current
+            return _BoundConsumerSubscription(
+                _fake_consumer_info(self.current)
+            )
+
+    async def _run() -> _DangerousSnapshotDurableJS:
+        bus = NatsEventBus(
+            config=config,
+            consumer_role="decision",
+            delivery_gate=NatsDeliveryGate(),
+        )
+        js = _DangerousSnapshotDurableJS()
+        bus._js = js  # type: ignore[assignment]
+
+        async def _noop_handler(_message: dict[str, Any]) -> None:
+            return None
+
+        await bus.subscribe(topic, _noop_handler)
+        return js
+
+    js = asyncio.run(_run())
+    assert js.operations == ["consumer_info", "delete_consumer", "subscribe"]
+    assert js.bound_config.headers_only is False
 
 
 def test_nats_disconnect_timeout_aborts_gate_and_fails_supervisor() -> None:
@@ -2259,11 +3062,6 @@ def test_nats_reconnect_before_deadline_remains_healthy() -> None:
     assert aborted is False
 
 
-class _ConsumerSupervisionSubscription:
-    async def drain(self) -> None:
-        return None
-
-
 class _ConsumerSupervisionJS:
     """先创建 durable，随后模拟管理面删除或持续不可达。"""
 
@@ -2273,6 +3071,7 @@ class _ConsumerSupervisionJS:
         self.consumer_info_calls = 0
         self.failure_calls = 0
         self.first_failure = asyncio.Event()
+        self.config: Any = None
 
     async def consumer_info(self, _stream: str, _durable: str) -> Any:
         from nats.js.errors import NotFoundError
@@ -2289,9 +3088,15 @@ class _ConsumerSupervisionJS:
             raise OSError("simulated JetStream management outage")
         raise AssertionError(f"unsupported failure mode: {self.failure}")
 
-    async def subscribe(self, **_kwargs: Any) -> _ConsumerSupervisionSubscription:
+    async def subscribe(self, **kwargs: Any) -> _BoundConsumerSubscription:
+        self.config = kwargs["config"].evolve(
+            filter_subject=kwargs["subject"],
+            deliver_subject="_INBOX.supervised",
+        )
         self.bound = True
-        return _ConsumerSupervisionSubscription()
+        return _BoundConsumerSubscription(
+            _fake_consumer_info(self.config)
+        )
 
 
 class _ConcurrentUnavailableConsumerSupervisionJS:
@@ -2321,9 +3126,13 @@ class _ConcurrentUnavailableConsumerSupervisionJS:
         finally:
             self.in_flight_queries -= 1
 
-    async def subscribe(self, **kwargs: Any) -> _ConsumerSupervisionSubscription:
+    async def subscribe(self, **kwargs: Any) -> _BoundConsumerSubscription:
         self.bound_durables.add(str(kwargs["durable"]))
-        return _ConsumerSupervisionSubscription()
+        config = kwargs["config"].evolve(
+            filter_subject=kwargs["subject"],
+            deliver_subject=f"_INBOX.{kwargs['durable']}",
+        )
+        return _BoundConsumerSubscription(_fake_consumer_info(config))
 
 
 class _AlternatingUnhealthyConsumerSupervisionJS:
@@ -2342,21 +3151,20 @@ class _AlternatingUnhealthyConsumerSupervisionJS:
         self.failure_calls += 1
         if self.failure_calls % 2:
             raise OSError("simulated alternating management outage")
-        return SimpleNamespace(
-            config=self.config,
+        return _fake_consumer_info(
+            self.config,
             push_bound=False,
-            delivered=None,
-            ack_floor=None,
-            num_pending=0,
-            num_ack_pending=0,
         )
 
-    async def subscribe(self, **kwargs: Any) -> _ConsumerSupervisionSubscription:
+    async def subscribe(self, **kwargs: Any) -> _BoundConsumerSubscription:
         self.config = kwargs["config"].evolve(
             filter_subject=kwargs["subject"],
+            deliver_subject="_INBOX.supervised",
         )
         self.bound = True
-        return _ConsumerSupervisionSubscription()
+        return _BoundConsumerSubscription(
+            _fake_consumer_info(self.config)
+        )
 
 
 class _NoAckProgressConsumerSupervisionJS:
@@ -2378,24 +3186,110 @@ class _NoAckProgressConsumerSupervisionJS:
             self.query_calls if self.mode == "redelivery_growth" else 1
         )
         num_pending = self.query_calls if self.mode == "pending_growth" else 0
-        return SimpleNamespace(
-            config=self.config,
-            push_bound=True,
-            delivered=SimpleNamespace(
-                stream_seq=1,
-                consumer_seq=delivered_consumer_seq,
-            ),
-            ack_floor=SimpleNamespace(stream_seq=0, consumer_seq=0),
+        return _fake_consumer_info(
+            self.config,
+            cursor=(1, delivered_consumer_seq, 0, 0),
             num_pending=num_pending,
             num_ack_pending=1,
         )
 
-    async def subscribe(self, **kwargs: Any) -> _ConsumerSupervisionSubscription:
+    async def subscribe(self, **kwargs: Any) -> _BoundConsumerSubscription:
         self.config = kwargs["config"].evolve(
             filter_subject=kwargs["subject"],
+            deliver_subject="_INBOX.supervised",
         )
         self.bound = True
-        return _ConsumerSupervisionSubscription()
+        return _BoundConsumerSubscription(
+            _fake_consumer_info(self.config)
+        )
+
+
+class _BehaviorDriftConsumerSupervisionJS:
+    """Create safely, then expose one dangerous broker-side config drift."""
+
+    def __init__(self, *, drift_name: str) -> None:
+        self.drift_name = drift_name
+        self.bound = False
+        self.config: Any = None
+        self.query_calls = 0
+
+    async def consumer_info(self, _stream: str, _durable: str) -> Any:
+        from nats.js.errors import NotFoundError
+
+        if not self.bound:
+            raise NotFoundError
+        self.query_calls += 1
+        return _fake_consumer_info(self.config)
+
+    async def subscribe(
+        self, **kwargs: Any
+    ) -> _BoundConsumerSubscription:
+        safe_config = kwargs["config"].evolve(
+            filter_subject=kwargs["subject"],
+            deliver_subject="_INBOX.supervised",
+        )
+        broker_config = {
+            "filter_subject": kwargs["subject"],
+            "deliver_subject": "_INBOX.supervised",
+        }
+        broker_config.update(
+            _unsafe_consumer_config_override(self.drift_name)
+        )
+        self.config = kwargs["config"].evolve(**broker_config)
+        self.bound = True
+        return _BoundConsumerSubscription(
+            _fake_consumer_info(safe_config)
+        )
+
+
+class _ConsumerContinuitySupervisionJS:
+    """Expose same-name recreation, rogue inbox, cursor reset, or progress."""
+
+    def __init__(self, *, mode: str) -> None:
+        self.mode = mode
+        self.bound = False
+        self.config: Any = None
+        self.query_calls = 0
+
+    async def consumer_info(self, _stream: str, _durable: str) -> Any:
+        from nats.js.errors import NotFoundError
+
+        if not self.bound:
+            raise NotFoundError
+        self.query_calls += 1
+        created = _TEST_CONSUMER_CREATED
+        config = self.config
+        cursor = (10, 10, 8, 8)
+        if self.mode == "recreated":
+            created = "2026-08-29T00:01:00Z"
+            cursor = (0, 0, 0, 0)
+        elif self.mode == "rogue_inbox":
+            config = self.config.evolve(deliver_subject="_INBOX.rogue")
+        elif self.mode == "cursor_reset":
+            cursor = (9, 9, 7, 7)
+        elif self.mode == "forward":
+            offset = self.query_calls
+            cursor = (10 + offset, 10 + offset, 8 + offset, 8 + offset)
+        else:
+            raise AssertionError(f"unsupported continuity mode: {self.mode}")
+        return _fake_consumer_info(
+            config,
+            created=created,
+            cursor=cursor,
+        )
+
+    async def subscribe(self, **kwargs: Any) -> _BoundConsumerSubscription:
+        self.config = kwargs["config"].evolve(
+            filter_subject=kwargs["subject"],
+            deliver_subject="_INBOX.supervised",
+        )
+        self.bound = True
+        return _BoundConsumerSubscription(
+            _fake_consumer_info(
+                self.config,
+                cursor=(10, 10, 8, 8),
+            )
+        )
 
 
 def test_pre_promotion_proof_rejects_disconnected_bus_and_aborts_gate() -> None:
@@ -2416,6 +3310,116 @@ def test_pre_promotion_proof_rejects_disconnected_bus_and_aborts_gate() -> None:
         return gate
 
     gate = asyncio.run(_run())
+    assert gate.aborted is True
+    assert gate.activated is False
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ("recreated", "rogue_inbox", "cursor_reset"),
+)
+def test_pre_promotion_rejects_consumer_identity_or_cursor_discontinuity(
+    mode: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Same name/config cannot hide recreation, rebinding, or cursor reset."""
+
+    async def _run() -> tuple[NatsDeliveryGate, bool]:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(),
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        bus._js = _ConsumerContinuitySupervisionJS(  # type: ignore[assignment]
+            mode=mode
+        )
+        bus._connected = True
+
+        async def _noop_handler(_message: dict[str, Any]) -> None:
+            return None
+
+        try:
+            await bus.subscribe(_topics.ORDER_INTENTS, _noop_handler)
+            await bus._supervise_critical_consumers_once(fail_fast=True)
+            return gate, bus._terminal_connection_failure.is_set()
+        finally:
+            await bus.close()
+
+    gate, terminal = asyncio.run(_run())
+    assert terminal is True
+    assert gate.aborted is True
+    assert "_INBOX.supervised" not in caplog.text
+    assert "_INBOX.rogue" not in caplog.text
+
+
+def test_consumer_cursor_can_advance_without_false_terminal() -> None:
+    """A stable created/inbox identity may advance every cursor component."""
+
+    async def _run() -> tuple[bool, tuple[int, int, int, int]]:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(),
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        js = _ConsumerContinuitySupervisionJS(mode="forward")
+        bus._js = js  # type: ignore[assignment]
+        bus._connected = True
+
+        async def _noop_handler(_message: dict[str, Any]) -> None:
+            return None
+
+        try:
+            await bus.subscribe(_topics.ORDER_INTENTS, _noop_handler)
+            await bus._supervise_critical_consumers_once(fail_fast=True)
+            await bus._supervise_critical_consumers_once(fail_fast=True)
+            target = next(iter(bus._consumer_supervision_targets.values()))
+            return bus._terminal_connection_failure.is_set(), target.cursor
+        finally:
+            await bus.close()
+
+    terminal, cursor = asyncio.run(_run())
+    assert terminal is False
+    assert cursor == (12, 12, 10, 10)
+
+
+@pytest.mark.parametrize(
+    "drift_name",
+    _UNSAFE_EXISTING_CONSUMER_CONFIG_FIELDS,
+)
+def test_pre_promotion_rejects_unsafe_consumer_config(
+    drift_name: str,
+) -> None:
+    """A broker-side drift after bind must abort before READY promotion."""
+
+    async def _run() -> tuple[NatsDeliveryGate, int]:
+        gate = NatsDeliveryGate()
+        bus = NatsEventBus(
+            config=NatsBusConfig(),
+            consumer_role="execution",
+            delivery_gate=gate,
+        )
+        js = _BehaviorDriftConsumerSupervisionJS(drift_name=drift_name)
+        bus._js = js  # type: ignore[assignment]
+        bus._connected = True
+
+        async def _noop_handler(_message: dict[str, Any]) -> None:
+            return None
+
+        try:
+            await bus.subscribe(_topics.ORDER_INTENTS, _noop_handler)
+            with pytest.raises(
+                RuntimeError,
+                match="nats_not_ready_for_promotion",
+            ):
+                await bus.verify_ready_for_promotion()
+            return gate, js.query_calls
+        finally:
+            await bus.close()
+
+    gate, query_calls = asyncio.run(_run())
+    assert query_calls == 1
     assert gate.aborted is True
     assert gate.activated is False
 
@@ -2469,23 +3473,19 @@ def test_pre_promotion_proof_rechecks_connection_after_consumer_queries() -> Non
             if not self.bound:
                 raise NotFoundError
             self.bus._connected = False
-            return SimpleNamespace(
-                config=self.config,
-                push_bound=True,
-                delivered=None,
-                ack_floor=None,
-                num_pending=0,
-                num_ack_pending=0,
-            )
+            return _fake_consumer_info(self.config)
 
         async def subscribe(
             self, **kwargs: Any
-        ) -> _ConsumerSupervisionSubscription:
+        ) -> _BoundConsumerSubscription:
             self.config = kwargs["config"].evolve(
                 filter_subject=kwargs["subject"],
+                deliver_subject="_INBOX.supervised",
             )
             self.bound = True
-            return _ConsumerSupervisionSubscription()
+            return _BoundConsumerSubscription(
+                _fake_consumer_info(self.config)
+            )
 
     async def _run() -> NatsDeliveryGate:
         gate = NatsDeliveryGate()

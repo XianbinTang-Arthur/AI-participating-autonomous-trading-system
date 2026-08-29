@@ -3,10 +3,13 @@
 
 This command is intentionally limited to the loopback NATS endpoint used by
 the WSL2 deployment.  It lists every stream and every consumer with explicit
-pagination, then evaluates only existing four-role durables whose topic is a
-stream-backed ``DEFAULT_CRITICAL_TOPICS`` event with expected
-``DeliverPolicy.ALL``.  Persist-only critical topics have no JetStream stream
-or live consumer and are deliberately excluded.
+pagination, then evaluates every existing durable declared by the exact
+four-role runtime ownership manifest.  Critical event cursors keep strict
+``DeliverPolicy.ALL`` drain semantics; declared snapshot/transient consumers
+are recorded with their ``LAST``/``NEW`` semantics and may only be classified
+as safely rebuildable when their immutable identity and configuration are
+exact.  Persist-only critical topics have no JetStream stream or live consumer
+and are deliberately excluded.
 
 The command never acknowledges messages and never creates, updates, deletes,
 or purges JetStream state.  Every outcome is written as a no-secret JSON
@@ -39,6 +42,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from aats.bus.nats_bus import (  # noqa: E402
+    consumer_mutable_config_migration_blockers,
+)
 from scripts.docker_event_monitor import (  # noqa: E402
     LiveDockerEventMonitor,
     validate_live_window_evidence,
@@ -66,7 +72,7 @@ _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _EVIDENCE_DIR = Path("artifacts/deployments")
-_SCHEMA_VERSION = "aats.nats_durable_cutover_preflight.v2"
+_SCHEMA_VERSION = "aats.nats_durable_cutover_preflight.v3"
 _MAX_PAGINATED_ITEMS = 100_000
 _MAX_PREVIOUS_EVIDENCE_BYTES = 5 * 1024 * 1024
 _STAGE_PRE_FULL_DOWN = "pre_full_down"
@@ -119,8 +125,11 @@ class ExpectedDurable:
     topic: str
     stream: str
     filter_subject: str
+    delivery_semantics: str = "event"
     ack_policy: str = "explicit"
     deliver_policy: str = "all"
+    ack_wait_seconds: float = 30.0
+    max_deliver: int = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +153,19 @@ class ConsumerState:
     max_ack_pending: int
     num_ack_pending: int
     cursor: ConsumerCursor
+    deliver_subject_present: bool = True
+    replay_policy: str = "instant"
+    headers_only: bool = False
+    pause_until: str | None = None
+    backoff_seconds: tuple[float, ...] = ()
+    rate_limit_bps: int = 0
+    inactive_threshold_seconds: float | None = None
+    mem_storage: bool = False
+    ack_wait_seconds: float = 30.0
+    max_deliver: int = 5
+    durable_name_matches: bool = True
+    opt_start_seq: int | None = None
+    opt_start_time: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +198,34 @@ class QueryResult:
     consumer_count: int
     consumers: tuple[ConsumerState, ...]
     streams: tuple[CriticalStreamState, ...] = ()
+
+
+def validate_query_result_consumer_projection(result: QueryResult) -> None:
+    """Cross-check broker stream counts against the paginated consumer list."""
+
+    if (
+        isinstance(result.stream_count, bool)
+        or result.stream_count < 0
+        or result.stream_count != len(result.streams)
+        or isinstance(result.consumer_count, bool)
+        or result.consumer_count < 0
+        or result.consumer_count != len(result.consumers)
+    ):
+        raise RuntimeError("nats_consumer_projection_count_invalid")
+    enumerated_by_stream: dict[str, int] = {}
+    for consumer in result.consumers:
+        enumerated_by_stream[consumer.stream] = (
+            enumerated_by_stream.get(consumer.stream, 0) + 1
+        )
+    broker_stream_names: set[str] = set()
+    for stream in result.streams:
+        if stream.name in broker_stream_names:
+            raise RuntimeError("nats_consumer_projection_stream_duplicate")
+        broker_stream_names.add(stream.name)
+        if stream.consumer_count != enumerated_by_stream.get(stream.name, 0):
+            raise RuntimeError("nats_consumer_projection_stream_count_mismatch")
+    if set(enumerated_by_stream) - broker_stream_names:
+        raise RuntimeError("nats_consumer_projection_stream_missing")
 
 
 def _run_command(args: Sequence[str]) -> str:
@@ -473,24 +523,38 @@ def build_app_quiescence_evidence(
 
 
 def build_expected_durable_index() -> dict[str, ExpectedDurable]:
-    """Derive the exact four-role critical ALL durable names from runtime truth."""
+    """Derive the exact declared four-role durable topology from runtime truth."""
 
+    from aats.bus.consumer_ownership import (
+        SPLIT_RUNTIME_CONSUMER_TOPICS_BY_ROLE,
+    )
     from aats.bus.nats_bus import (
         DEFAULT_CRITICAL_TOPICS,
         DEFAULT_PERSIST_ONLY_CRITICAL_TOPICS,
         NatsBusConfig,
         delivery_semantics_for,
     )
+    from aats.events import topics
 
     config = NatsBusConfig()
     expected: dict[str, ExpectedDurable] = {}
     stream_backed_topics = (
         DEFAULT_CRITICAL_TOPICS - DEFAULT_PERSIST_ONLY_CRITICAL_TOPICS
     )
-    for role in _MAIN_ROLES:
-        for topic in sorted(stream_backed_topics):
-            if delivery_semantics_for(topic) != "event":
-                continue
+    if tuple(SPLIT_RUNTIME_CONSUMER_TOPICS_BY_ROLE) != _MAIN_ROLES:
+        raise RuntimeError("nats_cutover_consumer_role_manifest_drift")
+    for role, owned_topics in SPLIT_RUNTIME_CONSUMER_TOPICS_BY_ROLE.items():
+        if owned_topics - stream_backed_topics:
+            raise RuntimeError("nats_cutover_non_stream_consumer_declared")
+        for topic in sorted(owned_topics):
+            semantics = delivery_semantics_for(topic)
+            deliver_policy = {
+                "event": "all",
+                "snapshot": "last",
+                "transient": "new",
+            }.get(semantics)
+            if deliver_policy is None:
+                raise RuntimeError("nats_cutover_unknown_delivery_semantics")
             durable = config.durable_name_for(role, topic)
             stream_spec = config.stream_spec_for_topic(topic)
             if stream_spec is None:
@@ -501,11 +565,83 @@ def build_expected_durable_index() -> dict[str, ExpectedDurable]:
                 topic=topic,
                 stream=stream_spec.name,
                 filter_subject=config.subject_for(topic),
+                delivery_semantics=semantics,
+                deliver_policy=deliver_policy,
+                ack_wait_seconds=(
+                    90.0
+                    if topic
+                    in {topics.MARKET_SNAPSHOTS, topics.FEATURE_SNAPSHOTS}
+                    else config.ack_wait_seconds
+                ),
+                max_deliver=config.max_deliver,
             )
             previous = expected.setdefault(durable, candidate)
             if previous != candidate:
                 raise RuntimeError("nats_cutover_expected_durable_collision")
     return expected
+
+
+def _actual_consumer_config(state: ConsumerState) -> dict[str, object]:
+    """Return immutable/no-reset consumer behavior needed for safe delivery."""
+
+    return {
+        "stream": state.stream,
+        "deliver_policy": state.deliver_policy,
+        "ack_policy": state.ack_policy,
+        "filter_subject": state.filter_subject,
+        "filter_subjects": list(state.filter_subjects),
+        "deliver_group": state.deliver_group,
+        # Only presence is evidence: the generated push inbox itself is volatile
+        # and must never become an identity or continuity field.
+        "deliver_subject_present": state.deliver_subject_present,
+        "replay_policy": state.replay_policy,
+        "headers_only": state.headers_only,
+        "pause_until": state.pause_until,
+        "backoff_seconds": list(state.backoff_seconds),
+        "rate_limit_bps": state.rate_limit_bps,
+        "inactive_threshold_seconds": state.inactive_threshold_seconds,
+        "mem_storage": state.mem_storage,
+        "durable_name_matches": state.durable_name_matches,
+        "opt_start_seq": state.opt_start_seq,
+        "opt_start_time": state.opt_start_time,
+    }
+
+
+def _expected_consumer_config(expected: ExpectedDurable) -> dict[str, object]:
+    return {
+        "stream": expected.stream,
+        "deliver_policy": expected.deliver_policy,
+        "ack_policy": expected.ack_policy,
+        "filter_subject": expected.filter_subject,
+        "deliver_group": None,
+        "deliver_subject_present": True,
+        "replay_policy": "instant",
+        "headers_only": False,
+        "pause_until": None,
+        "backoff_seconds": [],
+        "rate_limit_bps": 0,
+        "inactive_threshold_seconds": None,
+        "mem_storage": False,
+        "durable_name_matches": True,
+        "opt_start_seq": None,
+        "opt_start_time": None,
+    }
+
+
+def _actual_consumer_mutable_config(state: ConsumerState) -> dict[str, object]:
+    return {
+        "ack_wait_seconds": state.ack_wait_seconds,
+        "max_deliver": state.max_deliver,
+    }
+
+
+def _expected_consumer_mutable_config(
+    expected: ExpectedDurable,
+) -> dict[str, object]:
+    return {
+        "ack_wait_seconds": expected.ack_wait_seconds,
+        "max_deliver": expected.max_deliver,
+    }
 
 
 def evaluate_consumer(
@@ -532,6 +668,40 @@ def evaluate_consumer(
         blockers.append("filter_subject_drift")
     if state.deliver_group not in {None, ""}:
         blockers.append("deliver_group_drift")
+    if not state.durable_name_matches:
+        blockers.append("durable_name_drift")
+    if not state.deliver_subject_present:
+        blockers.append("push_delivery_subject_missing")
+    if state.replay_policy != "instant":
+        blockers.append("replay_policy_drift")
+    if state.headers_only:
+        blockers.append("headers_only_enabled")
+    if state.pause_until is not None:
+        blockers.append("consumer_paused")
+    if state.backoff_seconds:
+        blockers.append("backoff_policy_drift")
+    if state.rate_limit_bps != 0:
+        blockers.append("rate_limit_enabled")
+    if state.inactive_threshold_seconds is not None:
+        blockers.append("inactive_threshold_enabled")
+    if state.mem_storage:
+        blockers.append("memory_storage_enabled")
+    mutable_migration_blockers = consumer_mutable_config_migration_blockers(
+        delivery_semantics=expected.delivery_semantics,
+        current_ack_wait_seconds=state.ack_wait_seconds,
+        target_ack_wait_seconds=expected.ack_wait_seconds,
+        current_max_deliver=state.max_deliver,
+        target_max_deliver=expected.max_deliver,
+    )
+    blockers.extend(mutable_migration_blockers)
+    ack_wait_drift = state.ack_wait_seconds != expected.ack_wait_seconds
+    ack_wait_reconcile_allowed = (
+        ack_wait_drift and "ack_wait_drift" not in mutable_migration_blockers
+    )
+    if state.opt_start_seq is not None:
+        blockers.append("start_sequence_enabled")
+    if state.opt_start_time is not None:
+        blockers.append("start_time_enabled")
     if state.num_ack_pending < 0:
         blockers.append("invalid_num_ack_pending")
 
@@ -539,16 +709,26 @@ def evaluate_consumer(
         state.max_ack_pending <= 0
         or state.max_ack_pending > _TARGET_MAX_ACK_PENDING
     )
-    if reducing_window and state.num_ack_pending != 0:
-        blockers.append("ack_window_migration_requires_drain")
-    elif (
+    outstanding_exceeds_target = (
         state.max_ack_pending == _TARGET_MAX_ACK_PENDING
         and state.num_ack_pending > _TARGET_MAX_ACK_PENDING
-    ):
-        blockers.append("outstanding_exceeds_target")
+    )
+    mutable_config_drift = ack_wait_drift and ack_wait_reconcile_allowed
+    if expected.delivery_semantics == "event":
+        if reducing_window and state.num_ack_pending != 0:
+            blockers.append("ack_window_migration_requires_drain")
+        elif outstanding_exceeds_target:
+            blockers.append("outstanding_exceeds_target")
 
     if blockers:
         status = "BLOCKED"
+    elif expected.delivery_semantics != "event" and (
+        (reducing_window and state.num_ack_pending != 0)
+        or outstanding_exceeds_target
+    ):
+        status = "SAFE_REBUILDABLE_NON_EVENT"
+    elif mutable_config_drift:
+        status = "SAFE_TO_RECONCILE_IN_PLACE"
     elif reducing_window:
         status = "SAFE_TO_SHRINK"
     else:
@@ -560,25 +740,17 @@ def evaluate_consumer(
             "durable": state.durable,
             "role": expected.role,
             "topic": expected.topic,
+            "delivery_semantics": expected.delivery_semantics,
         },
         "created": state.created,
         "cursor": asdict(state.cursor),
         "immutable_config": {
-            "actual": {
-                "stream": state.stream,
-                "deliver_policy": state.deliver_policy,
-                "ack_policy": state.ack_policy,
-                "filter_subject": state.filter_subject,
-                "filter_subjects": list(state.filter_subjects),
-                "deliver_group": state.deliver_group,
-            },
-            "expected": {
-                "stream": expected.stream,
-                "deliver_policy": expected.deliver_policy,
-                "ack_policy": expected.ack_policy,
-                "filter_subject": expected.filter_subject,
-                "deliver_group": None,
-            },
+            "actual": _actual_consumer_config(state),
+            "expected": _expected_consumer_config(expected),
+        },
+        "mutable_config": {
+            "actual": _actual_consumer_mutable_config(state),
+            "expected": _expected_consumer_mutable_config(expected),
         },
         "window": {
             "current_max_ack_pending": state.max_ack_pending,
@@ -594,7 +766,7 @@ def evaluate_existing_consumers(
     consumers: Sequence[ConsumerState],
     expected_by_name: dict[str, ExpectedDurable],
 ) -> tuple[list[dict[str, object]], bool]:
-    """Evaluate only existing consumers matching the current critical ALL map."""
+    """Evaluate existing consumers matching the declared runtime ownership map."""
 
     rows = [
         evaluate_consumer(state, expected_by_name[state.durable])
@@ -615,7 +787,7 @@ def build_unexpected_durable_rows(
     consumers: Sequence[ConsumerState],
     expected_by_name: dict[str, ExpectedDurable],
 ) -> list[dict[str, object]]:
-    """Expose every unowned durable instead of filtering it out of evidence."""
+    """Expose every truly unowned durable with complete read-only facts."""
 
     rows = [
         {
@@ -624,8 +796,17 @@ def build_unexpected_durable_rows(
                 "durable": state.durable,
             },
             "created": state.created,
+            "cursor": asdict(state.cursor),
+            "immutable_config": {
+                "actual": _actual_consumer_config(state),
+            },
+            "mutable_config": {
+                "actual": _actual_consumer_mutable_config(state),
+            },
             "window": {"current_max_ack_pending": state.max_ack_pending},
             "outstanding": {"num_ack_pending": state.num_ack_pending},
+            "status": "BLOCKED",
+            "blockers": ["consumer_owner_not_declared"],
         }
         for state in consumers
         if state.durable not in expected_by_name
@@ -637,6 +818,320 @@ def build_unexpected_durable_rows(
         )
     )
     return rows
+
+
+def build_missing_declared_durable_rows(
+    consumers: Sequence[ConsumerState],
+    expected_by_name: dict[str, ExpectedDurable],
+) -> list[dict[str, object]]:
+    """Expose declared consumers absent from a preserved NATS installation."""
+
+    observed_names = {state.durable for state in consumers}
+    rows = [
+        {
+            "identity": {
+                "stream": expected.stream,
+                "durable": expected.durable,
+                "role": expected.role,
+                "topic": expected.topic,
+                "delivery_semantics": expected.delivery_semantics,
+            },
+            "immutable_config": {
+                "expected": _expected_consumer_config(expected),
+            },
+            "mutable_config": {
+                "expected": _expected_consumer_mutable_config(expected),
+            },
+            "status": "BLOCKED",
+            "blockers": ["declared_consumer_missing"],
+        }
+        for expected in expected_by_name.values()
+        if expected.durable not in observed_names
+    ]
+    rows.sort(
+        key=lambda row: (
+            str(row["identity"]["stream"]),  # type: ignore[index]
+            str(row["identity"]["durable"]),  # type: ignore[index]
+        )
+    )
+    return rows
+
+
+def _recompute_preflight_durable_row(
+    row: object,
+    *,
+    expected: ExpectedDurable,
+) -> dict[str, object]:
+    """Recompute a persisted row so its safety status is never self-attested."""
+
+    error = "nats_cutover_malformed_previous_preflight"
+    if not isinstance(row, dict) or set(row) != {
+        "identity",
+        "created",
+        "cursor",
+        "immutable_config",
+        "mutable_config",
+        "window",
+        "outstanding",
+        "status",
+        "blockers",
+    }:
+        raise RuntimeError(error)
+    if row.get("identity") != {
+        "stream": expected.stream,
+        "durable": expected.durable,
+        "role": expected.role,
+        "topic": expected.topic,
+        "delivery_semantics": expected.delivery_semantics,
+    }:
+        raise RuntimeError(error)
+    _parse_evidence_timestamp(row.get("created"))
+    immutable = row.get("immutable_config")
+    mutable = row.get("mutable_config")
+    if not isinstance(immutable, dict) or set(immutable) != {"actual", "expected"}:
+        raise RuntimeError(error)
+    if not isinstance(mutable, dict) or set(mutable) != {"actual", "expected"}:
+        raise RuntimeError(error)
+    actual = immutable.get("actual")
+    canonical_expected = _expected_consumer_config(expected)
+    if (
+        immutable.get("expected") != canonical_expected
+        or not isinstance(actual, dict)
+        or set(actual) != set(canonical_expected) | {"filter_subjects"}
+    ):
+        raise RuntimeError(error)
+    actual_mutable = mutable.get("actual")
+    if (
+        mutable.get("expected") != _expected_consumer_mutable_config(expected)
+        or not isinstance(actual_mutable, dict)
+        or set(actual_mutable) != {"ack_wait_seconds", "max_deliver"}
+    ):
+        raise RuntimeError(error)
+
+    cursor = row.get("cursor")
+    window = row.get("window")
+    outstanding = row.get("outstanding")
+    if (
+        not isinstance(cursor, dict)
+        or set(cursor)
+        != {
+            "delivered_stream_seq",
+            "delivered_consumer_seq",
+            "ack_floor_stream_seq",
+            "ack_floor_consumer_seq",
+        }
+        or not isinstance(window, dict)
+        or set(window)
+        != {"current_max_ack_pending", "target_max_ack_pending"}
+        or not isinstance(outstanding, dict)
+        or set(outstanding) != {"num_ack_pending"}
+    ):
+        raise RuntimeError(error)
+    cursor_values = tuple(_row_integer(cursor, field) for field in cursor)
+    del cursor_values
+    current_window = window.get("current_max_ack_pending")
+    target_window = window.get("target_max_ack_pending")
+    num_ack_pending = outstanding.get("num_ack_pending")
+    if (
+        isinstance(current_window, bool)
+        or not isinstance(current_window, int)
+        or isinstance(target_window, bool)
+        or target_window != _TARGET_MAX_ACK_PENDING
+        or isinstance(num_ack_pending, bool)
+        or not isinstance(num_ack_pending, int)
+        or num_ack_pending < 0
+    ):
+        raise RuntimeError(error)
+
+    filter_subject = actual.get("filter_subject")
+    filter_subjects = actual.get("filter_subjects")
+    deliver_group = actual.get("deliver_group")
+    backoff = actual.get("backoff_seconds")
+    pause_until = actual.get("pause_until")
+    inactive_threshold = actual.get("inactive_threshold_seconds")
+    ack_wait = actual_mutable.get("ack_wait_seconds")
+    max_deliver = actual_mutable.get("max_deliver")
+    rate_limit = actual.get("rate_limit_bps")
+    opt_start_seq = actual.get("opt_start_seq")
+    opt_start_time = actual.get("opt_start_time")
+    if (
+        filter_subject is not None
+        and not isinstance(filter_subject, str)
+        or not isinstance(filter_subjects, list)
+        or not all(isinstance(value, str) for value in filter_subjects)
+        or deliver_group is not None
+        and not isinstance(deliver_group, str)
+        or not isinstance(backoff, list)
+        or not all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in backoff
+        )
+        or pause_until is not None
+        and not isinstance(pause_until, str)
+        or inactive_threshold is not None
+        and (
+            isinstance(inactive_threshold, bool)
+            or not isinstance(inactive_threshold, (int, float))
+        )
+        or isinstance(ack_wait, bool)
+        or not isinstance(ack_wait, (int, float))
+        or isinstance(max_deliver, bool)
+        or not isinstance(max_deliver, int)
+        or isinstance(rate_limit, bool)
+        or not isinstance(rate_limit, int)
+        or not isinstance(actual.get("deliver_subject_present"), bool)
+        or not isinstance(actual.get("replay_policy"), str)
+        or not isinstance(actual.get("headers_only"), bool)
+        or not isinstance(actual.get("mem_storage"), bool)
+        or not isinstance(actual.get("durable_name_matches"), bool)
+        or opt_start_seq is not None
+        and (
+            isinstance(opt_start_seq, bool)
+            or not isinstance(opt_start_seq, int)
+            or opt_start_seq < 0
+        )
+        or opt_start_time is not None
+        and not isinstance(opt_start_time, str)
+    ):
+        raise RuntimeError(error)
+    state = ConsumerState(
+        stream=actual.get("stream"),
+        durable=expected.durable,
+        created=row["created"],
+        deliver_policy=actual.get("deliver_policy"),
+        ack_policy=actual.get("ack_policy"),
+        filter_subject=filter_subject,
+        filter_subjects=tuple(filter_subjects),
+        deliver_group=deliver_group,
+        max_ack_pending=current_window,
+        num_ack_pending=num_ack_pending,
+        cursor=ConsumerCursor(**cursor),
+        deliver_subject_present=actual.get("deliver_subject_present"),
+        replay_policy=actual.get("replay_policy"),
+        headers_only=actual.get("headers_only"),
+        pause_until=pause_until,
+        backoff_seconds=tuple(float(value) for value in backoff),
+        rate_limit_bps=rate_limit,
+        inactive_threshold_seconds=(
+            None if inactive_threshold is None else float(inactive_threshold)
+        ),
+        mem_storage=actual.get("mem_storage"),
+        ack_wait_seconds=float(ack_wait),
+        max_deliver=max_deliver,
+        durable_name_matches=actual.get("durable_name_matches"),
+        opt_start_seq=opt_start_seq,
+        opt_start_time=opt_start_time,
+    )
+    recomputed = evaluate_consumer(state, expected)
+    if recomputed != row:
+        raise RuntimeError(error)
+    return recomputed
+
+
+def validate_preflight_snapshot_projection(
+    payload: dict[str, object],
+    *,
+    bootstrap_mode: str,
+) -> None:
+    """Validate v3 broker rows, counts and target claims from raw evidence."""
+
+    query = _required_mapping(payload.get("query"))
+    durables = payload.get("durables")
+    streams = payload.get("critical_streams")
+    if not isinstance(durables, list) or not isinstance(streams, list):
+        raise RuntimeError("nats_cutover_malformed_previous_preflight")
+    if (
+        payload.get("unexpected_durables") != []
+        or payload.get("missing_declared_durables") != []
+        or payload.get("blocker_classes") != []
+    ):
+        raise RuntimeError("nats_cutover_previous_preflight_not_passed")
+
+    expected = build_expected_durable_index()
+    expected_by_pair = {
+        (item.stream, item.durable): item for item in expected.values()
+    }
+    observed_pairs: set[tuple[str, str]] = set()
+    event_count = 0
+    non_event_count = 0
+    consumers_by_stream: dict[str, int] = {}
+    for row in durables:
+        if not isinstance(row, dict) or not isinstance(row.get("identity"), dict):
+            raise RuntimeError("nats_cutover_malformed_previous_preflight")
+        identity = row["identity"]
+        pair = (identity.get("stream"), identity.get("durable"))
+        if (
+            not all(isinstance(value, str) for value in pair)
+            or pair in observed_pairs
+            or pair not in expected_by_pair
+        ):
+            raise RuntimeError("nats_cutover_malformed_previous_preflight")
+        observed_pairs.add(pair)
+        canonical = _recompute_preflight_durable_row(
+            row,
+            expected=expected_by_pair[pair],
+        )
+        if canonical["status"] == "BLOCKED" or canonical["blockers"] != []:
+            raise RuntimeError("nats_cutover_previous_preflight_not_passed")
+        semantics = identity.get("delivery_semantics")
+        if semantics == "event":
+            event_count += 1
+        else:
+            non_event_count += 1
+        stream_name = pair[0]
+        consumers_by_stream[stream_name] = consumers_by_stream.get(stream_name, 0) + 1
+
+    if bootstrap_mode == "existing_container_preserved":
+        if observed_pairs != set(expected_by_pair):
+            raise RuntimeError("nats_cutover_malformed_previous_preflight")
+    elif bootstrap_mode == "proven_fresh_install":
+        if observed_pairs:
+            raise RuntimeError("nats_cutover_malformed_previous_preflight")
+    else:
+        raise RuntimeError("nats_cutover_malformed_bootstrap_provenance")
+
+    expected_query = {
+        "complete": True,
+        "streams_scanned": len(streams),
+        "consumers_scanned": len(durables),
+        "declared_durables_found": len(durables),
+        "critical_all_durables_found": event_count,
+        "known_non_event_durables_found": non_event_count,
+        "critical_streams_found": len(streams),
+    }
+    if query != expected_query:
+        raise RuntimeError("nats_cutover_malformed_previous_preflight")
+
+    stream_index = _indexed_rows(streams, kind="stream")
+    for key, row in stream_index.items():
+        state = _required_mapping(row.get("state"))
+        if _row_integer(state, "consumer_count") != consumers_by_stream.get(key[0], 0):
+            raise RuntimeError("nats_cutover_malformed_previous_preflight")
+    target_manifest = payload.get("target_stream_manifest")
+    target_compliance = payload.get("stream_target_compliance")
+    if not isinstance(target_manifest, dict) or not isinstance(target_compliance, dict):
+        raise RuntimeError("nats_cutover_malformed_target_stream_manifest")
+    target_rows = target_manifest.get("streams")
+    target_sha256 = target_manifest.get("sha256")
+    if not isinstance(target_rows, list) or not isinstance(target_sha256, str):
+        raise RuntimeError("nats_cutover_malformed_target_stream_manifest")
+    canonical_target = json.dumps(
+        target_rows,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    computed_sha256 = (
+        f"sha256:{hashlib.sha256(canonical_target.encode('utf-8')).hexdigest()}"
+    )
+    if target_sha256 != computed_sha256:
+        raise RuntimeError("nats_cutover_malformed_target_stream_manifest")
+    recomputed_compliance, blocked = evaluate_stream_target(
+        actual_streams=streams,
+        target_manifest=target_manifest,
+        bootstrap_mode=bootstrap_mode,
+    )
+    if blocked or recomputed_compliance != target_compliance:
+        raise RuntimeError("nats_cutover_malformed_target_stream_manifest")
 
 
 def _indexed_rows(
@@ -744,6 +1239,8 @@ def evaluate_cutover_continuity(
             violations.append(f"durable_created_changed:{identity}")
         if previous.get("immutable_config") != current.get("immutable_config"):
             violations.append(f"durable_config_changed:{identity}")
+        if previous.get("mutable_config") != current.get("mutable_config"):
+            violations.append(f"durable_mutable_config_changed:{identity}")
         if previous.get("window") != current.get("window"):
             violations.append(f"durable_window_changed:{identity}")
         previous_cursor = _required_mapping(previous.get("cursor"))
@@ -779,15 +1276,23 @@ def evaluate_active_runtime_continuity(
     previous_durables: object,
     current_durables: Sequence[dict[str, object]],
     allow_new_identities: bool = False,
+    allow_declared_cutover_migrations: bool = False,
 ) -> dict[str, object]:
     """Validate monotonic JetStream continuity while applications are active.
 
     Publishers, consumers, retention and INTEREST deletion can legitimately
     change counts, outstanding work and first sequence.  Identity, creation
     time and immutable configuration must remain exact; stream last sequence
-    and every durable cursor may only advance.  JetStream does not expose purge
-    provenance, so purge-vs-retention remains an explicit trust boundary while
-    ``deny_purge`` is false.
+    and every durable cursor may only advance.  The one bounded exception is
+    the explicitly requested app-start cutover migration: an in-place
+    ``SAFE_TO_SHRINK`` window update may change only the window; a narrowly
+    allowed ``SAFE_TO_RECONCILE_IN_PLACE`` update may also raise a non-event
+    consumer's ack wait to its declared target.  A
+    ``SAFE_REBUILDABLE_NON_EVENT`` LAST/NEW consumer may also receive a new
+    creation time and reset cursor.  Both must end as exact
+    ``SAFE_ALREADY_ONE`` rows.  JetStream does not expose purge provenance, so
+    purge-vs-retention remains an explicit trust boundary while ``deny_purge``
+    is false.
     """
 
     previous_stream_index = _indexed_rows(previous_streams, kind="stream")
@@ -834,24 +1339,205 @@ def evaluate_active_runtime_continuity(
         "ack_floor_stream_seq",
         "ack_floor_consumer_seq",
     )
+    authorized_migrations: list[dict[str, str]] = []
     for key in sorted(set(previous_durable_index) & set(current_durable_index)):
+        row_violation_count = len(violations)
         previous = previous_durable_index[key]
         current = current_durable_index[key]
         identity = f"{key[0]}/{key[1]}"
-        if previous.get("created") != current.get("created"):
+        previous_identity = _required_mapping(previous.get("identity"))
+        current_identity = _required_mapping(current.get("identity"))
+        previous_window = _required_mapping(previous.get("window"))
+        current_window = _required_mapping(current.get("window"))
+        previous_outstanding = _required_mapping(previous.get("outstanding"))
+        previous_mutable = _required_mapping(previous.get("mutable_config"))
+        current_mutable = _required_mapping(current.get("mutable_config"))
+        previous_mutable_actual = _required_mapping(previous_mutable.get("actual"))
+        previous_mutable_expected = _required_mapping(
+            previous_mutable.get("expected")
+        )
+        current_mutable_actual = _required_mapping(current_mutable.get("actual"))
+        current_mutable_expected = _required_mapping(current_mutable.get("expected"))
+        previous_current_window = _row_integer(
+            previous_window,
+            "current_max_ack_pending",
+        )
+        previous_target_window = _row_integer(
+            previous_window,
+            "target_max_ack_pending",
+        )
+        current_current_window = _row_integer(
+            current_window,
+            "current_max_ack_pending",
+        )
+        current_target_window = _row_integer(
+            current_window,
+            "target_max_ack_pending",
+        )
+        previous_num_ack_pending = _row_integer(
+            previous_outstanding,
+            "num_ack_pending",
+        )
+        previous_ack_wait = previous_mutable_actual.get("ack_wait_seconds")
+        target_ack_wait = previous_mutable_expected.get("ack_wait_seconds")
+        current_ack_wait = current_mutable_actual.get("ack_wait_seconds")
+        previous_delivery_semantics = previous_identity.get(
+            "delivery_semantics"
+        )
+        previous_migration_blockers = (
+            consumer_mutable_config_migration_blockers(
+                delivery_semantics=(
+                    previous_delivery_semantics
+                    if isinstance(previous_delivery_semantics, str)
+                    else "invalid"
+                ),
+                current_ack_wait_seconds=previous_ack_wait,
+                target_ack_wait_seconds=target_ack_wait,
+                current_max_deliver=previous_mutable_actual.get(
+                    "max_deliver"
+                ),
+                target_max_deliver=previous_mutable_expected.get(
+                    "max_deliver"
+                ),
+            )
+        )
+        current_migration_blockers = (
+            consumer_mutable_config_migration_blockers(
+                delivery_semantics=(
+                    previous_delivery_semantics
+                    if isinstance(previous_delivery_semantics, str)
+                    else "invalid"
+                ),
+                current_ack_wait_seconds=current_ack_wait,
+                target_ack_wait_seconds=current_mutable_expected.get(
+                    "ack_wait_seconds"
+                ),
+                current_max_deliver=current_mutable_actual.get(
+                    "max_deliver"
+                ),
+                target_max_deliver=current_mutable_expected.get(
+                    "max_deliver"
+                ),
+            )
+        )
+        safe_non_event_ack_wait_raise = (
+            previous_delivery_semantics in {"snapshot", "transient"}
+            and current_identity.get("delivery_semantics")
+            == previous_delivery_semantics
+            and not previous_migration_blockers
+            and not current_migration_blockers
+            and current_ack_wait == target_ack_wait
+            and current_mutable_actual.get("max_deliver")
+            == current_mutable_expected.get("max_deliver")
+        )
+        reaches_exact_target = (
+            previous_target_window == _TARGET_MAX_ACK_PENDING
+            and current_target_window == _TARGET_MAX_ACK_PENDING
+            and current_current_window == _TARGET_MAX_ACK_PENDING
+            and (
+                previous_current_window <= 0
+                or previous_current_window > _TARGET_MAX_ACK_PENDING
+            )
+        )
+        in_place_window_shrink = (
+            allow_declared_cutover_migrations
+            and previous.get("status") == "SAFE_TO_SHRINK"
+            and current.get("status") == "SAFE_ALREADY_ONE"
+            and reaches_exact_target
+            and previous.get("created") == current.get("created")
+            and previous.get("immutable_config") == current.get("immutable_config")
+            and previous.get("mutable_config") == current.get("mutable_config")
+        )
+        in_place_mutable_reconcile = (
+            allow_declared_cutover_migrations
+            and previous.get("status") == "SAFE_TO_RECONCILE_IN_PLACE"
+            and current.get("status") == "SAFE_ALREADY_ONE"
+            and previous.get("created") == current.get("created")
+            and previous.get("immutable_config") == current.get("immutable_config")
+            and safe_non_event_ack_wait_raise
+            and previous_mutable_actual != previous_mutable_expected
+            and previous_mutable_expected == current_mutable_expected
+            and current_mutable_actual == current_mutable_expected
+            and previous_target_window == _TARGET_MAX_ACK_PENDING
+            and current_target_window == _TARGET_MAX_ACK_PENDING
+            and current_current_window == _TARGET_MAX_ACK_PENDING
+            and (
+                previous_current_window == _TARGET_MAX_ACK_PENDING
+                or previous_current_window <= 0
+                or previous_current_window > _TARGET_MAX_ACK_PENDING
+            )
+        )
+        requires_non_event_rebuild = (
+            (
+                (
+                    previous_current_window <= 0
+                    or previous_current_window > _TARGET_MAX_ACK_PENDING
+                )
+                and previous_num_ack_pending != 0
+            )
+            or (
+                previous_current_window == _TARGET_MAX_ACK_PENDING
+                and previous_num_ack_pending > _TARGET_MAX_ACK_PENDING
+            )
+        )
+        non_event_rebuild = (
+            allow_declared_cutover_migrations
+            and previous.get("status") == "SAFE_REBUILDABLE_NON_EVENT"
+            and current.get("status") == "SAFE_ALREADY_ONE"
+            and previous_identity.get("delivery_semantics")
+            in {"snapshot", "transient"}
+            and current_identity.get("delivery_semantics")
+            == previous_identity.get("delivery_semantics")
+            and previous.get("created") != current.get("created")
+            and current_target_window == _TARGET_MAX_ACK_PENDING
+            and current_current_window == _TARGET_MAX_ACK_PENDING
+            and requires_non_event_rebuild
+            and previous.get("immutable_config") == current.get("immutable_config")
+            and previous_mutable_expected == current_mutable_expected
+            and current_mutable_actual == current_mutable_expected
+        )
+        if (
+            previous.get("created") != current.get("created")
+            and not non_event_rebuild
+        ):
             violations.append(f"durable_created_changed:{identity}")
         if previous.get("immutable_config") != current.get("immutable_config"):
             violations.append(f"durable_config_changed:{identity}")
-        if previous.get("window") != current.get("window"):
+        if (
+            previous.get("mutable_config") != current.get("mutable_config")
+            and not in_place_mutable_reconcile
+            and not non_event_rebuild
+        ):
+            violations.append(f"durable_mutable_config_changed:{identity}")
+        if (
+            previous.get("window") != current.get("window")
+            and not in_place_window_shrink
+            and not in_place_mutable_reconcile
+            and not non_event_rebuild
+        ):
             violations.append(f"durable_window_changed:{identity}")
         previous_cursor = _required_mapping(previous.get("cursor"))
         current_cursor = _required_mapping(current.get("cursor"))
         for field in cursor_fields:
-            if _row_integer(current_cursor, field) < _row_integer(
-                previous_cursor,
-                field,
+            if (
+                _row_integer(current_cursor, field)
+                < _row_integer(previous_cursor, field)
+                and not non_event_rebuild
             ):
                 violations.append(f"durable_cursor_regressed:{identity}:{field}")
+        if len(violations) == row_violation_count:
+            if in_place_window_shrink:
+                authorized_migrations.append(
+                    {"identity": identity, "kind": "IN_PLACE_ACK_WINDOW_SHRINK"}
+                )
+            elif non_event_rebuild:
+                authorized_migrations.append(
+                    {"identity": identity, "kind": "NON_EVENT_DURABLE_REBUILD"}
+                )
+            elif in_place_mutable_reconcile:
+                authorized_migrations.append(
+                    {"identity": identity, "kind": "IN_PLACE_MUTABLE_RECONCILE"}
+                )
 
     return {
         "status": "PASSED_WITH_TRUST_BOUNDARY" if not violations else "INVALIDATED",
@@ -859,6 +1545,10 @@ def evaluate_active_runtime_continuity(
         "streams_checked": len(current_stream_index),
         "durables_checked": len(current_durable_index),
         "new_identities_allowed": allow_new_identities,
+        "declared_cutover_migrations_allowed": (
+            allow_declared_cutover_migrations
+        ),
+        "authorized_durable_migrations": authorized_migrations,
         "purge_exclusion_verified": False,
         "trust_boundary": "purge_vs_legitimate_retention_not_distinguishable",
         "violations": violations,
@@ -904,6 +1594,10 @@ def load_previous_preflight(
     if payload.get("mutations_performed") != []:
         raise RuntimeError("nats_cutover_previous_preflight_not_read_only")
     nats_bootstrap = _required_nats_bootstrap(payload.get("nats_bootstrap"))
+    validate_preflight_snapshot_projection(
+        payload,
+        bootstrap_mode=nats_bootstrap["mode"],
+    )
     nats_query_fingerprint = payload.get("nats_query_fingerprint")
     if (
         not isinstance(nats_query_fingerprint, str)
@@ -942,6 +1636,7 @@ def load_previous_preflight(
         or not isinstance(quiescence.get("before"), list)
         or quiescence.get("before") != quiescence.get("after")
         or payload.get("unexpected_durables") != []
+        or payload.get("missing_declared_durables") != []
         or continuity.get("status") != "BASELINE_CAPTURED"
         or continuity.get("complete") is not True
         or continuity.get("violations") != []
@@ -1138,6 +1833,117 @@ def _duration_seconds(value: object) -> float:
     if not math.isfinite(result):
         raise RuntimeError("nats_cutover_malformed_stream_state")
     return result
+
+
+def _consumer_duration_seconds(
+    value: object,
+    *,
+    optional: bool = False,
+) -> float | None:
+    """Normalize nats-py consumer durations without guessing malformed state."""
+
+    if value is None and optional:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RuntimeError("nats_cutover_malformed_consumer_state")
+    try:
+        result = float(value)
+    except (OverflowError, ValueError) as exc:
+        raise RuntimeError("nats_cutover_malformed_consumer_state") from exc
+    if not math.isfinite(result) or result < 0:
+        raise RuntimeError("nats_cutover_malformed_consumer_state")
+    # Older nats-py response paths exposed nanoseconds; current versions expose
+    # seconds.  The same explicit conversion used for stream durations keeps the
+    # evidence stable across those wire decoders.
+    if result > 1e10:
+        result /= 1e9
+    if not math.isfinite(result):
+        raise RuntimeError("nats_cutover_malformed_consumer_state")
+    return result
+
+
+def _consumer_optional_bool(config: object, field: str) -> bool:
+    if not hasattr(config, field):
+        raise RuntimeError("nats_cutover_malformed_consumer_state")
+    value = getattr(config, field)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise RuntimeError("nats_cutover_malformed_consumer_state")
+    return value
+
+
+def _consumer_optional_integer(config: object, field: str) -> int:
+    if not hasattr(config, field):
+        raise RuntimeError("nats_cutover_malformed_consumer_state")
+    value = getattr(config, field)
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise RuntimeError("nats_cutover_malformed_consumer_state")
+    return value
+
+
+def _consumer_deliver_subject_present(config: object) -> bool:
+    if not hasattr(config, "deliver_subject"):
+        raise RuntimeError("nats_cutover_malformed_consumer_state")
+    value = getattr(config, "deliver_subject")
+    if value is None:
+        return False
+    if not isinstance(value, str):
+        raise RuntimeError("nats_cutover_malformed_consumer_state")
+    return bool(value.strip())
+
+
+def _consumer_pause_until(config: object) -> str | None:
+    if not hasattr(config, "pause_until"):
+        raise RuntimeError("nats_cutover_malformed_consumer_state")
+    value = getattr(config, "pause_until")
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return _broker_created_text(value)
+    if not isinstance(value, str):
+        raise RuntimeError("nats_cutover_malformed_consumer_state")
+    return value
+
+
+def _consumer_optional_timestamp(config: object, field: str) -> str | None:
+    if not hasattr(config, field):
+        raise RuntimeError("nats_cutover_malformed_consumer_state")
+    value = getattr(config, field)
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return _broker_created_text(value)
+    if not isinstance(value, str):
+        raise RuntimeError("nats_cutover_malformed_consumer_state")
+    return value
+
+
+def _consumer_optional_sequence(config: object, field: str) -> int | None:
+    if not hasattr(config, field):
+        raise RuntimeError("nats_cutover_malformed_consumer_state")
+    value = getattr(config, field)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RuntimeError("nats_cutover_malformed_consumer_state")
+    return value
+
+
+def _consumer_backoff_seconds(config: object) -> tuple[float, ...]:
+    if not hasattr(config, "backoff"):
+        raise RuntimeError("nats_cutover_malformed_consumer_state")
+    raw = getattr(config, "backoff")
+    if raw is None:
+        return ()
+    if not isinstance(raw, (list, tuple)):
+        raise RuntimeError("nats_cutover_malformed_consumer_state")
+    values = tuple(_consumer_duration_seconds(value) for value in raw)
+    if any(value is None for value in values):
+        raise RuntimeError("nats_cutover_malformed_consumer_state")
+    return tuple(float(value) for value in values)
 
 
 def _stream_state(info: object, *, created: str) -> CriticalStreamState:
@@ -1402,12 +2208,16 @@ def evaluate_stream_target(
 
 def _consumer_state(stream: str, info: object) -> ConsumerState:
     config = getattr(info, "config")
+    durable = _required_name(getattr(info, "name"))
+    config_durable = getattr(config, "durable_name")
+    if config_durable is not None and not isinstance(config_durable, str):
+        raise RuntimeError("nats_cutover_malformed_consumer_state")
     created_text = _broker_created_text(getattr(info, "created", None))
     delivered = getattr(info, "delivered")
     ack_floor = getattr(info, "ack_floor")
     return ConsumerState(
         stream=_required_name(stream),
-        durable=_required_name(getattr(info, "name")),
+        durable=durable,
         created=created_text,
         deliver_policy=_policy_text(getattr(config, "deliver_policy")),
         ack_policy=_policy_text(getattr(config, "ack_policy")),
@@ -1433,6 +2243,24 @@ def _consumer_state(stream: str, info: object) -> ConsumerState:
             ack_floor_stream_seq=_sequence_value(ack_floor, "stream_seq"),
             ack_floor_consumer_seq=_sequence_value(ack_floor, "consumer_seq"),
         ),
+        deliver_subject_present=_consumer_deliver_subject_present(config),
+        replay_policy=_policy_text(getattr(config, "replay_policy")),
+        headers_only=_consumer_optional_bool(config, "headers_only"),
+        pause_until=_consumer_pause_until(config),
+        backoff_seconds=_consumer_backoff_seconds(config),
+        rate_limit_bps=_consumer_optional_integer(config, "rate_limit_bps"),
+        inactive_threshold_seconds=_consumer_duration_seconds(
+            getattr(config, "inactive_threshold"),
+            optional=True,
+        ),
+        mem_storage=_consumer_optional_bool(config, "mem_storage"),
+        ack_wait_seconds=float(
+            _consumer_duration_seconds(getattr(config, "ack_wait"))
+        ),
+        max_deliver=_integer_value(config, "max_deliver", non_negative=False),
+        durable_name_matches=config_durable == durable,
+        opt_start_seq=_consumer_optional_sequence(config, "opt_start_seq"),
+        opt_start_time=_consumer_optional_timestamp(config, "opt_start_time"),
     )
 
 
@@ -1478,12 +2306,14 @@ async def query_consumer_states_from_js(js: Any) -> QueryResult:
         )
         consumer_count += len(page)
         consumers.extend(_consumer_state(stream_name, info) for info in page)
-    return QueryResult(
+    result = QueryResult(
         stream_count=len(streams),
         consumer_count=consumer_count,
         consumers=tuple(consumers),
         streams=stream_states,
     )
+    validate_query_result_consumer_projection(result)
+    return result
 
 
 async def query_loopback_nats() -> QueryResult:
@@ -1517,6 +2347,7 @@ def build_evidence(
     stage: str = _STAGE_PRE_FULL_DOWN,
     critical_streams: Sequence[dict[str, object]] = (),
     unexpected_durables: Sequence[dict[str, object]] = (),
+    missing_declared_durables: Sequence[dict[str, object]] = (),
     target_stream_manifest: dict[str, object] | None = None,
     stream_target_compliance: dict[str, object] | None = None,
     previous_preflight: dict[str, object] | None = None,
@@ -1543,6 +2374,33 @@ def build_evidence(
         "PASSED_WITH_TRUST_BOUNDARY",
     }:
         status = "BLOCKED"
+    if missing_declared_durables and status in {
+        "PASSED",
+        "PASSED_WITH_TRUST_BOUNDARY",
+    }:
+        status = "BLOCKED"
+    event_row_count = 0
+    non_event_row_count = 0
+    row_blockers: set[str] = set()
+    for row in rows:
+        identity = row.get("identity")
+        semantics = (
+            identity.get("delivery_semantics")
+            if isinstance(identity, dict)
+            else None
+        )
+        if semantics == "event":
+            event_row_count += 1
+        elif semantics in {"snapshot", "transient"}:
+            non_event_row_count += 1
+        blockers = row.get("blockers")
+        if isinstance(blockers, list):
+            row_blockers.update(str(blocker) for blocker in blockers)
+    if unexpected_durables:
+        row_blockers.add("consumer_owner_not_declared")
+    if missing_declared_durables:
+        row_blockers.add("declared_consumer_missing")
+    blocker_classes = sorted(row_blockers)
     evidence: dict[str, object] = {
         "schema_version": _SCHEMA_VERSION,
         "stage": stage,
@@ -1561,7 +2419,9 @@ def build_evidence(
             "consumers_scanned": (
                 query_result.consumer_count if query_result is not None else 0
             ),
-            "critical_all_durables_found": len(rows),
+            "declared_durables_found": len(rows),
+            "critical_all_durables_found": event_row_count,
+            "known_non_event_durables_found": non_event_row_count,
             "critical_streams_found": len(critical_streams),
         },
         "critical_streams": list(critical_streams),
@@ -1569,24 +2429,64 @@ def build_evidence(
         "stream_target_compliance": stream_target_compliance,
         "durables": list(rows),
         "unexpected_durables": list(unexpected_durables),
+        "missing_declared_durables": list(missing_declared_durables),
         "app_quiescence": app_quiescence,
         "nats_bootstrap": nats_bootstrap,
         "nats_query_fingerprint": nats_query_fingerprint,
         "previous_preflight": previous_preflight,
         "continuity": continuity,
+        "blocker_classes": blocker_classes,
     }
     if status == "BLOCKED":
+        if "consumer_owner_not_declared" in blocker_classes:
+            instruction_code = (
+                "nats_durable_cutover_requires_approved_unknown_consumer_release_review"
+            )
+            instruction = (
+                "Keep NATS and persistent state online. A durable is not owned "
+                "by the current split-runtime manifest. Establish its human "
+                "owner and retention requirement before any approved removal; "
+                "never auto-ack, delete, recreate, reset, or purge it."
+            )
+        elif any(
+            blocker in blocker_classes
+            for blocker in (
+                "ack_window_migration_requires_drain",
+                "outstanding_exceeds_target",
+            )
+        ):
+            instruction_code = (
+                "nats_durable_cutover_requires_approved_all_cursor_drain"
+            )
+            instruction = (
+                "Keep NATS and persistent state online. Drain the matching "
+                "critical ALL consumer naturally to zero under an approved "
+                "change window, then rerun this preflight. Never auto-ack, "
+                "delete, recreate, reset, or purge its financial event cursor."
+            )
+        elif "declared_consumer_missing" in blocker_classes:
+            instruction_code = (
+                "nats_durable_cutover_requires_approved_missing_consumer_review"
+            )
+            instruction = (
+                "Keep NATS and persistent state online. A consumer declared by "
+                "the current release is absent from the preserved broker. "
+                "Review cursor/replay consequences before provisioning it; "
+                "never create, reset, or replace financial state implicitly."
+            )
+        else:
+            instruction_code = (
+                "nats_durable_cutover_requires_approved_config_release_review"
+            )
+            instruction = (
+                "Keep NATS and persistent state online. Declared consumer or "
+                "stream configuration differs from the release contract and "
+                "requires human review. Never auto-ack, delete, recreate, "
+                "reset, or purge critical state."
+            )
         evidence["recovery"] = {
-            "instruction_code": (
-                "nats_durable_cutover_requires_approved_legacy_drain_or_release_review"
-            ),
-            "instruction": (
-                "Keep NATS and persistent state online. For outstanding-only "
-                "blockers, use the matching legacy consumer under an approved "
-                "change window to drain naturally to zero, then rerun this "
-                "preflight. Immutable drift requires human release review. "
-                "Never auto-ack, delete, update, recreate, reset, or purge."
-            ),
+            "instruction_code": instruction_code,
+            "instruction": instruction,
         }
     if error_code is not None:
         evidence["error_code"] = error_code
@@ -1825,7 +2725,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             query_result.consumers,
             expected,
         )
-        blocked = blocked or bool(unexpected_durables)
+        missing_declared_durables = (
+            build_missing_declared_durable_rows(
+                query_result.consumers,
+                expected,
+            )
+            if nats_bootstrap["mode"] == "existing_container_preserved"
+            else []
+        )
+        blocked = (
+            blocked
+            or bool(unexpected_durables)
+            or bool(missing_declared_durables)
+        )
         critical_streams = build_critical_stream_rows(query_result.streams)
         stream_target_compliance, stream_target_blocked = evaluate_stream_target(
             actual_streams=critical_streams,
@@ -1875,6 +2787,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             stage=args.stage,
             critical_streams=critical_streams,
             unexpected_durables=unexpected_durables,
+            missing_declared_durables=missing_declared_durables,
             target_stream_manifest=target_stream_manifest,
             stream_target_compliance=stream_target_compliance,
             previous_preflight=previous_reference,

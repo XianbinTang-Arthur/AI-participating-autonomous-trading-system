@@ -222,6 +222,38 @@ def _consumer(durable: str) -> cutover.ConsumerState:
     )
 
 
+def _stream(*, consumer_count: int) -> cutover.CriticalStreamState:
+    manifest = cutover._default_target_stream_manifest()
+    row = next(
+        item
+        for item in manifest["streams"]
+        if item["identity"]["name"] == "AATS_EVENTS_COMMANDS"
+    )
+    config = row["immutable_config"]
+    return cutover.CriticalStreamState(
+        name="AATS_EVENTS_COMMANDS",
+        created="2026-08-28T00:00:00Z",
+        subjects=tuple(config["subjects"]),
+        retention=config["retention"],
+        storage=config["storage"],
+        discard=config["discard"],
+        max_age_seconds=config["max_age_seconds"],
+        max_bytes=config["max_bytes"],
+        max_msgs=config["max_msgs"],
+        max_msg_size=config["max_msg_size"],
+        num_replicas=config["num_replicas"],
+        duplicate_window_seconds=config["duplicate_window_seconds"],
+        deny_purge=config["deny_purge"],
+        messages=0,
+        bytes=0,
+        first_seq=0,
+        last_seq=0,
+        consumer_count=consumer_count,
+        deleted=(),
+        num_deleted=0,
+    )
+
+
 def test_final_nats_state_rejects_unexpected_legacy_consumer(
     monkeypatch,
 ) -> None:
@@ -238,13 +270,13 @@ def test_final_nats_state_rejects_unexpected_legacy_consumer(
         lambda: {expected.durable: expected},
     )
     result = cutover.QueryResult(
-        stream_count=0,
+        stream_count=1,
         consumer_count=2,
         consumers=(
             _consumer(expected.durable),
             _consumer("legacy-unowned-consumer"),
         ),
-        streams=(),
+        streams=(_stream(consumer_count=2),),
     )
 
     with pytest.raises(

@@ -980,6 +980,148 @@ def build_consumer_config_spec(
     )
 
 
+def consumer_mutable_config_migration_blockers(
+    *,
+    delivery_semantics: str,
+    current_ack_wait_seconds: object,
+    target_ack_wait_seconds: object,
+    current_max_deliver: object,
+    target_max_deliver: object,
+) -> tuple[str, ...]:
+    """Return unsafe mutable consumer drift under the release contract.
+
+    ``max_ack_pending`` has its own outstanding-aware cutover rules and is
+    intentionally not evaluated here.  The remaining mutable fields cannot be
+    treated as generic JetStream updates: an event consumer's ``ack_wait`` is
+    part of its reviewed delivery contract, and changing ``max_deliver`` can
+    silently change loss/retry behavior.  Snapshot/transient consumers may
+    only increase a finite positive ``ack_wait`` to the declared target.
+
+    This pure helper is shared by the read-only deployment preflight and the
+    runtime binder so the preflight cannot promise a stricter policy than the
+    process that later consumes the durable.
+    """
+
+    def _positive_finite_number(value: object) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        normalized = float(value)
+        if not math.isfinite(normalized) or normalized <= 0.0:
+            return None
+        return normalized
+
+    blockers: list[str] = []
+    current_ack_wait = _positive_finite_number(current_ack_wait_seconds)
+    target_ack_wait = _positive_finite_number(target_ack_wait_seconds)
+    ack_wait_matches = (
+        current_ack_wait is not None
+        and target_ack_wait is not None
+        and current_ack_wait == target_ack_wait
+    )
+    if not ack_wait_matches:
+        safe_non_event_raise = (
+            delivery_semantics in {"snapshot", "transient"}
+            and current_ack_wait is not None
+            and target_ack_wait is not None
+            and target_ack_wait > current_ack_wait
+        )
+        if not safe_non_event_raise:
+            blockers.append("ack_wait_drift")
+
+    max_deliver_matches = (
+        not isinstance(current_max_deliver, bool)
+        and isinstance(current_max_deliver, int)
+        and not isinstance(target_max_deliver, bool)
+        and isinstance(target_max_deliver, int)
+        and current_max_deliver == target_max_deliver
+    )
+    if not max_deliver_matches:
+        blockers.append("max_deliver_drift")
+    return tuple(blockers)
+
+
+def _consumer_behavior_config_drift(config: Any) -> list[str]:
+    """Return fail-closed drift for safety-critical push-consumer behavior.
+
+    ``deliver_subject`` is intentionally reduced to a presence check: the
+    server assigns the inbox dynamically, so comparing its raw value would be
+    unstable and would expose a transport identifier without adding safety.
+    The remaining fields can suppress payloads, delay replay, expire a durable,
+    or move its state into volatile storage.  None of those behaviors belongs
+    to the canonical AATS consumer contract.
+    """
+
+    drift: list[str] = []
+    deliver_subject = getattr(config, "deliver_subject", None)
+    if not isinstance(deliver_subject, str) or not deliver_subject.strip():
+        drift.append("deliver_subject")
+
+    replay_policy = getattr(config, "replay_policy", None)
+    replay_policy_value = getattr(replay_policy, "value", replay_policy)
+    if replay_policy_value != "instant":
+        drift.append("replay_policy")
+    if getattr(config, "deliver_group", None) not in {None, ""}:
+        drift.append("deliver_group")
+
+    headers_only = getattr(config, "headers_only", None)
+    if headers_only is not None and headers_only is not False:
+        drift.append("headers_only")
+    if getattr(config, "pause_until", None) is not None:
+        drift.append("pause_until")
+
+    backoff = getattr(config, "backoff", None)
+    if backoff is not None and not (
+        isinstance(backoff, (list, tuple)) and not backoff
+    ):
+        drift.append("backoff")
+    rate_limit_bps = getattr(config, "rate_limit_bps", None)
+    if rate_limit_bps is not None and rate_limit_bps != 0:
+        drift.append("rate_limit_bps")
+    if getattr(config, "inactive_threshold", None) is not None:
+        drift.append("inactive_threshold")
+    mem_storage = getattr(config, "mem_storage", None)
+    if mem_storage is not None and mem_storage is not False:
+        drift.append("mem_storage")
+    if getattr(config, "opt_start_seq", None) is not None:
+        drift.append("opt_start_seq")
+    if getattr(config, "opt_start_time", None) is not None:
+        drift.append("opt_start_time")
+    return drift
+
+
+def _consumer_cursor_snapshot(info: Any) -> tuple[int, int, int, int]:
+    """Normalize the broker's durable cursor without accepting malformed data."""
+
+    def _sequence_pair(value: Any) -> tuple[int, int]:
+        if value is None:
+            return (0, 0)
+        stream_seq = getattr(value, "stream_seq", None)
+        consumer_seq = getattr(value, "consumer_seq", None)
+        if (
+            not isinstance(stream_seq, int)
+            or isinstance(stream_seq, bool)
+            or stream_seq < 0
+            or not isinstance(consumer_seq, int)
+            or isinstance(consumer_seq, bool)
+            or consumer_seq < 0
+        ):
+            raise ValueError("invalid_consumer_cursor")
+        return (stream_seq, consumer_seq)
+
+    delivered_stream, delivered_consumer = _sequence_pair(
+        getattr(info, "delivered", None)
+    )
+    ack_stream, ack_consumer = _sequence_pair(
+        getattr(info, "ack_floor", None)
+    )
+    return (
+        delivered_stream,
+        delivered_consumer,
+        ack_stream,
+        ack_consumer,
+    )
+
+
 @dataclass(slots=True)
 class _ConsumerSupervisionTarget:
     """Expected state and bounded-failure bookkeeping for one critical durable."""
@@ -988,6 +1130,9 @@ class _ConsumerSupervisionTarget:
     durable: str
     topic: str
     subject: str
+    created: Any
+    deliver_subject: str
+    cursor: tuple[int, int, int, int]
     ack_policy: Any
     deliver_policy: Any
     ack_wait: float
@@ -1608,6 +1753,7 @@ class NatsEventBus(EventBus):
                 AckPolicy,
                 ConsumerConfig,
                 DeliverPolicy,
+                ReplayPolicy,
             )
             from nats.js.errors import NotFoundError  # type: ignore[import-not-found]
         except ImportError as exc:
@@ -1885,12 +2031,21 @@ class NatsEventBus(EventBus):
             max_ack_pending=effective_max_ack_pending,
             max_deliver=spec.max_deliver,
             deliver_policy=dp,
+            replay_policy=ReplayPolicy.INSTANT,
+            backoff=None,
+            rate_limit_bps=None,
             flow_control=spec.flow_control if spec.flow_control else None,
             idle_heartbeat=(
                 spec.idle_heartbeat_seconds
                 if spec.flow_control and spec.idle_heartbeat_seconds > 0
                 else None
             ),
+            headers_only=False,
+            opt_start_seq=None,
+            opt_start_time=None,
+            inactive_threshold=None,
+            mem_storage=False,
+            pause_until=None,
         )
 
         # Consumer 迁移：已有 durable consumer 的 deliver_policy 不匹配时，
@@ -1906,6 +2061,37 @@ class NatsEventBus(EventBus):
 
         if existing_info is not None:
             current = existing_info.config
+            mutable_migration_blockers = (
+                consumer_mutable_config_migration_blockers(
+                    delivery_semantics=delivery_semantics_for(topic),
+                    current_ack_wait_seconds=getattr(
+                        current,
+                        "ack_wait",
+                        None,
+                    ),
+                    target_ack_wait_seconds=consumer_config.ack_wait,
+                    current_max_deliver=getattr(
+                        current,
+                        "max_deliver",
+                        None,
+                    ),
+                    target_max_deliver=consumer_config.max_deliver,
+                )
+            )
+            if mutable_migration_blockers:
+                log_event(
+                    self.logger,
+                    "nats_consumer_mutable_config_drift",
+                    level="critical",
+                    topic=topic,
+                    durable=durable,
+                    stream=stream_name,
+                    drift=list(mutable_migration_blockers),
+                )
+                raise RuntimeError(
+                    "nats_critical_consumer_mutable_config_drift:"
+                    f"{durable}:{','.join(mutable_migration_blockers)}"
+                )
             current_filters = tuple(current.filter_subjects or ())
             filter_matches = (
                 current.filter_subject == subject and not current_filters
@@ -1914,14 +2100,17 @@ class NatsEventBus(EventBus):
                 and current_filters == (subject,)
             )
             immutable_drift: list[str] = []
+            if getattr(existing_info, "name", None) != durable:
+                immutable_drift.append("consumer_name")
+            if current.durable_name != durable:
+                immutable_drift.append("durable_name")
             if current.deliver_policy != consumer_config.deliver_policy:
                 immutable_drift.append("deliver_policy")
             if current.ack_policy != consumer_config.ack_policy:
                 immutable_drift.append("ack_policy")
             if not filter_matches:
                 immutable_drift.append("filter_subject")
-            if current.deliver_group not in {None, ""}:
-                immutable_drift.append("deliver_group")
+            immutable_drift.extend(_consumer_behavior_config_drift(current))
             if (
                 bool(current.flow_control) != bool(consumer_config.flow_control)
                 or float(current.idle_heartbeat or 0.0)
@@ -1971,6 +2160,31 @@ class NatsEventBus(EventBus):
                     stream=stream_name,
                     drift=immutable_drift,
                 )
+
+        existing_identity: tuple[
+            Any,
+            str,
+            tuple[int, int, int, int],
+        ] | None = None
+        if existing_info is not None and topic in DEFAULT_CRITICAL_TOPICS:
+            existing_created = getattr(existing_info, "created", None)
+            if existing_created is None:
+                raise RuntimeError(
+                    "nats_critical_consumer_existing_identity_unavailable:"
+                    f"{durable}:created_unavailable"
+                )
+            try:
+                existing_cursor = _consumer_cursor_snapshot(existing_info)
+            except ValueError as exc:
+                raise RuntimeError(
+                    "nats_critical_consumer_existing_cursor_invalid:"
+                    f"{durable}"
+                ) from exc
+            existing_identity = (
+                existing_created,
+                current.deliver_subject,
+                existing_cursor,
+            )
 
         if existing_info is not None:
             current = existing_info.config
@@ -2039,6 +2253,10 @@ class NatsEventBus(EventBus):
                 # semantics.
                 await self._js.delete_consumer(stream_name, durable)
                 existing_info = None
+                # This is the explicit disposable-cursor recovery branch; the
+                # replacement becomes the first valid continuity baseline only
+                # after its post-bind identity proof succeeds.
+                existing_identity = None
                 log_event(
                     self.logger,
                     "nats_non_event_consumer_rebuilt_for_ack_window",
@@ -2095,6 +2313,43 @@ class NatsEventBus(EventBus):
                     for field_name, expected in mutable_targets.items()
                     if getattr(verified_info.config, field_name) != expected
                 ]
+                if verified_info.config.durable_name != durable:
+                    uncorrected.append("durable_name")
+                uncorrected.extend(
+                    _consumer_behavior_config_drift(verified_info.config)
+                )
+                verified_cursor: tuple[int, int, int, int] | None = None
+                if existing_identity is not None:
+                    (
+                        existing_created,
+                        existing_deliver_subject,
+                        existing_cursor,
+                    ) = existing_identity
+                    if getattr(verified_info, "name", None) != durable:
+                        uncorrected.append("consumer_name")
+                    if getattr(verified_info, "created", None) != existing_created:
+                        uncorrected.append("created")
+                    if (
+                        verified_info.config.deliver_subject
+                        != existing_deliver_subject
+                    ):
+                        uncorrected.append("deliver_subject_binding")
+                    try:
+                        verified_cursor = _consumer_cursor_snapshot(
+                            verified_info
+                        )
+                    except ValueError:
+                        uncorrected.append("cursor_invalid")
+                    else:
+                        if any(
+                            current < previous
+                            for current, previous in zip(
+                                verified_cursor,
+                                existing_cursor,
+                                strict=True,
+                            )
+                        ):
+                            uncorrected.append("cursor_regressed")
                 if uncorrected:
                     log_event(
                         self.logger,
@@ -2108,6 +2363,13 @@ class NatsEventBus(EventBus):
                     raise RuntimeError(
                         f"nats_consumer_in_place_update_unverified:{durable}:"
                         f"{','.join(uncorrected)}"
+                    )
+                if existing_identity is not None:
+                    assert verified_cursor is not None
+                    existing_identity = (
+                        existing_identity[0],
+                        existing_identity[1],
+                        verified_cursor,
                     )
                 log_event(
                     self.logger,
@@ -2135,14 +2397,160 @@ class NatsEventBus(EventBus):
             ),
         )
 
+        supervision_identity: tuple[
+            Any,
+            str,
+            tuple[int, int, int, int],
+        ] | None = None
+        if topic in DEFAULT_CRITICAL_TOPICS:
+            binding_subject = getattr(sub, "subject", None)
+            if not isinstance(binding_subject, str) or not binding_subject:
+                await self._discard_unverified_subscription(
+                    sub=sub,
+                    durable=durable,
+                    reason="binding_subject_unavailable",
+                )
+                raise RuntimeError(
+                    "nats_critical_consumer_post_bind_identity_unavailable:"
+                    f"{durable}:binding_subject_unavailable"
+                )
+            try:
+                bound_info = await asyncio.wait_for(
+                    sub.consumer_info(),
+                    timeout=(
+                        self._config.consumer_supervision_interval_seconds
+                    ),
+                )
+            except Exception as exc:
+                await self._discard_unverified_subscription(
+                    sub=sub,
+                    durable=durable,
+                    reason="consumer_info_unavailable",
+                )
+                raise RuntimeError(
+                    "nats_critical_consumer_post_bind_query_failed:"
+                    f"{durable}"
+                ) from exc
+
+            bound_config = bound_info.config
+            bound_filters = tuple(bound_config.filter_subjects or ())
+            bound_filter_matches = (
+                bound_config.filter_subject == subject and not bound_filters
+            ) or (
+                bound_config.filter_subject in {None, ""}
+                and bound_filters == (subject,)
+            )
+            post_bind_drift: list[str] = []
+            if getattr(bound_info, "name", None) != durable:
+                post_bind_drift.append("consumer_name")
+            if bound_config.durable_name != durable:
+                post_bind_drift.append("durable_name")
+            if bound_config.ack_policy != consumer_config.ack_policy:
+                post_bind_drift.append("ack_policy")
+            if bound_config.deliver_policy != consumer_config.deliver_policy:
+                post_bind_drift.append("deliver_policy")
+            if float(bound_config.ack_wait or 0.0) != float(
+                consumer_config.ack_wait or 0.0
+            ):
+                post_bind_drift.append("ack_wait")
+            if int(bound_config.max_ack_pending or 0) != int(
+                consumer_config.max_ack_pending or 0
+            ):
+                post_bind_drift.append("max_ack_pending")
+            if int(bound_config.max_deliver or 0) != int(
+                consumer_config.max_deliver or 0
+            ):
+                post_bind_drift.append("max_deliver")
+            if not bound_filter_matches:
+                post_bind_drift.append("filter_subject")
+            post_bind_drift.extend(
+                _consumer_behavior_config_drift(bound_config)
+            )
+            if bound_config.deliver_subject != binding_subject:
+                post_bind_drift.append("deliver_subject_binding")
+            if post_bind_drift:
+                await self._discard_unverified_subscription(
+                    sub=sub,
+                    durable=durable,
+                    reason="config_drift",
+                )
+                raise RuntimeError(
+                    "nats_critical_consumer_post_bind_config_drift:"
+                    f"{durable}:{','.join(post_bind_drift)}"
+                )
+
+            created = getattr(bound_info, "created", None)
+            if created is None:
+                await self._discard_unverified_subscription(
+                    sub=sub,
+                    durable=durable,
+                    reason="created_unavailable",
+                )
+                raise RuntimeError(
+                    "nats_critical_consumer_post_bind_identity_unavailable:"
+                    f"{durable}:created_unavailable"
+                )
+            try:
+                initial_cursor = _consumer_cursor_snapshot(bound_info)
+            except ValueError as exc:
+                await self._discard_unverified_subscription(
+                    sub=sub,
+                    durable=durable,
+                    reason="cursor_invalid",
+                )
+                raise RuntimeError(
+                    "nats_critical_consumer_post_bind_cursor_invalid:"
+                    f"{durable}"
+                ) from exc
+            if existing_identity is not None:
+                (
+                    existing_created,
+                    existing_deliver_subject,
+                    existing_cursor,
+                ) = existing_identity
+                continuity_drift: list[str] = []
+                if created != existing_created:
+                    continuity_drift.append("created")
+                if binding_subject != existing_deliver_subject:
+                    continuity_drift.append("deliver_subject_binding")
+                if any(
+                    current < previous
+                    for current, previous in zip(
+                        initial_cursor,
+                        existing_cursor,
+                        strict=True,
+                    )
+                ):
+                    continuity_drift.append("cursor_regressed")
+                if continuity_drift:
+                    await self._discard_unverified_subscription(
+                        sub=sub,
+                        durable=durable,
+                        reason="continuity_drift",
+                    )
+                    raise RuntimeError(
+                        "nats_critical_consumer_post_bind_identity_drift:"
+                        f"{durable}:{','.join(continuity_drift)}"
+                    )
+            supervision_identity = (
+                created,
+                binding_subject,
+                initial_cursor,
+            )
+
         self._subscriptions.append(sub)
         if topic in DEFAULT_CRITICAL_TOPICS:
+            assert supervision_identity is not None
+            created, binding_subject, initial_cursor = supervision_identity
             self._consumer_supervision_targets[durable] = (
                 _ConsumerSupervisionTarget(
                     stream_name=stream_name,
                     durable=durable,
                     topic=topic,
                     subject=subject,
+                    created=created,
+                    deliver_subject=binding_subject,
+                    cursor=initial_cursor,
                     ack_policy=consumer_config.ack_policy,
                     deliver_policy=consumer_config.deliver_policy,
                     ack_wait=float(consumer_config.ack_wait or 0.0),
@@ -2167,6 +2575,40 @@ class NatsEventBus(EventBus):
             flow_control=spec.flow_control,
             idle_heartbeat_seconds=spec.idle_heartbeat_seconds,
         )
+
+    async def _discard_unverified_subscription(
+        self,
+        *,
+        sub: Any,
+        durable: str,
+        reason: str,
+    ) -> None:
+        """Abort delivery and detach locally after post-bind proof fails."""
+
+        if self._delivery_gate is not None:
+            self._delivery_gate.abort()
+        unsubscribe_timeout = max(
+            0.001,
+            min(
+                5.0,
+                self._config.consumer_supervision_interval_seconds,
+            ),
+        )
+        try:
+            await asyncio.wait_for(
+                sub.unsubscribe(),
+                timeout=unsubscribe_timeout,
+            )
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "nats_unverified_subscription_cleanup_failed",
+                level="critical",
+                durable=durable,
+                reason=reason,
+                error_type=type(exc).__name__,
+                timeout_seconds=unsubscribe_timeout,
+            )
 
     async def _wait_for_delivery_activation(
         self,
@@ -2261,14 +2703,6 @@ class NatsEventBus(EventBus):
         )
         self._mark_terminal_connection_failure("consumer_delivery_unhealthy")
         return True
-
-    @staticmethod
-    def _consumer_progress_signature(info: Any) -> tuple[int, ...]:
-        ack_floor = getattr(info, "ack_floor", None)
-        return (
-            int(getattr(ack_floor, "stream_seq", 0) or 0),
-            int(getattr(ack_floor, "consumer_seq", 0) or 0),
-        )
 
     async def _supervise_critical_consumers_once(
         self,
@@ -2375,6 +2809,10 @@ class NatsEventBus(EventBus):
                     and current_filters == (target.subject,)
                 )
                 config_drift: list[str] = []
+                if getattr(info, "name", None) != target.durable:
+                    config_drift.append("consumer_name")
+                if current.durable_name != target.durable:
+                    config_drift.append("durable_name")
                 if current.ack_policy != target.ack_policy:
                     config_drift.append("ack_policy")
                 if current.deliver_policy != target.deliver_policy:
@@ -2387,6 +2825,7 @@ class NatsEventBus(EventBus):
                     config_drift.append("max_deliver")
                 if not filter_matches:
                     config_drift.append("filter_subject")
+                config_drift.extend(_consumer_behavior_config_drift(current))
                 if config_drift:
                     log_event(
                         self.logger,
@@ -2399,6 +2838,61 @@ class NatsEventBus(EventBus):
                     )
                     self._mark_terminal_connection_failure(
                         "consumer_config_drift"
+                    )
+                    return
+
+                identity_drift: list[str] = []
+                if getattr(info, "created", None) != target.created:
+                    identity_drift.append("created")
+                if current.deliver_subject != target.deliver_subject:
+                    identity_drift.append("deliver_subject_binding")
+                if identity_drift:
+                    log_event(
+                        self.logger,
+                        "nats_critical_consumer_runtime_identity_drift",
+                        level="critical",
+                        topic=target.topic,
+                        durable=target.durable,
+                        stream=target.stream_name,
+                        drift=identity_drift,
+                    )
+                    self._mark_terminal_connection_failure(
+                        "consumer_identity_drift"
+                    )
+                    return
+                try:
+                    current_cursor = _consumer_cursor_snapshot(info)
+                except ValueError:
+                    log_event(
+                        self.logger,
+                        "nats_critical_consumer_runtime_cursor_invalid",
+                        level="critical",
+                        topic=target.topic,
+                        durable=target.durable,
+                        stream=target.stream_name,
+                    )
+                    self._mark_terminal_connection_failure(
+                        "consumer_cursor_invalid"
+                    )
+                    return
+                if any(
+                    current < previous
+                    for current, previous in zip(
+                        current_cursor,
+                        target.cursor,
+                        strict=True,
+                    )
+                ):
+                    log_event(
+                        self.logger,
+                        "nats_critical_consumer_runtime_cursor_regressed",
+                        level="critical",
+                        topic=target.topic,
+                        durable=target.durable,
+                        stream=target.stream_name,
+                    )
+                    self._mark_terminal_connection_failure(
+                        "consumer_cursor_regressed"
                     )
                     return
 
@@ -2434,12 +2928,13 @@ class NatsEventBus(EventBus):
                     continue
                 target.health_failure_since = None
                 target.health_failure_kind = None
+                target.cursor = current_cursor
 
                 gate_inactive = (
                     self._delivery_gate is not None
                     and not self._delivery_gate.activated
                 )
-                signature = self._consumer_progress_signature(info)
+                signature = (current_cursor[2], current_cursor[3])
                 num_pending = int(getattr(info, "num_pending", 0) or 0)
                 num_ack_pending = int(
                     getattr(info, "num_ack_pending", 0) or 0

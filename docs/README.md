@@ -1,7 +1,7 @@
 # AATS 文档地图与适用边界
 
 > 文档状态：现行全仓文档入口
-> 最后核对：2026-08-28（起始 HEAD `82e600842a7ef360ab63c103c6dea1eae2267898`；含当前 FS-016 readiness lease 重启安全候选，以本文档所在最终 HEAD 为准）
+> 最后核对：2026-08-29（核对基线 `main@f9bb249964364d457cd307f8ea427a65b7320888` + 当前 FS-016 NATS exact-ownership 候选；以本文档所在最终 HEAD 为准）
 > 核对范围：当前代码、迁移、配置、测试与文档入口的静态复核；不证明现场容器、数据库、交易所或资金状态
 
 本页解决一个长期问题：仓库同时保存当前规范、专题参考、历史设计、审查报告、任务书和一次性观察记录。文件仍在仓库中，不代表它描述当前行为。
@@ -204,22 +204,45 @@
   入口停净七个已知应用后记录容器 ID/status/StartedAt/FinishedAt/RestartCount，并在 preflight
   前后查询精确时间窗内的 Docker lifecycle events；基础设施-only up 后、full-down 前执行第一次
   loopback 全量分页只读 durable preflight，full-down 后重建基线，infra/schema 后、app up 前执行
-  第二次。v2 PASS 绑定 lock id、generation、deployed commit 与 quiescence，最终部署证据校验同值并
-  记录最后一次证据的路径/hash。阻断、查询失败或 quiescence 变化保留 NATS 在线；标准 stop 仍不是
-  drain 证明。NATS 八键容量目标在同步后冻结为 root-owned `0444` 白名单快照，preflight、Compose
+  第二次。schema v3 的 ownership manifest 是 `aats/bus/consumer_ownership.py` 中人工维护的
+  authoritative declaration；动态 topology 契约测试会实际装配四个 `build_runtime()` 并证明两者
+  精确一致。manifest 声明 `77` 个 stream-backed durable：gateway `31`、market `8`、decision `27`、
+  execution `11`；其中 event `49`、snapshot `24`、transient `4`。preflight 必须同时证明查询分页/
+  计数、每个 stream 的 consumer 数量、声明集合与实际集合精确一致；
+  `existing_container_preserved` 下任一声明项缺失或任一实际 consumer 未归属都阻断；
+  `proven_fresh_install` 的 preflight 反而要求 broker consumer 集合为空，app-up 后最终证据才要求 exact
+  `77`。符合相应 bootstrap mode 时，PASS 绑定 lock id、generation、deployed commit 与 quiescence，
+  最终部署证据校验同值、记录 preflight
+  路径/hash，并封存两次最终 no-secret canonical durable projection 及各自 SHA-256，使 identity、created、
+  四维 cursor、配置、窗口、outstanding 和状态可独立复核。阻断、查询失败或 quiescence 变化保留 NATS
+  在线；标准 stop 仍不是 drain 证明。NATS 八键容量目标在同步后冻结为 root-owned `0444` 白名单快照，preflight、Compose
   末位 `env_file`、所有必需容器 manifest label 与最终证据绑定同一摘要；NATS 身份还校验固定
   `Config.Image` pin 及其实际 image ID。应用通过健康边界后主动观察 40 秒，应用与 NATS 均每 2 秒
   主动复核；NATS 的滚动 `Health.Log` 独立于稳定身份 fingerprint，但部署观察和最终 writer 会按同一
   边界拒绝非零结果，并要求至少一次边界后的成功检查。最终逻辑窗限定为 35–60 秒；Docker event
   证据仍明确只是 bounded observation。
   该路径已完成代码、聚焦测试及 Windows Git Bash -> WSL 锁竞争/释放/重取窄 smoke，尚未完成真实
-  标准部署。LAST/NEW 运行时重建仅受 strict delivery gate、非 ALL policy，以及
-  “outstanding 超过目标”或“收缩窗口且 outstanding 非零”条件约束，自动重启也可能触发；标准
-  full-down 是额外发布门禁，不是运行时信号。
-  当前候选在最后一次 NATS 健康窗及 WSL completion ACK、输出完整性、幂等 proof、marker cleanup、
-  durable marker scan 与单事务代码同步修复后已通过 `213` 项
-  FS-016 聚焦回归、`173` 项根级独立聚焦复跑、六项隔离 smoke 和
-  `6434 passed / 31 skipped / 259 subtests passed` 全量单测；真
+  标准部署。runtime 对现存 durable 在 update/bind 前冻结 broker `created`、真实 push inbox 与四维
+  cursor；update 回读、post-bind、READY 前和稳态监督均拒绝同名重建、inbox 漂移、cursor 回退及安全
+  投影内的行为配置漂移。实际 inbox 只在进程内比较，日志/证据仅保存是否存在。flow control 与 idle
+  heartbeat 的历史差异当前保留并告警，不在 qualification/supervisor 投影内，仍需运行验收。共享迁移
+  规则只允许 snapshot/transient 的正数 `ack_wait` 向声明目标增加；event `ack_wait` 或任意
+  `max_deliver` drift 继续阻断。“LAST/NEW 重建仅受 gate/policy/outstanding 条件约束”只描述
+  ACK-window rebuild；snapshot/transient 的 safety-projection immutable drift 另有声明丢弃语义重建
+  分支。标准 preflight 会先阻断此类 drift，故它不是发布绕行许可。自动重启也可能进入运行时分支；
+  标准 full-down 是额外发布门禁，不是运行时信号。
+  2026-08-29 03:43Z 的最新标准 derivatives 尝试使用已提交 `f9bb2499` 的旧 schema v2 checker：它在
+  停净七个应用后扫描 `78` 个 consumer，只识别 `49` 个 event durable，并把 `29` 个列为 unexpected；
+  其中 `28` 个后来由 v3 manifest 识别为合法 snapshot/transient，另一个是
+  `aats-codex_manual_resume-system_operator_command_responses`。因此该 artifact 只能证明旧 v2 模型过窄并
+  安全阻断，不能证明 v3 的 `77+1` 资格。当前候选代码随后对同一 broker 做过非发布只读诊断，得到
+  声明 `77` + 未归属 `1`，但尚未形成标准 v3 preflight artifact；必须先提交，再经标准入口重跑确认。应用容器
+  当前保持停止，NATS/Redis/Postgres 在线；未知 durable 必须由真人 owner/release review 决定，代码不得
+  自动删除。
+  当前候选在最后一次 NATS 健康窗、WSL completion ACK、exact ownership、runtime TOCTOU 与最终
+  canonical durable evidence 修复后，相关聚焦测试与完整单元测试已通过，独立终审未留下 P0/P1；
+  精确测试计数保存在当次 FS-016 交付记录中，不在本现行索引固化。此前六项隔离 smoke
+  仍不等同于真实标准部署；真
   Redis/NATS/Docker 故障注入、标准
   部署、逐角色重启、双故障与下游 fencing 均 `OPEN`，真实资金继续 `NO-GO`。详见现行
   [`task/fs_016_runtime_readiness_lease_restart_safety_p0_sow_2026_08_28.md`](task/fs_016_runtime_readiness_lease_restart_safety_p0_sow_2026_08_28.md)
