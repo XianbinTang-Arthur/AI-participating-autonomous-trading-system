@@ -1,7 +1,7 @@
 # AATS Task 与 SOW 历史索引
 
 > 文档状态：任务与交付历史证据索引（截至 2026-08-29）
-> 最后核对：2026-08-29（补录 FS-016 NATS exact ownership/schema v3 候选与最新失败关闭现场；其余历史状态边界不变）
+> 最后核对：2026-08-29（补录 FS-016 NATS exact ownership/schema v3 已提交实现与 05:54Z 标准失败关闭现场；其余历史状态边界不变）
 > 核对范围：任务文件存在性、索引与各任务自报状态；不把任务状态升级为运行时或生产事实
 
 本目录保存任务书、SOW、阶段设计、实施记录和交付报告。它是工程可追溯性材料，不是当前系统说明；“完成”“通过”“上线”等措辞只对文件记录的基线和验证范围成立。
@@ -147,14 +147,14 @@
   LAST/NEW 的 ACK-window backlog 与 immutable-drift 重建是两个声明丢弃语义分支；full-down 是额外发布
   门禁，不是运行时信号。真实 NATS
   consumer-delete 集成已通过，锁竞争/释放/重取、WSL completion ACK、输出完整性、幂等 proof 重试与
-  marker cleanup 有窄 smoke；当前 exact-ownership 候选的聚焦与全量单测已通过，精确计数记录在
+  marker cleanup 有窄 smoke；当前 exact-ownership 提交的聚焦与全量单测已通过，精确计数记录在
   FS-016 当次交付正文，独立终审无 P0/P1。2026-08-29
-  标准入口仍运行已提交的旧 v2 checker：扫描 `78`、只认识 `49` 个 event，并把 `28` 个合法非事件
-  consumer 和 `1` 个未知 consumer 一并列为 `29` unexpected 后安全阻断；该 artifact 不能冒充 v3
-  资格证据。七个 app 保持停止，候选 v3 尚待提交和标准入口重跑。真
+  2026-08-29 05:54Z，提交 `45612697` 的标准入口已运行 schema v3 第一次只读 preflight：扫描 `3` 个
+  stream/`78` 个 consumer，识别全部 `77` 个声明 durable、无 missing，仅因 `1` 个未知 consumer 未归属
+  而安全阻断。七个 app 保持停止，NATS/Redis/Postgres 健康在线；标准部署 PASS 仍待真人处置后重跑。真
   Redis/NATS/Docker、标准
   部署、网络/push/heartbeat/backlog stall、真实逐角色重启、双故障和下游 fencing 均为 `OPEN`；
-  不能据本地候选宣称模拟栈已恢复或 live 已放行。
+  不能据已提交代码或第一次阻断证据宣称模拟栈已恢复或 live 已放行。
 - [`fs_019_operator_login_async_isolation_sow_2026_08_24.md`](fs_019_operator_login_async_isolation_sow_2026_08_24.md)：Operator 登录异步隔离、有界 worker、每进程限流与 dummy KDF；
 - [`fs_020_browser_security_headers_sow_2026_08_24.md`](fs_020_browser_security_headers_sow_2026_08_24.md)：Gateway Host 失败关闭与浏览器安全响应头；
 - [`fs_017_fs_018_dashboard_accessibility_sow_2026_08_25.md`](fs_017_fs_018_dashboard_accessibility_sow_2026_08_25.md)：Dashboard 原生 modal/focus contract 与 reduced-motion 收敛；

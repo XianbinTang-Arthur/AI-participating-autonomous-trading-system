@@ -1,7 +1,7 @@
 # AATS 文档地图与适用边界
 
 > 文档状态：现行全仓文档入口
-> 最后核对：2026-08-29（核对基线 `main@f9bb249964364d457cd307f8ea427a65b7320888` + 当前 FS-016 NATS exact-ownership 候选；以本文档所在最终 HEAD 为准）
+> 最后核对：2026-08-29（核对基线 `main@45612697ce77399ded889d85f2c4cf365ac61746` + 05:54Z schema v3 标准 preflight 阻断证据；以本文档所在最终 HEAD 为准）
 > 核对范围：当前代码、迁移、配置、测试与文档入口的静态复核；不证明现场容器、数据库、交易所或资金状态
 
 本页解决一个长期问题：仓库同时保存当前规范、专题参考、历史设计、审查报告、任务书和一次性观察记录。文件仍在仓库中，不代表它描述当前行为。
@@ -173,7 +173,7 @@
   滑动窗口、dummy KDF 和输入上限失败关闭。多进程集中限流、trusted proxy、
   真实数据库和目标负载仍 OPEN，详见
   [`task/fs_019_operator_login_async_isolation_sow_2026_08_24.md`](task/fs_019_operator_login_async_isolation_sow_2026_08_24.md)。
-- 2026-08-28 FS-016 P0 现行本地候选将四主进程 NATS/hybrid readiness 升级为 Redis-only
+- 2026-08-28 FS-016 P0 现行提交将四主进程 NATS/hybrid readiness 升级为 Redis-only
   protocol v2：全局 `aats:runtime:owner:<role>` key 不含 generation，generation 只在 payload 和 peer
   barrier；任何 NATS I/O 前 claim `PROVISIONING`，立即续租并启动独立 subprocess watchdog，再执行
   55 秒 takeover quarantine。父子进程统一使用 POSIX `CLOCK_BOOTTIME` / Windows
@@ -221,8 +221,9 @@
   主动复核；NATS 的滚动 `Health.Log` 独立于稳定身份 fingerprint，但部署观察和最终 writer 会按同一
   边界拒绝非零结果，并要求至少一次边界后的成功检查。最终逻辑窗限定为 35–60 秒；Docker event
   证据仍明确只是 bounded observation。
-  该路径已完成代码、聚焦测试及 Windows Git Bash -> WSL 锁竞争/释放/重取窄 smoke，尚未完成真实
-  标准部署。runtime 对现存 durable 在 update/bind 前冻结 broker `created`、真实 push inbox 与四维
+  该路径已完成代码、聚焦测试及 Windows Git Bash -> WSL 锁竞争/释放/重取窄 smoke；真实标准入口已
+  运行到第一次 schema v3 preflight 并在未归属 consumer 上安全阻断，尚未完成两次 PASS chain、app-up
+  和最终 evidence。runtime 对现存 durable 在 update/bind 前冻结 broker `created`、真实 push inbox 与四维
   cursor；update 回读、post-bind、READY 前和稳态监督均拒绝同名重建、inbox 漂移、cursor 回退及安全
   投影内的行为配置漂移。实际 inbox 只在进程内比较，日志/证据仅保存是否存在。flow control 与 idle
   heartbeat 的历史差异当前保留并告警，不在 qualification/supervisor 投影内，仍需运行验收。共享迁移
@@ -231,20 +232,19 @@
   ACK-window rebuild；snapshot/transient 的 safety-projection immutable drift 另有声明丢弃语义重建
   分支。标准 preflight 会先阻断此类 drift，故它不是发布绕行许可。自动重启也可能进入运行时分支；
   标准 full-down 是额外发布门禁，不是运行时信号。
-  2026-08-29 03:43Z 的最新标准 derivatives 尝试使用已提交 `f9bb2499` 的旧 schema v2 checker：它在
-  停净七个应用后扫描 `78` 个 consumer，只识别 `49` 个 event durable，并把 `29` 个列为 unexpected；
-  其中 `28` 个后来由 v3 manifest 识别为合法 snapshot/transient，另一个是
-  `aats-codex_manual_resume-system_operator_command_responses`。因此该 artifact 只能证明旧 v2 模型过窄并
-  安全阻断，不能证明 v3 的 `77+1` 资格。当前候选代码随后对同一 broker 做过非发布只读诊断，得到
-  声明 `77` + 未归属 `1`，但尚未形成标准 v3 preflight artifact；必须先提交，再经标准入口重跑确认。应用容器
-  当前保持停止，NATS/Redis/Postgres 在线；未知 durable 必须由真人 owner/release review 决定，代码不得
-  自动删除。
-  当前候选在最后一次 NATS 健康窗、WSL completion ACK、exact ownership、runtime TOCTOU 与最终
+  2026-08-29 05:54Z 的最新标准 derivatives 尝试运行已提交 `45612697` 的 schema v3 checker：停净七个
+  应用并保持基础设施在线后，第一次 `pre_full_down` 只读 preflight 扫描 `3` 个 stream/`78` 个 consumer，
+  精确识别全部 `77` 个声明 durable、无 missing，仅将
+  `aats-codex_manual_resume-system_operator_command_responses` 判为未归属，因此状态为 `BLOCKED`。证据位于
+  `artifacts/deployments/nats_durable_cutover_preflight_20260829T055421396560Z_4c98224d8635.json`；流程未进入
+  full-down、schema、app-up 或最终 evidence。应用容器当前保持停止，NATS/Redis/Postgres 健康在线；未知
+  durable 必须由真人 owner/release review 决定，代码不得自动删除。
+  当前提交在最后一次 NATS 健康窗、WSL completion ACK、exact ownership、runtime TOCTOU 与最终
   canonical durable evidence 修复后，相关聚焦测试与完整单元测试已通过，独立终审未留下 P0/P1；
   精确测试计数保存在当次 FS-016 交付记录中，不在本现行索引固化。此前六项隔离 smoke
-  仍不等同于真实标准部署；真
-  Redis/NATS/Docker 故障注入、标准
-  部署、逐角色重启、双故障与下游 fencing 均 `OPEN`，真实资金继续 `NO-GO`。详见现行
+  仍不等同于完整标准部署 PASS；真
+  Redis/NATS/Docker 故障注入、第二次 preflight/app-up/final evidence、逐角色重启、双故障与下游
+  fencing 均 `OPEN`，真实资金继续 `NO-GO`。详见现行
   [`task/fs_016_runtime_readiness_lease_restart_safety_p0_sow_2026_08_28.md`](task/fs_016_runtime_readiness_lease_restart_safety_p0_sow_2026_08_28.md)
   与历史边界
   [`task/fs_016_nats_peer_readiness_fail_closed_sow_2026_08_24.md`](task/fs_016_nats_peer_readiness_fail_closed_sow_2026_08_24.md)。

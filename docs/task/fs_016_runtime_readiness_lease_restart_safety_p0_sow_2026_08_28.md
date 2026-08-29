@@ -1,7 +1,7 @@
 # FS-016 Runtime Readiness 可续租与单角色重启安全 P0 SOW
 
-> 文档状态：现行实施任务书；本地候选已完成独立复审，最终 WSL2 集成、标准部署和完整故障矩阵仍 `OPEN`
-> 最后核对：2026-08-29（核对基线 `main@f9bb249964364d457cd307f8ea427a65b7320888` + 当前 NATS exact-ownership 候选；以本文档所在最终 HEAD 为准）
+> 文档状态：现行实施任务书；实现已提交并完成独立复审与标准第一次 v3 preflight，第二次 preflight/app-up/final evidence 和完整故障矩阵仍 `OPEN`
+> 最后核对：2026-08-29（核对基线 `main@45612697ce77399ded889d85f2c4cf365ac61746` + 05:54Z schema v3 标准 preflight 阻断证据；以本文档所在最终 HEAD 为准）
 > 核对范围：当前代码、测试、标准部署脚本、WSL2 derivatives 模拟栈只读现场
 > 历史起点：[`fs_016_nats_peer_readiness_fail_closed_sow_2026_08_24.md`](fs_016_nats_peer_readiness_fail_closed_sow_2026_08_24.md)（其一次性 key 协议已被本文替代）
 > 生产决定：**REAL-MONEY PRODUCTION: NO-GO**
@@ -272,14 +272,15 @@ Compose project/service、唯一 RW 标准
 `BOUNDED_OBSERVED / PASSED_WITH_TRUST_BOUNDARY`：Moby event broker 不是有序无损审计源，daemon/client
 时钟未证明对齐，exec、network attachment 与跨容器 volume 访问不可见，不能升格为完整审计。
 
-上述代码、聚焦测试与隔离 smoke 已落地。2026-08-29 03:43Z 的标准 derivatives 尝试使用已提交
-`f9bb2499` 的旧 schema v2 checker：停净七个 app 并保持基础设施在线后，第一次 `pre_full_down`
-扫描 `78` 个 consumer，只识别 `49` 个 event durable，把 `28` 个合法 snapshot/transient 与一个
-`aats-codex_manual_resume-system_operator_command_responses` 一并列为 `29` 个 unexpected 后安全阻断。
-该 artifact 证明旧 v2 ownership 模型过窄，不能证明新 v3 的 exact `77+1` 资格。当前候选随后对同一
-broker 做过非发布只读诊断，得到声明 `77` + 未归属 `1`，但仍须提交后用标准入口生成 v3 artifact。系统
-没有进入 full-down/app-up，七个 app 保持停止，未知 durable 未被修改。该项必须由真人 owner/release
-review 决定，不能自动删除；在此之前标准部署、完整 Docker 故障矩阵仍 `OPEN`。
+上述代码、聚焦测试与隔离 smoke 已落地并提交为 `45612697`。2026-08-29 05:54Z 的标准 derivatives
+尝试停净七个 app、保持基础设施在线后，运行 schema v3 第一次 `pre_full_down` 只读 preflight：扫描
+`3` 个 stream/`78` 个 consumer，精确识别全部 `77` 个声明 durable、无 missing，仅将
+`aats-codex_manual_resume-system_operator_command_responses` 判为未归属后安全阻断。artifact 为
+`artifacts/deployments/nats_durable_cutover_preflight_20260829T055421396560Z_4c98224d8635.json`，状态
+`BLOCKED`、operation `READ_ONLY`；这证明 exact ownership 已进入标准部署路径，但不构成两次 PASS chain
+或最终发布资格。系统没有进入 full-down/app-up，七个 app 保持停止，未知 durable 未被修改。该项必须
+由真人 owner/release review 决定，不能自动删除；在此之前标准部署 PASS、完整 Docker 故障矩阵仍
+`OPEN`。
 
 本协议仍不是下游 Postgres/NATS/交易所执行 sink 强制校验的单调 fencing token。若 Redis owner
 truth 丢失/被错误恢复与独立 watchdog 或 OS termination 同时失效，55 秒 quarantine 只能提供
@@ -392,9 +393,9 @@ truth 丢失/被错误恢复与独立 watchdog 或 OS termination 同时失效�
 ownership、claim 即续租、55 秒 quarantine、delivery gate、有界 build publish 缓冲、strict gated
 `max_ack_pending=1`、durable 原位更新与首次 cutover drain gate、critical consumer runtime
 supervision、30 秒断连监督、Redis `noeviction`、210 秒部署健康预算与独立 subprocess watchdog 属
-本地候选实现。父子 boot-time clock、pidfd/creation FILETIME、关键故障冻结续租、每次成功
+已提交实现。父子 boot-time clock、pidfd/creation FILETIME、关键故障冻结续租、每次成功
 PROVISIONING 写/续租后的 50 秒滑动 hard fence、claim→READY 180 秒绝对上界（170 秒冻结 + 10 秒
-fatal grace）和正常 cleanup 10 秒上界也已进入候选代码。non-strict、in-memory 与 monolith 不注入
+fatal grace）和正常 cleanup 10 秒上界也已进入已提交代码。non-strict、in-memory 与 monolith 不注入
 gate、不强制 `max_ack_pending=1`。标准入口另已加入固定生产路径的长寿命 WSL `flock`、仅测试可用
 的 lock-path override、fresh predecessor lease 与 durable marker 双重 takeover quarantine、外部步骤
 spawn fencing/active child 全局登记、本地/未分类/WSL ACK 三类 completion 语义、七字段输出完整性、
@@ -413,18 +414,19 @@ TCP 仍连接时删除 critical durable 会 ABORT gate 并触发 terminal；首�
 未清零的真 NATS 集成也已证明固定失败关闭并保留 durable identity/created/cursor；聚焦真 NATS
 验证还覆盖 LAST 与 NEW 两类重建后的声明丢弃语义。后者只证明运行时 strict gate/policy/outstanding
 条件下的重建结果，不证明 full-down 是代码内信号，也不覆盖自动重启或标准发布端到端时序。这些
-证据不覆盖真实标准部署中的两次只读 drain/quiescence preflight，也不覆盖真实服务容器退出、网络/
+当前运行证据已覆盖真实标准入口停净七个 app、基础设施保留和第一次只读 quiescence preflight 的
+失败关闭，但不覆盖第二次 preflight、full-down 后 infra/schema、app-up、最终健康 evidence、网络/
 push/heartbeat/backlog stall、告警或恢复时序。
 
 最后一次 NATS 健康窗、WSL completion ACK、输出完整性、幂等 proof、marker cleanup、durable marker
 scan、单事务代码同步、exact ownership、runtime TOCTOU 与最终 canonical durable evidence 修复后，
-当前候选的 NATS/部署门禁聚焦合集 `351 passed`，全量
+当前提交的 NATS/部署门禁聚焦合集 `351 passed`，全量
 `6531 passed / 31 skipped / 259 subtests passed` 已于 2026-08-29 通过；Ruff 已对本切片全部变更 Python 文件复跑通过，
 此前真实 Git Bash 语法检查和六项隔离 smoke 通过。隔离 smoke 不等同于真实 Docker/WSL 发布，SQLite
 deprecation warnings 也不属于本切片安全通过条件。两路独立代码复审未留下 P0/P1；Docker event delivery loss、
 daemon clock 未校准、HTTP ready 早于订阅确认及 exec/跨容器 volume blind spot 仍作为不完整信任边界
 显式披露。真 Redis 集成、标准 full-down 模拟发布、完整真实 NATS/Docker
-启动-断连-consumer supervision-逐角色重启、双故障与下游 fencing 矩阵仍保持 `OPEN`，不得声称新候选已完成运行验收。此前 execution 重启循环和 Windows/容器基线
+启动-断连-consumer supervision-逐角色重启、双故障与下游 fencing 矩阵仍保持 `OPEN`，不得声称当前提交已完成运行验收。此前 execution 重启循环和 Windows/容器基线
 不一致是 2026-08-28 已记录的历史现场证据，不证明当前时刻仍相同。2026-08-29 的标准尝试只证明
 基础设施在线与第一次 preflight 安全阻断；七个 app 当前有意保持停止，故整体模拟栈不是 healthy，
 也不得宣称部署通过。仓库当前没有获准的单角色重启入口，因此

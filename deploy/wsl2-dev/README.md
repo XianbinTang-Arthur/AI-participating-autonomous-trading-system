@@ -13,7 +13,7 @@
 > `scripts/deploy.sh` 仍兼容旧位置 `deploy/wsl2-dev/.env.wsl2`，但只建议作为迁移期兼容路径。
 >
 > 文档状态：现行基础设施与部署入口说明
-> 最后核对：2026-08-29（核对基线 `main@f9bb24996436` + 当前 FS-016 NATS exact-ownership 候选；以本文档所在最终 HEAD 为准）。本页说明基础设施构成；部署唯一入口仍是仓库根目录的 `scripts/deploy.sh`。静态文档不能证明当前容器、网络、数据库、账户、交易所或风控状态。
+> 最后核对：2026-08-29（核对基线 `main@45612697ce77` + 05:54Z schema v3 标准 preflight 阻断证据；以本文档所在最终 HEAD 为准）。本页说明基础设施构成；部署唯一入口仍是仓库根目录的 `scripts/deploy.sh`。静态文档不能证明当前容器、网络、数据库、账户、交易所或风控状态。
 
 ## 拓扑
 
@@ -108,7 +108,7 @@ LAST/NEW 的 ACK-window backlog 重建只在 strict delivery gate、policy 非 A
 
 TTL 为 60 秒，每 10 秒续租，safety margin 30 秒，hard-exit grace 10 秒。每次成功 `PROVISIONING` 写入/续租后，本地 hard fence 最多滑动到该次写入后 50 秒；另有 claim 到 `READY` 的 180 秒绝对 promotion 上界，续租不得延长，并在第 170 秒冻结续租、进入 10 秒 fatal grace。确定失租零宽限。关键故障立即冻结续租并进入不可解除的 fatal deadline；正常 cleanup 也先冻结续租并受 10 秒硬截止保护，业务/NATS 安全停止后才 disarm、owner-aware delete。Redis 配置为 `noeviction`，写满显式失败；NATS 连续断连 30 秒进入 runtime critical failure。critical durable 明确缺失、created/inbox/name/safety-projection config drift 或四维 cursor 回退立即 terminal；management、push binding、heartbeat 持续失败 30 秒 terminal；有 backlog 且进度在 `max(30 秒, 2 x ack_wait)` 内不变也 terminal。post-bind 失败只 abort gate 并有界取消本地 subscription，不 drain/ACK/delete broker durable。该代次同时写入 evidence。
 
-protocol v1 -> v2 首次发布和回滚禁止 rolling/mixed version，只能走标准 full-down/full-up；旧 gateway/market/decision/execution 未全部停止，或首次 ACK-window cutover 未取得完整只读 PASS 时，均不得 app up。NATS 八键目标在同步后冻结为 root-owned `0444` 白名单快照，并作为所有必需应用最后一个 `env_file`；preflight、容器 manifest label、健康边界和最终证据必须同摘要。应用健康后另执行 40 秒主动观察，最终证据逻辑窗只能为 35–60 秒。应用进程只做 schema exact validation，不得在 lifespan 或 daemon 启动路径隐式建表、补列或迁移。任一关键步骤失败必须中止；模拟证据明确不是 trading-ready。真实 NATS consumer-delete 集成已经证明 durable 消失会在 core TCP 仍连通时触发 terminal，当前候选全量单测、preflight 聚焦回归和隔离 smoke 已通过；但尚未执行 v3 标准部署/完整 Docker 矩阵，当前 lease 也仍不是下游执行端强制校验的单调 fencing token。2026-08-29 03:43Z 标准尝试仍运行已提交 `f9bb2499` 旧 v2 checker：扫描 `78`、只识别 `49`，把 `28` 个合法非事件 consumer 与一个 `aats-codex_manual_resume-system_operator_command_responses` 一并列为 `29` unexpected 后阻断。候选 v3 的非发布只读诊断得到 `77+1`，仍须提交后标准重跑；七个 app 保持停止，基础设施在线，未知 durable 不得自动删除。真 Redis/NATS/Docker 故障注入、标准发布、网络/push/heartbeat/backlog stall、双故障、下游 fencing 与受控逐角色重启矩阵仍 `OPEN`，真实资金继续 `NO-GO`。
+protocol v1 -> v2 首次发布和回滚禁止 rolling/mixed version，只能走标准 full-down/full-up；旧 gateway/market/decision/execution 未全部停止，或首次 ACK-window cutover 未取得完整只读 PASS 时，均不得 app up。NATS 八键目标在同步后冻结为 root-owned `0444` 白名单快照，并作为所有必需应用最后一个 `env_file`；preflight、容器 manifest label、健康边界和最终证据必须同摘要。应用健康后另执行 40 秒主动观察，最终证据逻辑窗只能为 35–60 秒。应用进程只做 schema exact validation，不得在 lifespan 或 daemon 启动路径隐式建表、补列或迁移。任一关键步骤失败必须中止；模拟证据明确不是 trading-ready。真实 NATS consumer-delete 集成已经证明 durable 消失会在 core TCP 仍连通时触发 terminal，当前提交的全量单测、preflight 聚焦回归和隔离 smoke 已通过；当前 lease 仍不是下游执行端强制校验的单调 fencing token。2026-08-29 05:54Z，提交 `45612697` 的标准流程运行 schema v3 第一次只读 preflight：扫描 `3` 个 stream/`78` 个 consumer，识别全部 `77` 个声明 durable、无 missing，仅因 `aats-codex_manual_resume-system_operator_command_responses` 未归属而按设计阻断。七个 app 保持停止，NATS/Redis/Postgres 健康在线；未进入 full-down/app-up。未知 durable 不得自动删除。标准部署 PASS、真 Redis/NATS/Docker 故障注入、网络/push/heartbeat/backlog stall、双故障、下游 fencing 与受控逐角色重启矩阵仍 `OPEN`，真实资金继续 `NO-GO`。
 
 部署报告完成后可做只读验证：
 
