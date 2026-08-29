@@ -618,55 +618,63 @@ def build_funding_continuity_plan(
     )
 
 
-def validate_funding_settlement_events(
-    snapshot_sets: tuple[LoadedDerivativesSnapshotSetV1, ...],
-    events: tuple[FundingSettlementEventV1, ...],
-    *,
-    start_ts: datetime,
-    end_ts: datetime,
-) -> FundingContinuityPlanV1:
-    """Validate exact funding completeness before any economic state mutation."""
+class FundingSettlementStreamValidatorV1:
+    """Incrementally validate one exact funding settlement lattice.
 
-    plan = build_funding_continuity_plan(
-        snapshot_sets,
-        start_ts=start_ts,
-        end_ts=end_ts,
-    )
-    if type(events) is not tuple:
-        raise DerivativesBacktestContractError("funding_event_sequence_invalid")
-    if len(events) > MAX_EXPECTED_FUNDING_SETTLEMENTS_V1:
-        raise DerivativesBacktestContractError("funding_event_limit_exceeded")
+    The immutable plan remains bounded by the existing one-million timestamp
+    policy, while funding event objects are consumed one at a time rather than
+    retained until end-of-stream.
+    """
 
-    previous_ts: datetime | None = None
-    for event in events:
+    def __init__(
+        self,
+        snapshot_sets: tuple[LoadedDerivativesSnapshotSetV1, ...],
+        *,
+        start_ts: datetime,
+        end_ts: datetime,
+    ) -> None:
+        self._plan = build_funding_continuity_plan(
+            snapshot_sets,
+            start_ts=start_ts,
+            end_ts=end_ts,
+        )
+        self._event_index = 0
+        self._segment_index = 0
+        self._previous_ts: datetime | None = None
+        self._finished = False
+
+    @property
+    def plan(self) -> FundingContinuityPlanV1:
+        return self._plan
+
+    @property
+    def consumed_event_count(self) -> int:
+        return self._event_index
+
+    def consume(self, event: FundingSettlementEventV1) -> None:
+        if self._finished:
+            raise DerivativesBacktestContractError(
+                "funding_stream_validator_finished"
+            )
         validated = _revalidate_funding_event(event)
         event_ts = validated.header.ts
-        if previous_ts is not None and event_ts == previous_ts:
+        if self._previous_ts is not None and event_ts == self._previous_ts:
             raise DerivativesBacktestContractError("funding_event_duplicate")
-        if previous_ts is not None and event_ts < previous_ts:
+        if self._previous_ts is not None and event_ts < self._previous_ts:
             raise DerivativesBacktestContractError("funding_event_order_invalid")
-        previous_ts = event_ts
-
-    expected = plan.expected_timestamps
-    if len(events) < len(expected):
-        raise DerivativesBacktestContractError("funding_event_missing")
-    if len(events) > len(expected):
-        raise DerivativesBacktestContractError("funding_event_extra")
-
-    segment_index = 0
-    for event_index, event in enumerate(events):
-        # Reconstructing rechecks header identity and all public event fields;
-        # frozen dataclasses and private constructors are not safety boundaries.
-        validated = _revalidate_funding_event(event)
-        event_ts = validated.header.ts
-        if event_ts != expected[event_index]:
-            raise DerivativesBacktestContractError("funding_event_timestamp_mismatch")
+        if self._event_index >= len(self._plan.expected_timestamps):
+            raise DerivativesBacktestContractError("funding_event_extra")
+        expected_ts = self._plan.expected_timestamps[self._event_index]
+        if event_ts != expected_ts:
+            raise DerivativesBacktestContractError(
+                "funding_event_timestamp_mismatch"
+            )
         while (
-            segment_index + 1 < len(plan.segments)
-            and event_ts >= plan.segments[segment_index].end_ts
+            self._segment_index + 1 < len(self._plan.segments)
+            and event_ts >= self._plan.segments[self._segment_index].end_ts
         ):
-            segment_index += 1
-        segment = plan.segments[segment_index]
+            self._segment_index += 1
+        segment = self._plan.segments[self._segment_index]
         if not segment.contains(event_ts):
             raise DerivativesBacktestContractError(
                 "funding_event_outside_schedule_segments"
@@ -677,11 +685,61 @@ def validate_funding_settlement_events(
             )
         validated.schedule_ref.validate_at(event_ts)
         segment.schedule.validate_rate(validated.rate)
-        if validated.observed_at_ts > validated.header.ts:
-            raise DerivativesBacktestContractError("funding_observation_in_future")
-        if validated.header.ts - validated.observed_at_ts > segment.cadence:
+        if validated.observed_at_ts > event_ts:
+            raise DerivativesBacktestContractError(
+                "funding_observation_in_future"
+            )
+        if event_ts - validated.observed_at_ts > segment.cadence:
             raise DerivativesBacktestContractError("funding_event_stale")
-    return plan
+        self._previous_ts = event_ts
+        self._event_index += 1
+
+    def finish(self) -> FundingContinuityPlanV1:
+        if self._finished:
+            raise DerivativesBacktestContractError(
+                "funding_stream_validator_finished"
+            )
+        if self._event_index < len(self._plan.expected_timestamps):
+            raise DerivativesBacktestContractError("funding_event_missing")
+        self._finished = True
+        return self._plan
+
+
+def validate_funding_settlement_events(
+    snapshot_sets: tuple[LoadedDerivativesSnapshotSetV1, ...],
+    events: tuple[FundingSettlementEventV1, ...],
+    *,
+    start_ts: datetime,
+    end_ts: datetime,
+) -> FundingContinuityPlanV1:
+    """Validate exact funding completeness before any economic state mutation."""
+
+    validator = FundingSettlementStreamValidatorV1(
+        snapshot_sets,
+        start_ts=start_ts,
+        end_ts=end_ts,
+    )
+    if type(events) is not tuple:
+        raise DerivativesBacktestContractError("funding_event_sequence_invalid")
+    if len(events) > MAX_EXPECTED_FUNDING_SETTLEMENTS_V1:
+        raise DerivativesBacktestContractError("funding_event_limit_exceeded")
+    previous_ts: datetime | None = None
+    for event in events:
+        validated = _revalidate_funding_event(event)
+        event_ts = validated.header.ts
+        if previous_ts is not None and event_ts == previous_ts:
+            raise DerivativesBacktestContractError("funding_event_duplicate")
+        if previous_ts is not None and event_ts < previous_ts:
+            raise DerivativesBacktestContractError("funding_event_order_invalid")
+        previous_ts = event_ts
+    expected_count = len(validator.plan.expected_timestamps)
+    if len(events) < expected_count:
+        raise DerivativesBacktestContractError("funding_event_missing")
+    if len(events) > expected_count:
+        raise DerivativesBacktestContractError("funding_event_extra")
+    for event in events:
+        validator.consume(event)
+    return validator.finish()
 
 
 __all__ = [
@@ -690,6 +748,7 @@ __all__ = [
     "MAX_FUNDING_SCHEDULE_SEGMENTS_V1",
     "FundingContinuityPlanV1",
     "FundingScheduleSegmentV1",
+    "FundingSettlementStreamValidatorV1",
     "build_funding_continuity_plan",
     "validate_funding_settlement_events",
 ]

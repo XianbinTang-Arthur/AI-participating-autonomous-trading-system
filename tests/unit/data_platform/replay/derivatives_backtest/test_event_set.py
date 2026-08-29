@@ -105,7 +105,6 @@ def _stream_ref(kind: DerivativeEventKindV1) -> DerivativesEventStreamRefV1:
 
 
 def _empty_stream(kind: DerivativeEventKindV1) -> DerivativesEventStreamRefV1:
-    event = _event_by_kind()[kind]
     digest = event_stream_semantic_seed(kind)
     return DerivativesEventStreamRefV1(
         kind=kind,
@@ -126,10 +125,8 @@ def _empty_stream(kind: DerivativeEventKindV1) -> DerivativesEventStreamRefV1:
         last_key=None,
         coverage_start_ts=BASE_TS,
         coverage_end_ts=END_TS,
-        source_registry_ids=(event.header.source_ref.source_registry_id,),
-        parent_raw_partition_sha256s=(
-            event.header.source_ref.parent_artifact_sha256,
-        ),
+        source_registry_ids=(),
+        parent_raw_partition_sha256s=(),
     )
 
 
@@ -242,7 +239,6 @@ def test_event_stream_integrity_policy_fingerprint_is_frozen() -> None:
 
 
 def test_empty_stream_has_one_canonical_identity() -> None:
-    event = _event_by_kind()[DerivativeEventKindV1.INDEX_PRICE]
     stream = DerivativesEventStreamRefV1(
         kind=DerivativeEventKindV1.INDEX_PRICE,
         stream_id=EXPECTED_EVENT_STREAM_ID_V1[
@@ -268,16 +264,23 @@ def test_empty_stream_has_one_canonical_identity() -> None:
         last_key=None,
         coverage_start_ts=BASE_TS,
         coverage_end_ts=END_TS,
-        source_registry_ids=(event.header.source_ref.source_registry_id,),
-        parent_raw_partition_sha256s=(
-            event.header.source_ref.parent_artifact_sha256,
-        ),
+        source_registry_ids=(),
+        parent_raw_partition_sha256s=(),
     )
 
     assert DerivativesEventStreamRefV1.from_dict(stream.to_dict()) == stream
 
     with pytest.raises(DerivativesBacktestContractError) as exc_info:
         replace(stream, raw_sha256="f" * 64)
+
+    assert exc_info.value.code == "empty_event_stream_identity_invalid"
+
+    with pytest.raises(DerivativesBacktestContractError) as exc_info:
+        replace(
+            stream,
+            source_registry_ids=("00000000-0000-4000-8000-000000000099",),
+            parent_raw_partition_sha256s=("f" * 64,),
+        )
 
     assert exc_info.value.code == "empty_event_stream_identity_invalid"
 

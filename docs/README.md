@@ -1,7 +1,7 @@
 # AATS 文档地图与适用边界
 
 > 文档状态：现行全仓文档入口
-> 最后核对：2026-08-29（核对基线 `main@45612697ce77399ded889d85f2c4cf365ac61746` + 05:54Z schema v3 标准 preflight 阻断证据；以本文档所在最终 HEAD 为准）
+> 最后核对：2026-08-29（核对起始基线 `main@a22e72d4` + 05:54Z schema v3 标准 preflight 阻断证据；以本文档所在最终 HEAD 为准）
 > 核对范围：当前代码、迁移、配置、测试与文档入口的静态复核；不证明现场容器、数据库、交易所或资金状态
 
 本页解决一个长期问题：仓库同时保存当前规范、专题参考、历史设计、审查报告、任务书和一次性观察记录。文件仍在仓库中，不代表它描述当前行为。
@@ -69,6 +69,8 @@
 
 - [`rdp/README.md`](rdp/README.md)
 - [`../aats/data_platform/README.md`](../aats/data_platform/README.md)
+- [`task/rdp_derivatives_backtest_lfb1_2_engine_evidence_sow_2026_08_28.md`](task/rdp_derivatives_backtest_lfb1_2_engine_evidence_sow_2026_08_28.md)（LF-B1.2 现行任务状态）
+- [`design/rdp_derivatives_backtest_lfb1_2_a2_formal_source_decision_addendum_2026_08_29.md`](design/rdp_derivatives_backtest_lfb1_2_a2_formal_source_decision_addendum_2026_08_29.md)（A2a verification-only / A2b design-only 边界）
 - [`operations/platform_runbook.md`](operations/platform_runbook.md)
 - [`operations/rdp_scheduling_strategy.md`](operations/rdp_scheduling_strategy.md)
 - [`operations/rdp_workflow_calendar.md`](operations/rdp_workflow_calendar.md)

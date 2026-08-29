@@ -1,12 +1,13 @@
 # ADR：RDP `derivatives-backtest-run/v1` 首个衍生品回测纵向切片
 
-> 文档状态：设计提案（Proposed）；LF-B1.1、LF-B1.2-A1 与 A2 event-set 契约基础已实施并完成本地静态验收，整体设计未批准、不可作为运行或晋级依据
-> 最后核对：2026-08-28（起始代码基线 `main@96c772010767`；实施状态以本文档所在 HEAD 为准）
+> 文档状态：设计提案（Proposed）；LF-B1.1、LF-B1.2-A1 与 A2 event-set 契约基础已完成本地静态验收；A2a 仅有 verification-only 事件源切片，整体设计未批准、不可作为运行或晋级依据
+> 最后核对：2026-08-29（本轮起始代码基线 `main@a22e72d4`；实施状态以本文档所在 HEAD 为准）
 > 核对范围：静态代码、测试契约、现行 LF-B 任务书与 Windows 全量单元回归；未执行正式 event-set/真实数据 replay、未验证目标数据、未部署
 > 待决策人：待实名任命的 RDP Owner、Independent Risk Reviewer、Data Lineage Reviewer
 > 生产决定：**REAL-MONEY PRODUCTION: NO-GO；CAPITAL PROMOTION: NO-GO**
 
-关联任务书：[`../task/rdp_derivatives_phase2_promotion_evidence_producer_p1_sow_2026_08_28.md`](../task/rdp_derivatives_phase2_promotion_evidence_producer_p1_sow_2026_08_28.md)。
+关联任务书：[`../task/rdp_derivatives_phase2_promotion_evidence_producer_p1_sow_2026_08_28.md`](../task/rdp_derivatives_phase2_promotion_evidence_producer_p1_sow_2026_08_28.md)。A2a/A2b 的现行边界、开放风险与验收条件见
+[`rdp_derivatives_backtest_lfb1_2_a2_formal_source_decision_addendum_2026_08_29.md`](rdp_derivatives_backtest_lfb1_2_a2_formal_source_decision_addendum_2026_08_29.md)。
 
 ## 1. 决策摘要
 

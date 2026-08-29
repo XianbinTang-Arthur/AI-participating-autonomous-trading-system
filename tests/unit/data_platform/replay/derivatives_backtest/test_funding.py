@@ -19,6 +19,7 @@ from aats.data_platform.replay.derivatives_backtest.events import (
     FundingSettlementEventV1,
 )
 from aats.data_platform.replay.derivatives_backtest.funding import (
+    FundingSettlementStreamValidatorV1,
     MAX_EXPECTED_FUNDING_SETTLEMENTS_V1,
     build_funding_continuity_plan,
     validate_funding_settlement_events,
@@ -237,6 +238,26 @@ def test_dynamic_switch_uses_new_half_open_schedule_and_exact_lattice(
     )
     assert plan.segment_at(SWITCH_TS).schedule_ref == second.refs.funding_schedule
     assert events[1].rate > first.funding_schedule.schedule.maximum_rate_inclusive
+
+
+def test_stream_validator_consumes_without_retaining_event_tuple(
+    tmp_path: Path,
+) -> None:
+    first, second = _two_schedule_timeline(tmp_path)
+    events = _valid_events(first, second)
+    validator = FundingSettlementStreamValidatorV1(
+        (first, second),
+        start_ts=BASE_TS,
+        end_ts=END_TS,
+    )
+
+    for event in events:
+        validator.consume(event)
+
+    assert validator.consumed_event_count == len(events)
+    assert validator.finish().expected_timestamps == tuple(
+        event.header.ts for event in events
+    )
 
 
 def test_plan_does_not_alias_loaded_ref_and_revalidates_expected_lattice(

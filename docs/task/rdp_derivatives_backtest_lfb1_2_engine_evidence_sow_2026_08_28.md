@@ -1,8 +1,9 @@
 # RDP 衍生品回测 LF-B1.2 事件与证据内核实施任务书
 
-> 文档状态：现行实施任务书；LF-B1.2-A1 与 A2 event-set 严格契约基础已完成本地静态验收，A2 formal reader/decision input 及 LF-B1.2 整体仍执行中、未验收
-> 最后核对：2026-08-28（起始基线 `main@0fb27c0a152c`；以本文档所在 HEAD 为准）
+> 文档状态：现行实施任务书；LF-B1.2-A1 与 A2 event-set 严格契约基础已完成本地静态验收；A2a 已实现 verification-only 事件源切片但尚无事务提交边界，A2b 仍仅为设计，LF-B1.2 整体未验收
+> 最后核对：2026-08-29（本轮起始基线 `main@a22e72d4`；以本文档所在 HEAD 为准）
 > 上位设计：[`../design/rdp_derivatives_backtest_run_v1_adr_2026_08_28.md`](../design/rdp_derivatives_backtest_run_v1_adr_2026_08_28.md)
+> A2 边界增补：[`../design/rdp_derivatives_backtest_lfb1_2_a2_formal_source_decision_addendum_2026_08_29.md`](../design/rdp_derivatives_backtest_lfb1_2_a2_formal_source_decision_addendum_2026_08_29.md)
 > 上位任务：[`rdp_derivatives_phase2_promotion_evidence_producer_p1_sow_2026_08_28.md`](rdp_derivatives_phase2_promotion_evidence_producer_p1_sow_2026_08_28.md)
 > 生产决定：**REAL-MONEY PRODUCTION: NO-GO**
 
@@ -186,21 +187,31 @@ diagnostic 根，且不得包含收益、promotion metrics 或可被 qualificati
   integrity summary、warmup carry-in catalog/phase-05 一致性、immutable snapshot locator、评价期 bar、固定资源上限、
   restart cursor、4 MiB component/final gate 与 manifest raw path/size/SHA/canonical-byte 校验；该结果仍不包含文件 I/O
   双遍 reader、真实 raw event 预检或运行时经济状态；
+- LF-B1.2-A2a verification-only 事件源切片已实现：absolute exact-case/无 link/reparse 路径、manifest parse 前上限、
+  有界 canonical JSONL、六流 raw/semantic/boundary/lineage 重算、bar lattice、catalog/funding 预检、prefix cursor、
+  两遍读取，以及 `finish()` 前对 manifest、全部 stream、snapshot root/identity/bytes 的最终复核。非空流 lineage 必须与
+  观察集合完全相等，空流的两组 lineage 必须为空；所有输出明确为 uncommitted，`economic_mutation_allowed=false`；
 - LF-B1.2-A1 本地静态验证：Ruff 通过；本目录聚焦测试 `204 passed`；连同共享 instrument arithmetic/snapshot
   回归 `255 passed`；Windows 全量 unit `6128 passed, 31 skipped, 259 subtests passed`。两名独立只读审查者均
   给出 PASS，未发现未关闭 P0/P1；未访问网络、数据库、live profile 或真实资金；
 - LF-B1.2-A2 契约基础本地静态验证：Ruff `aats/ --fix` 通过；衍生品回放目录 `236 passed`；Windows 全量 unit
   `6160 passed, 31 skipped, 259 subtests passed`。两轮对抗复审逐项修复后最终无未关闭 P0/P1；未执行文件
   reader、网络、数据库、WSL2、部署、live profile 或真实资金；
-- 执行中：LF-B1.2-A2 metadata-preserving 双遍 formal reader 与 sealed feature/Decimal decision input；完成后才进入 LF-B1.2-B reducer/golden ledger，
-  再进入 LF-B1.2-C publisher/checkpoint/recovery；
-- 未完成：canonical JSONL event-set 有界文件读取/两遍原始身份重算、feature/decision input、single-position reducer、正式 publisher/validator、exact
-  checkpoint/recovery、正式数据运行接入和 UI/UX 全面重构；因此本任务书整体仍未验收；
+- LF-B1.2-A2a verification-only 切片本地静态验证：Ruff `aats/ --fix` 通过；衍生品回放目录
+  `258 passed, 1 skipped`；Windows 全量 unit `6553 passed, 32 skipped, 259 subtests passed`。唯一新增相关 skip
+  是 Windows 不允许替换仍打开的 descriptor；同字节 stream/snapshot 替换、最终 artifact-set 复核和空流 lineage
+  失败测试均通过。独立只读复审确认本切片新增 P0/P1 已关闭；既有 transactional spool/reducer rollback P1 继续 OPEN；
+- 执行中：为 A2a 增加可丢弃的 validated spool 或 reducer 全事务/rollback 边界及完整故障矩阵；A2b 的 strict
+  feature/parameter reader、restart cursor 和 sealed Decimal decision state 尚未保留实现；完成并验收后才进入
+  LF-B1.2-B reducer/golden ledger，再进入 LF-B1.2-C publisher/checkpoint/recovery；
+- 未完成：可安全驱动经济状态的 transactional event source、feature/decision input、single-position reducer、正式
+  publisher/validator、exact checkpoint/recovery、正式数据运行接入和 UI/UX 全面重构；因此本任务书整体仍未验收；
 - 本轮已关闭的审查项：公开 `event_order_key()` 全事件重验；event/funding 共用 strict snapshot transition；
   integrity policy 明确并绑定 singleton kind 集；manifest ref 不再忽略 raw bytes；catalog/phase-05、评价期 bar、
   `(ts,source_sequence)` boundary、wire array、casefold path、4 MiB aggregate/final gate 均失败关闭；
 - 已登记的非阻断 P2：snapshot loader 的 symlink/junction/读取中替换/非法 UTF-8/重复 key/超限等 wrapper 级
-  fault-injection 补测、自定义 iterator 原生异常归一化，以及 funding expected lattice 的增量化；这些不得在最终
+  fault-injection 补测、自定义 iterator 原生异常归一化，以及 snapshot intern sharing/峰值内存证明；funding event
+  已改为增量消费，但 expected timestamp plan 仍受既有 1,000,000 上限约束。这些不得在最终
   LF-B1.2 验收时遗留为未处置风险；
 - reducer 开工前已冻结的 P1 设计修正：validated activation/decision step、feature/parameter 可重算输入、exact
   lot-floor/price、经济子状态原子性与 IOC lifecycle 分离、open/queued snapshot switch 语义、timestamp-boundary

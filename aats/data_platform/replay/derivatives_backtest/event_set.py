@@ -474,8 +474,9 @@ def _sorted_unique_sha256s(
     *,
     field_name: str,
     maximum: int,
+    minimum: int = 1,
 ) -> tuple[str, ...]:
-    if type(value) not in {tuple, list} or not 1 <= len(value) <= maximum:
+    if type(value) not in {tuple, list} or not minimum <= len(value) <= maximum:
         raise DerivativesBacktestContractError(
             "event_stream_lineage_invalid",
             field=field_name,
@@ -494,8 +495,9 @@ def _sorted_unique_uuids(
     *,
     field_name: str,
     maximum: int,
+    minimum: int = 1,
 ) -> tuple[str, ...]:
-    if type(value) not in {tuple, list} or not 1 <= len(value) <= maximum:
+    if type(value) not in {tuple, list} or not minimum <= len(value) <= maximum:
         raise DerivativesBacktestContractError(
             "event_stream_lineage_invalid",
             field=field_name,
@@ -561,11 +563,13 @@ class DerivativesEventStreamRefV1:
             self.source_registry_ids,
             field_name="source_registry_id",
             maximum=DERIVATIVES_MAX_SOURCE_REGISTRY_IDS,
+            minimum=0 if count == 0 else 1,
         )
         parents = _sorted_unique_sha256s(
             self.parent_raw_partition_sha256s,
             field_name="parent_raw_partition_sha256",
             maximum=DERIVATIVES_MAX_PARENT_RAW_PARTITIONS,
+            minimum=0 if count == 0 else 1,
         )
         object.__setattr__(self, "source_registry_ids", registries)
         object.__setattr__(self, "parent_raw_partition_sha256s", parents)
@@ -587,6 +591,8 @@ class DerivativesEventStreamRefV1:
                 or self.size_bytes != 0
                 or self.raw_sha256 != _EMPTY_RAW_SHA256
                 or self.semantic_event_digest != event_stream_semantic_seed(self.kind)
+                or registries
+                or parents
             ):
                 raise DerivativesBacktestContractError(
                     "empty_event_stream_identity_invalid"
@@ -755,11 +761,13 @@ class DerivativesEventStreamRefV1:
                 payload["source_registry_ids"],
                 field_name="source_registry_id",
                 maximum=DERIVATIVES_MAX_SOURCE_REGISTRY_IDS,
+                minimum=0,
             ),
             parent_raw_partition_sha256s=_sorted_unique_sha256s(
                 payload["parent_raw_partition_sha256s"],
                 field_name="parent_raw_partition_sha256",
                 maximum=DERIVATIVES_MAX_PARENT_RAW_PARTITIONS,
+                minimum=0,
             ),
         )
 
