@@ -1,5 +1,10 @@
 # AATS Research OS 独立建设计划书
 
+> **2026-08-29 局部规划失效说明**：本文中 Binance 作为第二来源、许可对象、验证探针或 fallback 的
+> 内容已被 [`来源准入与收益优先级纠偏`](aats_research_os_source_access_and_profit_priority_correction_2026_08_29.md)
+> 替代。现行来源基线为 OKX 主源、第二来源 `UNBOUND`、Binance 明确排除；本文保留其余长期架构设想
+> 作为规划历史，不得据此启动已失效来源。
+
 > 文档状态：立项规划基线；项目启动已条件性批准，G0 Gate 仍为 `OPEN / NOT PASSED`
 > 版本：1.0
 > 最后核对：2026-08-26（代码基线 `40dc6817861a1ddfd92cc8a01d2b9ce87af523aa`，分支 `main`）

@@ -49,6 +49,7 @@
 | [文档治理规范](DOCUMENTATION_GOVERNANCE.md) | 现行约束 | 放置、命名、状态、复核、迁移和验收规则 |
 | [文档纠错审计报告](code_review/DOCUMENTATION_AUDIT.md) | 现行审计记录 | 本轮纠错范围、代码事实、验证方法与未改代码风险 |
 | [真实收益差距评估与落地路线](code_review/profitability_gap_assessment_2026_08_25.md) | 现行代码审查与收益判断 | 当前候选、模拟执行、统计/成交/前向/live 门禁的实际差距与实施顺序 |
+| [RDP 收益成熟度与数据价值链复评](code_review/rdp_profitability_and_data_source_reassessment_2026_08_29.md) | 现行代码审查与决策依据 | 当前真实数据覆盖、加工消费断点、来源准入、收益成熟度与盈利优先工作包 |
 | [收益证据与模拟交易就绪运行手册](operations/profit_readiness_runbook.md) | 现行操作说明 | 公共微观结构、v2 候选、L2、holdout、参数代次、故障矩阵和 readiness |
 | [收益可信度整改验收矩阵](testing/profit_readiness_acceptance.md) | 现行测试说明 | 静态、单元、WSL2、模拟运行及明确 NO-GO 边界 |
 
@@ -69,6 +70,8 @@
 
 - [`rdp/README.md`](rdp/README.md)
 - [`../aats/data_platform/README.md`](../aats/data_platform/README.md)
+- [`code_review/rdp_profitability_and_data_source_reassessment_2026_08_29.md`](code_review/rdp_profitability_and_data_source_reassessment_2026_08_29.md)（现行收益与数据源复评）
+- [`task/aats_research_os_source_access_and_profit_priority_correction_2026_08_29.md`](task/aats_research_os_source_access_and_profit_priority_correction_2026_08_29.md)（现行来源准入与收益优先级决议）
 - [`task/rdp_derivatives_backtest_lfb1_2_engine_evidence_sow_2026_08_28.md`](task/rdp_derivatives_backtest_lfb1_2_engine_evidence_sow_2026_08_28.md)（LF-B1.2 现行任务状态）
 - [`design/rdp_derivatives_backtest_lfb1_2_a2_formal_source_decision_addendum_2026_08_29.md`](design/rdp_derivatives_backtest_lfb1_2_a2_formal_source_decision_addendum_2026_08_29.md)（A2a verification-only / A2b design-only 边界）
 - [`operations/platform_runbook.md`](operations/platform_runbook.md)

@@ -1,5 +1,9 @@
 # AATS Research OS G0 Bootstrap 实施任务书
 
+> **2026-08-29 局部范围失效说明**：本文中 Binance 的能力合同、许可或 G1 前提已经由
+> [`来源准入与收益优先级纠偏`](aats_research_os_source_access_and_profit_priority_correction_2026_08_29.md)
+> 替代。独立仓库已改为 OKX-only source contract v2；本文原文仅用于说明 bootstrap 当时的实施范围。
+
 > 文档状态：历史实施基线；当前实现事实以交付记录和独立仓库代码为准
 > 最后核对：2026-08-27（AATS 基线 `40dc6817861a1ddfd92cc8a01d2b9ce87af523aa`，分支 `main`）
 > 决策来源：[`G0 立项决议记录`](aats_research_os_g0_decision_record_2026_08_26.md)

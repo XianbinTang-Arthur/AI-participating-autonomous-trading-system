@@ -1,5 +1,9 @@
 # AATS Research OS G0 Bootstrap 交付记录
 
+> **2026-08-29 后续纠偏说明**：本快照记录的 Binance 合同草案和 168 小时探针前提已经由
+> [`来源准入与收益优先级纠偏`](aats_research_os_source_access_and_profit_priority_correction_2026_08_29.md)
+> 替代。现行独立仓库不再包含 Binance 活跃来源合同；本文不得作为当前来源清单。
+
 > 文档状态：截至核对日的交付快照 / G0 工程准备已完成 / G0 人类收口未启动
 > 核对日期：2026-08-27
 > AATS 基线：`main@40dc6817861a1ddfd92cc8a01d2b9ce87af523aa`

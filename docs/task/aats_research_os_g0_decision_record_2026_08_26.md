@@ -1,5 +1,10 @@
 # AATS Research OS G0 立项决议记录
 
+> **2026-08-29 局部决策失效说明**：本文关于 Binance 作为第二来源、许可对象或 G1 探针的决定已被
+> [`AATS Research OS 来源准入与收益优先级纠偏`](aats_research_os_source_access_and_profit_priority_correction_2026_08_29.md)
+> 替代。Binance 不再属于现行架构、许可范围或交付前提；其余 G0 人类责任、预算、信任根和 Gate
+> 边界仍按本文及独立仓库当前治理证据判断。本文保留原文，只用于追溯当时决策。
+
 > 文档状态：现行项目决议；项目启动 `APPROVED_WITH_CONDITIONS`，G0 证据门 `OPEN / NOT PASSED`
 > 决策日期：2026-08-26
 > 最后核对：2026-08-27（AATS 代码基线 `40dc6817861a1ddfd92cc8a01d2b9ce87af523aa`，分支 `main`）

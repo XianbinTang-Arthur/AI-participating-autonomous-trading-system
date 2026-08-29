@@ -30,7 +30,7 @@ AATS（AI Participating Autonomous Trading System）不是一个简单的“策�
 5. **成交是财务投影的核心事实输入。** `FillEvent` 驱动组合、余额、费用、已实现盈亏、lot、ledger、settlement 与 reconciliation；费用在系统内按正成本记录，并从余额/盈亏扣除。
 6. **四进程运行依赖 NATS 与 Redis。** exchange-coupled 的四进程模式若仍使用纯内存事件总线或纯内存热状态，启动会失败，而不是带着错误拓扑继续运行。
 7. **RDP 的研究结论默认不能直接改实盘。** Research Factory 明确禁止 runtime mutation、active parameter write、runtime config write 和 OKX write；研究产物先形成证据、verdict、recommendation，再进入审批、gate、发布和观察链路。
-8. **当前代码与若干旧文档存在漂移。** Phase 3Q 已把失效的 `scripts/run_local.py` 收口为明确迁移失败入口；Phase 3R 又修复 replay short-bias gate，并重写已漂移的参数映射参考；Phase 3S 增加基础 CI/warning gate，Phase 3T 再加入 Python hashed lock 与外部镜像 digest，但远端 required check、integration 和完整供应链扫描仍未启用；当前 RDP ORM 元数据是 102 张表，标准部署另有 8 张 migration-owned 表，现场物理总数为 110；JetStream 主事件流当前代码默认 1 天而部分旧注释仍写 7 天。最新收益复核证明历史、OHLCV/funding 和微观结构三阶段累计 10/10 个唯一候选全部失败，当前项目不能因模拟部署健康而被描述为“接近盈利上线”。具体见第 26 章与[真实收益差距评估](profitability_gap_assessment_2026_08_25.md)。
+8. **当前代码与若干旧文档存在漂移。** Phase 3Q 已把失效的 `scripts/run_local.py` 收口为明确迁移失败入口；Phase 3R 又修复 replay short-bias gate，并重写已漂移的参数映射参考；Phase 3S 增加基础 CI/warning gate，Phase 3T 再加入 Python hashed lock 与外部镜像 digest，但远端 required check、integration 和完整供应链扫描仍未启用；当前 RDP ORM 元数据是 102 张表，标准部署另有 8 张 migration-owned 表，现场物理总数为 110；JetStream 主事件流当前代码默认 1 天而部分旧注释仍写 7 天。最新收益复核证明历史、OHLCV/funding 和微观结构三阶段累计 10/10 个唯一候选全部失败，当前项目不能因模拟部署健康而被描述为“接近盈利上线”。具体见第 26 章、[真实收益差距评估](profitability_gap_assessment_2026_08_25.md)与[2026-08-29 数据价值链复评](rdp_profitability_and_data_source_reassessment_2026_08_29.md)。
 
 ## 1. 文档范围、方法与可信边界
 

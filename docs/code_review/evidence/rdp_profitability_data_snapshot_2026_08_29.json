@@ -1,0 +1,130 @@
+{
+  "schema_version": "aats.rdp_profitability_data_snapshot.v1",
+  "truth_status": "READ_ONLY_POINT_IN_TIME_EVIDENCE",
+  "captured_at_utc": "2026-08-29T08:23:17.865227Z",
+  "database_timezone": "Asia/Shanghai",
+  "aats_starting_commit": "3c8d3c42",
+  "database": "aats_research",
+  "credential_boundary": "No credential value, private account table, order, position, balance, or live endpoint was read.",
+  "queries": [
+    {
+      "id": "DB-E1-CORE",
+      "sql_statements": [
+        "SELECT count(*) AS rows, min(ts), max(ts), string_agg(DISTINCT symbol, ',' ORDER BY symbol) AS scope FROM staging.market_swap_candles_15m;",
+        "SELECT count(*) AS rows, min(ts), max(ts), string_agg(DISTINCT symbol, ',' ORDER BY symbol) AS scope FROM silver.market_swap_candles_1h;",
+        "SELECT count(*) AS rows, min(ts), max(ts), string_agg(DISTINCT symbol, ',' ORDER BY symbol) AS scope FROM staging.market_spot_candles_15m;",
+        "SELECT count(*) AS rows, min(ts), max(ts), string_agg(DISTINCT symbol, ',' ORDER BY symbol) AS scope FROM silver.market_spot_candles_1h;",
+        "SELECT count(*) AS rows, min(ts), max(ts), string_agg(DISTINCT symbol, ',' ORDER BY symbol) AS scope FROM staging.market_swap_funding;",
+        "SELECT count(*) AS rows, min(ts), max(ts), string_agg(DISTINCT symbol, ',' ORDER BY symbol) AS scope FROM silver.market_swap_funding;",
+        "SELECT count(*) AS rows, min(ts), max(ts), string_agg(DISTINCT symbol, ',' ORDER BY symbol) AS scope FROM bronze.market_trades;",
+        "SELECT count(*) AS rows, min(ts), max(ts), string_agg(DISTINCT symbol, ',' ORDER BY symbol) AS scope FROM bronze.market_orderbook_bbo;",
+        "SELECT count(*) AS rows, min(ts), max(ts), string_agg(DISTINCT symbol, ',' ORDER BY symbol) AS scope FROM bronze.market_orderbook_books5;",
+        "SELECT count(*) AS rows, min(ts), max(ts), string_agg(DISTINCT symbol, ',' ORDER BY symbol) AS scope FROM bronze.market_oi_history_1h;",
+        "SELECT count(*) AS rows, min(ts), max(ts), string_agg(DISTINCT symbol, ',' ORDER BY symbol) AS scope FROM bronze.market_mark_price_candles_1m;",
+        "SELECT count(*) AS rows, min(ts), max(ts), string_agg(DISTINCT symbol, ',' ORDER BY symbol) AS scope FROM bronze.market_long_short_ratio_5m;",
+        "SELECT count(*) AS rows, min(ts), max(ts), string_agg(DISTINCT symbol, ',' ORDER BY symbol) AS scope FROM bronze.market_long_short_ratio_1h;",
+        "SELECT count(*) AS rows, min(ts), max(ts), count(DISTINCT inst_id) AS instrument_count, count(*) FILTER (WHERE inst_id='BTC-USDT-SWAP') AS btc_rows, count(*) FILTER (WHERE inst_id='ETH-USDT-SWAP') AS eth_rows FROM staging.raw_liquidations;"
+      ],
+      "results": [
+        {"table": "staging.market_swap_candles_15m", "rows": 45476, "min_time": "2025-12-12T15:00:00+08:00", "max_time": "2026-08-29T11:30:00+08:00", "scope": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]},
+        {"table": "silver.market_swap_candles_1h", "rows": 16746, "min_time": "2024-10-01T08:00:00+08:00", "max_time": "2026-08-28T12:00:00+08:00", "scope": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]},
+        {"table": "staging.market_spot_candles_15m", "rows": 26488, "min_time": "2026-03-17T10:00:00+08:00", "max_time": "2026-08-29T11:30:00+08:00", "scope": ["BTC-USDT", "ETH-USDT"]},
+        {"table": "silver.market_spot_candles_1h", "rows": 16746, "min_time": "2024-10-01T08:00:00+08:00", "max_time": "2026-08-28T12:00:00+08:00", "scope": ["BTC-USDT", "ETH-USDT"]},
+        {"table": "staging.market_swap_funding", "rows": 1447, "min_time": "2026-01-15T00:00:00+08:00", "max_time": "2026-08-28T08:00:00+08:00", "scope": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]},
+        {"table": "silver.market_swap_funding", "rows": 1354, "min_time": "2026-01-15T00:00:00+08:00", "max_time": "2026-08-28T08:00:00+08:00", "scope": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]},
+        {"table": "bronze.market_trades", "rows": 4679610, "min_time": "2026-08-24T10:47:54.051+08:00", "max_time": "2026-08-29T11:31:41.243+08:00", "scope": ["BTC-USDT-SWAP"]},
+        {"table": "bronze.market_orderbook_bbo", "rows": 257586, "min_time": "2026-08-24T10:47:54.232606+08:00", "max_time": "2026-08-29T11:31:43.546649+08:00", "scope": ["BTC-USDT-SWAP"]},
+        {"table": "bronze.market_orderbook_books5", "rows": 459260, "min_time": "2026-08-24T10:47:54.232730+08:00", "max_time": "2026-08-29T11:31:43.527769+08:00", "scope": ["BTC-USDT-SWAP"]},
+        {"table": "bronze.market_oi_history_1h", "rows": 2764, "min_time": "2026-02-19T08:00:00+08:00", "max_time": "2026-08-29T11:00:00+08:00", "scope": ["BTC-USDT-SWAP"]},
+        {"table": "bronze.market_mark_price_candles_1m", "rows": 106403, "min_time": "2026-03-21T05:50:00+08:00", "max_time": "2026-08-29T11:18:00+08:00", "scope": ["BTC-USDT-SWAP"]},
+        {"table": "bronze.market_long_short_ratio_5m", "rows": 14299, "min_time": "2026-04-18T07:30:00+08:00", "max_time": "2026-08-29T11:15:00+08:00", "scope": ["BTC-USDT-SWAP"]},
+        {"table": "bronze.market_long_short_ratio_1h", "rows": 3024, "min_time": "2026-03-21T10:00:00+08:00", "max_time": "2026-08-29T11:00:00+08:00", "scope": ["BTC-USDT-SWAP"]},
+        {"table": "staging.raw_liquidations", "rows": 470541, "min_time": "2026-04-19T12:39:25.243+08:00", "max_time": "2026-08-29T11:31:45.472+08:00", "distinct_instruments": 439, "btc_rows": 18908, "eth_rows": 22369}
+      ]
+    },
+    {
+      "id": "DB-E1-SILVER-GOLD",
+      "sql_statements": [
+        "SELECT count(*) AS rows, min(ts), max(ts), string_agg(DISTINCT symbol, ',' ORDER BY symbol) AS scope FROM silver.market_orderbook_metrics_15m;",
+        "SELECT count(*) AS rows, min(ts), max(ts), string_agg(DISTINCT symbol, ',' ORDER BY symbol) AS scope FROM silver.market_trade_flow_15m;",
+        "SELECT count(*) AS rows, min(ts), max(ts), string_agg(DISTINCT symbol, ',' ORDER BY symbol) AS scope FROM silver.market_oi_funding_metrics_15m;",
+        "SELECT count(*) AS rows, min(ts), max(ts), string_agg(DISTINCT symbol, ',' ORDER BY symbol) AS scope FROM silver.market_volume_profile_15m;",
+        "SELECT count(*) AS rows, min(ts), max(ts), string_agg(DISTINCT symbol, ',' ORDER BY symbol) AS scope FROM silver.market_liquidation_metrics_15m;",
+        "SELECT count(*) AS rows, min(ts), max(ts), string_agg(DISTINCT symbol || ':' || timeframe, ',' ORDER BY symbol || ':' || timeframe) AS scope FROM gold.historical_replay_bars;"
+      ],
+      "results": [
+        {"table": "silver.market_orderbook_metrics_15m", "rows": 4340, "min_time": "2026-04-20T05:00:00+08:00", "max_time": "2026-08-29T11:15:00+08:00", "scope": ["BTC-USDT-SWAP"]},
+        {"table": "silver.market_trade_flow_15m", "rows": 4340, "min_time": "2026-04-20T05:00:00+08:00", "max_time": "2026-08-29T11:15:00+08:00", "scope": ["BTC-USDT-SWAP"]},
+        {"table": "silver.market_oi_funding_metrics_15m", "rows": 4340, "min_time": "2026-04-20T05:00:00+08:00", "max_time": "2026-08-29T11:15:00+08:00", "scope": ["BTC-USDT-SWAP"]},
+        {"table": "silver.market_volume_profile_15m", "rows": 4340, "min_time": "2026-04-20T05:00:00+08:00", "max_time": "2026-08-29T11:15:00+08:00", "scope": ["BTC-USDT-SWAP"]},
+        {"table": "silver.market_liquidation_metrics_15m", "rows": 4340, "min_time": "2026-04-20T05:00:00+08:00", "max_time": "2026-08-29T11:15:00+08:00", "scope": ["BTC-USDT-SWAP"]},
+        {"table": "gold.historical_replay_bars", "rows": 3600, "min_time": "2026-07-22T08:00:00+08:00", "max_time": "2026-08-21T07:45:00+08:00", "scope": ["BTC-USDT-SWAP:15m", "BTC-USDT-SWAP:1H"]}
+      ]
+    },
+    {
+      "id": "DB-E2-HISTORY",
+      "sql_statements": [
+        "SELECT count(*) AS rows, min(ts), max(ts), pg_total_relation_size('staging.official_l2_history') AS relation_bytes FROM staging.official_l2_history;",
+        "SELECT count(*) AS rows, min(ts), max(ts), pg_total_relation_size('staging.official_trade_history') AS relation_bytes FROM staging.official_trade_history;"
+      ],
+      "results": [
+        {"table": "staging.official_l2_history", "rows": 161551006, "min_time": "2026-07-22T08:00:00.006+08:00", "max_time": "2026-08-21T07:59:59.975+08:00", "relation_size_display": "138 GB"},
+        {"table": "staging.official_trade_history", "rows": 52585844, "min_time": "2026-07-22T08:00:00.046+08:00", "max_time": "2026-08-24T23:59:59.983+08:00", "relation_size_display": "26 GB"}
+      ]
+    },
+    {
+      "id": "DB-E3-CAMPAIGN",
+      "sql": "SELECT campaign_id,status,symbol,coverage_start,coverage_end,requested_days,started_at,ended_at,manifest->>'manifest_fingerprint' AS manifest_fingerprint FROM meta.historical_campaign_runs WHERE campaign_id='60e46f5e-e3e0-4090-b141-b53c92f1aa71';",
+      "result": {
+        "campaign_id": "60e46f5e-e3e0-4090-b141-b53c92f1aa71",
+        "status": "SUCCEEDED",
+        "symbol": "BTC-USDT-SWAP",
+        "coverage_start": "2026-07-22T08:00:00+08:00",
+        "coverage_end": "2026-08-21T08:00:00+08:00",
+        "requested_days": 30,
+        "started_at": "2026-08-27T07:12:02.964899+08:00",
+        "ended_at": "2026-08-27T19:50:04.803261+08:00",
+        "manifest_fingerprint": "81e42205278cc8ae56cd2c43ee60e480f82b114864a2d03cd79e35d9e8e59e88"
+      }
+    },
+    {
+      "id": "DB-E4-BUNDLES",
+      "sql": "SELECT count(*) FILTER (WHERE status='ELIGIBLE') AS eligible, count(*) FILTER (WHERE status='ELIGIBLE' AND NOT (eligibility_report::jsonb ? 'instrument_contract_binding')) AS eligible_without_binding FROM meta.dataset_bundles;",
+      "result": {"eligible": 73, "eligible_without_binding": 73}
+    },
+    {
+      "id": "RT-E2-CONTINUITY",
+      "sql": "SELECT count(*) FILTER (WHERE event_type='DROP') AS drop_events, count(*) FILTER (WHERE collector='aats-liquidations-daemon' AND event_type='DISCONNECT') AS liquidation_disconnects, count(*) FILTER (WHERE collector='aats-microstructure-collector' AND event_type='DISCONNECT') AS microstructure_disconnects, count(*) FILTER (WHERE event_type='SHUTDOWN') AS shutdown_events FROM meta.collector_continuity_events WHERE event_ts >= timestamp with time zone '2026-08-28 16:23:17.865227+08' AND event_ts <= timestamp with time zone '2026-08-29 16:23:17.865227+08';",
+      "result": {"drop_events": 0, "liquidation_disconnects": 13, "microstructure_disconnects_across_six_channels": 12, "shutdown_events": 7}
+    }
+  ],
+  "runtime_snapshot": {
+    "command": "docker ps -a (read-only, via the existing WSL2 Docker context)",
+    "running_infrastructure": [
+      "aats-prometheus",
+      "aats-grafana",
+      "aats-promtail",
+      "aats-redis-exporter",
+      "aats-redis",
+      "aats-loki",
+      "aats-postgres",
+      "aats-nats",
+      "aats-jaeger"
+    ],
+    "stopped_applications": [
+      {"name": "aats-microstructure-collector", "exit_code": 0},
+      {"name": "aats-liquidations-daemon", "exit_code": 0},
+      {"name": "aats-rdp-daemon", "exit_code": 0},
+      {"name": "aats-execution", "exit_code": 0},
+      {"name": "aats-market", "exit_code": 0},
+      {"name": "aats-decision", "exit_code": 0},
+      {"name": "aats-gateway", "exit_code": 143}
+    ]
+  },
+  "interpretation_limits": [
+    "Counts and min/max timestamps do not prove continuous coverage.",
+    "PostgreSQL relation size is not the provider download size.",
+    "A SUCCEEDED legacy campaign does not satisfy the current instrument-binding or capital-qualification policy.",
+    "No live or private-account readiness claim is made."
+  ]
+}

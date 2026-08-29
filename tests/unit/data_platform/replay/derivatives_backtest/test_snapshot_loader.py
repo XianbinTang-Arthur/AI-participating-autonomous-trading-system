@@ -424,7 +424,7 @@ def test_observed_forward_snapshot_cannot_authorize_future_window(tmp_path: Path
     ("field", "value"),
     [
         ("symbol", "ETH-USDT-SWAP"),
-        ("venue", "BINANCE"),
+        ("venue", "UNSUPPORTED"),
         ("margin_mode", "cross"),
         ("payload_schema", "derivatives-execution-fee-snapshot-payload/v2"),
     ],

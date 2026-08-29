@@ -17,14 +17,19 @@
 
 ## AATS Research OS 独立建设计划
 
+- [`aats_research_os_source_access_and_profit_priority_correction_2026_08_29.md`](aats_research_os_source_access_and_profit_priority_correction_2026_08_29.md)：
+  现行来源与收益优先级决议；Binance 明确排除，主源为 OKX、第二来源为 `UNBOUND`，认证/付费来源
+  先完成官方准入调研，公开来源在许可与用途核对后可自主选择；同时把资源重新聚焦到可证伪 Alpha、
+  真实成本、样本外和 paper forward。
+
 - [`aats_research_os_program_plan_2026_08_26.md`](aats_research_os_program_plan_2026_08_26.md)：
   从零建设独立研究证据平台的立项规划基线，覆盖目标架构、领域合同、WBS、G0--G8 阶段门、
   30/60/90 日纵向切片、团队资源、测试、风险、Legacy 迁移和资本授权边界。项目启动已条件性
   批准，但 G0 Gate 尚未通过；不代表新平台已实施，也不授权 live、真实资金或 Runtime 参数写入。
 - [`aats_research_os_g0_decision_record_2026_08_26.md`](aats_research_os_g0_decision_record_2026_08_26.md)：
   G0 正式决议；确认独立仓库、BTC/ETH 永续楔子、Owner/Reviewer 规则、精简专业资源模式、
-  Binance 条件性第二来源、G0--G4 USD 120,000 预算硬上限和 Legacy Freeze。项目启动状态为
-  `APPROVED_WITH_CONDITIONS`，G0 证据门为 `OPEN / NOT PASSED`。
+  原始第二来源决策、G0--G4 USD 120,000 预算硬上限和 Legacy Freeze。原 Binance 决策已由
+  2026-08-29 纠偏替代；项目启动状态为 `APPROVED_WITH_CONDITIONS`，G0 证据门为 `OPEN / NOT PASSED`。
 - [`aats_research_os_g0_closure_and_g1_kickoff_plan_2026_08_26.md`](aats_research_os_g0_closure_and_g1_kickoff_plan_2026_08_26.md)：
   十个工作日 G0 收口清单和 G0 通过后的首个 30 日 G1 Canonical Truth Kernel tranche；明确
   Owner、依赖、证据、预算、停止线，以及条件关闭前允许和禁止的工作。
@@ -33,7 +38,8 @@
   回滚和验收；实际实现差异和现行状态以交付记录为准。
 - [`aats_research_os_g0_bootstrap_delivery_2026_08_27.md`](aats_research_os_g0_bootstrap_delivery_2026_08_27.md)：
   截至核对日的交付快照；记录独立本地仓库、领域/治理/CI 合同、审查修复、任务书差异和真实阻断。
-  独立工程基线为 `22a465b06cd731a27cf92154190b1b480fa84d2b`，当前仍为
+  该快照的独立工程基线为 `22a465b06cd731a27cf92154190b1b480fa84d2b`；现行来源纠偏已落地到
+  `b67a59f2c1c69f313796410a492c8a87b03f3235`。当前仍为
   `G0_OPEN / G1_LOCKED`，无 remote/采集/168h/部署事实；动态 Gate 以独立仓库 current/readiness 为准。
 - [`aats_research_os_legacy_freeze_register_2026_08_26.md`](aats_research_os_legacy_freeze_register_2026_08_26.md)：
   截至核对日的 Legacy Freeze 分类快照；区分仍须在旧系统完成的 P0/P1 安全/正确性修复、需例外审批的

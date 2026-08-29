@@ -1,5 +1,10 @@
 # AATS Research OS G0 收口与 G1 启动计划
 
+> **2026-08-29 局部计划失效说明**：本文所有 Binance 许可、能力矩阵、168 小时探针和第二来源交付项
+> 已被 [`来源准入与收益优先级纠偏`](aats_research_os_source_access_and_profit_priority_correction_2026_08_29.md)
+> 替代。现行 G1 是 OKX-only 技术基线，第二来源为 `UNBOUND`；不得把本文原有 Binance 项目作为 Gate、
+> 开发任务或上线前提。本文其余 G0 人类收口要求仍有效。
+
 > 文档状态：已批准的下一步执行计划；G0 Gate 仍为 `OPEN / NOT PASSED`
 > 最后核对：2026-08-27（AATS 代码基线 `40dc6817861a1ddfd92cc8a01d2b9ce87af523aa`，分支 `main`）
 > 决策来源：[`G0 立项决议记录`](aats_research_os_g0_decision_record_2026_08_26.md)

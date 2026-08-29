@@ -1,11 +1,12 @@
 # AATS RDP 文档索引
 
 > 文档状态：现行索引  
-> 最后核对：2026-08-27（起始 HEAD `9c4112c6`，含当前 RDP 控制面收口候选；以本文档所在 HEAD 为准）
+> 最后核对：2026-08-29（新增收益/数据源复评入口；原模块边界核对仍基于 `9c4112c6`，以本文档所在 HEAD 为准）
 > 核对范围：当前入口、任务状态和静态模块边界；历史运行证据不证明现场状态
 
 ## 当前入口
 
+- [`../code_review/rdp_profitability_and_data_source_reassessment_2026_08_29.md`](../code_review/rdp_profitability_and_data_source_reassessment_2026_08_29.md)：当前数据覆盖、加工消费断点、收益成熟度、来源准入和盈利优先工作包；
 - [`../../aats/data_platform/README.md`](../../aats/data_platform/README.md)：RDP 总览、模块边界和安全原则；
 - [`module_reference.md`](module_reference.md)：当前代码模块、API 与数据层导航；
 - [`../design/rdp_platform_v3_architecture_2026_08_25.md`](../design/rdp_platform_v3_architecture_2026_08_25.md)：当前统一工作台、单一读模型、队列语义和发布资格设计；
