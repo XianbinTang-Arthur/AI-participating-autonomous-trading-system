@@ -1183,7 +1183,7 @@ def test_evidence_packet_requires_fresh_public_collector_heartbeats(
         module,
         profile="derivatives",
         image_id=image_id,
-        heartbeat_epoch=int(generated_at.timestamp()) - 10,
+        heartbeat_epoch=HEALTH_BOUNDARY_NS // 1_000_000_000 - 10,
     )
     before_path, after_path = _write_preflight_pair(tmp_path, module)
     final_clock_values = iter(
@@ -1215,17 +1215,23 @@ def test_evidence_packet_requires_fresh_public_collector_heartbeats(
         {
             "name": "aats-liquidations-daemon",
             "heartbeat_path": "/tmp/aats_liquidations_heartbeat",
-            "heartbeat_at": "2026-08-24T00:00:53+00:00",
-                "heartbeat_age_seconds": 50.0,
+            "heartbeat_at": "2026-08-24T00:00:52+00:00",
+            "observed_at": "2026-08-24T00:01:02+00:00",
+            "observation_phase": "pre_health_boundary",
+            "observation_method": "docker_archive_mtime",
+            "heartbeat_age_seconds": 10.0,
             "fresh": True,
         },
         {
             "name": "aats-microstructure-collector",
             "heartbeat_path": "/tmp/aats_microstructure_heartbeat",
-            "heartbeat_at": "2026-08-24T00:00:53+00:00",
-                "heartbeat_age_seconds": 50.0,
+            "heartbeat_at": "2026-08-24T00:00:52+00:00",
+            "observed_at": "2026-08-24T00:01:02+00:00",
+            "observation_phase": "pre_health_boundary",
+            "observation_method": "docker_archive_mtime",
+            "heartbeat_age_seconds": 10.0,
             "fresh": True,
-        }
+        },
     ]
 
 
@@ -1245,22 +1251,32 @@ def test_evidence_rejects_stale_or_future_collector_heartbeat() -> None:
             heartbeat_epoch=int(now.timestamp()) + 6,
             now=now,
         )
+    with pytest.raises(ValueError, match="invalid_collector_heartbeat_observation_phase"):
+        module._collector_heartbeat_fact(
+            "aats-microstructure-collector",
+            heartbeat_epoch=int(now.timestamp()),
+            now=now,
+            observation_phase="final_cutoff",
+        )
+    with pytest.raises(ValueError, match="invalid_collector_heartbeat_observation_method"):
+        module._collector_heartbeat_fact(
+            "aats-microstructure-collector",
+            heartbeat_epoch=int(now.timestamp()),
+            now=now,
+            observation_method="docker_exec",
+        )
 
 
-def test_evidence_observes_heartbeat_after_reading_it(tmp_path: Path) -> None:
+def test_evidence_scopes_pre_boundary_heartbeat_to_health_boundary(
+    tmp_path: Path,
+) -> None:
     module = _load_evidence_module()
     started_at = datetime.fromtimestamp(
         HEALTH_BOUNDARY_NS // 1_000_000_000,
         tz=UTC,
     )
     heartbeat_at = started_at.replace(second=5)
-    observed_at = started_at.replace(second=6)
-    observed_later = started_at.replace(second=7)
-    clock_values = iter((started_at, observed_at, observed_later))
     image_id = "sha256:" + "b" * 64
-
-    def clock() -> datetime:
-        return next(clock_values)
 
     names, fake_run, health_boundary_fingerprint, heartbeat_epochs = _evidence_runner(
         module,
@@ -1290,13 +1306,15 @@ def test_evidence_observes_heartbeat_after_reading_it(tmp_path: Path) -> None:
         nats_cutover_preflight_before_path=before_path,
         nats_cutover_preflight_after_path=after_path,
         run=fake_run,
-        clock=clock,
+        clock=lambda: started_at,
         nanosecond_clock=lambda: next(final_clock_values),
     )
 
     assert payload["generated_at"] == started_at.isoformat()
-    assert payload["collector_freshness"][0]["heartbeat_age_seconds"] == 38.0
-    assert payload["collector_freshness"][1]["heartbeat_age_seconds"] == 38.0
+    for row in payload["collector_freshness"]:
+        assert row["observed_at"] == started_at.isoformat()
+        assert row["observation_phase"] == "pre_health_boundary"
+        assert row["heartbeat_age_seconds"] == 0.0
 
 
 @pytest.mark.parametrize(
@@ -1346,8 +1364,10 @@ def test_final_evidence_window_is_bounded_from_health_boundary(
         )
 
 
-def test_final_evidence_rechecks_collector_freshness_at_window_end(
+@pytest.mark.parametrize("heartbeat_age_seconds", (23, 25, 50))
+def test_final_evidence_preserves_boundary_scoped_collector_freshness(
     tmp_path: Path,
+    heartbeat_age_seconds: int,
 ) -> None:
     module = _load_evidence_module()
     image_id = "sha256:" + "b" * 64
@@ -1357,7 +1377,7 @@ def test_final_evidence_rechecks_collector_freshness_at_window_end(
             module,
             profile="derivatives",
             image_id=image_id,
-            heartbeat_epoch=boundary_epoch - 50,
+            heartbeat_epoch=boundary_epoch - heartbeat_age_seconds,
         )
     )
     before_path, after_path = _write_preflight_pair(tmp_path, module)
@@ -1365,7 +1385,61 @@ def test_final_evidence_rechecks_collector_freshness_at_window_end(
         (HEALTH_BOUNDARY_NS + 40_000_000_000, HEALTH_BOUNDARY_NS + 41_000_000_000)
     )
 
-    with pytest.raises(RuntimeError, match="collector_heartbeat_stale"):
+    payload = module.build_evidence(
+        repo_root=tmp_path,
+        profile="derivatives",
+        overlay="docker-compose.aats.derivatives.yml",
+        schema_job_status="passed",
+        runtime_readiness_generation=READINESS_GENERATION,
+        deployment_lock_id=DEPLOYMENT_LOCK_ID,
+        deployed_commit=DEPLOYED_COMMIT,
+        required_containers=names,
+        nats_stream_probe=_matched_nats_stream_rows,
+        **_writer_monitor_kwargs(names),
+        health_boundary_started_ns=HEALTH_BOUNDARY_NS,
+        health_boundary_app_fingerprint=health_boundary_fingerprint,
+        collector_heartbeat_epochs=heartbeat_epochs,
+        nats_cutover_preflight_before_path=before_path,
+        nats_cutover_preflight_after_path=after_path,
+        run=fake_run,
+        generated_at=datetime.fromtimestamp(boundary_epoch, tz=UTC),
+        nanosecond_clock=lambda: next(final_clock_values),
+    )
+
+    assert payload["collector_freshness"][0]["heartbeat_age_seconds"] == float(
+        heartbeat_age_seconds
+    )
+    assert payload["collector_freshness"][1]["heartbeat_age_seconds"] == float(
+        heartbeat_age_seconds
+    )
+    assert payload["container_runtime_evidence_window"][
+        "observed_stability_seconds"
+    ] == 41.0
+
+
+@pytest.mark.parametrize(
+    ("heartbeat_offset_seconds", "expected_error"),
+    ((-60, "collector_heartbeat_stale"), (6, "collector_heartbeat_in_future")),
+)
+def test_evidence_rejects_collector_heartbeat_outside_health_boundary(
+    tmp_path: Path,
+    heartbeat_offset_seconds: int,
+    expected_error: str,
+) -> None:
+    module = _load_evidence_module()
+    image_id = "sha256:" + "b" * 64
+    boundary_epoch = HEALTH_BOUNDARY_NS // 1_000_000_000
+    names, fake_run, health_boundary_fingerprint, heartbeat_epochs = (
+        _evidence_runner(
+            module,
+            profile="derivatives",
+            image_id=image_id,
+            heartbeat_epoch=boundary_epoch + heartbeat_offset_seconds,
+        )
+    )
+    before_path, after_path = _write_preflight_pair(tmp_path, module)
+
+    with pytest.raises(RuntimeError, match=expected_error):
         module.build_evidence(
             repo_root=tmp_path,
             profile="derivatives",
@@ -1383,8 +1457,7 @@ def test_final_evidence_rechecks_collector_freshness_at_window_end(
             nats_cutover_preflight_before_path=before_path,
             nats_cutover_preflight_after_path=after_path,
             run=fake_run,
-            generated_at=datetime.fromtimestamp(boundary_epoch, tz=UTC),
-            nanosecond_clock=lambda: next(final_clock_values),
+            nanosecond_clock=lambda: HEALTH_BOUNDARY_NS + 40_000_000_000,
         )
 
 

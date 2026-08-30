@@ -115,7 +115,9 @@ protocol v1 -> v2 首次发布和回滚禁止 rolling/mixed version，只能走�
 `derivatives` 模拟 profile 还会启动 `aats-liquidations-daemon` 和
 `aats-microstructure-collector` 两个公共数据采集器，应用必需集合因此为七个容器。采集器只写
 研究库、不加载 live env、不接 execution command；其 60 秒 heartbeat 是部署证据的一部分，
-但不能代替 Silver 表数据新鲜度和 eligibility。完整流程见
+且只评价健康边界前唯一一次 archive mtime 相对该边界的年龄。随后 40 秒窗口证明容器与
+healthcheck 连续性，不把同一个 immutable mtime 伪装成 cutoff 时点的新读数；该 heartbeat 仍不能
+代替 Silver 表数据新鲜度和 eligibility。完整流程见
 [收益证据与模拟交易就绪运行手册](../../docs/operations/profit_readiness_runbook.md)。
 
 ```bash

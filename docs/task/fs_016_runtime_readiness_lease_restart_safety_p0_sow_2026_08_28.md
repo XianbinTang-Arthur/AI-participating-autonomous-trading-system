@@ -284,6 +284,14 @@ Compose project/service、唯一 RW 标准
 `BOUNDED_OBSERVED / PASSED_WITH_TRUST_BOUNDARY`：Moby event broker 不是有序无损审计源，daemon/client
 时钟未证明对齐，exec、network attachment 与跨容器 volume 访问不可见，不能升格为完整审计。
 
+collector heartbeat 的 60 秒 freshness 只评价上述唯一一次边界前 archive mtime 相对健康边界的
+年龄；健康边界是读取完成后的首个权威 wall clock，因此这是读取时年龄的保守上界。该 immutable
+样本不得在 40 秒窗口末尾再次计龄，也不得被表述为最终 cutoff 时点的 heartbeat freshness。边界后
+连续性由 running/healthy、`FailingStreak=0`、最新 `ExitCode=0`、保留 health log 与 lifecycle monitor
+共同证明；它仍不能替代 Silver 数据 freshness 或研究 eligibility。若将来必须证明 cutoff 时点的
+heartbeat mtime，需要另行扩展 healthcheck 输出及证据协议，不能通过第二次 `archive-path` 读取绕过
+当前“每个 collector 恰好一次、健康边界后零 archive 事件”的审计约束。
+
 上述代码、聚焦测试与隔离 smoke 已落地并提交为 `45612697`。2026-08-29 05:54Z 的标准 derivatives
 尝试停净七个 app、保持基础设施在线后，运行 schema v3 第一次 `pre_full_down` 只读 preflight：扫描
 `3` 个 stream/`78` 个 consumer，精确识别全部 `77` 个声明 durable、无 missing，仅将

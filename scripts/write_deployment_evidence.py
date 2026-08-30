@@ -916,7 +916,13 @@ def _collector_heartbeat_fact(
     heartbeat_epoch: int,
     now: datetime | None = None,
     clock: Clock = _utc_now,
+    observation_phase: str = "current",
+    observation_method: str = "supplied_epoch",
 ) -> dict[str, object]:
+    if observation_phase not in {"current", "pre_health_boundary"}:
+        raise ValueError("invalid_collector_heartbeat_observation_phase")
+    if observation_method not in {"supplied_epoch", "docker_archive_mtime"}:
+        raise ValueError("invalid_collector_heartbeat_observation_method")
     heartbeat_path = _COLLECTOR_HEARTBEATS[name]
     try:
         if isinstance(heartbeat_epoch, bool) or not isinstance(heartbeat_epoch, int):
@@ -935,6 +941,9 @@ def _collector_heartbeat_fact(
         "name": name,
         "heartbeat_path": heartbeat_path,
         "heartbeat_at": heartbeat_at.isoformat(),
+        "observed_at": observed_at.isoformat(),
+        "observation_phase": observation_phase,
+        "observation_method": observation_method,
         "heartbeat_age_seconds": round(age_seconds, 3),
         "fresh": True,
     }
@@ -1659,16 +1668,23 @@ def build_evidence(
         raise RuntimeError("invalid_base_image_id")
 
     now = generated_at or clock()
-    # These mtimes were captured before the authoritative health boundary.
-    # The final writer must remain entirely observation-event-free from that
-    # boundary onward; it therefore validates supplied no-secret epochs rather
-    # than calling docker exec/cp itself.
+    heartbeat_observed_at = datetime.fromtimestamp(
+        health_boundary_started_ns / 1_000_000_000,
+        tz=timezone.utc,
+    )
+    # Each mtime was captured exactly once immediately before the authoritative
+    # health boundary.  Evaluate that immutable sample against the boundary,
+    # which is the conservative upper bound on its actual read-time age.  The
+    # final writer must remain observation-event-free from this boundary onward;
+    # post-boundary continuity is established separately by the bounded Docker
+    # health/lifecycle evidence below.
     collector_freshness = [
         _collector_heartbeat_fact(
             name,
             heartbeat_epoch=collector_heartbeat_epochs[name],
-            now=generated_at,
-            clock=clock,
+            now=heartbeat_observed_at,
+            observation_phase="pre_health_boundary",
+            observation_method="docker_archive_mtime",
         )
         for name in required_container_names
         if name in _COLLECTOR_HEARTBEATS
@@ -1904,18 +1920,6 @@ def build_evidence(
         raise RuntimeError("nats_volume_changed_after_monitor_seal")
     if base_image_id_sealed != base_image_id_before:
         raise RuntimeError("base_image_changed_after_monitor_seal")
-    collector_freshness = [
-        _collector_heartbeat_fact(
-            name,
-            heartbeat_epoch=collector_heartbeat_epochs[name],
-            now=datetime.fromtimestamp(
-                coverage_ended_ns / 1_000_000_000,
-                tz=timezone.utc,
-            ),
-        )
-        for name in required_container_names
-        if name in _COLLECTOR_HEARTBEATS
-    ]
     payload: dict[str, object] = {
         "format_version": 2,
         "generated_at": now.isoformat(),
