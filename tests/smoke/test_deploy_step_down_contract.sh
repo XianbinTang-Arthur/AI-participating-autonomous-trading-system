@@ -37,6 +37,9 @@ wsl_run() {
                 printf '%s\n' \
                     "aats-liquidations-daemon" \
                     "aats-microstructure-collector"
+            elif [[ "$scenario" == managed_created_collector \
+                || "$scenario" == managed_created_race ]]; then
+                printf 'aats-liquidations-daemon\n'
             else
                 printf 'aats-liquidations-daemon\n'
             fi
@@ -57,8 +60,22 @@ wsl_run() {
                 return 96
             fi
             ;;
+        *"docker inspect --format '{{.State.Status}}'"*)
+            if [[ "$scenario" == managed_created_collector \
+                || "$scenario" == managed_created_race ]]; then
+                printf 'created\n'
+            else
+                printf 'running\n'
+            fi
+            ;;
         *"docker stop --time 15"*)
             printf '%s\n' "$command" >>"$command_log"
+            ;;
+        *"docker rm "*)
+            printf '%s\n' "$command" >>"$command_log"
+            if [[ "$scenario" == managed_created_race ]]; then
+                return 82
+            fi
             ;;
         *"docker compose"*" down --timeout 5"*)
             printf '%s\n' "$command" >>"$command_log"
@@ -86,6 +103,35 @@ captured_down="$(grep -F 'docker compose' "$command_log")"
 [[ "$captured_down" == *"AATS_NATS_TARGET_ENV_SNAPSHOT_PATH='$NATS_TARGET_ENV_SNAPSHOT_PATH'"* ]]
 [[ "$captured_down" == *"AATS_NATS_TARGET_MANIFEST_SHA256='$NATS_TARGET_MANIFEST_SHA256'"* ]]
 [[ "$captured_down" == *"docker compose $COMPOSE_CMD_ARGS down --timeout 5"* ]]
+
+# A managed container left in Docker's created state by an interrupted
+# deployment has no process to stop. It is removed by exact verified ID without
+# --force so a concurrent start remains a hard failure.
+: >"$command_log"
+scenario=managed_created_collector
+step_down
+captured_remove="$(grep -F 'docker rm ' "$command_log")"
+[[ "$captured_remove" == *"$LIQUIDATIONS_ID"* ]]
+[[ "$captured_remove" != *"aats-liquidations-daemon"* ]]
+if grep -Fq 'docker stop --time 15' "$command_log"; then
+    printf 'created container was incorrectly sent to docker stop\n' >&2
+    exit 99
+fi
+
+# If the container starts between the state read and non-forced removal,
+# Docker refuses the removal and the standard path must not reach Compose down.
+: >"$command_log"
+scenario=managed_created_race
+set +e
+( set -e; step_down )
+race_status=$?
+set -e
+[[ "$race_status" -eq 82 ]]
+grep -Fq 'docker rm ' "$command_log"
+if grep -Fq 'docker compose' "$command_log"; then
+    printf 'created-container race reached Compose down\n' >&2
+    exit 100
+fi
 
 # A foreign container reusing a managed name is never stopped, and the later
 # Compose/NATS mutation path is not reached.

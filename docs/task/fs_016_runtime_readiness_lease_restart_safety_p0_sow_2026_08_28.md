@@ -232,8 +232,10 @@ keeper 与后继 holder 都被阻断，直至按精确证据恢复；锁不会�
 分支不匹配或同步后 HEAD 不一致等远端语义状态可准确传播并清理自身 marker，transport 歧义仍保留。
 当前 Windows Git Bash -> WSL 协议只有聚焦 smoke 证据，不等于标准部署 PASS。
 
-停止阶段对所有已知 profile 的七个应用容器执行 15 秒有界 stop；逐个只接受 `exited/dead` 或明确
-not-found，其他状态与 inspect 失败全部停止发布。quiescence 基线记录容器 ID、状态、`StartedAt`、
+停止阶段对所有已知 profile 的七个应用容器执行 15 秒有界 stop。被中断的 app-up 若遗留状态精确为
+`created` 的受管应用，入口只在 project/service/64 位 ID 归属校验后按该 ID 无强制、无 volume 删除；
+并发启动或删除失败立即阻断。随后逐个只接受 `exited/dead` 或明确 not-found，其他状态与 inspect 失败
+全部停止发布。quiescence 基线记录容器 ID、状态、`StartedAt`、
 `FinishedAt`、`RestartCount`。随后受控确保仅基础设施在线，在 full-down 前执行第一次 preflight；
 PASS 后才以 5 秒 down 关闭 Redis/NATS/Postgres，并为 full-down 后的容器状态建立新基线。正常
 infra/schema 完成后、app up 前执行第二次同等 preflight。strict v2 增加 55 秒 quarantine，应用 health
@@ -361,7 +363,8 @@ truth 丢失/被错误恢复与独立 watchdog 或 OS termination 同时失效�
   launch 前取消不执行 mutation，launch 后信号/退出/失锁保持 lease/flock 并等待实际 completion proof；
   WSL `capture` 的七字段 ACK、输出摘要验证后回放、远端语义状态、proof 幂等重读及所有歧义失败关闭均
   取得运行证据；标准代码同步作为单个 ACK 支持的 Git 事务完成，语义拒绝不毒化全局锁；
-  stop 七个 app 时只接受 `exited/dead` 或明确 not-found；以 ID/status/StartedAt/FinishedAt/RestartCount
+  stop 七个 app；中断 app-up 遗留的受管 `created` 容器仅在精确归属校验后按 ID 无强制清理，随后只
+  接受 `exited/dead` 或明确 not-found；以 ID/status/StartedAt/FinishedAt/RestartCount
   和精确 Docker events 区间验证 quiescence；基础设施-only up 后、full-down 前取得第一次 loopback
   全量分页只读 preflight PASS，full-down 后建立新基线，infra/schema 完成后、app up 前取得第二次；
   最终证据验证两次 v3 PASS 的同 lock id/generation/deployed commit/quiescence、chain 及 path/hash，

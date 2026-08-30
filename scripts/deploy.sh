@@ -2198,22 +2198,38 @@ step_down() {
     # 按所有受支持 profile 的应用并集停机，而不是只停目标 profile。否则
     # derivatives -> spot 会遗留 collector，令 full-down/cutover 证据失真。
     # 名称是受版本控制的固定 allowlist；健康/evidence 仍使用目标 APP_CONTAINERS。
-    local existing_containers container container_id container_ids_to_stop
+    local existing_containers container container_id container_state
+    local container_ids_to_stop container_ids_to_remove
     if ! existing_containers="$(wsl_run "docker ps -a --format '{{.Names}}'" | tr -d '\r')"; then
         log_error "无法枚举应用容器状态；拒绝关闭协调基础设施"
         exit 10
     fi
     container_ids_to_stop=""
+    container_ids_to_remove=""
     for container in $ALL_KNOWN_APP_CONTAINERS; do
         if printf '%s\n' "$existing_containers" | grep -Fxq -- "$container"; then
             if ! container_id="$(owned_app_container_id "$container")"; then
                 exit 10
             fi
-            container_ids_to_stop="$container_ids_to_stop $container_id"
+            if ! container_state="$(wsl_run "docker inspect --format '{{.State.Status}}' '$container_id'" | tr -d '\r')"; then
+                log_error "无法读取应用容器状态；拒绝产生副作用: $container"
+                exit 10
+            fi
+            if [[ "$container_state" == "created" ]]; then
+                # An interrupted Compose create leaves no process for docker stop
+                # to transition to exited. Remove only the exact, ownership-bound
+                # ID without --force; a concurrent start therefore fails closed.
+                container_ids_to_remove="$container_ids_to_remove $container_id"
+            else
+                container_ids_to_stop="$container_ids_to_stop $container_id"
+            fi
         fi
     done
     if [[ -n "${container_ids_to_stop// /}" ]]; then
         wsl_run "docker stop --time 15 $container_ids_to_stop"
+    fi
+    if [[ -n "${container_ids_to_remove// /}" ]]; then
+        wsl_run "docker rm $container_ids_to_remove"
     fi
     capture_new_app_quiescence_boundary "首次 cutover"
     ensure_nats_cutover_preflight_infra_up

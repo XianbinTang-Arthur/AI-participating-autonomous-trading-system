@@ -3129,12 +3129,14 @@ def test_deploy_stops_apps_before_coordination_infra_and_budgets_readiness_v2() 
     text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
 
     app_stop = "docker stop --time 15 $container_ids_to_stop"
+    created_remove = "docker rm $container_ids_to_remove"
     cutover_preflight = (
         'if ! run_nats_durable_cutover_preflight "$stage" "$previous_path"; then'
     )
     full_down = "docker compose $COMPOSE_CMD_ARGS down --timeout 5"
     assert "HEALTH_TIMEOUT=210" in text
     assert app_stop in text
+    assert created_remove in text
     assert "应用容器未处于 exited/dead；拒绝继续" in text
     assert "~/aats-venv/bin/python scripts/check_nats_durable_cutover.py" in text
     assert "保持 NATS/Redis/Postgres 在线并终止部署" in text
@@ -3147,6 +3149,7 @@ def test_deploy_stops_apps_before_coordination_infra_and_budgets_readiness_v2() 
     )[1].split("\n}", 1)[0]
     infra_only_up = "ensure_nats_cutover_preflight_infra_up"
     assert step_down.index(app_stop) < step_down.index(infra_only_up)
+    assert step_down.index(created_remove) < step_down.index(infra_only_up)
     assert step_down.index(infra_only_up) < step_down.index(
         "require_nats_durable_cutover_preflight"
     )
@@ -3182,6 +3185,12 @@ def test_deploy_stop_scope_is_all_profile_apps_not_only_target_profile() -> None
     assert "for container in $ALL_KNOWN_APP_CONTAINERS; do" in step_down
     assert "for container in $ALL_KNOWN_APP_CONTAINERS; do" in capture
     assert "docker stop --time 15 $container_ids_to_stop" in step_down
+    assert "docker rm $container_ids_to_remove" in step_down
+    assert "docker rm --force" not in step_down
+    assert "docker rm -f" not in step_down
+    assert "docker rm --volumes" not in step_down
+    assert "docker rm -v" not in step_down
+    assert 'container_state="$(wsl_run "docker inspect --format \'{{.State.Status}}\'' in step_down
     assert 'container_id="$(owned_app_container_id "$container")"' in step_down
     assert "for container in $APP_CONTAINERS; do" not in step_down
     assert 'local env_prefix' in step_down
