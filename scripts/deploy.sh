@@ -642,6 +642,29 @@ build_wsl_completion_wrapped_command() {
     printf '%s' "$wrapped"
 }
 
+run_wsl_completion_transport() {
+    local user_mode="$1" wrapped_encoded="$2" transport_script
+    local -a wsl_command=(wsl -d "$DISTRO")
+    if [[ ( "$user_mode" != default && "$user_mode" != root ) \
+        || -z "$wrapped_encoded" \
+        || ! "$wrapped_encoded" =~ ^[A-Za-z0-9+/=]+$ ]]; then
+        return 125
+    fi
+    if [[ "$user_mode" == root ]]; then
+        wsl_command+=(-u root)
+    fi
+    # Decode the complete program into a static Python loader before starting
+    # it.  Passing the ACK program itself to `bash` over stdin lets
+    # Docker/Compose consume the unparsed tail.  The loader reads that tail to
+    # EOF first, starts the real wrapper with DEVNULL stdin, and preserves the
+    # wrapper's exact status (including shell-style signal status).
+    printf -v transport_script '%s\n' \
+        'set -o pipefail' \
+        "printf '%s' '$wrapped_encoded' | base64 --decode | python3 -c 'import subprocess,sys; script=sys.stdin.read(); script or sys.exit(125); status=subprocess.run([\"bash\",\"-c\",script],stdin=subprocess.DEVNULL).returncode; sys.exit(128-status if status<0 else status)'"
+    MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 \
+        "${wsl_command[@]}" bash -c "$transport_script"
+}
+
 finalize_proven_wsl_completion() {
     local marker_file="$1" completion_file="$2" user_mode="$3" io_mode="$4"
     local expected_stdout_size="$5" expected_stdout_sha256="$6"
@@ -826,15 +849,17 @@ run_supervised_command_guard() {
                 : >"$stdout_file"
                 : >"$stderr_file"
                 chmod 600 -- "$stdout_file" "$stderr_file"
-                "$@" >"$stdout_file" 2>"$stderr_file"
+                MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 \
+                    "$@" >"$stdout_file" 2>"$stderr_file"
                 status=$?
                 ;;
             quiet)
-                "$@" >/dev/null 2>&1
+                MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 \
+                    "$@" >/dev/null 2>&1
                 status=$?
                 ;;
             stream)
-                "$@"
+                MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 "$@"
                 status=$?
                 ;;
             *)
@@ -1079,12 +1104,8 @@ run_lock_supervised_external() {
             log_error "无法编码 WSL completion acknowledgement wrapper: $context"
             return 16
         fi
-        supervised_command=(wsl -d "$DISTRO")
-        if [[ "$user_mode" == root ]]; then
-            supervised_command+=(-u root)
-        fi
-        supervised_command+=(bash -c \
-            "printf '%s' '$wrapped_encoded' | base64 --decode | bash")
+        supervised_command=(run_wsl_completion_transport \
+            "$user_mode" "$wrapped_encoded")
     fi
     DEPLOY_ACTIVE_GATE_DIR="$gate_dir"
     DEPLOY_ACTIVE_MARKER_FILE="$marker_file"

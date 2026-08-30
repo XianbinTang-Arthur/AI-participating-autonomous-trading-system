@@ -1037,6 +1037,9 @@ def test_marker_cleanup_requires_local_completion_or_remote_acknowledgement() ->
     ack_finalizer = source.split("finalize_proven_wsl_completion() {", 1)[1].split(
         "\n}", 1
     )[0]
+    transport = source.split("run_wsl_completion_transport() {", 1)[1].split(
+        "\n}", 1
+    )[0]
     guard = source.split("run_supervised_command_guard() {", 1)[1].split(
         "\n}", 1
     )[0]
@@ -1078,6 +1081,14 @@ def test_marker_cleanup_requires_local_completion_or_remote_acknowledgement() ->
         ack_builder.index('if [[ "$transport_status" -ne 0 ]]')
     )
     assert "expected_marker_uid" in ack_builder
+    assert 'MSYS_NO_PATHCONV=1 "$@"' in guard
+    assert "MSYS2_ARG_CONV_EXCL='*'" in guard
+    assert "script=sys.stdin.read()" in transport
+    assert "stdin=subprocess.DEVNULL" in transport
+    assert "128-status if status<0 else status" in transport
+    assert "MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1" in transport
+    assert 'supervised_command=(run_wsl_completion_transport' in source
+    assert "printf '%s' '$wrapped_encoded' | base64 --decode | bash" not in source
     assert "os.O_EXCL" in source
     assert '[[ "$ack_marker" == "$marker_file"' in ack_finalizer
     assert '[[ "$ack_io_mode" == "$expected_io_mode" ]]' in ack_finalizer

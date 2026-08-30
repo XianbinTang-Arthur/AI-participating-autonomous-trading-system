@@ -61,6 +61,24 @@ if [[ "$wsl_root_ack_status" -ne 8 || "$wsl_root_ack_output" != "root-ack-output
 fi
 assert_no_owned_active_markers "wsl-root-ack semantic nonzero smoke"
 
+# The completion program must be passed as a bash -c argument, never through
+# the wrapper's stdin.  Docker/Compose and other legitimate remote commands may
+# read stdin; under the old transport they consumed the remainder of the ACK
+# program and made Bash reach EOF at hash_output with status 0.
+set +e
+wsl_stdin_output="$(run_lock_supervised_wsl \
+    "wsl-ack-stdin-consumer-smoke" default capture \
+    "cat >/dev/null; printf 'stdin-safe-output'; exit 9")"
+wsl_stdin_status=$?
+set -e
+if [[ "$wsl_stdin_status" -ne 9 || "$wsl_stdin_output" != "stdin-safe-output" ]]; then
+    printf 'stdin consumer truncated WSL completion program: status=%s output=%s\n' \
+        "$wsl_stdin_status" "$wsl_stdin_output" >&2
+    exit 84
+fi
+assert_no_owned_active_markers "wsl-ack stdin consumer smoke"
+assert_deploy_lock_held "wsl-ack stdin consumer smoke"
+
 # A signal delivered to the WSL wrapper while it waits for the synchronous
 # child must not delete the capture files before the child returns.  The remote
 # command signals its direct parent (the completion wrapper), then completes
