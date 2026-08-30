@@ -297,6 +297,7 @@ def _baseline_continuity() -> dict[str, object]:
         "baseline_sha256": None,
         "streams_checked": 0,
         "durables_checked": 0,
+        "passive_retention_trims": [],
         "violations": [],
     }
 
@@ -1830,11 +1831,16 @@ def test_nats_cutover_continuity_rejects_stream_purge_and_cursor_rollback() -> N
         first_seq=6,
         last_seq=5,
     )
+    previous_stream = _critical_stream_row()
+    # A purge on a stream with max-age expiry disabled cannot qualify for the
+    # bounded passive-retention trust boundary.
+    previous_stream["immutable_config"]["max_age_seconds"] = 0.0
+    purged_stream["immutable_config"]["max_age_seconds"] = 0.0
     rolled_back_durable = json.loads(json.dumps(durable))
     rolled_back_durable["cursor"]["ack_floor_stream_seq"] = 9
 
     continuity = cutover.evaluate_cutover_continuity(
-        previous_streams=[_critical_stream_row()],
+        previous_streams=[previous_stream],
         current_streams=[purged_stream],
         previous_durables=[durable],
         current_durables=[rolled_back_durable],
@@ -1933,8 +1939,121 @@ def test_nats_cutover_continuity_accepts_identical_baseline() -> None:
         "baseline_sha256": "sha256:" + "1" * 64,
         "streams_checked": 1,
         "durables_checked": 1,
+        "passive_retention_trims": [],
         "violations": [],
     }
+
+
+def test_nats_cutover_continuity_accepts_exact_passive_retention_trim() -> None:
+    durable = cutover.evaluate_consumer(
+        _consumer_state(window=1, outstanding=0),
+        _expected_durable(),
+    )
+    continuity = cutover.evaluate_cutover_continuity(
+        previous_streams=[_critical_stream_row()],
+        current_streams=[
+            _critical_stream_row(
+                messages=3,
+                byte_count=300,
+                first_seq=3,
+                last_seq=5,
+            )
+        ],
+        previous_durables=[durable],
+        current_durables=[durable],
+        baseline_sha256="sha256:" + "1" * 64,
+    )
+
+    assert continuity["status"] == "PASSED"
+    assert continuity["violations"] == []
+    assert continuity["passive_retention_trims"] == [
+        {
+            "stream": "AATS_EVENTS_COMMANDS",
+            "delta": 2,
+            "messages_removed": 2,
+            "bytes_removed": 200,
+            "first_seq_advanced": 2,
+            "trust_boundary": "purge_vs_expiry_not_distinguishable",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "delta_mismatch",
+        "bytes_unchanged",
+        "bytes_increase",
+        "non_limits",
+        "max_age_zero",
+        "discard_new",
+        "deleted_nonempty",
+    ),
+)
+def test_nats_cutover_continuity_rejects_inexact_or_ineligible_head_trim(
+    mutation: str,
+) -> None:
+    previous = _critical_stream_row()
+    current = _critical_stream_row(
+        messages=3,
+        byte_count=300,
+        first_seq=3,
+        last_seq=5,
+    )
+    if mutation == "delta_mismatch":
+        current["state"]["first_seq"] = 2
+    elif mutation == "bytes_unchanged":
+        current["state"]["bytes"] = 500
+    elif mutation == "bytes_increase":
+        current["state"]["bytes"] = 501
+    elif mutation == "non_limits":
+        previous["immutable_config"]["retention"] = "interest"
+        current["immutable_config"]["retention"] = "interest"
+    elif mutation == "max_age_zero":
+        previous["immutable_config"]["max_age_seconds"] = 0.0
+        current["immutable_config"]["max_age_seconds"] = 0.0
+    elif mutation == "discard_new":
+        previous["immutable_config"]["discard"] = "new"
+        current["immutable_config"]["discard"] = "new"
+    else:
+        previous["state"]["deleted"] = [2]
+        previous["state"]["num_deleted"] = 1
+        current["state"]["deleted"] = [2]
+        current["state"]["num_deleted"] = 1
+
+    continuity = cutover.evaluate_cutover_continuity(
+        previous_streams=[previous],
+        current_streams=[current],
+        previous_durables=[],
+        current_durables=[],
+        baseline_sha256="sha256:" + "1" * 64,
+    )
+
+    assert continuity["status"] == "INVALIDATED"
+    assert continuity["passive_retention_trims"] == []
+
+
+def test_nats_cutover_continuity_rejects_unprojected_durable_row_drift() -> None:
+    durable = cutover.evaluate_consumer(
+        _consumer_state(window=1, outstanding=0),
+        _expected_durable(),
+    )
+    drifted = json.loads(json.dumps(durable))
+    drifted["unprojected_state"] = "changed"
+
+    continuity = cutover.evaluate_cutover_continuity(
+        previous_streams=[_critical_stream_row()],
+        current_streams=[_critical_stream_row()],
+        previous_durables=[durable],
+        current_durables=[drifted],
+        baseline_sha256="sha256:" + "1" * 64,
+    )
+
+    assert continuity["status"] == "INVALIDATED"
+    assert any(
+        str(item).startswith("durable_row_changed:")
+        for item in continuity["violations"]
+    )
 
 
 def test_nats_cutover_profile_target_manifest_applies_only_allowlisted_overrides(

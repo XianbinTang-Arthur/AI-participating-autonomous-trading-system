@@ -312,6 +312,7 @@ def _write_preflight_pair(tmp_path: Path, module: ModuleType) -> tuple[Path, Pat
             "baseline_sha256": None,
             "streams_checked": len(streams),
             "durables_checked": len(durables),
+            "passive_retention_trims": [],
             "violations": [],
         },
     )
@@ -499,6 +500,31 @@ def test_preflight_chain_rejects_forged_continuity_summary(
     with pytest.raises(
         ValueError,
         match="nats_cutover_continuity_artifact_mismatch:streams_checked",
+    ):
+        module._validate_nats_cutover_preflight_chain(
+            before_reference=before_reference,
+            before_payload=before_payload,
+            after_payload=forged_after,
+        )
+
+
+def test_preflight_chain_rejects_omitted_passive_retention_trim_summary(
+    tmp_path: Path,
+) -> None:
+    module = _load_evidence_module()
+    before_reference, before_payload, after_payload = _load_preflight_chain(
+        tmp_path,
+        module,
+    )
+    forged_after = copy.deepcopy(after_payload)
+    del forged_after["continuity"]["passive_retention_trims"]
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "nats_cutover_continuity_artifact_mismatch:"
+            "passive_retention_trims"
+        ),
     ):
         module._validate_nats_cutover_preflight_chain(
             before_reference=before_reference,

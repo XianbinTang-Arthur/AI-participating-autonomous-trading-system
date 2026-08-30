@@ -82,6 +82,7 @@ _NATS_BOOTSTRAP_MODES = (
     "existing_container_preserved",
     "proven_fresh_install",
 )
+_PASSIVE_RETENTION_TRIM_TRUST_BOUNDARY = "purge_vs_expiry_not_distinguishable"
 _APP_QUIESCENCE_INSPECT_TEMPLATE = (
     '{"Name":{{json .Name}},"Id":{{json .Id}},'
     '"Status":{{json .State.Status}},'
@@ -1185,6 +1186,7 @@ def evaluate_cutover_continuity(
     previous_durable_index = _indexed_rows(previous_durables, kind="durable")
     current_durable_index = _indexed_rows(list(current_durables), kind="durable")
     violations: list[str] = []
+    passive_retention_trims: list[dict[str, object]] = []
 
     if set(previous_stream_index) != set(current_stream_index):
         violations.append("critical_stream_identity_set_changed")
@@ -1199,31 +1201,82 @@ def evaluate_cutover_continuity(
             violations.append(f"stream_created_changed:{name}")
         if previous.get("immutable_config") != current.get("immutable_config"):
             violations.append(f"stream_config_changed:{name}")
+        previous_config = _required_mapping(previous.get("immutable_config"))
         previous_state = _required_mapping(previous.get("state"))
         current_state = _required_mapping(current.get("state"))
-        # All application publishers/consumers are stopped across this window.
-        # Any broker state change is therefore an unowned write, ACK, purge, or
-        # retention mutation and must invalidate the cutover, not merely avoid
-        # rollback. Exact equality also catches purge-then-repopulate attacks.
-        for field in (
-            "messages",
-            "bytes",
-            "first_seq",
-            "last_seq",
-            "consumer_count",
-        ):
-            if _row_integer(current_state, field) != _row_integer(
-                previous_state,
-                field,
+        previous_values = {
+            field: _row_integer(previous_state, field)
+            for field in (
+                "messages",
+                "bytes",
+                "first_seq",
+                "last_seq",
+                "consumer_count",
+                "num_deleted",
+            )
+        }
+        current_values = {
+            field: _row_integer(current_state, field)
+            for field in previous_values
+        }
+        message_delta = previous_values["messages"] - current_values["messages"]
+        bytes_delta = previous_values["bytes"] - current_values["bytes"]
+        first_seq_delta = current_values["first_seq"] - previous_values["first_seq"]
+        max_age_seconds = previous_config.get("max_age_seconds")
+        passive_retention_trim = (
+            previous.get("created") == current.get("created")
+            and previous.get("immutable_config") == current.get("immutable_config")
+            and previous_config.get("retention") == "limits"
+            and previous_config.get("discard") == "old"
+            and not isinstance(max_age_seconds, bool)
+            and isinstance(max_age_seconds, (int, float))
+            and math.isfinite(float(max_age_seconds))
+            and float(max_age_seconds) > 0
+            and message_delta > 0
+            and bytes_delta > 0
+            and first_seq_delta == message_delta
+            and current_values["last_seq"] == previous_values["last_seq"]
+            and current_values["consumer_count"]
+            == previous_values["consumer_count"]
+            and previous_state.get("deleted") == []
+            and current_state.get("deleted") == []
+            and previous_values["num_deleted"] == 0
+            and current_values["num_deleted"] == 0
+        )
+        if passive_retention_trim:
+            # NATS exposes the resulting stream state, not the mutation source.
+            # These invariants prove a continuous head trim but cannot
+            # distinguish max-age expiry from an exact manual purge.
+            passive_retention_trims.append(
+                {
+                    "stream": name,
+                    "delta": message_delta,
+                    "messages_removed": message_delta,
+                    "bytes_removed": bytes_delta,
+                    "first_seq_advanced": first_seq_delta,
+                    "trust_boundary": _PASSIVE_RETENTION_TRIM_TRUST_BOUNDARY,
+                }
+            )
+        else:
+            # All application publishers/consumers are stopped across this
+            # window. Outside the bounded retention exception, exact equality
+            # catches unowned writes, ACK effects, purge, and
+            # purge-then-repopulate attacks.
+            for field in (
+                "messages",
+                "bytes",
+                "first_seq",
+                "last_seq",
+                "consumer_count",
             ):
-                violations.append(f"stream_state_changed:{name}:{field}")
-        if current_state.get("deleted") != previous_state.get("deleted"):
-            violations.append(f"stream_deleted_state_changed:{name}")
-        if _row_integer(current_state, "num_deleted") != _row_integer(
-            previous_state,
-            "num_deleted",
-        ):
-            violations.append(f"stream_deleted_state_changed:{name}:num_deleted")
+                if current_values[field] != previous_values[field]:
+                    violations.append(f"stream_state_changed:{name}:{field}")
+            if current_state.get("deleted") != previous_state.get("deleted"):
+                violations.append(f"stream_deleted_state_changed:{name}")
+            if current_values["num_deleted"] != previous_values["num_deleted"]:
+                violations.append(
+                    f"stream_deleted_state_changed:{name}:num_deleted"
+                )
 
     cursor_fields = (
         "delivered_stream_seq",
@@ -1235,6 +1288,7 @@ def evaluate_cutover_continuity(
         previous = previous_durable_index[key]
         current = current_durable_index[key]
         identity = f"{key[0]}/{key[1]}"
+        violation_count_before_row = len(violations)
         if previous.get("created") != current.get("created"):
             violations.append(f"durable_created_changed:{identity}")
         if previous.get("immutable_config") != current.get("immutable_config"):
@@ -1258,6 +1312,8 @@ def evaluate_cutover_continuity(
             "num_ack_pending",
         ):
             violations.append(f"durable_outstanding_changed:{identity}")
+        if previous != current and len(violations) == violation_count_before_row:
+            violations.append(f"durable_row_changed:{identity}")
 
     return {
         "status": "PASSED" if not violations else "INVALIDATED",
@@ -1265,6 +1321,7 @@ def evaluate_cutover_continuity(
         "baseline_sha256": baseline_sha256,
         "streams_checked": len(previous_stream_index),
         "durables_checked": len(previous_durable_index),
+        "passive_retention_trims": passive_retention_trims,
         "violations": violations,
     }
 
@@ -1639,6 +1696,7 @@ def load_previous_preflight(
         or payload.get("missing_declared_durables") != []
         or continuity.get("status") != "BASELINE_CAPTURED"
         or continuity.get("complete") is not True
+        or continuity.get("passive_retention_trims") != []
         or continuity.get("violations") != []
         or payload.get("previous_preflight") is not None
     ):
@@ -2751,6 +2809,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "baseline_sha256": None,
                 "streams_checked": len(critical_streams),
                 "durables_checked": len(rows),
+                "passive_retention_trims": [],
                 "violations": [],
             }
         else:

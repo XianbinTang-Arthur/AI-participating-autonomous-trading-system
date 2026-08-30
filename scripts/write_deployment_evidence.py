@@ -1301,10 +1301,45 @@ def _nats_cutover_preflight_reference(
     expected_continuity_status = (
         "BASELINE_CAPTURED" if expected_stage == "pre_full_down" else "PASSED"
     )
+    passive_retention_trims = (
+        continuity.get("passive_retention_trims")
+        if isinstance(continuity, dict)
+        else None
+    )
     if (
         not isinstance(continuity, dict)
         or continuity.get("complete") is not True
         or continuity.get("status") != expected_continuity_status
+        or not isinstance(passive_retention_trims, list)
+        or (
+            expected_stage == "pre_full_down"
+            and passive_retention_trims != []
+        )
+        or any(
+            not isinstance(trim, dict)
+            or set(trim)
+            != {
+                "stream",
+                "delta",
+                "messages_removed",
+                "bytes_removed",
+                "first_seq_advanced",
+                "trust_boundary",
+            }
+            or not isinstance(trim.get("stream"), str)
+            or not trim.get("stream")
+            or isinstance(trim.get("delta"), bool)
+            or not isinstance(trim.get("delta"), int)
+            or trim.get("delta", 0) <= 0
+            or trim.get("messages_removed") != trim.get("delta")
+            or trim.get("first_seq_advanced") != trim.get("delta")
+            or isinstance(trim.get("bytes_removed"), bool)
+            or not isinstance(trim.get("bytes_removed"), int)
+            or trim.get("bytes_removed", 0) <= 0
+            or trim.get("trust_boundary")
+            != cutover._PASSIVE_RETENTION_TRIM_TRUST_BOUNDARY
+            for trim in passive_retention_trims
+        )
         or continuity.get("violations") != []
     ):
         raise ValueError("nats_cutover_preflight_continuity_not_passed")
@@ -1437,6 +1472,7 @@ def _validate_nats_cutover_preflight_chain(
         "baseline_sha256",
         "streams_checked",
         "durables_checked",
+        "passive_retention_trims",
         "violations",
     ):
         if continuity.get(key) != recomputed_continuity.get(key):

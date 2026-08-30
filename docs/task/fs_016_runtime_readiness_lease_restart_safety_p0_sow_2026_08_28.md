@@ -254,6 +254,14 @@ evidence 同时验证 pre/post 两次 schema v3 artifact 的同值、只读、�
 四维 cursor、immutable/mutable config、窗口、outstanding、status/blockers，使审计者可独立重算
 post-to-final 与 final double-read 连续性。
 
+quiescent pre/post 之间仍会发生 JetStream `max_age` 自然淘汰，不能要求所有 stream 动态计数逐字相等。
+唯一受限例外是 `LIMITS + discard=old + max_age>0` 的连续头部 trim：stream identity/created/完整
+immutable config、last sequence、consumer count 必须相等，messages 与 bytes 必须严格下降，first
+sequence 前移量必须精确等于消息减少量，`deleted=[]/num_deleted=0`，且所有 durable 投影逐行相等。
+continuity 必须封存 stream 与移除差量，并明确记录 `purge_vs_expiry_not_distinguishable`；由于当前
+`deny_purge=false`，该通过仍属于 `PASSED_WITH_TRUST_BOUNDARY`。任一发布、重填、非连续删除、配置、
+游标、窗口或 outstanding 漂移继续失败关闭。
+
 NATS 的八个非秘密容量目标不再由多个阶段重复读取可变 profile。标准入口在同步代码并取得 deployed
 commit 后，只用严格 allowlist 解析 profile 一次，将全部八键补齐、规范化并编码为确定性快照；root
 在 `/run/aats-deploy/` 的受管目录内原子写入 `root:root`、`0444` 的本次锁 token 专属文件。preflight
@@ -283,6 +291,16 @@ Compose project/service、唯一 RW 标准
 或最终发布资格。系统没有进入 full-down/app-up，七个 app 保持停止，未知 durable 未被修改。该项必须
 由真人 owner/release review 决定，不能自动删除；在此之前标准部署 PASS、完整 Docker 故障矩阵仍
 `OPEN`。
+
+真人随后批准精确删除该唯一未归属 consumer；删除前再次证明其 pending、ack pending、redelivered 与
+messages 均为零，正式 `77` 个 durable 未被修改。2026-08-29 22:07:33 EDT 的标准入口重跑在
+268.718 秒后退出 `9`：首次 preflight PASS、两库 schema 均为 current，且 WSL completion ACK 修复已
+越过此前 `hash_output/status=0` 阻断；第二次 `post_infra_pre_app_up` 仅因 `AATS_EVENTS_COMMANDS`
+自然减少 `14` 条、`AATS_EVENTS_MARKET` 自然减少 `5,118` 条而 INVALIDATED。两流均满足消息减少量等于
+first sequence 前移量、bytes 下降、last sequence 不变；77 个 durable、quiescence、volume fingerprint
+均稳定。该运行证据直接发现并驱动上述 max-age 例外；修复后的全量单元结果为
+`6565 passed / 32 skipped / 259 subtests passed`，标准入口仍须重跑取得两次 PASS chain、app-up 与最终
+deployment evidence。
 
 本协议仍不是下游 Postgres/NATS/交易所执行 sink 强制校验的单调 fencing token。若 Redis owner
 truth 丢失/被错误恢复与独立 watchdog 或 OS termination 同时失效，55 秒 quarantine 只能提供
@@ -421,16 +439,17 @@ TCP 仍连接时删除 critical durable 会 ABORT gate 并触发 terminal；首�
 push/heartbeat/backlog stall、告警或恢复时序。
 
 最后一次 NATS 健康窗、WSL completion ACK、输出完整性、幂等 proof、marker cleanup、durable marker
-scan、单事务代码同步、exact ownership、runtime TOCTOU 与最终 canonical durable evidence 修复后，
-当前提交的 NATS/部署门禁聚焦合集 `351 passed`，全量
-`6531 passed / 31 skipped / 259 subtests passed` 已于 2026-08-29 通过；Ruff 已对本切片全部变更 Python 文件复跑通过，
-此前真实 Git Bash 语法检查和六项隔离 smoke 通过。隔离 smoke 不等同于真实 Docker/WSL 发布，SQLite
-deprecation warnings 也不属于本切片安全通过条件。两路独立代码复审未留下 P0/P1；Docker event delivery loss、
-daemon clock 未校准、HTTP ready 早于订阅确认及 exec/跨容器 volume blind spot 仍作为不完整信任边界
-显式披露。真 Redis 集成、标准 full-down 模拟发布、完整真实 NATS/Docker
-启动-断连-consumer supervision-逐角色重启、双故障与下游 fencing 矩阵仍保持 `OPEN`，不得声称当前提交已完成运行验收。此前 execution 重启循环和 Windows/容器基线
-不一致是 2026-08-28 已记录的历史现场证据，不证明当前时刻仍相同。2026-08-29 的标准尝试只证明
-基础设施在线与第一次 preflight 安全阻断；七个 app 当前有意保持停止，故整体模拟栈不是 healthy，
-也不得宣称部署通过。仓库当前没有获准的单角色重启入口，因此
-真实逐角色重启矩阵保持 **OPEN**，不能用手工 Compose 或容器重启冒充验收。真实资金继续
+scan、单事务代码同步、exact ownership、runtime TOCTOU、最终 canonical durable evidence 与 max-age
+连续头部淘汰误判修复后，相关 cutover/evidence 测试 `139 passed`，全量
+`6565 passed / 32 skipped / 259 subtests passed` 已于 2026-08-29 通过；Ruff 已对本切片全部变更
+Python 文件复跑通过，此前真实 Git Bash 语法检查和六项隔离 smoke 通过。隔离 smoke 不等同于真实
+Docker/WSL 发布，SQLite deprecation warnings 也不属于本切片安全通过条件。两路独立代码复审未留下
+P0/P1；Docker event delivery loss、daemon clock 未校准、同形 purge 与 max-age expiry 无法密码学区分、
+HTTP ready 早于订阅确认及 exec/跨容器 volume blind spot 仍作为不完整信任边界显式披露。
+
+真实标准入口已证明 WSL completion ACK 修复能够越过 schema 阶段，并发现第二次 preflight 的 max-age
+误判；但包含本修复的标准 full-down 模拟发布尚待重跑，因此不能声称当前提交已完成运行验收。当前
+七个 app 有意保持停止、九个基础设施容器健康在线，整体模拟栈不是 healthy。真 Redis 集成、完整真实
+NATS/Docker 启动-断连-consumer supervision-逐角色重启、双故障与下游 fencing 矩阵仍保持 `OPEN`；
+仓库当前没有获准的单角色重启入口，不能用手工 Compose 或容器重启冒充验收。真实资金继续
 **NO-GO**。
