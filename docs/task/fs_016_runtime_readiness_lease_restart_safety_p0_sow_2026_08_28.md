@@ -224,8 +224,10 @@ keeper 与后继 holder 都被阻断，直至按精确证据恢复；锁不会�
 绑定 marker、远端语义退出码、I/O 模式、stdout/stderr 字节数及 SHA-256。默认 `capture` 同时在本地以
 `0600` 暂存两路输出，只有 ACK 与本地字节数/摘要完全一致时才回放并返回远端语义状态；`stream` 仅用于
 需实时输出的构建，`quiet` 用于明确静默步骤。ACK 在 proof 跨越 WSL transport 前保留，允许“marker 已
-删除但响应丢失”的幂等重读；初次 client 非零、ACK 缺失/畸形、摘要不一致、回放或清理失败均返回
-16 并保留阻断证据。释放阶段在 NATS 快照清理后再次扫描 marker 并复核 holder；若原状态待成功则改为
+删除但响应丢失”的幂等重读。HUP/INT/TERM 在同步远端命令返回前只记录，不提前删除暂存文件；命令
+返回后仍先发布 ACK，再传播 transport 非零状态。初次 client 非零时也必须先验证 ACK：有效且与本地
+捕获字节完全绑定的 ACK 可清除 marker，但部署仍返回 16；ACK 缺失/畸形、摘要不一致、回放或清理
+失败均返回 16 并保留阻断证据。释放阶段在 NATS 快照清理后再次扫描 marker 并复核 holder；若原状态待成功则改为
 16，已有非零状态保持不变。标准代码同步已合并为单个 ACK 支持的 WSL Git 事务，dirty checkout、
 分支不匹配或同步后 HEAD 不一致等远端语义状态可准确传播并清理自身 marker，transport 歧义仍保留。
 当前 Windows Git Bash -> WSL 协议只有聚焦 smoke 证据，不等于标准部署 PASS。

@@ -580,7 +580,12 @@ build_wsl_completion_wrapped_command() {
         'stdout_tmp=""' \
         'stderr_tmp=""' \
         'completion_tmp=""' \
-        "trap 'rm -f -- \"\$stdout_tmp\" \"\$stderr_tmp\" \"\$completion_tmp\"' EXIT HUP INT TERM" \
+        'pending_signal_status=0' \
+        'record_pending_signal() { if [[ "$pending_signal_status" -eq 0 ]]; then pending_signal_status="$1"; fi; }' \
+        "trap 'rm -f -- \"\$stdout_tmp\" \"\$stderr_tmp\" \"\$completion_tmp\"' EXIT" \
+        "trap 'record_pending_signal 129' HUP" \
+        "trap 'record_pending_signal 130' INT" \
+        "trap 'record_pending_signal 143' TERM" \
         'if [[ "$io_mode" == capture ]]; then' \
         '    stdout_tmp=$(mktemp "${completion_file}.stdout.XXXXXX") || exit 125' \
         '    stderr_tmp=$(mktemp "${completion_file}.stderr.XXXXXX") || exit 125' \
@@ -613,7 +618,10 @@ build_wsl_completion_wrapped_command() {
         'rm -f -- "$stdout_tmp" "$stderr_tmp"' \
         'stdout_tmp=""' \
         'stderr_tmp=""' \
-        'trap - EXIT HUP INT TERM' \
+        'trap - HUP INT TERM' \
+        'transport_status="$pending_signal_status"' \
+        'trap - EXIT' \
+        'if [[ "$transport_status" -ne 0 ]]; then exit "$transport_status"; fi' \
         'exit 0'
     printf '%s' "$wrapped"
 }
@@ -841,12 +849,6 @@ run_supervised_command_guard() {
             return 0
             ;;
         wsl-ack)
-            if [[ "$status" -ne 0 ]]; then
-                if [[ "$io_mode" == capture ]]; then
-                    cat -- "$stderr_file" >&2 || true
-                fi
-                return 16
-            fi
             if [[ "$io_mode" == capture ]]; then
                 if ! stdout_size="$(wc -c <"$stdout_file" | tr -d '[:space:]')" \
                     || ! stderr_size="$(wc -c <"$stderr_file" | tr -d '[:space:]')" \
@@ -858,6 +860,28 @@ run_supervised_command_guard() {
                         || ! "$stderr_sha256" =~ ^[0-9a-f]{64}$ ]]; then
                     return 16
                 fi
+            fi
+            if [[ "$status" -ne 0 ]]; then
+                # A delayed HUP/INT/TERM can make wsl.exe return non-zero after
+                # the remote command has completed and published its immutable
+                # acknowledgement.  Verify that proof before deciding whether
+                # the marker must remain poisoned.  The deployment still fails
+                # with a transport error; only the ambiguity is cleared.
+                if completion_status="$(finalize_proven_wsl_completion \
+                    "$marker_file" "$completion_file" "$user_mode" "$io_mode" \
+                    "$stdout_size" "$stdout_sha256" "$stderr_size" "$stderr_sha256" \
+                    "$DEPLOY_WSL_DEFAULT_UID")"; then
+                    if [[ "$io_mode" == capture ]]; then
+                        cat -- "$stdout_file" || true
+                        cat -- "$stderr_file" >&2 || true
+                    fi
+                    log_error "WSL transport 在有效远端完成确认后非零结束: transport_status=$status; remote_status=$completion_status"
+                    return 16
+                fi
+                if [[ "$io_mode" == capture ]]; then
+                    cat -- "$stderr_file" >&2 || true
+                fi
+                return 16
             fi
             if ! completion_status="$(finalize_proven_wsl_completion \
                 "$marker_file" "$completion_file" "$user_mode" "$io_mode" \

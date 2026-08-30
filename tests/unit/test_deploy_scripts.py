@@ -1061,6 +1061,17 @@ def test_marker_cleanup_requires_local_completion_or_remote_acknowledgement() ->
     assert "stdout_sha256" in ack_builder
     assert "stderr_sha256" in ack_builder
     assert 'ln -- "$completion_tmp" "$completion_file"' in ack_builder
+    assert 'pending_signal_status=0' in ack_builder
+    assert 'record_pending_signal 129' in ack_builder
+    assert 'record_pending_signal 130' in ack_builder
+    assert 'record_pending_signal 143' in ack_builder
+    assert "EXIT HUP INT TERM" not in ack_builder
+    assert ack_builder.index('bash -c "$remote_command"') < ack_builder.index(
+        'trap - HUP INT TERM'
+    )
+    assert ack_builder.index('ln -- "$completion_tmp" "$completion_file"') < (
+        ack_builder.index('if [[ "$transport_status" -ne 0 ]]')
+    )
     assert "expected_marker_uid" in ack_builder
     assert "os.O_EXCL" in source
     assert '[[ "$ack_marker" == "$marker_file"' in ack_finalizer
@@ -1073,6 +1084,14 @@ def test_marker_cleanup_requires_local_completion_or_remote_acknowledgement() ->
     assert 'run_lock_supervised_wsl "WSL 命令" default "$io_mode"' in source
     assert 'run_lock_supervised_wsl "WSL root 命令" root "$io_mode"' in source
     assert 'if [[ "$status" -ne 0 ]]' in guard.split("wsl-ack)", 1)[1]
+    wsl_ack = guard.split("wsl-ack)", 1)[1]
+    assert wsl_ack.count("finalize_proven_wsl_completion") == 2
+    assert wsl_ack.index('if [[ "$status" -ne 0 ]]') < wsl_ack.index(
+        "finalize_proven_wsl_completion"
+    )
+    assert wsl_ack.index("sha256sum -- \"$stdout_file\"") < wsl_ack.index(
+        'if [[ "$status" -ne 0 ]]'
+    )
     assert 'cat -- "$stdout_file"' in guard
     assert 'if ! cat -- "$stdout_file"' in guard
     assert "sha256sum -- \"$stdout_file\"" in guard

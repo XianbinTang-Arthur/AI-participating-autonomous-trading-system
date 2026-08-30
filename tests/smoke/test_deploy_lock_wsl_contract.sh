@@ -61,6 +61,33 @@ if [[ "$wsl_root_ack_status" -ne 8 || "$wsl_root_ack_output" != "root-ack-output
 fi
 assert_no_owned_active_markers "wsl-root-ack semantic nonzero smoke"
 
+# A signal delivered to the WSL wrapper while it waits for the synchronous
+# child must not delete the capture files before the child returns.  The remote
+# command signals its direct parent (the completion wrapper), then completes
+# normally.  The immutable ACK proves mutation completion and permits marker
+# cleanup, while the transport interruption still fails the deployment.
+signal_transport_log="$(mktemp)"
+log_error() { printf '%s\n' "$*" >>"$signal_transport_log"; }
+set +e
+wsl_signal_output="$(run_lock_supervised_wsl \
+    "wsl-ack-delayed-term-smoke" default capture \
+    'kill -TERM "$PPID"; sleep 0.1; printf "signal-ack-output"; exit 7')"
+wsl_signal_status=$?
+set -e
+if [[ "$wsl_signal_status" -ne 16 || "$wsl_signal_output" != "signal-ack-output" ]]; then
+    printf 'delayed TERM did not preserve ACK/marker safety: status=%s output=%s\n' \
+        "$wsl_signal_status" "$wsl_signal_output" >&2
+    exit 86
+fi
+if ! grep -Fq 'transport_status=143; remote_status=7' "$signal_transport_log"; then
+    printf 'delayed TERM did not preserve transport/remote status evidence\n' >&2
+    exit 85
+fi
+rm -f -- "$signal_transport_log"
+log_error() { :; }
+assert_no_owned_active_markers "wsl-ack delayed TERM smoke"
+assert_deploy_lock_held "wsl-ack delayed TERM smoke"
+
 sync_source_mount="$(windows_path_to_wsl_mount "$PROJECT_ROOT")"
 sync_source_branch="$(git -C "$PROJECT_ROOT" symbolic-ref --quiet --short HEAD)"
 sync_source_head="$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
