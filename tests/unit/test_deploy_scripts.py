@@ -3246,6 +3246,15 @@ def test_deploy_holds_one_long_lived_wsl_lock_across_all_mutations() -> None:
     main = text.split("main() {", 1)[1].split("\n}", 1)[0]
     acquire = text.split("acquire_deploy_lock() {", 1)[1].split("\n}", 1)[0]
     release = text.split("release_deploy_lock() {", 1)[1].split("\n}", 1)[0]
+    touch_lease = text.split("touch_deploy_lock_lease() {", 1)[1].split(
+        "\n}", 1
+    )[0]
+    heartbeat = text.split("deploy_lock_heartbeat_loop() {", 1)[1].split(
+        "\n}", 1
+    )[0]
+    lock_assertion = text.split("assert_deploy_lock_held() {", 1)[1].split(
+        "\n}", 1
+    )[0]
     supervisor = text.split("run_lock_supervised_external() {", 1)[1].split(
         "\n}", 1
     )[0]
@@ -3262,6 +3271,26 @@ def test_deploy_holds_one_long_lived_wsl_lock_across_all_mutations() -> None:
     assert 'glob.glob(active_glob)' in acquire
     assert "while python3 -c" in acquire
     assert "DEPLOY_LOCK_HEARTBEAT_PID" in acquire
+    assert "last_success_seconds" in heartbeat
+    assert "DEPLOY_LOCK_HEARTBEAT_FAILURE_BUDGET_SECONDS" in heartbeat
+    assert "touch_deploy_lock_lease; then" in heartbeat
+    assert "return 1" in heartbeat
+    assert "while kill -0" in heartbeat
+    assert "os.lstat(path)" in touch_lease
+    assert "os.utime(path, follow_symlinks=False)" in touch_lease
+    assert "SIGUSR1" in lock_assertion
+    assert "0 <= age <= float(stale)" in lock_assertion
+    assert "observed_start == expected_start" in lock_assertion
+    assert "/fd/9" in lock_assertion
+    assert "holder_fd.st_dev == lock_meta.st_dev" in lock_assertion
+    assert "holder_fd.st_ino == lock_meta.st_ino" in lock_assertion
+    assert "read -r -t 0.01" in lock_assertion
+    assert "HELD:$DEPLOY_LOCK_TOKEN" in lock_assertion
+    assert "DEPLOY_LOCK_READER_FD" in lock_assertion
+    assert "ACQUIRED:%s:%s:%s:%s" in acquire
+    assert "DEPLOY_LOCK_WSL_PID" in acquire
+    assert "DEPLOY_LOCK_WSL_STARTTIME" in acquire
+    assert "USR1" in acquire
     assert "rm " not in release
     assert "rmdir " not in release
     assert main.index("acquire_deploy_lock") < main.index(
@@ -3330,6 +3359,17 @@ def test_deploy_holds_one_long_lived_wsl_lock_across_all_mutations() -> None:
     assert "wrapper hard-crash poison allowed a second command to start" in harness
     assert "wsl-ack-semantic-nonzero-smoke" in harness
     assert "WSL completion ack did not preserve output/status" in harness
+
+    heartbeat_harness = (
+        REPO_ROOT
+        / "tests"
+        / "smoke"
+        / "test_deploy_lock_heartbeat_contract.sh"
+    ).read_text(encoding="utf-8")
+    assert "transient heartbeat failure did not recover" in heartbeat_harness
+    assert "persistent heartbeat failure exceeded stale budget" in heartbeat_harness
+    assert "removed lease was recreated by heartbeat touch" in heartbeat_harness
+    assert "old deployment accepted successor-owned flock" in heartbeat_harness
 
 
 def test_deploy_requires_clean_wsl_checkout_even_when_sync_is_skipped() -> None:

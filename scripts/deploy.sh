@@ -109,18 +109,26 @@ DEPLOY_LOCK_STALE_SECONDS=12
 if [[ -n "${AATS_DEPLOY_TEST_LOCK_STALE_SECONDS:-}" ]]; then
     if [[ "${AATS_DEPLOY_TEST_MODE:-false}" == true \
         && "${BASH_SOURCE[0]}" != "$0" \
-        && "$AATS_DEPLOY_TEST_LOCK_STALE_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+        && "$AATS_DEPLOY_TEST_LOCK_STALE_SECONDS" =~ ^([2-9]|[1-9][0-9]+)$ ]]; then
         DEPLOY_LOCK_STALE_SECONDS="$AATS_DEPLOY_TEST_LOCK_STALE_SECONDS"
     else
         DEPLOY_LOCK_OVERRIDE_REJECTED=true
     fi
 fi
+DEPLOY_LOCK_HEARTBEAT_INTERVAL_SECONDS=3
+if (( DEPLOY_LOCK_STALE_SECONDS < 6 )); then
+    DEPLOY_LOCK_HEARTBEAT_INTERVAL_SECONDS=1
+fi
+DEPLOY_LOCK_HEARTBEAT_FAILURE_BUDGET_SECONDS=$((DEPLOY_LOCK_STALE_SECONDS / 2))
 DEPLOY_LOCK_HELD=false
 DEPLOY_LOCK_KEEPER_PID=""
 DEPLOY_LOCK_HEARTBEAT_PID=""
 DEPLOY_LOCK_LEASE_FILE=""
+DEPLOY_LOCK_READER_FD=""
 DEPLOY_LOCK_WRITER_FD=""
 DEPLOY_WSL_DEFAULT_UID=""
+DEPLOY_LOCK_WSL_PID=""
+DEPLOY_LOCK_WSL_STARTTIME=""
 APP_QUIESCENCE_SNAPSHOT=""
 DEPLOY_ACTIVE_PROCESS_PID=""
 DEPLOY_ACTIVE_PROCESS_CONTEXT=""
@@ -362,12 +370,18 @@ release_deploy_lock() {
             kill "$DEPLOY_LOCK_KEEPER_PID" 2>/dev/null || true
             wait "$DEPLOY_LOCK_KEEPER_PID" 2>/dev/null || true
         fi
+        if [[ -n "$DEPLOY_LOCK_READER_FD" ]]; then
+            eval "exec ${DEPLOY_LOCK_READER_FD}<&-"
+        fi
         DEPLOY_LOCK_HELD=false
         DEPLOY_LOCK_HEARTBEAT_PID=""
         DEPLOY_LOCK_KEEPER_PID=""
         DEPLOY_LOCK_LEASE_FILE=""
+        DEPLOY_LOCK_READER_FD=""
         DEPLOY_LOCK_WRITER_FD=""
         DEPLOY_WSL_DEFAULT_UID=""
+        DEPLOY_LOCK_WSL_PID=""
+        DEPLOY_LOCK_WSL_STARTTIME=""
     fi
     trap - EXIT
     return "$original_status"
@@ -378,9 +392,22 @@ deploy_signal_exit() {
 }
 
 touch_deploy_lock_lease() {
-    local lease_file_q
+    local expected_lease lease_file_q uid_q
+    expected_lease="/tmp/aats-standard-deploy-lease-$DEPLOY_LOCK_SCOPE-$DEPLOY_LOCK_TOKEN"
+    if [[ ! "$DEPLOY_LOCK_SCOPE" =~ ^[0-9a-f]{16}$ \
+        || ! "$DEPLOY_LOCK_TOKEN" =~ ^[A-Za-z0-9._:-]+$ \
+        || "$DEPLOY_LOCK_LEASE_FILE" != "$expected_lease" \
+        || ! "$DEPLOY_WSL_DEFAULT_UID" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
     printf -v lease_file_q '%q' "$DEPLOY_LOCK_LEASE_FILE"
-    MSYS_NO_PATHCONV=1 wsl -d "$DISTRO" bash -c "touch -- $lease_file_q" >/dev/null
+    printf -v uid_q '%q' "$DEPLOY_WSL_DEFAULT_UID"
+    # lstat + follow_symlinks=False prevents a delayed refresher from creating
+    # a removed lease or following an attacker-controlled replacement symlink.
+    MSYS_NO_PATHCONV=1 timeout --signal=TERM --kill-after=1s 2s \
+        wsl -d "$DISTRO" bash -c \
+        "python3 -c 'import os, stat, sys; path, expected_uid=sys.argv[1:3]; meta=os.lstat(path); valid=stat.S_ISREG(meta.st_mode) and not stat.S_ISLNK(meta.st_mode) and meta.st_uid == int(expected_uid) and stat.S_IMODE(meta.st_mode) == 0o600; valid or sys.exit(1); os.utime(path, follow_symlinks=False)' $lease_file_q $uid_q" \
+        >/dev/null 2>&1
 }
 
 remove_deploy_lock_lease() {
@@ -391,14 +418,27 @@ remove_deploy_lock_lease() {
 
 deploy_lock_heartbeat_loop() {
     local parent_pid="$1"
+    local last_success_seconds="$SECONDS"
     while kill -0 "$parent_pid" 2>/dev/null; do
-        touch_deploy_lock_lease || return 1
-        sleep 3
+        if touch_deploy_lock_lease; then
+            last_success_seconds="$SECONDS"
+            sleep "$DEPLOY_LOCK_HEARTBEAT_INTERVAL_SECONDS"
+            continue
+        fi
+        # One transient wsl.exe failure is recoverable, but a persistent loss
+        # must kill this heartbeat well before the keeper's stale threshold.
+        # Every side-effect gate also requires this PID to be alive.
+        if (( SECONDS - last_success_seconds >= DEPLOY_LOCK_HEARTBEAT_FAILURE_BUDGET_SECONDS )); then
+            return 1
+        fi
+        sleep 1
     done
 }
 
 acquire_deploy_lock() {
-    local lock_file_q lease_file_q lease_glob_q active_glob_q token_q stale_q handshake coproc_reader coproc_writer
+    local lock_file_q lease_file_q lease_glob_q active_glob_q token_q stale_q handshake
+    local handshake_label handshake_token handshake_uid handshake_pid handshake_start handshake_extra
+    local coproc_reader coproc_writer
     if [[ "$DEPLOY_LOCK_OVERRIDE_REJECTED" == true ]]; then
         log_error "AATS_DEPLOY_LOCK_FILE 仅允许在 AATS_DEPLOY_TEST_MODE=true 的隔离测试中使用"
         log_error "标准部署必须共享固定全局锁: /tmp/aats-standard-deploy.lock"
@@ -419,27 +459,43 @@ acquire_deploy_lock() {
     printf -v stale_q '%q' "$DEPLOY_LOCK_STALE_SECONDS"
     coproc AATS_DEPLOY_LOCK_KEEPER {
         export MSYS_NO_PATHCONV=1
-        exec wsl -d "$DISTRO" bash -c "set -euo pipefail; umask 077; : >$lease_file_q; chmod 600 -- $lease_file_q; exec 9>>$lock_file_q; if ! flock -n 9; then rm -f -- $lease_file_q; printf 'BUSY\\n'; exit 75; fi; while ! python3 -c 'import glob, os, sys, time; own, lease_glob, active_glob, stale=sys.argv[1:5]; now=time.time(); fresh_other=any(path != own and now - os.stat(path).st_mtime <= float(stale) for path in glob.glob(lease_glob)); sys.exit(1 if fresh_other or glob.glob(active_glob) else 0)' $lease_file_q $lease_glob_q $active_glob_q $stale_q 2>/dev/null; do touch -- $lease_file_q; sleep 0.2; done; touch -- $lease_file_q; printf 'ACQUIRED:%s:%s\\n' $token_q \"\$(id -u)\"; while python3 -c 'import glob, os, sys, time; lease, active_glob, stale=sys.argv[1:4]; lease_fresh=time.time() - os.stat(lease).st_mtime <= float(stale); sys.exit(0 if lease_fresh or glob.glob(active_glob) else 1)' $lease_file_q $active_glob_q $stale_q 2>/dev/null; do sleep 0.2; done; rm -f -- $lease_file_q; exit 77"
+        exec wsl -d "$DISTRO" bash -c "set -euo pipefail; umask 077; : >$lease_file_q; chmod 600 -- $lease_file_q; exec 9>>$lock_file_q; if ! flock -n 9; then rm -f -- $lease_file_q; printf 'BUSY\\n'; exit 75; fi; while ! python3 -c 'import glob, os, sys, time; own, lease_glob, active_glob, stale=sys.argv[1:5]; now=time.time(); fresh_other=any(path != own and now - os.stat(path).st_mtime <= float(stale) for path in glob.glob(lease_glob)); sys.exit(1 if fresh_other or glob.glob(active_glob) else 0)' $lease_file_q $lease_glob_q $active_glob_q $stale_q 2>/dev/null; do touch -- $lease_file_q; sleep 0.2; done; touch -- $lease_file_q; trap 'printf \"HELD:$token_q\\n\"' USR1; printf 'ACQUIRED:%s:%s:%s:%s\\n' $token_q \"\$(id -u)\" \"\$\$\" \"\$(cut -d ' ' -f22 /proc/\$\$/stat)\"; while python3 -c 'import glob, os, sys, time; lease, active_glob, stale=sys.argv[1:4]; lease_fresh=time.time() - os.stat(lease).st_mtime <= float(stale); sys.exit(0 if lease_fresh or glob.glob(active_glob) else 1)' $lease_file_q $active_glob_q $stale_q 2>/dev/null; do sleep 0.2; done; rm -f -- $lease_file_q; exit 77"
     }
     DEPLOY_LOCK_KEEPER_PID="$AATS_DEPLOY_LOCK_KEEPER_PID"
     coproc_reader="${AATS_DEPLOY_LOCK_KEEPER[0]}"
     coproc_writer="${AATS_DEPLOY_LOCK_KEEPER[1]}"
-    DEPLOY_LOCK_WRITER_FD="$coproc_writer"
-    if ! IFS= read -r -t 30 handshake <&"$coproc_reader" \
-        || [[ "${handshake%:*}" != "ACQUIRED:$DEPLOY_LOCK_TOKEN" \
-            || ! "${handshake##*:}" =~ ^[0-9]+$ ]]; then
+    if IFS= read -r -t 30 handshake <&"$coproc_reader"; then
+        IFS=: read -r handshake_label handshake_token handshake_uid \
+            handshake_pid handshake_start handshake_extra \
+            <<<"${handshake%$'\r'}"
+    fi
+    if [[ "${handshake_label:-}" != ACQUIRED \
+        || "${handshake_token:-}" != "$DEPLOY_LOCK_TOKEN" \
+        || ! "${handshake_uid:-}" =~ ^[0-9]+$ \
+        || ! "${handshake_pid:-}" =~ ^[1-9][0-9]*$ \
+        || ! "${handshake_start:-}" =~ ^[1-9][0-9]*$ \
+        || -n "${handshake_extra:-}" ]]; then
         kill "$DEPLOY_LOCK_KEEPER_PID" 2>/dev/null || true
         wait "$DEPLOY_LOCK_KEEPER_PID" 2>/dev/null || true
         eval "exec ${coproc_writer}>&-" 2>/dev/null || true
         eval "exec ${coproc_reader}<&-" 2>/dev/null || true
         DEPLOY_LOCK_TOKEN=""
         DEPLOY_WSL_DEFAULT_UID=""
+        DEPLOY_LOCK_WSL_PID=""
+        DEPLOY_LOCK_WSL_STARTTIME=""
         log_error "另一个标准部署正在运行，或 WSL2 长寿命 flock holder 无法建立: $DEPLOY_LOCK_FILE"
         log_error "拒绝并发修改同一 WSL2 模拟栈；不要绕过锁或并行手工启动 Docker 应用容器"
         exit 14
     fi
-    DEPLOY_WSL_DEFAULT_UID="${handshake##*:}"
+    DEPLOY_WSL_DEFAULT_UID="$handshake_uid"
+    DEPLOY_LOCK_WSL_PID="$handshake_pid"
+    DEPLOY_LOCK_WSL_STARTTIME="$handshake_start"
+    # Duplicate the coprocess ends onto ordinary descriptors so command
+    # substitutions can read signal responses from this exact original holder.
+    exec {DEPLOY_LOCK_READER_FD}<&"$coproc_reader"
+    exec {DEPLOY_LOCK_WRITER_FD}>&"$coproc_writer"
     eval "exec ${coproc_reader}<&-"
+    eval "exec ${coproc_writer}>&-"
     DEPLOY_LOCK_HELD=true
     deploy_lock_heartbeat_loop "$$" &
     DEPLOY_LOCK_HEARTBEAT_PID=$!
@@ -451,15 +507,40 @@ acquire_deploy_lock() {
 }
 
 assert_deploy_lock_held() {
-    local context="$1" lock_file_q probe
+    local context="$1" expected_lease lock_file_q lease_file_q uid_q stale_q pid_q start_q
+    local probe response
+    expected_lease="/tmp/aats-standard-deploy-lease-$DEPLOY_LOCK_SCOPE-$DEPLOY_LOCK_TOKEN"
     printf -v lock_file_q '%q' "$DEPLOY_LOCK_FILE"
-    if [[ "$DEPLOY_SUPERVISION_POISONED" == true \
+    printf -v lease_file_q '%q' "$DEPLOY_LOCK_LEASE_FILE"
+    printf -v uid_q '%q' "$DEPLOY_WSL_DEFAULT_UID"
+    printf -v stale_q '%q' "$DEPLOY_LOCK_STALE_SECONDS"
+    printf -v pid_q '%q' "$DEPLOY_LOCK_WSL_PID"
+    printf -v start_q '%q' "$DEPLOY_LOCK_WSL_STARTTIME"
+    # Any unread response means a prior ownership probe did not complete
+    # cleanly; never let a stale acknowledgement satisfy a later gate.
+    if [[ -n "$DEPLOY_LOCK_READER_FD" ]] \
+        && IFS= read -r -t 0.01 response <&"$DEPLOY_LOCK_READER_FD"; then
+        log_error "WSL2 标准部署锁 holder 留下陈旧应答；拒绝继续 $context"
+        return 16
+    fi
+    if [[ ! "$DEPLOY_LOCK_SCOPE" =~ ^[0-9a-f]{16}$ \
+        || ! "$DEPLOY_LOCK_TOKEN" =~ ^[A-Za-z0-9._:-]+$ \
+        || "$DEPLOY_LOCK_LEASE_FILE" != "$expected_lease" \
+        || ! "$DEPLOY_WSL_DEFAULT_UID" =~ ^[0-9]+$ \
+        || ! "$DEPLOY_LOCK_WSL_PID" =~ ^[1-9][0-9]*$ \
+        || ! "$DEPLOY_LOCK_WSL_STARTTIME" =~ ^[1-9][0-9]*$ \
+        || "$DEPLOY_SUPERVISION_POISONED" == true \
         || "$DEPLOY_LOCK_HELD" != true || -z "$DEPLOY_LOCK_KEEPER_PID" ]] \
         || ! kill -0 "$DEPLOY_LOCK_KEEPER_PID" 2>/dev/null \
         || [[ -z "$DEPLOY_LOCK_HEARTBEAT_PID" ]] \
         || ! kill -0 "$DEPLOY_LOCK_HEARTBEAT_PID" 2>/dev/null \
-        || ! probe="$(MSYS_NO_PATHCONV=1 wsl -d "$DISTRO" bash -c "exec 8>>$lock_file_q; if flock -n 8; then printf 'FREE\\n'; else printf 'HELD\\n'; fi" | tr -d '\r')" \
-        || [[ "$probe" != "HELD" ]]; then
+        || [[ -z "$DEPLOY_LOCK_READER_FD" ]] \
+        || ! probe="$(MSYS_NO_PATHCONV=1 timeout --signal=TERM --kill-after=1s 2s \
+            wsl -d "$DISTRO" bash -c \
+            "if python3 -c 'import os, signal, stat, sys, time; lease, lock, expected_uid, stale, pid, expected_start=sys.argv[1:7]; meta=os.lstat(lease); age=time.time() - meta.st_mtime; proc=open(\"/proc/\" + pid + \"/stat\").read(); observed_start=proc[proc.rfind(\")\") + 2:].split()[19]; holder_fd=os.stat(\"/proc/\" + pid + \"/fd/9\"); lock_meta=os.stat(lock); valid=stat.S_ISREG(meta.st_mode) and not stat.S_ISLNK(meta.st_mode) and meta.st_uid == int(expected_uid) and stat.S_IMODE(meta.st_mode) == 0o600 and 0 <= age <= float(stale) and observed_start == expected_start and holder_fd.st_dev == lock_meta.st_dev and holder_fd.st_ino == lock_meta.st_ino; valid or sys.exit(1); os.kill(int(pid), signal.SIGUSR1)' $lease_file_q $lock_file_q $uid_q $stale_q $pid_q $start_q 2>/dev/null; then printf 'SIGNALED\\n'; else printf 'INVALID\\n'; fi" | tr -d '\r')" \
+        || [[ "$probe" != "SIGNALED" ]] \
+        || ! IFS= read -r -t 3 response <&"$DEPLOY_LOCK_READER_FD" \
+        || [[ "${response%$'\r'}" != "HELD:$DEPLOY_LOCK_TOKEN" ]]; then
         log_error "WSL2 标准部署锁 holder 已丢失；拒绝继续 $context"
         return 16
     fi

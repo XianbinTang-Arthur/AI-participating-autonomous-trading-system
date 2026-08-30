@@ -15,7 +15,7 @@ fi
 # shellcheck source=../../scripts/deploy.sh
 source "$PROJECT_ROOT/scripts/deploy.sh"
 
-DEPLOY_LOCK_FILE="/tmp/aats-standard-deploy-smoke.lock"
+DEPLOY_LOCK_FILE="${AATS_DEPLOY_SMOKE_LOCK_FILE:-/tmp/aats-standard-deploy-smoke.lock}"
 log_info() { :; }
 log_ok() { :; }
 log_warn() { :; }
