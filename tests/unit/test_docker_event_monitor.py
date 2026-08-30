@@ -567,6 +567,43 @@ def test_external_seal_surfaces_daemon_failure_without_waiting(
         )
 
 
+def test_ready_cli_can_emit_validated_pid_and_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        monitor,
+        "load_external_monitor_ready",
+        lambda *_args, **_kwargs: {
+            "pid": 4321,
+            "coverage_started_ns": START_NS,
+        },
+    )
+
+    status = monitor.main(
+        [
+            "ready",
+            "--control-dir",
+            "/tmp/aats-docker-event-monitor-test",
+            "--token",
+            "monitor-token",
+            "--container",
+            "aats-gateway",
+            "--deployment-lock-id",
+            "lock-1",
+            "--runtime-readiness-generation",
+            "generation-1",
+            "--deployed-commit",
+            "a" * 40,
+            "--output",
+            "pid-and-coverage",
+        ]
+    )
+
+    assert status == 0
+    assert capsys.readouterr().out == f"4321 {START_NS}\n"
+
+
 def test_external_ready_rejects_tampered_daemon_identity(
     tmp_path: Path,
     monkeypatch,

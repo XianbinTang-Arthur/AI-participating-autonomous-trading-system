@@ -1221,6 +1221,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     ready.add_argument("--deployment-lock-id", required=True)
     ready.add_argument("--runtime-readiness-generation", required=True)
     ready.add_argument("--deployed-commit", required=True)
+    ready.add_argument(
+        "--output",
+        choices=("coverage-started-ns", "pid-and-coverage"),
+        default="coverage-started-ns",
+    )
     return parser.parse_args(argv)
 
 
@@ -1255,7 +1260,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_allowlist=args.container,
         expected_metadata=metadata,
     )
-    print(ready["coverage_started_ns"])
+    if args.output == "pid-and-coverage":
+        print(f"{ready['pid']} {ready['coverage_started_ns']}")
+    else:
+        print(ready["coverage_started_ns"])
     return 0
 
 

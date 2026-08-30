@@ -2063,7 +2063,7 @@ start_deployment_lifecycle_monitor() {
         return 1
     fi
     local control_dir token monitor_pid started_ns container_args container
-    local max_runtime_seconds launch_output
+    local max_runtime_seconds ready_output extra_ready_field
     control_dir="/tmp/aats-docker-event-monitor-$DEPLOY_LOCK_TOKEN"
     token="$DEPLOY_LOCK_TOKEN"
     max_runtime_seconds=$((HEALTH_TIMEOUT + 180))
@@ -2076,10 +2076,14 @@ start_deployment_lifecycle_monitor() {
     done
     LIFECYCLE_MONITOR_CONTROL_DIR="$control_dir"
     LIFECYCLE_MONITOR_TOKEN="$token"
-    if ! launch_output="$(wsl_run "
+    if ! wsl_run "
 cd $WSL_PROJECT
 umask 077
-nohup ~/aats-venv/bin/python scripts/docker_event_monitor.py daemon \
+command -v setsid >/dev/null 2>&1 || exit 21
+# A background child of the short-lived wsl.exe transport is not durable on
+# this host even with nohup.  A fresh session survives that transport boundary;
+# the validated ready packet below supplies the actual daemon PID.
+setsid -f ~/aats-venv/bin/python scripts/docker_event_monitor.py daemon \
     --control-dir '$control_dir' \
     --token '$token' \
     $container_args \
@@ -2087,29 +2091,22 @@ nohup ~/aats-venv/bin/python scripts/docker_event_monitor.py daemon \
     --runtime-readiness-generation '$RUNTIME_READINESS_GENERATION' \
     --deployed-commit '$DEPLOYED_GIT_COMMIT' \
     --max-runtime-seconds '$max_runtime_seconds' \
-    >'$control_dir.log' 2>&1 </dev/null &
-printf '%s\\n' \$!
-")"; then
+    >'$control_dir.log' 2>&1 </dev/null
+"; then
         log_error "无法启动 Docker 生命周期实时观察器"
         return 1
     fi
-    monitor_pid="$(printf '%s\n' "$launch_output" | tr -d '\r' | tail -1)"
-    if [[ ! "$monitor_pid" =~ ^[1-9][0-9]*$ ]]; then
-        log_error "生命周期观察器未返回可信 WSL PID"
-        return 1
-    fi
-    LIFECYCLE_MONITOR_PID="$monitor_pid"
-    if ! started_ns="$(wsl_run "
+    if ! ready_output="$(wsl_run "
 cd $WSL_PROJECT
 for _attempt in \$(seq 1 150); do
-    if ! kill -0 '$monitor_pid' 2>/dev/null; then exit 19; fi
     if ~/aats-venv/bin/python scripts/docker_event_monitor.py ready \
         --control-dir '$control_dir' \
         --token '$token' \
         $container_args \
         --deployment-lock-id '$DEPLOY_LOCK_TOKEN' \
         --runtime-readiness-generation '$RUNTIME_READINESS_GENERATION' \
-        --deployed-commit '$DEPLOYED_GIT_COMMIT' 2>/dev/null; then
+        --deployed-commit '$DEPLOYED_GIT_COMMIT' \
+        --output pid-and-coverage 2>/dev/null; then
         exit 0
     fi
     sleep 0.1
@@ -2120,6 +2117,12 @@ exit 20
         cleanup_deployment_lifecycle_monitor || true
         return 1
     fi
+    read -r monitor_pid started_ns extra_ready_field <<<"$ready_output"
+    if [[ ! "$monitor_pid" =~ ^[1-9][0-9]*$ || -n "$extra_ready_field" ]]; then
+        log_error "生命周期观察器 ready 包未返回可信 WSL PID"
+        return 1
+    fi
+    LIFECYCLE_MONITOR_PID="$monitor_pid"
     if [[ ! "$started_ns" =~ ^[1-9][0-9]{18}$ ]]; then
         log_error "生命周期观察器 ready 边界无效"
         cleanup_deployment_lifecycle_monitor || true

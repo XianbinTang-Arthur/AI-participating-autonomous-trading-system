@@ -987,6 +987,19 @@ def test_standard_deploy_observes_minimum_stability_before_evidence() -> None:
     assert "observe_app_stability_window" not in source
 
 
+def test_standard_deploy_detaches_lifecycle_monitor_from_wsl_transport() -> None:
+    source = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+    start = source.split("start_deployment_lifecycle_monitor() {", 1)[1].split(
+        "\n}", 1
+    )[0]
+
+    assert "command -v setsid" in start
+    assert "setsid -f ~/aats-venv/bin/python scripts/docker_event_monitor.py daemon" in start
+    assert "nohup ~/aats-venv/bin/python scripts/docker_event_monitor.py daemon" not in start
+    assert "--output pid-and-coverage" in start
+    assert 'read -r monitor_pid started_ns extra_ready_field <<<"$ready_output"' in start
+
+
 def test_standard_deploy_freezes_and_revalidates_nats_target_snapshot() -> None:
     source = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
     main = source.split("main() {", 1)[1]
