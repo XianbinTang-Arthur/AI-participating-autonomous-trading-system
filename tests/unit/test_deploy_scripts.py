@@ -1062,6 +1062,11 @@ def test_marker_cleanup_requires_local_completion_or_remote_acknowledgement() ->
     assert "stderr_sha256" in ack_builder
     assert 'ln -- "$completion_tmp" "$completion_file"' in ack_builder
     assert 'pending_signal_status=0' in ack_builder
+    assert 'completion_phase=preflight' in ack_builder
+    assert 'completion_phase=run_remote_command' in ack_builder
+    assert 'completion_phase=hash_output' in ack_builder
+    assert 'completion_phase=publish_completion' in ack_builder
+    assert "WSL completion wrapper failed: phase=%s status=%s" in ack_builder
     assert 'record_pending_signal 129' in ack_builder
     assert 'record_pending_signal 130' in ack_builder
     assert 'record_pending_signal 143' in ack_builder
@@ -1095,6 +1100,7 @@ def test_marker_cleanup_requires_local_completion_or_remote_acknowledgement() ->
     assert 'cat -- "$stdout_file"' in guard
     assert 'if ! cat -- "$stdout_file"' in guard
     assert "sha256sum -- \"$stdout_file\"" in guard
+    assert guard.count("WSL completion acknowledgement 缺失或校验失败") == 2
     assert "assert_no_owned_active_markers" in source
 
 

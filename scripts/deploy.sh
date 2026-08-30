@@ -569,28 +569,41 @@ build_wsl_completion_wrapped_command() {
         "marker_file=$marker_q" \
         "io_mode='$io_mode'" \
         "expected_marker_uid='$expected_marker_uid'" \
+        'stdout_tmp=""' \
+        'stderr_tmp=""' \
+        'completion_tmp=""' \
+        'completion_phase=preflight' \
+        'completion_wrapper_cleanup() {' \
+        '    local failure_status=$?' \
+        '    trap - EXIT' \
+        '    printf "[deploy] WSL completion wrapper failed: phase=%s status=%s\n" "$completion_phase" "$failure_status" >&2' \
+        '    [[ -z "${stdout_tmp:-}" ]] || rm -f -- "$stdout_tmp" 2>/dev/null || true' \
+        '    [[ -z "${stderr_tmp:-}" ]] || rm -f -- "$stderr_tmp" 2>/dev/null || true' \
+        '    [[ -z "${completion_tmp:-}" ]] || rm -f -- "$completion_tmp" 2>/dev/null || true' \
+        '    exit "$failure_status"' \
+        '}' \
+        'trap completion_wrapper_cleanup EXIT' \
         'if [[ -e "$completion_file" ]]; then exit 126; fi' \
         '[[ -f "$marker_file" && ! -L "$marker_file" ]] || exit 124' \
         "marker_metadata=\$(stat -c '%u|%a|%s' -- \"\$marker_file\")" \
         '[[ "$marker_metadata" == "$expected_marker_uid|600|0" ]] || exit 124' \
+        'completion_phase=decode_command' \
         "remote_command=\$(printf '%s' '$encoded' | base64 --decode)" \
         'decode_status=$?' \
         'if [[ "$decode_status" -ne 0 ]]; then exit 125; fi' \
         'umask 077' \
-        'stdout_tmp=""' \
-        'stderr_tmp=""' \
-        'completion_tmp=""' \
         'pending_signal_status=0' \
         'record_pending_signal() { if [[ "$pending_signal_status" -eq 0 ]]; then pending_signal_status="$1"; fi; }' \
-        "trap 'rm -f -- \"\$stdout_tmp\" \"\$stderr_tmp\" \"\$completion_tmp\"' EXIT" \
         "trap 'record_pending_signal 129' HUP" \
         "trap 'record_pending_signal 130' INT" \
         "trap 'record_pending_signal 143' TERM" \
+        'completion_phase=run_remote_command' \
         'if [[ "$io_mode" == capture ]]; then' \
         '    stdout_tmp=$(mktemp "${completion_file}.stdout.XXXXXX") || exit 125' \
         '    stderr_tmp=$(mktemp "${completion_file}.stderr.XXXXXX") || exit 125' \
         '    bash -c "$remote_command" >"$stdout_tmp" 2>"$stderr_tmp"' \
         '    remote_status=$?' \
+        '    completion_phase=hash_output' \
         '    stdout_size=$(wc -c <"$stdout_tmp" | tr -d "[:space:]")' \
         '    stderr_size=$(wc -c <"$stderr_tmp" | tr -d "[:space:]")' \
         "    stdout_sha256=\$(sha256sum -- \"\$stdout_tmp\" | awk '{print \$1}')" \
@@ -605,12 +618,15 @@ build_wsl_completion_wrapped_command() {
         '    stdout_sha256=-' \
         '    stderr_sha256=-' \
         'fi' \
+        'completion_phase=write_completion' \
         'completion_tmp=$(mktemp "${completion_file}.tmp.XXXXXX") || exit 125' \
         "printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' $marker_q \"\$remote_status\" \"\$io_mode\" \"\$stdout_size\" \"\$stdout_sha256\" \"\$stderr_size\" \"\$stderr_sha256\" >\"\$completion_tmp\" || exit 125" \
         'chmod 600 -- "$completion_tmp" || exit 125' \
+        'completion_phase=publish_completion' \
         'ln -- "$completion_tmp" "$completion_file" || exit 125' \
         'rm -f -- "$completion_tmp"' \
         'completion_tmp=""' \
+        'completion_phase=replay_output' \
         'if [[ "$io_mode" == capture ]]; then' \
         '    cat -- "$stdout_tmp" || exit 123' \
         '    cat -- "$stderr_tmp" >&2 || exit 123' \
@@ -881,6 +897,7 @@ run_supervised_command_guard() {
                 if [[ "$io_mode" == capture ]]; then
                     cat -- "$stderr_file" >&2 || true
                 fi
+                log_error "WSL completion acknowledgement 缺失或校验失败: transport_status=$status"
                 return 16
             fi
             if ! completion_status="$(finalize_proven_wsl_completion \
@@ -890,6 +907,7 @@ run_supervised_command_guard() {
                 if [[ "$io_mode" == capture ]]; then
                     cat -- "$stderr_file" >&2 || true
                 fi
+                log_error "WSL completion acknowledgement 缺失或校验失败: transport_status=$status"
                 return 16
             fi
             if [[ "$io_mode" == capture ]]; then

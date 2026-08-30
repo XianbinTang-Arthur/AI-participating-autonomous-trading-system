@@ -118,12 +118,13 @@ completion_ambiguous="$(completion_for "$marker_ambiguous")"
 cleanup_paths+=("$marker_ambiguous" "$completion_ambiguous")
 create_marker "$marker_ambiguous"
 set +e
-run_supervised_command_guard \
+ambiguous_diagnostic="$(run_supervised_command_guard \
     "$marker_ambiguous" wsl-ack "$completion_ambiguous" default \
-    capture "$guard_gate" bash -c 'exit 1'
+    capture "$guard_gate" bash -c 'exit 1' 2>&1)"
 ambiguous_status=$?
 set -e
 [[ "$ambiguous_status" -eq 16 ]]
+[[ "$ambiguous_diagnostic" == *"WSL completion acknowledgement 缺失或校验失败: transport_status=1"* ]]
 assert_wsl_path_exists "$marker_ambiguous"
 assert_wsl_path_absent "$completion_ambiguous"
 DEPLOY_LOCK_SCOPE="$scope"
@@ -159,6 +160,32 @@ proof="$(finalize_proven_wsl_completion \
 [[ "$proof" -eq 7 ]]
 assert_wsl_path_absent "$marker_remote"
 assert_wsl_path_absent "$completion_remote"
+
+# Wrapper-internal failures emit only an allowlisted phase and numeric status;
+# they do not expose the remote command or captured output.
+marker_diagnostic="$(marker_for 8)"
+completion_diagnostic="$(completion_for "$marker_diagnostic")"
+cleanup_paths+=("$marker_diagnostic" "$completion_diagnostic")
+create_marker "$marker_diagnostic"
+completion_diagnostic_q=""
+printf -v completion_diagnostic_q '%q' "$completion_diagnostic"
+MSYS_NO_PATHCONV=1 command wsl -d "$DISTRO" bash -c \
+    "umask 077; : >$completion_diagnostic_q; chmod 600 -- $completion_diagnostic_q"
+wrapped="$(build_wsl_completion_wrapped_command \
+    'printf forbidden-output' "$marker_diagnostic" "$completion_diagnostic" capture "$marker_uid")"
+wrapped_encoded="$(printf '%s' "$wrapped" | base64 | tr -d '\r\n')"
+set +e
+diagnostic_output="$(MSYS_NO_PATHCONV=1 command wsl -d "$DISTRO" bash -c \
+    "printf '%s' '$wrapped_encoded' | base64 --decode | bash" 2>&1)"
+diagnostic_status=$?
+set -e
+[[ "$diagnostic_status" -eq 126 ]]
+[[ "$diagnostic_output" == *"WSL completion wrapper failed: phase=preflight status=126"* ]]
+[[ "$diagnostic_output" != *"forbidden-output"* ]]
+assert_wsl_path_exists "$marker_diagnostic"
+remove_proven_completed_active_marker "$marker_diagnostic"
+MSYS_NO_PATHCONV=1 command wsl -d "$DISTRO" bash -c \
+    "rm -f -- $completion_diagnostic_q"
 
 # If the first finalizer transport loses its response after the remote proof
 # already removed the marker, the still-present strict acknowledgement makes a

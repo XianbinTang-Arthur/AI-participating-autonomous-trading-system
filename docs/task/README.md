@@ -1,7 +1,7 @@
 # AATS Task 与 SOW 历史索引
 
 > 文档状态：任务与交付历史证据索引（截至 2026-08-29）
-> 最后核对：2026-08-29（补录标准部署 WSL completion ACK 信号安全修复；其余历史状态边界不变）
+> 最后核对：2026-08-29（补录标准部署 WSL completion ACK 阶段诊断与未闭合运行边界；其余历史状态边界不变）
 > 核对范围：任务文件存在性、索引与各任务自报状态；不把任务状态升级为运行时或生产事实
 
 本目录保存任务书、SOW、阶段设计、实施记录和交付报告。它是工程可追溯性材料，不是当前系统说明；“完成”“通过”“上线”等措辞只对文件记录的基线和验证范围成立。
@@ -33,7 +33,8 @@
 - [`wsl_completion_ack_signal_safety_hotfix_sow_2026_08_29.md`](wsl_completion_ack_signal_safety_hotfix_sow_2026_08_29.md)：
   修复同步 WSL 子命令等待期收到 HUP/INT/TERM 时过早删除 ACK 暂存文件的问题；有效 ACK 可消除
   mutation 完成歧义并安全清 marker，但 transport 中断仍令本次部署失败。SIGKILL 与无 ACK 情形继续
-  保留 durable marker 并要求显式恢复。
+  保留 durable marker 并要求显式恢复。后续两次标准部署仍在 schema 成功后缺失 ACK，因此加入
+  无秘密阶段/transport 状态诊断；信号修复不再被当作现场根因已经关闭的证据。
 
 ## AATS Research OS 独立建设计划
 
