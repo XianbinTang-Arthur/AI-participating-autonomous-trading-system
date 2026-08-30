@@ -45,16 +45,32 @@ _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_TARGET_EVENTS = 10_000
 _MAX_EVENT_LINE_BYTES = 1024 * 1024
 _DEFAULT_SEGMENT_SECONDS = 5.0
-_DEFAULT_OVERLAP_SECONDS = 1.0
+_DEFAULT_OVERLAP_SECONDS = 2.0
 _READY_TIMEOUT_SECONDS = 15.0
 _SEAL_TIMEOUT_SECONDS = 20.0
-_CLOCK_DRIFT_TOLERANCE_NS = 1_000_000_000
+_MAX_CLOCK_DRIFT_TOLERANCE_NS = 1_500_000_000
+_MIN_CLOCK_DRIFT_TOLERANCE_NS = 50_000_000
+_CLOCK_DRIFT_OVERLAP_MARGIN_NS = 250_000_000
 _MAX_DOCKER_INFO_BYTES = 4 * 1024 * 1024
 _DAEMON_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 
 
 class DockerEventMonitorError(RuntimeError):
     """A fail-closed live-event observation failure."""
+
+
+def _clock_drift_tolerance_for_overlap(overlap_ns: int) -> int:
+    """Bound accepted wall-clock steps below the configured segment overlap."""
+
+    if isinstance(overlap_ns, bool) or not isinstance(overlap_ns, int) or overlap_ns <= 0:
+        raise DockerEventMonitorError("invalid_live_monitor_overlap_ns")
+    return min(
+        _MAX_CLOCK_DRIFT_TOLERANCE_NS,
+        max(
+            _MIN_CLOCK_DRIFT_TOLERANCE_NS,
+            overlap_ns - _CLOCK_DRIFT_OVERLAP_MARGIN_NS,
+        ),
+    )
 
 
 class _UnixHTTPConnection(http.client.HTTPConnection):
@@ -377,6 +393,12 @@ class LiveDockerEventMonitor:
         self._max_runtime_ns = int(max_runtime_seconds * 1_000_000_000)
         self._segment_ns = int(segment_seconds * 1_000_000_000)
         self._overlap_ns = int(overlap_seconds * 1_000_000_000)
+        # WSL can apply a bounded host-clock correction while monotonic time
+        # remains continuous.  Accept only a correction that still leaves a
+        # configured overlap margin; larger or ambiguous steps remain fatal.
+        self._clock_drift_tolerance_ns = _clock_drift_tolerance_for_overlap(
+            self._overlap_ns
+        )
         self._segment_reader = segment_reader or (
             lambda until_ns, ready, event: _read_live_segment(
                 until_ns, ready, event
@@ -521,7 +543,7 @@ class LiveDockerEventMonitor:
                 mono_elapsed = segment.completed_at_mono_ns - int(
                     segment.ready_at_mono_ns
                 )
-                if abs(wall_elapsed - mono_elapsed) > _CLOCK_DRIFT_TOLERANCE_NS:
+                if abs(wall_elapsed - mono_elapsed) > self._clock_drift_tolerance_ns:
                     raise DockerEventMonitorError("live_docker_segment_clock_drift")
             except Exception as exc:  # fail closed at the thread boundary
                 segment.error = str(exc) or type(exc).__name__

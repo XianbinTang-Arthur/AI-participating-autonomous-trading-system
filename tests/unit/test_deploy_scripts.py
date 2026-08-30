@@ -955,10 +955,10 @@ def test_full_deployment_evidence_binds_stable_runtime_and_preflight_chain(
 
 def test_standard_deploy_observes_minimum_stability_before_evidence() -> None:
     source = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
-    stability = source.split("observe_app_stability_window() {", 1)[1].split(
-        "\n}",
-        1,
-    )[0]
+    health = source.split("step_health() {", 1)[1].split("\n}", 1)[0]
+    finalizer = source.split(
+        "finalize_deployment_health_and_evidence() {", 1
+    )[1].split("\n}", 1)[0]
     main = source.split("main() {", 1)[1]
 
     assert "APP_STABILITY_WINDOW_SECONDS=40" in source
@@ -975,14 +975,16 @@ def test_standard_deploy_observes_minimum_stability_before_evidence() -> None:
     assert ".ExitCode" in health_probe
     assert "health-check --since-ns" in nats_health_probe
     assert "--require-success-after-boundary" not in nats_health_probe
-    assert main.index('run_locked_step "健康检查" step_health') < main.index(
-        'run_locked_step "稳定性观察" observe_app_stability_window'
-    ) < main.index('run_locked_step "部署证据" write_deployment_evidence')
-    assert 'sleep "$interval"' in stability
-    assert stability.count("all_required_app_containers_healthy") == 2
-    assert stability.count("gateway_health_ok") == 2
-    assert stability.count("nats_container_health_ok_since") == 2
-    assert "return 17" in stability
+    assert "observe_deployment_stability.py" in health
+    assert "elapsed=$((SECONDS - health_started_seconds))" in health
+    assert finalizer.index("step_health") < finalizer.index(
+        "write_deployment_evidence"
+    )
+    assert main.count(
+        'run_locked_step "健康检查、稳定性观察与部署证据" '
+        "finalize_deployment_health_and_evidence"
+    ) == 1
+    assert "observe_app_stability_window" not in source
 
 
 def test_standard_deploy_freezes_and_revalidates_nats_target_snapshot() -> None:
@@ -3071,13 +3073,15 @@ def test_deploy_health_boundary_is_fixed_after_collector_observation() -> None:
     text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
     health = text.split("step_health() {", 1)[1].split("\n}", 1)[0]
     writer = text.split("write_deployment_evidence() {", 1)[1].split("\n}", 1)[0]
+    observer = (
+        REPO_ROOT / "scripts" / "observe_deployment_stability.py"
+    ).read_text(encoding="utf-8")
 
-    assert health.index("capture_deployment_collector_heartbeats.py") < health.index(
-        "date +%s%N"
+    assert observer.index("_capture_collector_heartbeats(") < observer.index(
+        "boundary_started_ns = _validated_wall_clock_ns"
     )
-    assert health.index("date +%s%N") < health.index(
-        "capture_deployment_health_boundary.py"
-    )
+    assert "container_probe(boundary_started_ns if final else None)" in observer
+    assert "observe_deployment_stability.py" in health
     assert "APP_COLLECTOR_HEARTBEAT_ARGS" in health
     assert "--health-boundary-started-ns" in writer
     assert "--health-boundary-app-fingerprint" in writer
@@ -3092,12 +3096,18 @@ def test_deploy_health_boundary_is_fixed_after_collector_observation() -> None:
 
 def test_deploy_script_health_helpers_check_each_container_safely() -> None:
     text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+    health_probe = text.split(
+        "all_required_app_containers_healthy() {", 1
+    )[1].split("\n}", 1)[0]
 
-    assert 'state="$(wsl_run "docker inspect --format' in text
-    assert '"${fields[0]}" != "running"' in text
-    assert '"${fields[1]}" != "healthy"' in text
-    assert '"${fields[2]}" != "0"' in text
-    assert '"${fields[$last_index]}" == "0"' in text
+    assert health_probe.count("wsl_run") == 1
+    assert 'states="$(wsl_run "docker inspect --format' in health_probe
+    assert "$APP_CONTAINERS 2>/dev/null" in health_probe
+    assert '"${fields[0]}" != "running"' in health_probe
+    assert '"${fields[1]}" != "healthy"' in health_probe
+    assert '"${fields[2]}" != "0"' in health_probe
+    assert '"${fields[$last_index]}" == "0"' in health_probe
+    assert '[[ "$actual_count" -eq "$expected_count" ]]' in health_probe
     assert "printf '%s %s\\n' \"$c\" \"$state\"" in text
     assert "printf '%s missing\\n' \"$c\"" in text
 
@@ -3247,7 +3257,9 @@ def test_deploy_holds_one_long_lived_wsl_lock_across_all_mutations() -> None:
     assert main.index('run_locked_step "代码提交"') < main.index(
         'run_locked_step "镜像构建"'
     )
-    assert main.index('run_locked_step "部署证据"') < main.index(
+    assert main.index(
+        'run_locked_step "健康检查、稳定性观察与部署证据"'
+    ) < main.index(
         'run_locked_step "部署报告"'
     )
     assert "assert_deploy_lock_held" in text
@@ -3345,6 +3357,23 @@ def test_deploy_postgres_password_sync_is_lock_supervised() -> None:
 
     assert infra.count('    wsl_run "') == 2
     assert 'wsl -d "$DISTRO"' not in infra
+    assert 'env_prefix="$(compose_env_prefix)"' in infra
+    assert "docker compose $COMPOSE_CMD_ARGS up -d --wait --wait-timeout 90" in infra
+    assert (
+        "postgres redis redis-exporter nats loki jaeger prometheus grafana promtail"
+        in infra
+    )
+    assert "docker-compose.yml --env-file" not in infra
+    for app_service in (
+        "aats-gateway",
+        "aats-market",
+        "aats-decision",
+        "aats-execution",
+        "aats-rdp-daemon",
+        "aats-liquidations-daemon",
+        "aats-microstructure-collector",
+    ):
+        assert app_service not in infra
     assert "docker exec -i aats-postgres psql" in infra
     assert "PG_USER=\\$(grep '^POSTGRES_USER=' \\\"$WSL2_ENV_FILE\\\"" in infra
     assert "PG_PW=\\$(grep '^POSTGRES_PASSWORD=' \\\"$WSL2_ENV_FILE\\\"" in infra

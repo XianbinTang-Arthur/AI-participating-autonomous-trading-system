@@ -419,6 +419,26 @@ def test_monitor_rejects_wall_monotonic_clock_drift() -> None:
         subject.close()
 
 
+def test_clock_drift_tolerance_is_bounded_by_segment_overlap() -> None:
+    assert (
+        monitor._clock_drift_tolerance_for_overlap(2_000_000_000)
+        == 1_500_000_000
+    )
+    assert (
+        monitor._clock_drift_tolerance_for_overlap(1_000_000_000)
+        == 750_000_000
+    )
+    assert (
+        monitor._clock_drift_tolerance_for_overlap(250_000_000)
+        == 50_000_000
+    )
+    with pytest.raises(
+        monitor.DockerEventMonitorError,
+        match="invalid_live_monitor_overlap_ns",
+    ):
+        monitor._clock_drift_tolerance_for_overlap(0)
+
+
 def test_monitor_rejects_daemon_identity_drift_before_seal() -> None:
     identities = iter((DAEMON_ID, DAEMON_ID, OTHER_DAEMON_ID))
 

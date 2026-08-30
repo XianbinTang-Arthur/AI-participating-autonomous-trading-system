@@ -1486,18 +1486,25 @@ ensure_operator_tls_assets() {
 }
 
 all_required_app_containers_healthy() {
-    local c
-    local state
+    local c state states
+    local actual_count=0 expected_count=0
     local last_index
     local -a fields
 
     for c in $APP_CONTAINERS; do
+        expected_count=$((expected_count + 1))
+    done
+    if ! states="$(wsl_run "docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}} {{.State.Health.FailingStreak}} {{range .State.Health.Log}}{{.ExitCode}} {{end}}{{else}}none -1 -1{{end}}' $APP_CONTAINERS 2>/dev/null" | tr -d '\r')" \
+        || [[ -z "$states" ]]; then
+        return 1
+    fi
+
+    while IFS= read -r state; do
         # Docker only flips Health.Status after `retries` consecutive failures.
         # Keep the current failing streak and every retained ExitCode in the
         # field projection, then require the newest sample itself to succeed.
-        # The 2s stability poll therefore catches a one-off failed 15s check
-        # even while Docker still reports the container as healthy.
-        state="$(wsl_run "docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}} {{.State.Health.FailingStreak}} {{range .State.Health.Log}}{{.ExitCode}} {{end}}{{else}}none -1 -1{{end}}' \"$c\" 2>/dev/null" || true)"
+        # One batched inspect keeps the readiness wait bounded by wall time
+        # instead of multiplying one supervised WSL transport per container.
         fields=()
         read -r -a fields <<<"$state"
         if [[ "${#fields[@]}" -lt 4 \
@@ -1508,9 +1515,10 @@ all_required_app_containers_healthy() {
         fi
         last_index=$((${#fields[@]} - 1))
         [[ "${fields[$last_index]}" == "0" ]] || return 1
-    done
+        actual_count=$((actual_count + 1))
+    done <<<"$states"
 
-    return 0
+    [[ "$actual_count" -eq "$expected_count" ]]
 }
 
 nats_container_health_ok_since() {
@@ -2295,7 +2303,14 @@ ensure_rdp_artifact_directory() {
 
 step_infra_up() {
     log_info "Step 6/8: 启动基础设施（Postgres/Redis/NATS/...）..."
-    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && docker compose -f docker-compose.yml --env-file $WSL2_ENV_FILE up -d --wait --wait-timeout 90"
+    local env_prefix
+    env_prefix="$(compose_env_prefix)"
+    # Use the final merged profile model from the first infra creation.  The
+    # derivatives overlay changes Prometheus mounts; starting it from the base
+    # file and applying the overlay only at app-up forces a recreate/rename in
+    # the lifecycle evidence window.  The explicit service allowlist keeps
+    # this phase infra-only while preserving one Compose model end to end.
+    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && ${env_prefix:+env $env_prefix }docker compose $COMPOSE_CMD_ARGS up -d --wait --wait-timeout 90 postgres redis redis-exporter nats loki jaeger prometheus grafana promtail"
 
     # Keep credential values inside WSL and stdin; the Windows command line
     # contains only this static program.  wsl_run places the whole mutating
@@ -2356,77 +2371,89 @@ step_app_up() {
 step_health() {
     log_info "健康检查（超时 ${HEALTH_TIMEOUT}s）..."
 
-    local port
+    local port health_started_seconds elapsed remaining_seconds
     port=$(wsl_run "grep -h '^AATS_API_PORT=' \"$ENV_PROFILE_PATH\" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\"'" || echo "")
     port="${port:-8000}"
 
-    local elapsed=0
     local interval=3
     local last_progress=""
-    while [[ $elapsed -lt $HEALTH_TIMEOUT ]]; do
+    health_started_seconds=$SECONDS
+    elapsed=0
+    while [[ "$elapsed" -lt "$HEALTH_TIMEOUT" ]]; do
         local gateway_state="未就绪"
         if gateway_health_ok "$port"; then
             gateway_state="已就绪"
         fi
 
         if [[ "$gateway_state" == "已就绪" ]] && all_required_app_containers_healthy; then
-            local boundary_started_ns boundary_fingerprint required_args c
-            local collector_output collector_args collector_name collector_epoch
-            local liquidation_epoch="" microstructure_epoch="" collector_capture_ok=true
-            collector_args=""
-            if [[ "$PROFILE" == "derivatives" ]]; then
-                if ! collector_output="$(wsl_run "cd $WSL_PROJECT && ~/aats-venv/bin/python scripts/capture_deployment_collector_heartbeats.py --profile derivatives" | tr -d '\r')"; then
-                    collector_capture_ok=false
-                else
-                    while IFS='=' read -r collector_name collector_epoch; do
-                        if [[ ! "$collector_epoch" =~ ^[1-9][0-9]{0,11}$ ]]; then
-                            collector_capture_ok=false
-                            break
-                        fi
-                        case "$collector_name" in
-                            aats-liquidations-daemon)
-                                [[ -z "$liquidation_epoch" ]] || collector_capture_ok=false
-                                liquidation_epoch="$collector_epoch"
-                                ;;
-                            aats-microstructure-collector)
-                                [[ -z "$microstructure_epoch" ]] || collector_capture_ok=false
-                                microstructure_epoch="$collector_epoch"
-                                ;;
-                            *)
-                                collector_capture_ok=false
-                                ;;
-                        esac
-                    done <<<"$collector_output"
-                    if [[ -z "$liquidation_epoch" || -z "$microstructure_epoch" ]]; then
-                        collector_capture_ok=false
-                    fi
-                    collector_args=" --collector-heartbeat-epoch 'aats-liquidations-daemon=$liquidation_epoch' --collector-heartbeat-epoch 'aats-microstructure-collector=$microstructure_epoch'"
-                fi
-            fi
-            boundary_started_ns=""
-            if [[ "$collector_capture_ok" == true ]]; then
-                boundary_started_ns="$(wsl_run "date +%s%N" | tr -d '\r')"
-            fi
+            local required_args c observation_output observation_key observation_value
+            local boundary_started_ns="" boundary_fingerprint=""
+            local observed_seconds="" sample_count=""
+            local collector_args="" liquidation_epoch="" microstructure_epoch=""
+            local observation_valid=true
             required_args=""
             for c in $APP_CONTAINERS; do
                 required_args="$required_args --required-container '$c'"
             done
-            if [[ "$boundary_started_ns" =~ ^[1-9][0-9]{18}$ ]] \
-                && boundary_fingerprint="$(wsl_run "cd $WSL_PROJECT && ~/aats-venv/bin/python scripts/capture_deployment_health_boundary.py --profile '$PROFILE' --runtime-readiness-generation '$RUNTIME_READINESS_GENERATION' --deployed-commit '$DEPLOYED_GIT_COMMIT' --nats-target-manifest-sha256 '$NATS_TARGET_MANIFEST_SHA256' $required_args" | tr -d '\r' | tail -1)" \
-                && [[ "$boundary_fingerprint" =~ ^sha256:[0-9a-f]{64}$ ]] \
-                && nats_container_health_ok_since "$boundary_started_ns" \
-                && gateway_health_ok "$port" \
-                && all_required_app_containers_healthy; then
-                APP_HEALTH_BOUNDARY_STARTED_NS="$boundary_started_ns"
-                APP_HEALTH_BOUNDARY_FINGERPRINT="$boundary_fingerprint"
-                APP_COLLECTOR_HEARTBEAT_ARGS="$collector_args"
-                log_ok "应用健康检查通过并固定连续性边界 (gateway port $port, containers: $APP_CONTAINERS, ${elapsed}s)"
-                return 0
+            if ! observation_output="$(wsl_run "cd $WSL_PROJECT && ~/aats-venv/bin/python scripts/observe_deployment_stability.py --profile '$PROFILE' --runtime-readiness-generation '$RUNTIME_READINESS_GENERATION' --deployed-commit '$DEPLOYED_GIT_COMMIT' --nats-target-manifest-sha256 '$NATS_TARGET_MANIFEST_SHA256' --gateway-scheme '$OPERATOR_HEALTH_SCHEME' --gateway-port '$port' --stability-seconds '$APP_STABILITY_WINDOW_SECONDS' $required_args" | tr -d '\r')"; then
+                log_error "应用未能连续通过正式稳定观察；拒绝写入成功证据"
+                return 17
             fi
-            if [[ "$DEPLOY_SUPERVISION_POISONED" == true ]]; then
-                return 16
+            while IFS='=' read -r observation_key observation_value; do
+                case "$observation_key" in
+                    health_boundary_started_ns)
+                        [[ -z "$boundary_started_ns" ]] || observation_valid=false
+                        boundary_started_ns="$observation_value"
+                        ;;
+                    health_boundary_app_fingerprint)
+                        [[ -z "$boundary_fingerprint" ]] || observation_valid=false
+                        boundary_fingerprint="$observation_value"
+                        ;;
+                    observed_stability_seconds)
+                        [[ -z "$observed_seconds" ]] || observation_valid=false
+                        observed_seconds="$observation_value"
+                        ;;
+                    sample_count)
+                        [[ -z "$sample_count" ]] || observation_valid=false
+                        sample_count="$observation_value"
+                        ;;
+                    collector_heartbeat_epoch:aats-liquidations-daemon)
+                        [[ -z "$liquidation_epoch" ]] || observation_valid=false
+                        liquidation_epoch="$observation_value"
+                        ;;
+                    collector_heartbeat_epoch:aats-microstructure-collector)
+                        [[ -z "$microstructure_epoch" ]] || observation_valid=false
+                        microstructure_epoch="$observation_value"
+                        ;;
+                    *)
+                        observation_valid=false
+                        ;;
+                esac
+            done <<<"$observation_output"
+            if [[ ! "$boundary_started_ns" =~ ^[1-9][0-9]{18}$ \
+                || ! "$boundary_fingerprint" =~ ^sha256:[0-9a-f]{64}$ \
+                || ! "$observed_seconds" =~ ^[0-9]+([.][0-9]{1,3})?$ \
+                || ! "$sample_count" =~ ^[1-9][0-9]*$ ]]; then
+                observation_valid=false
             fi
-            log_warn "健康状态在连续性边界固定期间发生变化；继续等待稳定窗口"
+            if [[ "$PROFILE" == "derivatives" ]]; then
+                if [[ ! "$liquidation_epoch" =~ ^[1-9][0-9]{0,11}$ \
+                    || ! "$microstructure_epoch" =~ ^[1-9][0-9]{0,11}$ ]]; then
+                    observation_valid=false
+                fi
+                collector_args=" --collector-heartbeat-epoch 'aats-liquidations-daemon=$liquidation_epoch' --collector-heartbeat-epoch 'aats-microstructure-collector=$microstructure_epoch'"
+            elif [[ -n "$liquidation_epoch" || -n "$microstructure_epoch" ]]; then
+                observation_valid=false
+            fi
+            if [[ "$observation_valid" != true ]]; then
+                log_error "稳定观察输出不完整或格式无效；拒绝写入成功证据"
+                return 17
+            fi
+            APP_HEALTH_BOUNDARY_STARTED_NS="$boundary_started_ns"
+            APP_HEALTH_BOUNDARY_FINGERPRINT="$boundary_fingerprint"
+            APP_COLLECTOR_HEARTBEAT_ARGS="$collector_args"
+            log_ok "应用健康检查与稳定观察通过 (gateway port $port, containers: $APP_CONTAINERS, readiness ${elapsed}s, stability ${observed_seconds}s/${sample_count} samples)"
+            return 0
         fi
 
         local container_states
@@ -2437,8 +2464,16 @@ step_health() {
             last_progress="$progress"
         fi
 
-        sleep "$interval"
-        elapsed=$((elapsed + interval))
+        elapsed=$((SECONDS - health_started_seconds))
+        remaining_seconds=$((HEALTH_TIMEOUT - elapsed))
+        if [[ "$remaining_seconds" -gt 0 ]]; then
+            if [[ "$remaining_seconds" -lt "$interval" ]]; then
+                sleep "$remaining_seconds"
+            else
+                sleep "$interval"
+            fi
+        fi
+        elapsed=$((SECONDS - health_started_seconds))
     done
 
     log_error "健康检查超时 (${HEALTH_TIMEOUT}s)，应用容器未全部就绪"
@@ -2446,30 +2481,6 @@ step_health() {
     print_required_app_container_states
     log_error "查看日志: wsl -d $DISTRO bash -c 'cd $WSL_PROJECT/$DEPLOY_DIR && docker compose $COMPOSE_CMD_ARGS logs --tail 50'"
     exit 3
-}
-
-observe_app_stability_window() {
-    log_info "观察应用稳定窗口（${APP_STABILITY_WINDOW_SECONDS}s）..."
-    local port elapsed=0 interval=2
-    port=$(wsl_run "grep -h '^AATS_API_PORT=' \"$ENV_PROFILE_PATH\" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\"'" || echo "")
-    port="${port:-8000}"
-    while [[ "$elapsed" -lt "$APP_STABILITY_WINDOW_SECONDS" ]]; do
-        if ! gateway_health_ok "$port" \
-            || ! all_required_app_containers_healthy \
-            || ! nats_container_health_ok_since "$APP_HEALTH_BOUNDARY_STARTED_NS"; then
-            log_error "应用在正式稳定观察窗口内失去健康状态；拒绝写入成功证据"
-            return 17
-        fi
-        sleep "$interval"
-        elapsed=$((elapsed + interval))
-    done
-    if ! gateway_health_ok "$port" \
-        || ! all_required_app_containers_healthy \
-        || ! nats_container_health_ok_since "$APP_HEALTH_BOUNDARY_STARTED_NS"; then
-        log_error "应用在稳定观察窗口结束时未保持健康；拒绝写入成功证据"
-        return 17
-    fi
-    log_ok "应用已连续通过 ${APP_STABILITY_WINDOW_SECONDS}s 主动健康观察"
 }
 
 write_deployment_evidence() {
@@ -2499,6 +2510,15 @@ write_deployment_evidence() {
         exit 6
     fi
     log_ok "模拟部署证据包已写入: $DEPLOYMENT_EVIDENCE_PATH"
+}
+
+finalize_deployment_health_and_evidence() {
+    # Keep the heartbeat -> health boundary -> monotonic stability window ->
+    # evidence write inside one outer lock step.  Splitting these phases made
+    # six additional supervised WSL transports consume the strict 60s final
+    # evidence budget even when every service was healthy.
+    step_health
+    write_deployment_evidence
 }
 
 report() {
@@ -2571,9 +2591,7 @@ main() {
         "最终 app-up 前" "post_infra_pre_app_up" \
         "$NATS_CUTOVER_PREFLIGHT_BEFORE_EVIDENCE_PATH"
     run_locked_step "应用启动" step_app_up
-    run_locked_step "健康检查" step_health
-    run_locked_step "稳定性观察" observe_app_stability_window
-    run_locked_step "部署证据" write_deployment_evidence
+    run_locked_step "健康检查、稳定性观察与部署证据" finalize_deployment_health_and_evidence
     run_locked_step "部署报告" report
 }
 
